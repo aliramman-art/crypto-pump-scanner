@@ -5,7 +5,7 @@ import statistics
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-BASE_URL = "https://api.binance.com"
+BASE_URL = "https://api.bybit.com"
 
 SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -18,18 +18,27 @@ SYMBOLS = [
 
 
 def get_klines(symbol):
+
     response = requests.get(
-        f"{BASE_URL}/api/v3/klines",
+        f"{BASE_URL}/v5/market/kline",
         params={
+            "category": "linear",
             "symbol": symbol,
-            "interval": "5m",
+            "interval": "5",
             "limit": 30
         },
         timeout=15
     )
 
     response.raise_for_status()
-    return response.json()
+
+    data = response.json()
+
+    if data["retCode"] != 0:
+        raise Exception(data["retMsg"])
+
+    # Bybit داده‌ها را جدید به قدیم می‌دهد
+    return list(reversed(data["result"]["list"]))
 
 
 def analyze(symbol):
@@ -39,11 +48,22 @@ def analyze(symbol):
     closes = [float(c[4]) for c in candles]
     volumes = [float(c[5]) for c in candles]
 
-    change_5m = ((closes[-1] - closes[-2]) / closes[-2]) * 100
-    change_15m = ((closes[-1] - closes[-4]) / closes[-4]) * 100
+    change_5m = (
+        (closes[-1] - closes[-2])
+        / closes[-2]
+    ) * 100
+
+    change_15m = (
+        (closes[-1] - closes[-4])
+        / closes[-4]
+    ) * 100
 
     avg_volume = statistics.mean(volumes[-21:-1])
-    volume_ratio = volumes[-1] / avg_volume
+
+    volume_ratio = (
+        volumes[-1] / avg_volume
+        if avg_volume > 0 else 0
+    )
 
     score = 0
 
@@ -83,7 +103,7 @@ def send_message(text):
         timeout=15
     )
 
-    print("TELEGRAM RESPONSE:", response.text)
+    print("TELEGRAM:", response.text)
 
     response.raise_for_status()
 
@@ -95,6 +115,7 @@ def main():
     for symbol in SYMBOLS:
 
         try:
+
             score, c5, c15, vr = analyze(symbol)
 
             results.append(
@@ -103,12 +124,14 @@ def main():
 
             print(
                 symbol,
-                "score=", score,
-                "5m=", round(c5, 2),
-                "15m=", round(c15, 2)
+                "Score:", score,
+                "5m:", round(c5, 2),
+                "15m:", round(c15, 2),
+                "Volume:", round(vr, 2)
             )
 
         except Exception as e:
+
             print(symbol, "ERROR:", e)
 
     results.sort(
@@ -118,15 +141,17 @@ def main():
 
     message = "📊 پامپ اسکنر | گزارش 5 دقیقه‌ای\n\n"
 
-    for i, (symbol, score, c5, c15, vr) in enumerate(results, 1):
+    for i, (symbol, score, c5, c15, vr) in enumerate(
+        results, 1
+    ):
 
         coin = symbol.replace("USDT", "")
 
         message += (
-            f"{i}. {coin} ⭐{score}/100 | "
-            f"5m {c5:+.2f}% | "
-            f"15m {c15:+.2f}% | "
-            f"Vol {vr:.1f}x\n"
+            f"{i}. {coin} ⭐ {score}/100\n"
+            f"5m: {c5:+.2f}% | "
+            f"15m: {c15:+.2f}% | "
+            f"Vol: {vr:.1f}x\n\n"
         )
 
     send_message(message)
