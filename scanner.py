@@ -44,17 +44,19 @@ COINS = [
 ]
 
 
-# --------------------------------------------------
-# زمان فعلی
-# --------------------------------------------------
+# ==================================================
+# TIME
+# ==================================================
 
 def now():
-    return int(datetime.now(timezone.utc).timestamp())
+    return int(
+        datetime.now(timezone.utc).timestamp()
+    )
 
 
-# --------------------------------------------------
-# خواندن تاریخچه
-# --------------------------------------------------
+# ==================================================
+# HISTORY
+# ==================================================
 
 def load_history():
 
@@ -62,18 +64,12 @@ def load_history():
         return {}
 
     try:
-
         with open(DATA_FILE, "r") as f:
             return json.load(f)
 
     except Exception:
-
         return {}
 
-
-# --------------------------------------------------
-# ذخیره تاریخچه
-# --------------------------------------------------
 
 def save_history(history):
 
@@ -81,9 +77,9 @@ def save_history(history):
         json.dump(history, f)
 
 
-# --------------------------------------------------
-# دریافت ۳۰ ارز در یک درخواست
-# --------------------------------------------------
+# ==================================================
+# MARKET DATA
+# ==================================================
 
 def get_market():
 
@@ -95,64 +91,92 @@ def get_market():
             "order": "market_cap_desc",
             "per_page": 30,
             "page": 1,
-            "sparkline": "false"
+            "sparkline": "false",
+            "price_change_percentage": "1h,24h"
         },
         timeout=30
     )
 
-    print("MARKET STATUS:", response.status_code)
+    print(
+        "MARKET STATUS:",
+        response.status_code
+    )
 
     response.raise_for_status()
 
     return response.json()
 
 
-# --------------------------------------------------
-# درصد تغییر
-# --------------------------------------------------
+# ==================================================
+# PERCENT CHANGE
+# ==================================================
 
-def percent_change(old, new):
+def pct(old, new):
 
-    if old <= 0:
-        return 0.0
+    if old is None or old <= 0:
+        return None
 
     return ((new - old) / old) * 100
 
 
-# --------------------------------------------------
-# پیدا کردن قیمت حدود N دقیقه قبل
-# --------------------------------------------------
+# ==================================================
+# HISTORICAL CHANGE
+# ==================================================
 
-def historical_change(records, minutes, current_price, current_time):
+def historical_change(
+    records,
+    minutes,
+    current_price,
+    current_time
+):
 
     if not records:
         return None
 
-    target = current_time - minutes * 60
+    target = current_time - (
+        minutes * 60
+    )
 
-    candidate = None
+    closest = None
+
+    smallest_distance = None
 
     for item in records:
 
-        if item["time"] <= target:
-            candidate = item
-        else:
-            break
+        distance = abs(
+            item["time"] - target
+        )
 
-    if candidate is None:
+        if (
+            smallest_distance is None
+            or distance < smallest_distance
+        ):
+
+            smallest_distance = distance
+            closest = item
+
+    if closest is None:
         return None
 
-    return percent_change(
-        candidate["price"],
+    # اگر داده خیلی دور از زمان مورد نظر است
+    if smallest_distance > 150:
+
+        return None
+
+    return pct(
+        closest["price"],
         current_price
     )
 
 
-# --------------------------------------------------
+# ==================================================
 # RSI
-# --------------------------------------------------
+# ==================================================
 
-def calculate_rsi(prices, period=14):
+def calculate_rsi(
+    prices,
+    period=14
+):
 
     if len(prices) < period + 1:
         return None
@@ -162,56 +186,103 @@ def calculate_rsi(prices, period=14):
 
     for i in range(1, len(prices)):
 
-        diff = prices[i] - prices[i - 1]
+        change = (
+            prices[i]
+            - prices[i - 1]
+        )
 
-        if diff > 0:
+        if change > 0:
 
-            gains.append(diff)
+            gains.append(change)
             losses.append(0)
 
         else:
 
             gains.append(0)
-            losses.append(abs(diff))
+            losses.append(abs(change))
 
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+    avg_gain = (
+        sum(gains[-period:])
+        / period
+    )
+
+    avg_loss = (
+        sum(losses[-period:])
+        / period
+    )
 
     if avg_loss == 0:
         return 100.0
 
     rs = avg_gain / avg_loss
 
-    return 100 - (100 / (1 + rs))
+    return 100 - (
+        100 / (1 + rs)
+    )
 
 
-# --------------------------------------------------
+# ==================================================
 # EMA
-# --------------------------------------------------
+# ==================================================
 
-def calculate_ema(prices, period):
+def calculate_ema(
+    prices,
+    period
+):
 
     if len(prices) < period:
         return None
 
-    multiplier = 2 / (period + 1)
+    multiplier = 2 / (
+        period + 1
+    )
 
-    ema = sum(prices[:period]) / period
+    result = (
+        sum(prices[:period])
+        / period
+    )
 
     for price in prices[period:]:
 
-        ema = (
-            (price - ema) * multiplier
-        ) + ema
+        result = (
+            (price - result)
+            * multiplier
+        ) + result
 
-    return ema
+    return result
 
 
-# --------------------------------------------------
-# محاسبه امتیاز
-# --------------------------------------------------
+# ==================================================
+# BREAKOUT DISTANCE
+# ==================================================
 
-def calculate_score(
+def breakout_distance(prices):
+
+    if len(prices) < 10:
+        return None
+
+    previous = prices[-10:-1]
+
+    resistance = max(previous)
+
+    current = prices[-1]
+
+    if resistance <= 0:
+        return None
+
+    distance = (
+        (resistance - current)
+        / resistance
+    ) * 100
+
+    return distance
+
+
+# ==================================================
+# EARLY PUMP SCORE
+# ==================================================
+
+def calculate_early_score(
     change5,
     change10,
     change15,
@@ -219,172 +290,229 @@ def calculate_score(
     ema5,
     ema10,
     price,
-    breakout
+    resistance_distance,
+    market_change_1h
 ):
 
     score = 0
 
-    # -----------------------------
-    # 5 دقیقه
-    # -----------------------------
+    reasons = []
+
+    # ----------------------------------------------
+    # 5M MOMENTUM
+    # ----------------------------------------------
 
     if change5 is not None:
 
-        if change5 >= 2.0:
-            score += 30
+        if 0.30 <= change5 < 0.80:
 
-        elif change5 >= 1.2:
-            score += 25
+            score += 15
+            reasons.append(
+                "5m momentum"
+            )
 
-        elif change5 >= 0.8:
-            score += 20
+        elif 0.80 <= change5 < 1.50:
 
-        elif change5 >= 0.5:
-            score += 14
+            score += 12
+            reasons.append(
+                "5m momentum"
+            )
 
-        elif change5 >= 0.25:
-            score += 7
+        elif change5 >= 1.50:
 
-    # -----------------------------
-    # 10 دقیقه
-    # -----------------------------
+            score += 5
+            reasons.append(
+                "5m already moving"
+            )
+
+    # ----------------------------------------------
+    # 10M MOMENTUM
+    # ----------------------------------------------
 
     if change10 is not None:
 
-        if change10 >= 3.0:
-            score += 18
+        if 0.60 <= change10 < 1.50:
 
-        elif change10 >= 2.0:
-            score += 14
+            score += 10
 
-        elif change10 >= 1.0:
-            score += 9
+        elif 1.50 <= change10 < 3:
 
-        elif change10 >= 0.5:
-            score += 5
+            score += 8
 
-    # -----------------------------
-    # 15 دقیقه
-    # -----------------------------
+        elif change10 >= 3:
+
+            score += 3
+
+    # ----------------------------------------------
+    # 15M TREND
+    # ----------------------------------------------
 
     if change15 is not None:
 
-        if change15 >= 4.0:
-            score += 15
+        if 0.80 <= change15 < 2:
 
-        elif change15 >= 2.5:
             score += 12
+            reasons.append(
+                "15m confirmation"
+            )
 
-        elif change15 >= 1.5:
+        elif 2 <= change15 < 4:
+
             score += 8
 
-        elif change15 >= 0.7:
-            score += 4
+        elif change15 >= 4:
 
-    # -----------------------------
-    # شتاب
-    # -----------------------------
+            score += 3
+
+    # ----------------------------------------------
+    # ACCELERATION
+    # ----------------------------------------------
 
     if (
         change5 is not None
         and change10 is not None
-        and change15 is not None
+        and change10 > 0
     ):
 
-        if change5 > 0 and change10 > 0:
+        if change5 > (
+            change10 / 3
+        ):
 
-            if change5 >= change10 * 0.45:
-                score += 8
+            score += 12
+            reasons.append(
+                "acceleration"
+            )
 
-        if change10 > 0 and change15 > 0:
-
-            if change10 >= change15 * 0.45:
-                score += 5
-
-    # -----------------------------
+    # ----------------------------------------------
     # RSI
-    # -----------------------------
+    # ----------------------------------------------
 
     if rsi is not None:
 
-        if 60 <= rsi <= 72:
+        if 52 <= rsi <= 65:
+
+            score += 15
+            reasons.append(
+                "healthy RSI"
+            )
+
+        elif 65 < rsi <= 72:
+
             score += 10
 
-        elif 55 <= rsi < 60:
-            score += 6
-
         elif 72 < rsi <= 78:
+
             score += 4
 
         elif rsi > 82:
-            score -= 5
 
-    # -----------------------------
+            score -= 10
+            reasons.append(
+                "RSI overheated"
+            )
+
+    # ----------------------------------------------
     # EMA
-    # -----------------------------
+    # ----------------------------------------------
 
     if (
         ema5 is not None
         and ema10 is not None
-        and price > ema5 > ema10
     ):
 
-        score += 5
+        if price > ema5 > ema10:
 
-    # -----------------------------
-    # Breakout
-    # -----------------------------
+            score += 15
+            reasons.append(
+                "EMA bullish"
+            )
 
-    if breakout:
-        score += 9
+        elif price > ema5:
 
-    return max(0, min(100, score))
+            score += 7
+
+    # ----------------------------------------------
+    # RESISTANCE
+    # ----------------------------------------------
+
+    if resistance_distance is not None:
+
+        if 0 <= resistance_distance <= 0.50:
+
+            score += 10
+            reasons.append(
+                "near breakout"
+            )
+
+        elif 0.50 < resistance_distance <= 1.0:
+
+            score += 7
+
+        elif 1 < resistance_distance <= 2:
+
+            score += 3
+
+    # ----------------------------------------------
+    # MARKET TREND
+    # ----------------------------------------------
+
+    if market_change_1h is not None:
+
+        if market_change_1h > 0.50:
+
+            score += 6
+
+        elif market_change_1h < -1.0:
+
+            score -= 10
+
+    return max(
+        0,
+        min(
+            100,
+            score
+        )
+    ), reasons
 
 
-# --------------------------------------------------
-# تلگرام
-# --------------------------------------------------
+# ==================================================
+# ANALYZE COIN
+# ==================================================
 
-def send_telegram(message):
-
-    response = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        data={
-            "chat_id": CHAT_ID,
-            "text": message
-        },
-        timeout=20
-    )
-
-    print("TELEGRAM:", response.text)
-
-    response.raise_for_status()
-
-
-# --------------------------------------------------
-# تحلیل هر ارز
-# --------------------------------------------------
-
-def analyze_coin(coin, history, current_time):
+def analyze_coin(
+    coin,
+    history,
+    current_time,
+    btc_change_1h
+):
 
     coin_id = coin["id"]
+
     symbol = coin["symbol"].upper()
 
-    price = coin.get("current_price")
+    price = coin.get(
+        "current_price"
+    )
 
     if not price:
         return None
 
-    records = history.get(coin_id, [])
+    records = history.get(
+        coin_id,
+        []
+    )
 
-    # اضافه کردن نمونه فعلی
     records.append({
         "time": current_time,
         "price": price
     })
 
-    # فقط حدود 2 ساعت تاریخچه نگه می‌داریم
-    cutoff = current_time - (2 * 60 * 60)
+    # نگهداری دو ساعت تاریخچه
+
+    cutoff = (
+        current_time
+        - 2 * 60 * 60
+    )
 
     records = [
         x for x in records
@@ -393,9 +521,9 @@ def analyze_coin(coin, history, current_time):
 
     history[coin_id] = records
 
-    # -----------------------------
-    # تغییرات زمانی
-    # -----------------------------
+    # ----------------------------------------------
+    # CHANGES
+    # ----------------------------------------------
 
     change5 = historical_change(
         records,
@@ -418,20 +546,26 @@ def analyze_coin(coin, history, current_time):
         current_time
     )
 
-    # -----------------------------
-    # RSI
-    # -----------------------------
+    # ----------------------------------------------
+    # PRICES
+    # ----------------------------------------------
 
     prices = [
         x["price"]
         for x in records
     ]
 
-    rsi = calculate_rsi(prices)
+    # ----------------------------------------------
+    # RSI
+    # ----------------------------------------------
 
-    # -----------------------------
+    rsi = calculate_rsi(
+        prices
+    )
+
+    # ----------------------------------------------
     # EMA
-    # -----------------------------
+    # ----------------------------------------------
 
     ema5 = calculate_ema(
         prices,
@@ -443,56 +577,91 @@ def analyze_coin(coin, history, current_time):
         10
     )
 
-    # -----------------------------
-    # Breakout
-    # -----------------------------
+    # ----------------------------------------------
+    # RESISTANCE
+    # ----------------------------------------------
 
-    breakout = False
+    resistance_distance = (
+        breakout_distance(prices)
+    )
 
-    if len(prices) >= 10:
+    # ----------------------------------------------
+    # SCORE
+    # ----------------------------------------------
 
-        previous_prices = prices[-10:-1]
-
-        previous_high = max(
-            previous_prices
+    score, reasons = (
+        calculate_early_score(
+            change5,
+            change10,
+            change15,
+            rsi,
+            ema5,
+            ema10,
+            price,
+            resistance_distance,
+            btc_change_1h
         )
-
-        if price > previous_high:
-            breakout = True
-
-    # -----------------------------
-    # Score
-    # -----------------------------
-
-    score = calculate_score(
-        change5,
-        change10,
-        change15,
-        rsi,
-        ema5,
-        ema10,
-        price,
-        breakout
     )
 
     return {
+
         "symbol": symbol,
+
         "price": price,
+
         "change5": change5,
+
         "change10": change10,
+
         "change15": change15,
+
         "rsi": rsi,
+
         "ema5": ema5,
+
         "ema10": ema10,
-        "breakout": breakout,
+
+        "resistance_distance":
+            resistance_distance,
+
         "score": score,
+
+        "reasons": reasons,
+
         "samples": len(records)
     }
 
 
-# --------------------------------------------------
-# برنامه اصلی
-# --------------------------------------------------
+# ==================================================
+# TELEGRAM
+# ==================================================
+
+def send_telegram(message):
+
+    response = requests.post(
+
+        f"https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/sendMessage",
+
+        data={
+            "chat_id": CHAT_ID,
+            "text": message
+        },
+
+        timeout=20
+    )
+
+    print(
+        "TELEGRAM:",
+        response.text
+    )
+
+    response.raise_for_status()
+
+
+# ==================================================
+# MAIN
+# ==================================================
 
 def main():
 
@@ -501,6 +670,26 @@ def main():
     history = load_history()
 
     market = get_market()
+
+    # ----------------------------------------------
+    # BTC FILTER
+    # ----------------------------------------------
+
+    btc = next(
+        (
+            x for x in market
+            if x["id"] == "bitcoin"
+        ),
+        None
+    )
+
+    btc_change_1h = None
+
+    if btc:
+
+        btc_change_1h = btc.get(
+            "price_change_percentage_1h_in_currency"
+        )
 
     results = []
 
@@ -513,11 +702,15 @@ def main():
             result = analyze_coin(
                 coin,
                 history,
-                current_time
+                current_time,
+                btc_change_1h
             )
 
             if result:
-                results.append(result)
+
+                results.append(
+                    result
+                )
 
         except Exception as e:
 
@@ -539,73 +732,116 @@ def main():
             "No valid market data"
         )
 
-    # -----------------------------
-    # مرتب‌سازی
-    # -----------------------------
+    # ----------------------------------------------
+    # SORT
+    # ----------------------------------------------
 
     results.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    # -----------------------------
-    # پیام تلگرام
-    # -----------------------------
+    # ----------------------------------------------
+    # MESSAGE
+    # ----------------------------------------------
 
     message = (
-        "🚨 PUMP SCANNER 5M\n"
-        "━━━━━━━━━━━━━━\n"
+        "🚨 EARLY PUMP SCANNER\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🎯 شکار پیش از پامپ\n\n"
     )
 
-    # -----------------------------
-    # سیگنال‌های قوی
-    # -----------------------------
+    # ----------------------------------------------
+    # STRONG EARLY
+    # ----------------------------------------------
 
     strong = [
+
         x for x in results
+
         if (
-            x["score"] >= 70
+            x["score"] >= 75
+
             and x["change5"] is not None
-            and x["change5"] > 0
+
+            and 0 < x["change5"] < 2.0
+
+            and len(x["reasons"]) >= 3
         )
     ]
 
     if strong:
 
-        message += "\n🔥 STRONG PUMP SIGNAL\n\n"
+        message += (
+            "🔴 STRONG EARLY PUMP\n\n"
+        )
 
         for x in strong[:5]:
 
-            rsi_text = (
+            rsi = (
                 f"{x['rsi']:.0f}"
                 if x["rsi"] is not None
                 else "N/A"
             )
 
+            distance = (
+
+                f"{x['resistance_distance']:.2f}%"
+
+                if x[
+                    "resistance_distance"
+                ] is not None
+
+                else "N/A"
+            )
+
             message += (
+
                 f"🚨 {x['symbol']}\n"
-                f"⭐ Score: {x['score']}/100\n"
-                f"5m: {x['change5']:+.2f}%\n"
+
+                f"⭐ Early Score: "
+                f"{x['score']}/100\n"
+
+                f"5m: "
+                f"{x['change5']:+.2f}%\n"
+
                 f"10m: "
                 f"{x['change10']:+.2f}%\n"
+
                 f"15m: "
                 f"{x['change15']:+.2f}%\n"
-                f"RSI: {rsi_text}\n"
-                f"Breakout: "
-                f"{'✅' if x['breakout'] else '❌'}\n\n"
+
+                f"RSI: {rsi}\n"
+
+                f"Resistance: "
+                f"{distance}\n"
+
+                f"EMA: "
+                f"{'✅' if x['ema5'] and x['ema10'] and x['price'] > x['ema5'] > x['ema10'] else '❌'}\n"
+
+                f"BTC 1H: "
+                f"{btc_change_1h:+.2f}%"
+                if btc_change_1h is not None
+                else
+                f"BTC 1H: N/A"
+
             )
+
+            message += "\n\n"
 
     else:
 
         message += (
-            "\n⚪ فعلاً سیگنال قوی وجود ندارد.\n"
+            "🟢 فعلاً Strong Early Pump نداریم.\n\n"
         )
 
-    # -----------------------------
-    # TOP 5
-    # -----------------------------
+    # ----------------------------------------------
+    # TOP WATCHLIST
+    # ----------------------------------------------
 
-    message += "\n🏆 TOP 5\n\n"
+    message += (
+        "👀 EARLY WATCHLIST\n\n"
+    )
 
     for i, x in enumerate(
         results[:5],
@@ -613,45 +849,85 @@ def main():
     ):
 
         c5 = (
+
             f"{x['change5']:+.2f}%"
+
             if x["change5"] is not None
+
             else "N/A"
         )
 
         c15 = (
+
             f"{x['change15']:+.2f}%"
+
             if x["change15"] is not None
+
             else "N/A"
         )
 
         rsi = (
+
             f"{x['rsi']:.0f}"
+
             if x["rsi"] is not None
+
             else "N/A"
         )
 
         message += (
-            f"{i}. {x['symbol']} "
+
+            f"{i}. "
+            f"{x['symbol']} "
             f"⭐ {x['score']}/100\n"
+
             f"   5m {c5} | "
             f"15m {c15} | "
             f"RSI {rsi}\n"
         )
 
-    # -----------------------------
-    # وضعیت سیستم
-    # -----------------------------
+    # ----------------------------------------------
+    # SYSTEM
+    # ----------------------------------------------
 
     message += (
-        "\n━━━━━━━━━━━━━━\n"
-        f"📊 Scanned: {len(results)}/30\n"
-        f"❌ Failed: {len(failed)}\n"
+
+        "\n━━━━━━━━━━━━━━━━━━\n"
+
+        f"📊 Scanned: "
+        f"{len(results)}/30\n"
+
+        f"❌ Failed: "
+        f"{len(failed)}\n"
+
+        f"₿ BTC 1H: "
+
+    )
+
+    if btc_change_1h is not None:
+
+        message += (
+            f"{btc_change_1h:+.2f}%\n"
+        )
+
+    else:
+
+        message += "N/A\n"
+
+    message += (
         "⏱ Timeframe: 5m\n"
         "📡 Source: CoinGecko\n"
     )
 
-    send_telegram(message)
+    # ----------------------------------------------
+    # SEND
+    # ----------------------------------------------
+
+    send_telegram(
+        message
+    )
 
 
 if __name__ == "__main__":
+
     main()
