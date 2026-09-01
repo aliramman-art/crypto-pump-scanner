@@ -1,115 +1,271 @@
 import os
 import json
-import requests
+import time
 from datetime import datetime, timezone
 
-BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+import requests
 
-DATA_FILE = "price_data.json"
 
-API_URL = "https://api.coingecko.com/api/v3/coins/markets"
+# ============================================================
+# CONFIG
+# ============================================================
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/markets"
+
+HISTORY_FILE = "price_data.json"
+
+# نگهداری 3 ساعت تاریخچه
+HISTORY_SECONDS = 3 * 60 * 60
+
+# حداکثر 30 ارز
 COINS = [
-    "bitcoin","ethereum","binancecoin","solana","ripple",
-    "dogecoin","cardano","avalanche-2","chainlink","polkadot",
-    "tron","litecoin","bitcoin-cash","cosmos","uniswap",
-    "ethereum-classic","stellar","near","aptos","filecoin",
-    "arbitrum","optimism","sui","injective-protocol","aave",
-    "maker","algorand","vechain","sei-network","celestia"
+    "bitcoin",
+    "ethereum",
+    "binancecoin",
+    "solana",
+    "ripple",
+    "dogecoin",
+    "cardano",
+    "avalanche-2",
+    "chainlink",
+    "polkadot",
+    "tron",
+    "litecoin",
+    "bitcoin-cash",
+    "cosmos",
+    "uniswap",
+    "ethereum-classic",
+    "stellar",
+    "near",
+    "aptos",
+    "filecoin",
+    "arbitrum",
+    "optimism",
+    "sui",
+    "injective-protocol",
+    "aave",
+    "maker",
+    "algorand",
+    "vechain",
+    "sei-network",
+    "celestia",
 ]
 
 
-def now():
-    return int(datetime.now(timezone.utc).timestamp())
+# ============================================================
+# TELEGRAM
+# ============================================================
 
+def send_telegram(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram secrets are missing.")
+        return False
+
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        result = response.json()
+
+        if result.get("ok"):
+            print("Telegram message sent successfully.")
+            return True
+
+        print(f"Telegram rejected message: {result}")
+        return False
+
+    except Exception as e:
+        print(f"Telegram error: {e}")
+        return False
+
+
+# ============================================================
+# HISTORY
+# ============================================================
 
 def load_history():
-
-    if not os.path.exists(DATA_FILE):
+    if not os.path.exists(HISTORY_FILE):
+        print("No previous history found. Starting new history.")
         return {}
 
     try:
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    except Exception:
-        return {}
+        with open(
+            HISTORY_FILE,
+            "r",
+            encoding="utf-8",
+        ) as file:
+            data = json.load(file)
+
+        if isinstance(data, dict):
+            return data
+
+    except Exception as e:
+        print(f"History read error: {e}")
+
+    return {}
 
 
 def save_history(history):
+    try:
+        temp_file = HISTORY_FILE + ".tmp"
 
-    with open(DATA_FILE, "w") as f:
-        json.dump(history, f)
+        with open(
+            temp_file,
+            "w",
+            encoding="utf-8",
+        ) as file:
+            json.dump(
+                history,
+                file,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+
+        os.replace(temp_file, HISTORY_FILE)
+
+        print("History saved.")
+
+    except Exception as e:
+        print(f"History save error: {e}")
 
 
-def get_market():
+def update_history(history, market_data):
+    now = int(time.time())
+    cutoff = now - HISTORY_SECONDS
 
-    response = requests.get(
-        API_URL,
-        params={
-            "vs_currency": "usd",
-            "ids": ",".join(COINS),
-            "order": "market_cap_desc",
-            "per_page": 30,
-            "page": 1,
-            "sparkline": "false",
-            "price_change_percentage": "1h,24h"
-        },
-        timeout=30
+    for coin in market_data:
+
+        coin_id = coin.get("id")
+
+        price = coin.get("current_price")
+
+        volume = coin.get("total_volume")
+
+        if not coin_id:
+            continue
+
+        if price is None:
+            continue
+
+        if coin_id not in history:
+            history[coin_id] = []
+
+        history[coin_id].append(
+            {
+                "time": now,
+                "price": float(price),
+                "volume": float(volume or 0),
+            }
+        )
+
+        # حذف داده‌های قدیمی
+        history[coin_id] = [
+            item
+            for item in history[coin_id]
+            if int(item.get("time", 0)) >= cutoff
+        ]
+
+        # جلوگیری از رکوردهای خیلی زیاد
+        if len(history[coin_id]) > 50:
+            history[coin_id] = history[coin_id][-50:]
+
+
+# ============================================================
+# PRICE CHANGE
+# ============================================================
+
+def get_change(items, minutes):
+    if not items:
+        return None
+
+    if len(items) < 2:
+        return None
+
+    latest = items[-1]
+
+    latest_time = int(latest["time"])
+
+    target_time = latest_time - (minutes * 60)
+
+    # نزدیک‌ترین snapshot به زمان هدف
+    previous = min(
+        items,
+        key=lambda x: abs(
+            int(x["time"]) - target_time
+        ),
     )
 
-    print("MARKET:", response.status_code)
+    previous_time = int(previous["time"])
 
-    response.raise_for_status()
+    # اگر داده خیلی دور باشد معتبر نیست
+    max_distance = max(120, minutes * 60 * 0.40)
 
-    return response.json()
-
-
-def pct(old, new):
-
-    if old is None or old <= 0:
+    if abs(previous_time - target_time) > max_distance:
         return None
 
-    return ((new - old) / old) * 100
+    previous_price = float(previous["price"])
 
+    latest_price = float(latest["price"])
 
-def get_change(records, minutes, price, current_time):
-
-    if len(records) < 2:
+    if previous_price <= 0:
         return None
 
-    target = current_time - minutes * 60
+    return (
+        (latest_price - previous_price)
+        / previous_price
+    ) * 100
 
-    candidate = None
 
-    for item in records:
+# ============================================================
+# RSI
+# ============================================================
 
-        if item["time"] <= target:
-            candidate = item
-        else:
-            break
-
-    if candidate is None:
+def calculate_rsi(items, period=14):
+    if len(items) < period + 1:
         return None
 
-    return pct(
-        candidate["price"],
-        price
-    )
-
-
-def rsi(prices, period=14):
+    prices = [
+        float(x["price"])
+        for x in items
+        if x.get("price") is not None
+    ]
 
     if len(prices) < period + 1:
         return None
 
+    changes = []
+
+    for i in range(1, len(prices)):
+        changes.append(
+            prices[i] - prices[i - 1]
+        )
+
+    recent = changes[-period:]
+
     gains = []
     losses = []
 
-    for i in range(1, len(prices)):
-
-        change = prices[i] - prices[i - 1]
-
+    for change in recent:
         if change > 0:
             gains.append(change)
             losses.append(0)
@@ -117,386 +273,634 @@ def rsi(prices, period=14):
             gains.append(0)
             losses.append(abs(change))
 
-    gain = sum(gains[-period:]) / period
-    loss = sum(losses[-period:]) / period
+    average_gain = sum(gains) / period
+    average_loss = sum(losses) / period
 
-    if loss == 0:
-        return 100
+    if average_loss == 0:
 
-    rs = gain / loss
+        if average_gain == 0:
+            return 50.0
 
-    return 100 - (100 / (1 + rs))
+        return 100.0
+
+    rs = average_gain / average_loss
+
+    return 100 - (
+        100 / (1 + rs)
+    )
 
 
-def ema(prices, period):
+# ============================================================
+# EMA
+# ============================================================
+
+def calculate_ema(items, period):
+    prices = [
+        float(x["price"])
+        for x in items
+        if x.get("price") is not None
+    ]
 
     if len(prices) < period:
         return None
 
-    result = sum(prices[:period]) / period
-
     multiplier = 2 / (period + 1)
 
+    ema = sum(prices[:period]) / period
+
     for price in prices[period:]:
+        ema = (
+            (price - ema)
+            * multiplier
+        ) + ema
 
-        result = (
-            (price - result) * multiplier
-        ) + result
-
-    return result
+    return ema
 
 
-def volume_ratio(records):
+# ============================================================
+# VOLUME TREND
+# ============================================================
 
-    if len(records) < 6:
+def calculate_volume_trend(items):
+    if len(items) < 4:
         return None
 
-    current_volume = records[-1]["volume"]
+    latest_volume = float(
+        items[-1].get("volume", 0)
+    )
 
-    previous = [
-        x["volume"]
-        for x in records[-6:-1]
-        if x["volume"] > 0
-    ]
+    old_volume = float(
+        items[-4].get("volume", 0)
+    )
 
-    if not previous:
+    if old_volume <= 0:
         return None
 
-    average = sum(previous) / len(previous)
+    return (
+        (latest_volume - old_volume)
+        / old_volume
+    ) * 100
 
-    if average <= 0:
-        return None
 
-    return current_volume / average
-
+# ============================================================
+# SCORE
+# ============================================================
 
 def calculate_score(
     c5,
     c10,
     c15,
-    rsi_value,
+    rsi,
     ema5,
     ema10,
-    price,
-    vol_ratio,
-    market_1h
+    volume_trend,
 ):
-
     score = 0
     reasons = []
 
-    # --------------------------------
-    # 5m momentum
-    # --------------------------------
+    # --------------------------------------------------------
+    # 5 MIN MOMENTUM
+    # --------------------------------------------------------
 
     if c5 is not None:
 
-        if 0.30 <= c5 < 0.80:
-            score += 15
+        if c5 >= 2.0:
+            score += 18
+            reasons.append("5m momentum 🔥")
+
+        elif c5 >= 1.0:
+            score += 13
             reasons.append("5m momentum")
 
-        elif 0.80 <= c5 < 1.50:
-            score += 12
+        elif c5 >= 0.5:
+            score += 7
+            reasons.append("5m positive")
 
-        elif c5 >= 1.50:
-            score += 4
-
-    # --------------------------------
-    # 10m
-    # --------------------------------
+    # --------------------------------------------------------
+    # 10 MIN MOMENTUM
+    # --------------------------------------------------------
 
     if c10 is not None:
 
-        if 0.60 <= c10 < 1.50:
+        if c10 >= 3.0:
+            score += 15
+            reasons.append("10m acceleration 🔥")
+
+        elif c10 >= 1.5:
             score += 10
+            reasons.append("10m acceleration")
 
-        elif 1.50 <= c10 < 3:
-            score += 7
+        elif c10 > 0:
+            score += 4
 
-        elif c10 >= 3:
-            score += 2
-
-    # --------------------------------
-    # 15m
-    # --------------------------------
+    # --------------------------------------------------------
+    # 15 MIN TREND
+    # --------------------------------------------------------
 
     if c15 is not None:
 
-        if 0.80 <= c15 < 2:
-            score += 12
+        if c15 >= 4.0:
+            score += 15
+            reasons.append("15m trend 🔥")
+
+        elif c15 >= 2.0:
+            score += 10
             reasons.append("15m trend")
 
-        elif 2 <= c15 < 4:
-            score += 7
+        elif c15 > 0:
+            score += 5
 
-        elif c15 >= 4:
-            score += 2
-
-    # --------------------------------
-    # acceleration
-    # --------------------------------
+    # --------------------------------------------------------
+    # ACCELERATION
+    # --------------------------------------------------------
 
     if c5 is not None and c10 is not None:
 
+        expected_5m = c10 / 2
+
         if c5 > 0 and c10 > 0:
 
-            if c5 > c10 * 0.35:
-                score += 12
-                reasons.append("acceleration")
+            if c5 > expected_5m:
+                score += 10
+                reasons.append("Acceleration")
 
-    # --------------------------------
+    # --------------------------------------------------------
     # RSI
-    # --------------------------------
+    # --------------------------------------------------------
 
-    if rsi_value is not None:
+    if rsi is not None:
 
-        if 52 <= rsi_value <= 65:
-            score += 15
+        if 52 <= rsi <= 68:
+            score += 10
             reasons.append("RSI healthy")
 
-        elif 65 < rsi_value <= 72:
-            score += 10
+        elif 68 < rsi <= 76:
+            score += 7
+            reasons.append("RSI strong")
 
-        elif 72 < rsi_value <= 78:
+        elif 76 < rsi <= 82:
             score += 3
 
-        elif rsi_value > 82:
-            score -= 10
+        elif rsi > 82:
+            score -= 5
+            reasons.append("RSI overheated")
 
-    # --------------------------------
+    # --------------------------------------------------------
     # EMA
-    # --------------------------------
+    # --------------------------------------------------------
 
-    if (
-        ema5 is not None
-        and ema10 is not None
-    ):
+    if ema5 is not None and ema10 is not None:
 
-        if price > ema5 > ema10:
-            score += 15
+        if ema5 > ema10:
+            score += 10
             reasons.append("EMA bullish")
 
-        elif price > ema5:
+    # --------------------------------------------------------
+    # MARKET VOLUME TREND
+    # --------------------------------------------------------
+
+    if volume_trend is not None:
+
+        if volume_trend >= 10:
             score += 7
+            reasons.append("Volume rising")
 
-    # --------------------------------
-    # Volume spike
-    # --------------------------------
+        elif volume_trend >= 3:
+            score += 3
 
-    if vol_ratio is not None:
+    # --------------------------------------------------------
+    # LIMIT SCORE
+    # --------------------------------------------------------
 
-        if vol_ratio >= 3:
-            score += 20
-            reasons.append("volume spike")
+    score = max(0, min(100, score))
 
-        elif vol_ratio >= 2:
-            score += 15
-            reasons.append("volume rising")
-
-        elif vol_ratio >= 1.5:
-            score += 8
-
-    # --------------------------------
-    # BTC filter
-    # --------------------------------
-
-    if market_1h is not None:
-
-        if market_1h > 0.30:
-            score += 6
-
-        elif market_1h < -1:
-            score -= 10
-            reasons.append("BTC weak")
-
-    return max(
-        0,
-        min(100, score)
-    ), reasons
+    return score, reasons
 
 
-def analyze(
-    coin,
-    history,
-    current_time,
-    btc_1h
-):
+# ============================================================
+# COINGECKO
+# ============================================================
 
-    coin_id = coin["id"]
-    symbol = coin["symbol"].upper()
-
-    price = coin.get("current_price")
-    volume = coin.get("total_volume")
-
-    if price is None:
-        return None
-
-    records = history.get(
-        coin_id,
-        []
-    )
-
-    records.append({
-        "time": current_time,
-        "price": price,
-        "volume": volume or 0
-    })
-
-    # نگهداری 2 ساعت
-    cutoff = current_time - 7200
-
-    records = [
-        x for x in records
-        if x["time"] >= cutoff
-    ]
-
-    history[coin_id] = records
-
-    prices = [
-        x["price"]
-        for x in records
-    ]
-
-    c5 = get_change(
-        records,
-        5,
-        price,
-        current_time
-    )
-
-    c10 = get_change(
-        records,
-        10,
-        price,
-        current_time
-    )
-
-    c15 = get_change(
-        records,
-        15,
-        price,
-        current_time
-    )
-
-    rsi_value = rsi(prices)
-
-    ema5 = ema(prices, 5)
-    ema10 = ema(prices, 10)
-
-    vol_ratio = volume_ratio(
-        records
-    )
-
-    score, reasons = calculate_score(
-        c5,
-        c10,
-        c15,
-        rsi_value,
-        ema5,
-        ema10,
-        price,
-        vol_ratio,
-        btc_1h
-    )
-
-    return {
-        "symbol": symbol,
-        "price": price,
-        "c5": c5,
-        "c10": c10,
-        "c15": c15,
-        "rsi": rsi_value,
-        "ema5": ema5,
-        "ema10": ema10,
-        "volume_ratio": vol_ratio,
-        "score": score,
-        "reasons": reasons,
-        "samples": len(records)
+def get_market_data():
+    params = {
+        "vs_currency": "usd",
+        "ids": ",".join(COINS),
+        "order": "market_cap_desc",
+        "per_page": 30,
+        "page": 1,
+        "sparkline": "false",
     }
 
+    headers = {
+        "User-Agent": "crypto-pump-scanner/1.0"
+    }
 
-def send_telegram(text):
+    try:
 
-    response = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        data={
-            "chat_id": CHAT_ID,
-            "text": text
-        },
-        timeout=20
-    )
+        response = requests.get(
+            COINGECKO_URL,
+            params=params,
+            headers=headers,
+            timeout=30,
+        )
+
+        print(
+            f"CoinGecko HTTP: {response.status_code}"
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if not isinstance(data, list):
+            print("CoinGecko returned invalid data.")
+            return []
+
+        return data
+
+    except Exception as e:
+
+        print(
+            f"CoinGecko request failed: {e}"
+        )
+
+        return []
+
+
+# ============================================================
+# FORMAT
+# ============================================================
+
+def fmt_percent(value):
+    if value is None:
+        return "N/A"
+
+    return f"{value:+.2f}%"
+
+
+def fmt_rsi(value):
+    if value is None:
+        return "N/A"
+
+    return f"{value:.1f}"
+
+
+# ============================================================
+# MAIN SCAN
+# ============================================================
+
+def scan():
+
+    print("=" * 60)
+    print("EARLY PUMP SCANNER START")
+    print("=" * 60)
+
+    market_data = get_market_data()
+
+    if not market_data:
+
+        error_message = (
+            "🔴 <b>PUMP SCANNER ERROR</b>\n\n"
+            "CoinGecko data unavailable.\n"
+            "Scanner stopped safely."
+        )
+
+        send_telegram(error_message)
+
+        return False
 
     print(
-        "TELEGRAM:",
-        response.text
+        f"Market data received: "
+        f"{len(market_data)} coins"
     )
-
-    response.raise_for_status()
-
-
-def main():
-
-    current_time = now()
 
     history = load_history()
 
-    market = get_market()
-
-    btc = next(
-        (
-            x for x in market
-            if x["id"] == "bitcoin"
-        ),
-        None
+    update_history(
+        history,
+        market_data,
     )
-
-    btc_1h = None
-
-    if btc:
-        btc_1h = btc.get(
-            "price_change_percentage_1h_in_currency"
-        )
-
-    results = []
-
-    for coin in market:
-
-        try:
-
-            result = analyze(
-                coin,
-                history,
-                current_time,
-                btc_1h
-            )
-
-            if result:
-                results.append(result)
-
-        except Exception as e:
-
-            print(
-                coin["id"],
-                "ERROR:",
-                e
-            )
 
     save_history(history)
 
-    results.sort(
-        key=lambda x: x["score"],
-        reverse=True
+    results = []
+
+    # --------------------------------------------------------
+    # BTC 1H FILTER
+    # --------------------------------------------------------
+
+    btc_history = history.get(
+        "bitcoin",
+        [],
     )
 
-    strong = [
-        x for x in results
-        if (
-            x["score"] >= 75
-            and x["c5"] is not None
-            and 0 < x["c5"] < 2
-            and len(x["reasons"]) >= 3
-        )
-    ]
+    btc_1h = get_change(
+        btc_history,
+        60,
+    )
 
-    message = (
-        "🚨 EARLY PUMP SCANNER\n"
+    # --------------------------------------------------------
+    # SCAN COINS
+    # --------------------------------------------------------
+
+    for coin in market_data:
+
+        coin_id = coin.get("id")
+
+        symbol = (
+            coin.get("symbol", "")
+            .upper()
+        )
+
+        name = coin.get(
+            "name",
+            symbol,
+        )
+
+        if not coin_id:
+            continue
+
+        items = history.get(
+            coin_id,
+            [],
+        )
+
+        if not items:
+            continue
+
+        c5 = get_change(
+            items,
+            5,
+        )
+
+        c10 = get_change(
+            items,
+            10,
+        )
+
+        c15 = get_change(
+            items,
+            15,
+        )
+
+        rsi = calculate_rsi(
+            items,
+            14,
+        )
+
+        ema5 = calculate_ema(
+            items,
+            5,
+        )
+
+        ema10 = calculate_ema(
+            items,
+            10,
+        )
+
+        volume_trend = calculate_volume_trend(
+            items
+        )
+
+        score, reasons = calculate_score(
+            c5=c5,
+            c10=c10,
+            c15=c15,
+            rsi=rsi,
+            ema5=ema5,
+            ema10=ema10,
+            volume_trend=volume_trend,
+        )
+
+        results.append(
+            {
+                "id": coin_id,
+                "symbol": symbol,
+                "name": name,
+                "score": score,
+                "c5": c5,
+                "c10": c10,
+                "c15": c15,
+                "rsi": rsi,
+                "volume_trend": volume_trend,
+                "reasons": reasons,
+            }
+        )
+
+    # --------------------------------------------------------
+    # SORT
+    # --------------------------------------------------------
+
+    results.sort(
+        key=lambda x: x["score"],
+        reverse=True,
+    )
+
+    # --------------------------------------------------------
+    # STRONG SIGNAL
+    # --------------------------------------------------------
+
+    strong = []
+
+    for item in results:
+
+        if item["score"] < 75:
+            continue
+
+        if item["c5"] is None:
+            continue
+
+        if item["c10"] is None:
+            continue
+
+        if item["c15"] is None:
+            continue
+
+        if item["c5"] <= 0:
+            continue
+
+        if item["c10"] <= 0:
+            continue
+
+        # جلوگیری از هشدارهای خیلی دیر
+        if item["c5"] >= 5:
+            continue
+
+        strong.append(item)
+
+    # --------------------------------------------------------
+    # EARLY WATCH
+    # --------------------------------------------------------
+
+    watchlist = [
+        item
+        for item in results
+        if item["score"] >= 45
+    ][:5]
+
+    # --------------------------------------------------------
+    # TELEGRAM
+    # --------------------------------------------------------
+
+    lines = []
+
+    lines.append(
+        "🚨 <b>EARLY PUMP SCANNER 5M</b>"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    if strong:
+
+        lines.append(
+            "🔥 <b>STRONG EARLY PUMP</b>"
+        )
+
+        lines.append("")
+
+        for index, item in enumerate(
+            strong[:3],
+            1,
+        ):
+
+            lines.append(
+                f"{index}. "
+                f"<b>{item['symbol']}</b> "
+                f"⭐ <b>{item['score']}/100</b>"
+            )
+
+            lines.append(
+                f"5m {fmt_percent(item['c5'])} | "
+                f"10m {fmt_percent(item['c10'])} | "
+                f"15m {fmt_percent(item['c15'])}"
+            )
+
+            lines.append(
+                f"RSI {fmt_rsi(item['rsi'])}"
+            )
+
+            if item["reasons"]:
+
+                reasons_text = ", ".join(
+                    item["reasons"][:4]
+                )
+
+                lines.append(
+                    f"📌 {reasons_text}"
+                )
+
+            lines.append("")
+
+    else:
+
+        lines.append(
+            "🟢 <b>فعلاً Strong Early Pump نداریم</b>"
+        )
+
+        lines.append("")
+
+    # --------------------------------------------------------
+    # WATCHLIST
+    # --------------------------------------------------------
+
+    lines.append(
+        "👀 <b>TOP 5 WATCHLIST</b>"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    if watchlist:
+
+        for index, item in enumerate(
+            watchlist,
+            1,
+        ):
+
+            lines.append(
+                f"{index}. "
+                f"<b>{item['symbol']}</b> "
+                f"⭐ {item['score']}/100"
+            )
+
+            lines.append(
+                f"5m {fmt_percent(item['c5'])} | "
+                f"15m {fmt_percent(item['c15'])} | "
+                f"RSI {fmt_rsi(item['rsi'])}"
+            )
+
+    else:
+
+        lines.append(
+            "هنوز داده کافی برای Watchlist نداریم."
+        )
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
+
+    lines.append("")
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    if btc_1h is None:
+
+        lines.append(
+            "₿ BTC 1H: N/A"
+        )
+
+    else:
+
+        lines.append(
+            f"₿ BTC 1H: {btc_1h:+.2f}%"
+        )
+
+    lines.append(
+        f"📊 Scanned: "
+        f"{len(market_data)}/30"
+    )
+
+    lines.append(
+        f"🧠 History: "
+        f"{sum(len(v) for v in history.values())} snapshots"
+    )
+
+    lines.append(
+        "📡 Source: CoinGecko"
+    )
+
+    now = datetime.now(
+        timezone.utc
+    ).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+
+    lines.append(
+        f"🕐 {now}"
+    )
+
+    message = "\n".join(lines)
+
+    print("")
+    print(message)
+    print("")
+
+    send_telegram(message)
+
+    print(
+        "EARLY PUMP SCANNER FINISHED."
+    )
+
+    return True
+
+
+# ============================================================
+# ENTRY
+# ============================================================
+
+if __name__ == "__main__":
+    scan()
