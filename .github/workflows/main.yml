@@ -21,8 +21,22 @@ jobs:
       - name: Install requests
         run: pip install requests
 
+      - name: Restore previous prices
+        uses: actions/cache/restore@v4
+        with:
+          path: price_data.json
+          key: pump-prices
+          restore-keys: |
+            pump-prices-
+
       - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scanner.py
+
+      - name: Save current prices
+        uses: actions/cache/save@v4
+        with:
+          path: price_data.json
+          key: pump-prices-${{ github.run_id }}
