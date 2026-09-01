@@ -1,3 +1,4 @@
+
 name: Pump Scanner
 
 on:
@@ -6,10 +7,13 @@ on:
     - cron: "*/5 * * * *"
 
 jobs:
+
   scan:
+
     runs-on: ubuntu-latest
 
     steps:
+
       - name: Get code
         uses: actions/checkout@v4
 
@@ -21,13 +25,13 @@ jobs:
       - name: Install requests
         run: pip install requests
 
-      - name: Restore previous prices
+      - name: Restore price history
         uses: actions/cache/restore@v4
         with:
           path: price_data.json
-          key: pump-prices
+          key: pump-history-${{ github.run_id }}
           restore-keys: |
-            pump-prices-
+            pump-history-
 
       - name: Run scanner
         env:
@@ -35,8 +39,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python scanner.py
 
-      - name: Save current prices
+      - name: Save price history
         uses: actions/cache/save@v4
         with:
           path: price_data.json
-          key: pump-prices-${{ github.run_id }}
+          key: pump-history-${{ github.run_id }}
