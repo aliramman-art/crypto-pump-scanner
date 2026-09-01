@@ -11,52 +11,18 @@ DATA_FILE = "price_data.json"
 API_URL = "https://api.coingecko.com/api/v3/coins/markets"
 
 COINS = [
-    "bitcoin",
-    "ethereum",
-    "binancecoin",
-    "solana",
-    "ripple",
-    "dogecoin",
-    "cardano",
-    "avalanche-2",
-    "chainlink",
-    "polkadot",
-    "tron",
-    "litecoin",
-    "bitcoin-cash",
-    "cosmos",
-    "uniswap",
-    "ethereum-classic",
-    "stellar",
-    "near",
-    "aptos",
-    "filecoin",
-    "arbitrum",
-    "optimism",
-    "sui",
-    "injective-protocol",
-    "aave",
-    "maker",
-    "algorand",
-    "vechain",
-    "sei-network",
-    "celestia"
+    "bitcoin","ethereum","binancecoin","solana","ripple",
+    "dogecoin","cardano","avalanche-2","chainlink","polkadot",
+    "tron","litecoin","bitcoin-cash","cosmos","uniswap",
+    "ethereum-classic","stellar","near","aptos","filecoin",
+    "arbitrum","optimism","sui","injective-protocol","aave",
+    "maker","algorand","vechain","sei-network","celestia"
 ]
 
 
-# ==================================================
-# TIME
-# ==================================================
-
 def now():
-    return int(
-        datetime.now(timezone.utc).timestamp()
-    )
+    return int(datetime.now(timezone.utc).timestamp())
 
-
-# ==================================================
-# HISTORY
-# ==================================================
 
 def load_history():
 
@@ -66,7 +32,6 @@ def load_history():
     try:
         with open(DATA_FILE, "r") as f:
             return json.load(f)
-
     except Exception:
         return {}
 
@@ -76,10 +41,6 @@ def save_history(history):
     with open(DATA_FILE, "w") as f:
         json.dump(history, f)
 
-
-# ==================================================
-# MARKET DATA
-# ==================================================
 
 def get_market():
 
@@ -97,19 +58,12 @@ def get_market():
         timeout=30
     )
 
-    print(
-        "MARKET STATUS:",
-        response.status_code
-    )
+    print("MARKET:", response.status_code)
 
     response.raise_for_status()
 
     return response.json()
 
-
-# ==================================================
-# PERCENT CHANGE
-# ==================================================
 
 def pct(old, new):
 
@@ -119,64 +73,32 @@ def pct(old, new):
     return ((new - old) / old) * 100
 
 
-# ==================================================
-# HISTORICAL CHANGE
-# ==================================================
+def get_change(records, minutes, price, current_time):
 
-def historical_change(
-    records,
-    minutes,
-    current_price,
-    current_time
-):
-
-    if not records:
+    if len(records) < 2:
         return None
 
-    target = current_time - (
-        minutes * 60
-    )
+    target = current_time - minutes * 60
 
-    closest = None
-
-    smallest_distance = None
+    candidate = None
 
     for item in records:
 
-        distance = abs(
-            item["time"] - target
-        )
+        if item["time"] <= target:
+            candidate = item
+        else:
+            break
 
-        if (
-            smallest_distance is None
-            or distance < smallest_distance
-        ):
-
-            smallest_distance = distance
-            closest = item
-
-    if closest is None:
-        return None
-
-    # اگر داده خیلی دور از زمان مورد نظر است
-    if smallest_distance > 150:
-
+    if candidate is None:
         return None
 
     return pct(
-        closest["price"],
-        current_price
+        candidate["price"],
+        price
     )
 
 
-# ==================================================
-# RSI
-# ==================================================
-
-def calculate_rsi(
-    prices,
-    period=14
-):
+def rsi(prices, period=14):
 
     if len(prices) < period + 1:
         return None
@@ -186,234 +108,164 @@ def calculate_rsi(
 
     for i in range(1, len(prices)):
 
-        change = (
-            prices[i]
-            - prices[i - 1]
-        )
+        change = prices[i] - prices[i - 1]
 
         if change > 0:
-
             gains.append(change)
             losses.append(0)
-
         else:
-
             gains.append(0)
             losses.append(abs(change))
 
-    avg_gain = (
-        sum(gains[-period:])
-        / period
-    )
+    gain = sum(gains[-period:]) / period
+    loss = sum(losses[-period:]) / period
 
-    avg_loss = (
-        sum(losses[-period:])
-        / period
-    )
+    if loss == 0:
+        return 100
 
-    if avg_loss == 0:
-        return 100.0
+    rs = gain / loss
 
-    rs = avg_gain / avg_loss
-
-    return 100 - (
-        100 / (1 + rs)
-    )
+    return 100 - (100 / (1 + rs))
 
 
-# ==================================================
-# EMA
-# ==================================================
-
-def calculate_ema(
-    prices,
-    period
-):
+def ema(prices, period):
 
     if len(prices) < period:
         return None
 
-    multiplier = 2 / (
-        period + 1
-    )
+    result = sum(prices[:period]) / period
 
-    result = (
-        sum(prices[:period])
-        / period
-    )
+    multiplier = 2 / (period + 1)
 
     for price in prices[period:]:
 
         result = (
-            (price - result)
-            * multiplier
+            (price - result) * multiplier
         ) + result
 
     return result
 
 
-# ==================================================
-# BREAKOUT DISTANCE
-# ==================================================
+def volume_ratio(records):
 
-def breakout_distance(prices):
-
-    if len(prices) < 10:
+    if len(records) < 6:
         return None
 
-    previous = prices[-10:-1]
+    current_volume = records[-1]["volume"]
 
-    resistance = max(previous)
+    previous = [
+        x["volume"]
+        for x in records[-6:-1]
+        if x["volume"] > 0
+    ]
 
-    current = prices[-1]
-
-    if resistance <= 0:
+    if not previous:
         return None
 
-    distance = (
-        (resistance - current)
-        / resistance
-    ) * 100
+    average = sum(previous) / len(previous)
 
-    return distance
+    if average <= 0:
+        return None
+
+    return current_volume / average
 
 
-# ==================================================
-# EARLY PUMP SCORE
-# ==================================================
-
-def calculate_early_score(
-    change5,
-    change10,
-    change15,
-    rsi,
+def calculate_score(
+    c5,
+    c10,
+    c15,
+    rsi_value,
     ema5,
     ema10,
     price,
-    resistance_distance,
-    market_change_1h
+    vol_ratio,
+    market_1h
 ):
 
     score = 0
-
     reasons = []
 
-    # ----------------------------------------------
-    # 5M MOMENTUM
-    # ----------------------------------------------
+    # --------------------------------
+    # 5m momentum
+    # --------------------------------
 
-    if change5 is not None:
+    if c5 is not None:
 
-        if 0.30 <= change5 < 0.80:
-
+        if 0.30 <= c5 < 0.80:
             score += 15
-            reasons.append(
-                "5m momentum"
-            )
+            reasons.append("5m momentum")
 
-        elif 0.80 <= change5 < 1.50:
-
+        elif 0.80 <= c5 < 1.50:
             score += 12
-            reasons.append(
-                "5m momentum"
-            )
 
-        elif change5 >= 1.50:
-
-            score += 5
-            reasons.append(
-                "5m already moving"
-            )
-
-    # ----------------------------------------------
-    # 10M MOMENTUM
-    # ----------------------------------------------
-
-    if change10 is not None:
-
-        if 0.60 <= change10 < 1.50:
-
-            score += 10
-
-        elif 1.50 <= change10 < 3:
-
-            score += 8
-
-        elif change10 >= 3:
-
-            score += 3
-
-    # ----------------------------------------------
-    # 15M TREND
-    # ----------------------------------------------
-
-    if change15 is not None:
-
-        if 0.80 <= change15 < 2:
-
-            score += 12
-            reasons.append(
-                "15m confirmation"
-            )
-
-        elif 2 <= change15 < 4:
-
-            score += 8
-
-        elif change15 >= 4:
-
-            score += 3
-
-    # ----------------------------------------------
-    # ACCELERATION
-    # ----------------------------------------------
-
-    if (
-        change5 is not None
-        and change10 is not None
-        and change10 > 0
-    ):
-
-        if change5 > (
-            change10 / 3
-        ):
-
-            score += 12
-            reasons.append(
-                "acceleration"
-            )
-
-    # ----------------------------------------------
-    # RSI
-    # ----------------------------------------------
-
-    if rsi is not None:
-
-        if 52 <= rsi <= 65:
-
-            score += 15
-            reasons.append(
-                "healthy RSI"
-            )
-
-        elif 65 < rsi <= 72:
-
-            score += 10
-
-        elif 72 < rsi <= 78:
-
+        elif c5 >= 1.50:
             score += 4
 
-        elif rsi > 82:
+    # --------------------------------
+    # 10m
+    # --------------------------------
 
+    if c10 is not None:
+
+        if 0.60 <= c10 < 1.50:
+            score += 10
+
+        elif 1.50 <= c10 < 3:
+            score += 7
+
+        elif c10 >= 3:
+            score += 2
+
+    # --------------------------------
+    # 15m
+    # --------------------------------
+
+    if c15 is not None:
+
+        if 0.80 <= c15 < 2:
+            score += 12
+            reasons.append("15m trend")
+
+        elif 2 <= c15 < 4:
+            score += 7
+
+        elif c15 >= 4:
+            score += 2
+
+    # --------------------------------
+    # acceleration
+    # --------------------------------
+
+    if c5 is not None and c10 is not None:
+
+        if c5 > 0 and c10 > 0:
+
+            if c5 > c10 * 0.35:
+                score += 12
+                reasons.append("acceleration")
+
+    # --------------------------------
+    # RSI
+    # --------------------------------
+
+    if rsi_value is not None:
+
+        if 52 <= rsi_value <= 65:
+            score += 15
+            reasons.append("RSI healthy")
+
+        elif 65 < rsi_value <= 72:
+            score += 10
+
+        elif 72 < rsi_value <= 78:
+            score += 3
+
+        elif rsi_value > 82:
             score -= 10
-            reasons.append(
-                "RSI overheated"
-            )
 
-    # ----------------------------------------------
+    # --------------------------------
     # EMA
-    # ----------------------------------------------
+    # --------------------------------
 
     if (
         ema5 is not None
@@ -421,80 +273,62 @@ def calculate_early_score(
     ):
 
         if price > ema5 > ema10:
-
             score += 15
-            reasons.append(
-                "EMA bullish"
-            )
+            reasons.append("EMA bullish")
 
         elif price > ema5:
-
             score += 7
 
-    # ----------------------------------------------
-    # RESISTANCE
-    # ----------------------------------------------
+    # --------------------------------
+    # Volume spike
+    # --------------------------------
 
-    if resistance_distance is not None:
+    if vol_ratio is not None:
 
-        if 0 <= resistance_distance <= 0.50:
+        if vol_ratio >= 3:
+            score += 20
+            reasons.append("volume spike")
 
-            score += 10
-            reasons.append(
-                "near breakout"
-            )
+        elif vol_ratio >= 2:
+            score += 15
+            reasons.append("volume rising")
 
-        elif 0.50 < resistance_distance <= 1.0:
+        elif vol_ratio >= 1.5:
+            score += 8
 
-            score += 7
+    # --------------------------------
+    # BTC filter
+    # --------------------------------
 
-        elif 1 < resistance_distance <= 2:
+    if market_1h is not None:
 
-            score += 3
-
-    # ----------------------------------------------
-    # MARKET TREND
-    # ----------------------------------------------
-
-    if market_change_1h is not None:
-
-        if market_change_1h > 0.50:
-
+        if market_1h > 0.30:
             score += 6
 
-        elif market_change_1h < -1.0:
-
+        elif market_1h < -1:
             score -= 10
+            reasons.append("BTC weak")
 
     return max(
         0,
-        min(
-            100,
-            score
-        )
+        min(100, score)
     ), reasons
 
 
-# ==================================================
-# ANALYZE COIN
-# ==================================================
-
-def analyze_coin(
+def analyze(
     coin,
     history,
     current_time,
-    btc_change_1h
+    btc_1h
 ):
 
     coin_id = coin["id"]
-
     symbol = coin["symbol"].upper()
 
-    price = coin.get(
-        "current_price"
-    )
+    price = coin.get("current_price")
+    volume = coin.get("total_volume")
 
-    if not price:
+    if price is None:
         return None
 
     records = history.get(
@@ -504,15 +338,12 @@ def analyze_coin(
 
     records.append({
         "time": current_time,
-        "price": price
+        "price": price,
+        "volume": volume or 0
     })
 
-    # نگهداری دو ساعت تاریخچه
-
-    cutoff = (
-        current_time
-        - 2 * 60 * 60
-    )
+    # نگهداری 2 ساعت
+    cutoff = current_time - 7200
 
     records = [
         x for x in records
@@ -521,133 +352,77 @@ def analyze_coin(
 
     history[coin_id] = records
 
-    # ----------------------------------------------
-    # CHANGES
-    # ----------------------------------------------
+    prices = [
+        x["price"]
+        for x in records
+    ]
 
-    change5 = historical_change(
+    c5 = get_change(
         records,
         5,
         price,
         current_time
     )
 
-    change10 = historical_change(
+    c10 = get_change(
         records,
         10,
         price,
         current_time
     )
 
-    change15 = historical_change(
+    c15 = get_change(
         records,
         15,
         price,
         current_time
     )
 
-    # ----------------------------------------------
-    # PRICES
-    # ----------------------------------------------
+    rsi_value = rsi(prices)
 
-    prices = [
-        x["price"]
-        for x in records
-    ]
+    ema5 = ema(prices, 5)
+    ema10 = ema(prices, 10)
 
-    # ----------------------------------------------
-    # RSI
-    # ----------------------------------------------
-
-    rsi = calculate_rsi(
-        prices
+    vol_ratio = volume_ratio(
+        records
     )
 
-    # ----------------------------------------------
-    # EMA
-    # ----------------------------------------------
-
-    ema5 = calculate_ema(
-        prices,
-        5
-    )
-
-    ema10 = calculate_ema(
-        prices,
-        10
-    )
-
-    # ----------------------------------------------
-    # RESISTANCE
-    # ----------------------------------------------
-
-    resistance_distance = (
-        breakout_distance(prices)
-    )
-
-    # ----------------------------------------------
-    # SCORE
-    # ----------------------------------------------
-
-    score, reasons = (
-        calculate_early_score(
-            change5,
-            change10,
-            change15,
-            rsi,
-            ema5,
-            ema10,
-            price,
-            resistance_distance,
-            btc_change_1h
-        )
+    score, reasons = calculate_score(
+        c5,
+        c10,
+        c15,
+        rsi_value,
+        ema5,
+        ema10,
+        price,
+        vol_ratio,
+        btc_1h
     )
 
     return {
-
         "symbol": symbol,
-
         "price": price,
-
-        "change5": change5,
-
-        "change10": change10,
-
-        "change15": change15,
-
-        "rsi": rsi,
-
+        "c5": c5,
+        "c10": c10,
+        "c15": c15,
+        "rsi": rsi_value,
         "ema5": ema5,
-
         "ema10": ema10,
-
-        "resistance_distance":
-            resistance_distance,
-
+        "volume_ratio": vol_ratio,
         "score": score,
-
         "reasons": reasons,
-
         "samples": len(records)
     }
 
 
-# ==================================================
-# TELEGRAM
-# ==================================================
-
-def send_telegram(message):
+def send_telegram(text):
 
     response = requests.post(
-
-        f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage",
-
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
-            "text": message
+            "text": text
         },
-
         timeout=20
     )
 
@@ -659,10 +434,6 @@ def send_telegram(message):
     response.raise_for_status()
 
 
-# ==================================================
-# MAIN
-# ==================================================
-
 def main():
 
     current_time = now()
@@ -670,10 +441,6 @@ def main():
     history = load_history()
 
     market = get_market()
-
-    # ----------------------------------------------
-    # BTC FILTER
-    # ----------------------------------------------
 
     btc = next(
         (
@@ -683,34 +450,28 @@ def main():
         None
     )
 
-    btc_change_1h = None
+    btc_1h = None
 
     if btc:
-
-        btc_change_1h = btc.get(
+        btc_1h = btc.get(
             "price_change_percentage_1h_in_currency"
         )
 
     results = []
 
-    failed = []
-
     for coin in market:
 
         try:
 
-            result = analyze_coin(
+            result = analyze(
                 coin,
                 history,
                 current_time,
-                btc_change_1h
+                btc_1h
             )
 
             if result:
-
-                results.append(
-                    result
-                )
+                results.append(result)
 
         except Exception as e:
 
@@ -720,214 +481,22 @@ def main():
                 e
             )
 
-            failed.append(
-                coin["id"]
-            )
-
     save_history(history)
-
-    if not results:
-
-        raise Exception(
-            "No valid market data"
-        )
-
-    # ----------------------------------------------
-    # SORT
-    # ----------------------------------------------
 
     results.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    # ----------------------------------------------
-    # MESSAGE
-    # ----------------------------------------------
-
-    message = (
-        "🚨 EARLY PUMP SCANNER\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        "🎯 شکار پیش از پامپ\n\n"
-    )
-
-    # ----------------------------------------------
-    # STRONG EARLY
-    # ----------------------------------------------
-
     strong = [
-
         x for x in results
-
         if (
             x["score"] >= 75
-
-            and x["change5"] is not None
-
-            and 0 < x["change5"] < 2.0
-
+            and x["c5"] is not None
+            and 0 < x["c5"] < 2
             and len(x["reasons"]) >= 3
         )
     ]
 
-    if strong:
-
-        message += (
-            "🔴 STRONG EARLY PUMP\n\n"
-        )
-
-        for x in strong[:5]:
-
-            rsi = (
-                f"{x['rsi']:.0f}"
-                if x["rsi"] is not None
-                else "N/A"
-            )
-
-            distance = (
-
-                f"{x['resistance_distance']:.2f}%"
-
-                if x[
-                    "resistance_distance"
-                ] is not None
-
-                else "N/A"
-            )
-
-            message += (
-
-                f"🚨 {x['symbol']}\n"
-
-                f"⭐ Early Score: "
-                f"{x['score']}/100\n"
-
-                f"5m: "
-                f"{x['change5']:+.2f}%\n"
-
-                f"10m: "
-                f"{x['change10']:+.2f}%\n"
-
-                f"15m: "
-                f"{x['change15']:+.2f}%\n"
-
-                f"RSI: {rsi}\n"
-
-                f"Resistance: "
-                f"{distance}\n"
-
-                f"EMA: "
-                f"{'✅' if x['ema5'] and x['ema10'] and x['price'] > x['ema5'] > x['ema10'] else '❌'}\n"
-
-                f"BTC 1H: "
-                f"{btc_change_1h:+.2f}%"
-                if btc_change_1h is not None
-                else
-                f"BTC 1H: N/A"
-
-            )
-
-            message += "\n\n"
-
-    else:
-
-        message += (
-            "🟢 فعلاً Strong Early Pump نداریم.\n\n"
-        )
-
-    # ----------------------------------------------
-    # TOP WATCHLIST
-    # ----------------------------------------------
-
-    message += (
-        "👀 EARLY WATCHLIST\n\n"
-    )
-
-    for i, x in enumerate(
-        results[:5],
-        1
-    ):
-
-        c5 = (
-
-            f"{x['change5']:+.2f}%"
-
-            if x["change5"] is not None
-
-            else "N/A"
-        )
-
-        c15 = (
-
-            f"{x['change15']:+.2f}%"
-
-            if x["change15"] is not None
-
-            else "N/A"
-        )
-
-        rsi = (
-
-            f"{x['rsi']:.0f}"
-
-            if x["rsi"] is not None
-
-            else "N/A"
-        )
-
-        message += (
-
-            f"{i}. "
-            f"{x['symbol']} "
-            f"⭐ {x['score']}/100\n"
-
-            f"   5m {c5} | "
-            f"15m {c15} | "
-            f"RSI {rsi}\n"
-        )
-
-    # ----------------------------------------------
-    # SYSTEM
-    # ----------------------------------------------
-
-    message += (
-
-        "\n━━━━━━━━━━━━━━━━━━\n"
-
-        f"📊 Scanned: "
-        f"{len(results)}/30\n"
-
-        f"❌ Failed: "
-        f"{len(failed)}\n"
-
-        f"₿ BTC 1H: "
-
-    )
-
-    if btc_change_1h is not None:
-
-        message += (
-            f"{btc_change_1h:+.2f}%\n"
-        )
-
-    else:
-
-        message += "N/A\n"
-
-    message += (
-        "⏱ Timeframe: 5m\n"
-        "📡 Source: CoinGecko\n"
-    )
-
-    # ----------------------------------------------
-    # SEND
-    # ----------------------------------------------
-
-    send_telegram(
-        message
-    )
-
-
-if __name__ == "__main__":
-
-    main()
+    message = (
+        "🚨 EARLY PUMP SCANNER\n"
