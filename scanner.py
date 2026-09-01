@@ -1,19 +1,175 @@
+
 import os
 import requests
+import statistics
+import time
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-message = "🚀 تست پامپ اسکنر\n\nاتصال ربات به تلگرام با موفقیت انجام شد."
+BASE_URL = "https://api.binance.com"
 
-url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+# 30 ارز مهم برای شروع
+SYMBOLS = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
+    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
+    "TRXUSDT", "LTCUSDT", "BCHUSDT", "ATOMUSDT", "UNIUSDT",
+    "ETCUSDT", "XLMUSDT", "NEARUSDT", "APTUSDT", "FILUSDT",
+    "ARBUSDT", "OPUSDT", "SUIUSDT", "INJUSDT", "AAVEUSDT",
+    "MKRUSDT", "ALGOUSDT", "VETUSDT", "SEIUSDT", "TIAUSDT"
+]
 
-response = requests.post(
-    url,
-    data={
-        "chat_id": CHAT_ID,
-        "text": message
+
+def get_klines(symbol, interval="5m", limit=30):
+    url = f"{BASE_URL}/api/v3/klines"
+
+    response = requests.get(
+        url,
+        params={
+            "symbol": symbol,
+            "interval": interval,
+            "limit": limit
+        },
+        timeout=10
+    )
+
+    response.raise_for_status()
+    return response.json()
+
+
+def analyze(symbol):
+    candles = get_klines(symbol)
+
+    closes = [float(x[4]) for x in candles]
+    volumes = [float(x[5]) for x in candles]
+
+    current_price = closes[-1]
+
+    # رشد قیمت در 5 دقیقه
+    price_change = ((closes[-1] - closes[-2]) / closes[-2]) * 100
+
+    # رشد قیمت در 15 دقیقه
+    price_change_15m = ((closes[-1] - closes[-4]) / closes[-4]) * 100
+
+    # میانگین حجم 20 کندل
+    avg_volume = statistics.mean(volumes[-21:-1])
+
+    volume_ratio = volumes[-1] / avg_volume if avg_volume else 0
+
+    score = 0
+    reasons = []
+
+    # حرکت قیمت
+    if price_change >= 1:
+        score += 25
+        reasons.append("رشد شدید 5m")
+    elif price_change >= 0.5:
+        score += 15
+        reasons.append("رشد قیمت")
+
+    # حرکت 15 دقیقه‌ای
+    if price_change_15m >= 2:
+        score += 20
+        reasons.append("شتاب 15m")
+
+    elif price_change_15m >= 1:
+        score += 10
+        reasons.append("روند مثبت 15m")
+
+    # حجم
+    if volume_ratio >= 3:
+        score += 30
+        reasons.append("حجم بسیار غیرعادی")
+    elif volume_ratio >= 2:
+        score += 20
+        reasons.append("حجم غیرعادی")
+    elif volume_ratio >= 1.5:
+        score += 10
+        reasons.append("افزایش حجم")
+
+    # شکست سقف 20 کندل
+    previous_high = max(closes[-21:-1])
+
+    if current_price > previous_high:
+        score += 25
+        reasons.append("شکست سقف کوتاه‌مدت")
+
+    return {
+        "symbol": symbol,
+        "price": current_price,
+        "change_5m": price_change,
+        "change_15m": price_change_15m,
+        "volume_ratio": volume_ratio,
+        "score": score,
+        "reasons": reasons
     }
-)
 
-print(response.text)
+
+def send_message(text):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+
+    requests.post(
+        url,
+        data={
+            "chat_id": CHAT_ID,
+            "text": text
+        },
+        timeout=10
+    )
+
+
+def main():
+
+    results = []
+
+    for symbol in SYMBOLS:
+
+        try:
+            result = analyze(symbol)
+            results.append(result)
+
+            print(
+                symbol,
+                result["score"],
+                result["change_5m"]
+            )
+
+        except Exception as e:
+            print(f"{symbol}: ERROR {e}")
+
+        time.sleep(0.2)
+
+    # مرتب‌سازی بر اساس امتیاز
+    results.sort(
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    alerts = [
+        x for x in results
+        if x["score"] >= 50
+    ]
+
+    if not alerts:
+        print("No strong pump signals.")
+        return
+
+    message = "🚨 پامپ اسکنر\n\n"
+
+    for x in alerts[:5]:
+
+        message += (
+            f"🔥 {x['symbol']}\n"
+            f"امتیاز: {x['score']}/100\n"
+            f"قیمت: {x['price']:.6f}\n"
+            f"5m: {x['change_5m']:+.2f}%\n"
+            f"15m: {x['change_15m']:+.2f}%\n"
+            f"حجم: {x['volume_ratio']:.1f}x\n"
+            f"دلایل: {', '.join(x['reasons'])}\n\n"
+        )
+
+    send_message(message)
+
+
+if __name__ == "__main__":
+    main()
