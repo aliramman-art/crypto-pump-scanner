@@ -1,0 +1,16 @@
+name: Pump Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Test scanner
+        run: |
+          echo "Pump scanner is running!"
+          date
