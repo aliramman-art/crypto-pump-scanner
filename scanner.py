@@ -1,7 +1,6 @@
 import os
 import requests
 import statistics
-import time
 
 BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -40,17 +39,11 @@ def analyze(symbol):
     closes = [float(c[4]) for c in candles]
     volumes = [float(c[5]) for c in candles]
 
-    price = closes[-1]
-
     change_5m = ((closes[-1] - closes[-2]) / closes[-2]) * 100
     change_15m = ((closes[-1] - closes[-4]) / closes[-4]) * 100
 
     avg_volume = statistics.mean(volumes[-21:-1])
-
-    volume_ratio = (
-        volumes[-1] / avg_volume
-        if avg_volume > 0 else 0
-    )
+    volume_ratio = volumes[-1] / avg_volume
 
     score = 0
 
@@ -73,17 +66,10 @@ def analyze(symbol):
 
     previous_high = max(closes[-21:-1])
 
-    if price > previous_high:
+    if closes[-1] > previous_high:
         score += 25
 
-    return {
-        "symbol": symbol,
-        "price": price,
-        "change_5m": change_5m,
-        "change_15m": change_15m,
-        "volume_ratio": volume_ratio,
-        "score": score
-    }
+    return score, change_5m, change_15m, volume_ratio
 
 
 def send_message(text):
@@ -97,7 +83,7 @@ def send_message(text):
         timeout=15
     )
 
-    print("Telegram:", response.text)
+    print("TELEGRAM RESPONSE:", response.text)
 
     response.raise_for_status()
 
@@ -109,59 +95,41 @@ def main():
     for symbol in SYMBOLS:
 
         try:
+            score, c5, c15, vr = analyze(symbol)
 
-            result = analyze(symbol)
-            results.append(result)
+            results.append(
+                (symbol, score, c5, c15, vr)
+            )
 
             print(
                 symbol,
-                "Score:",
-                result["score"]
+                "score=", score,
+                "5m=", round(c5, 2),
+                "15m=", round(c15, 2)
             )
 
         except Exception as e:
-
-            print(
-                symbol,
-                "ERROR:",
-                e
-            )
-
-        time.sleep(0.2)
+            print(symbol, "ERROR:", e)
 
     results.sort(
-        key=lambda x: x["score"],
+        key=lambda x: x[1],
         reverse=True
     )
 
-    # پیام اول
-    send_message(
-        "📊 گزارش پامپ اسکنر\n"
-        "⏱ تایم‌فریم: 5 دقیقه\n"
-        "🔎 تعداد ارز: 30"
-    )
+    message = "📊 پامپ اسکنر | گزارش 5 دقیقه‌ای\n\n"
 
-    # هر 10 ارز یک پیام
-    for start in range(0, len(results), 10):
+    for i, (symbol, score, c5, c15, vr) in enumerate(results, 1):
 
-        group = results[start:start + 10]
+        coin = symbol.replace("USDT", "")
 
-        message = ""
+        message += (
+            f"{i}. {coin} ⭐{score}/100 | "
+            f"5m {c5:+.2f}% | "
+            f"15m {c15:+.2f}% | "
+            f"Vol {vr:.1f}x\n"
+        )
 
-        for i, x in enumerate(
-            group,
-            start=start + 1
-        ):
-
-            message += (
-                f"{i}. {x['symbol'].replace('USDT', '')} "
-                f"⭐ {x['score']}/100\n"
-                f"   5m: {x['change_5m']:+.2f}% | "
-                f"15m: {x['change_15m']:+.2f}%\n"
-                f"   Volume: {x['volume_ratio']:.1f}x\n\n"
-            )
-
-        send_message(message)
+    send_message(message)
 
 
 if __name__ == "__main__":
