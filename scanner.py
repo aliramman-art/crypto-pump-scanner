@@ -1,6 +1,5 @@
 import os
 import json
-import time
 import requests
 from datetime import datetime, timezone
 
@@ -9,17 +8,53 @@ CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 DATA_FILE = "price_data.json"
 
+API_URL = "https://api.coingecko.com/api/v3/coins/markets"
+
 COINS = [
-    "bitcoin", "ethereum", "binancecoin", "solana", "ripple",
-    "dogecoin", "cardano", "avalanche-2", "chainlink", "polkadot",
-    "tron", "litecoin", "bitcoin-cash", "cosmos", "uniswap",
-    "ethereum-classic", "stellar", "near", "aptos", "filecoin",
-    "arbitrum", "optimism", "sui", "injective-protocol", "aave",
-    "maker", "algorand", "vechain", "sei-network", "celestia"
+    "bitcoin",
+    "ethereum",
+    "binancecoin",
+    "solana",
+    "ripple",
+    "dogecoin",
+    "cardano",
+    "avalanche-2",
+    "chainlink",
+    "polkadot",
+    "tron",
+    "litecoin",
+    "bitcoin-cash",
+    "cosmos",
+    "uniswap",
+    "ethereum-classic",
+    "stellar",
+    "near",
+    "aptos",
+    "filecoin",
+    "arbitrum",
+    "optimism",
+    "sui",
+    "injective-protocol",
+    "aave",
+    "maker",
+    "algorand",
+    "vechain",
+    "sei-network",
+    "celestia"
 ]
 
-BASE_URL = "https://api.coingecko.com/api/v3"
 
+# --------------------------------------------------
+# زمان فعلی
+# --------------------------------------------------
+
+def now():
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+# --------------------------------------------------
+# خواندن تاریخچه
+# --------------------------------------------------
 
 def load_history():
 
@@ -27,12 +62,18 @@ def load_history():
         return {}
 
     try:
+
         with open(DATA_FILE, "r") as f:
             return json.load(f)
 
     except Exception:
+
         return {}
 
+
+# --------------------------------------------------
+# ذخیره تاریخچه
+# --------------------------------------------------
 
 def save_history(history):
 
@@ -40,162 +81,229 @@ def save_history(history):
         json.dump(history, f)
 
 
-def get_chart(coin):
+# --------------------------------------------------
+# دریافت ۳۰ ارز در یک درخواست
+# --------------------------------------------------
 
-    url = f"{BASE_URL}/coins/{coin}/market_chart"
+def get_market():
 
     response = requests.get(
-        url,
+        API_URL,
         params={
             "vs_currency": "usd",
-            "days": "1"
+            "ids": ",".join(COINS),
+            "order": "market_cap_desc",
+            "per_page": 30,
+            "page": 1,
+            "sparkline": "false"
         },
-        timeout=20
+        timeout=30
     )
 
-    print(
-        coin,
-        "HTTP:",
-        response.status_code
-    )
-
-    if response.status_code == 429:
-        raise Exception("RATE LIMIT")
+    print("MARKET STATUS:", response.status_code)
 
     response.raise_for_status()
 
     return response.json()
 
 
-def pct(a, b):
+# --------------------------------------------------
+# درصد تغییر
+# --------------------------------------------------
 
-    if a <= 0:
-        return 0
+def percent_change(old, new):
 
-    return ((b - a) / a) * 100
+    if old <= 0:
+        return 0.0
+
+    return ((new - old) / old) * 100
 
 
-def calculate_rsi(closes, period=14):
+# --------------------------------------------------
+# پیدا کردن قیمت حدود N دقیقه قبل
+# --------------------------------------------------
 
-    if len(closes) < period + 1:
+def historical_change(records, minutes, current_price, current_time):
+
+    if not records:
+        return None
+
+    target = current_time - minutes * 60
+
+    candidate = None
+
+    for item in records:
+
+        if item["time"] <= target:
+            candidate = item
+        else:
+            break
+
+    if candidate is None:
+        return None
+
+    return percent_change(
+        candidate["price"],
+        current_price
+    )
+
+
+# --------------------------------------------------
+# RSI
+# --------------------------------------------------
+
+def calculate_rsi(prices, period=14):
+
+    if len(prices) < period + 1:
         return None
 
     gains = []
     losses = []
 
-    for i in range(1, len(closes)):
+    for i in range(1, len(prices)):
 
-        change = closes[i] - closes[i - 1]
+        diff = prices[i] - prices[i - 1]
 
-        if change > 0:
-            gains.append(change)
+        if diff > 0:
+
+            gains.append(diff)
             losses.append(0)
 
         else:
+
             gains.append(0)
-            losses.append(abs(change))
+            losses.append(abs(diff))
 
     avg_gain = sum(gains[-period:]) / period
     avg_loss = sum(losses[-period:]) / period
 
     if avg_loss == 0:
-        return 100
+        return 100.0
 
     rs = avg_gain / avg_loss
 
     return 100 - (100 / (1 + rs))
 
 
-def ema(values, period):
+# --------------------------------------------------
+# EMA
+# --------------------------------------------------
 
-    if len(values) < period:
+def calculate_ema(prices, period):
+
+    if len(prices) < period:
         return None
 
     multiplier = 2 / (period + 1)
 
-    result = sum(values[:period]) / period
+    ema = sum(prices[:period]) / period
 
-    for price in values[period:]:
+    for price in prices[period:]:
 
-        result = (
-            (price - result) * multiplier
-        ) + result
+        ema = (
+            (price - ema) * multiplier
+        ) + ema
 
-    return result
+    return ema
 
+
+# --------------------------------------------------
+# محاسبه امتیاز
+# --------------------------------------------------
 
 def calculate_score(
     change5,
     change10,
     change15,
-    volume_ratio,
     rsi,
-    ema_fast,
-    ema_slow,
+    ema5,
+    ema10,
     price,
     breakout
 ):
 
     score = 0
 
-    # -------------------------
-    # Price momentum 5m
-    # -------------------------
+    # -----------------------------
+    # 5 دقیقه
+    # -----------------------------
 
-    if change5 >= 2:
-        score += 30
+    if change5 is not None:
 
-    elif change5 >= 1:
-        score += 25
+        if change5 >= 2.0:
+            score += 30
 
-    elif change5 >= 0.6:
-        score += 18
+        elif change5 >= 1.2:
+            score += 25
 
-    elif change5 >= 0.3:
-        score += 10
+        elif change5 >= 0.8:
+            score += 20
 
-    # -------------------------
-    # 10m momentum
-    # -------------------------
+        elif change5 >= 0.5:
+            score += 14
 
-    if change10 >= 3:
-        score += 15
+        elif change5 >= 0.25:
+            score += 7
 
-    elif change10 >= 1.5:
-        score += 12
+    # -----------------------------
+    # 10 دقیقه
+    # -----------------------------
 
-    elif change10 >= 0.8:
-        score += 7
+    if change10 is not None:
 
-    # -------------------------
-    # 15m momentum
-    # -------------------------
+        if change10 >= 3.0:
+            score += 18
 
-    if change15 >= 4:
-        score += 15
+        elif change10 >= 2.0:
+            score += 14
 
-    elif change15 >= 2:
-        score += 10
+        elif change10 >= 1.0:
+            score += 9
 
-    elif change15 >= 1:
-        score += 5
+        elif change10 >= 0.5:
+            score += 5
 
-    # -------------------------
-    # Volume
-    # -------------------------
+    # -----------------------------
+    # 15 دقیقه
+    # -----------------------------
 
-    if volume_ratio >= 3:
-        score += 20
+    if change15 is not None:
 
-    elif volume_ratio >= 2:
-        score += 15
+        if change15 >= 4.0:
+            score += 15
 
-    elif volume_ratio >= 1.5:
-        score += 8
+        elif change15 >= 2.5:
+            score += 12
 
-    # -------------------------
+        elif change15 >= 1.5:
+            score += 8
+
+        elif change15 >= 0.7:
+            score += 4
+
+    # -----------------------------
+    # شتاب
+    # -----------------------------
+
+    if (
+        change5 is not None
+        and change10 is not None
+        and change15 is not None
+    ):
+
+        if change5 > 0 and change10 > 0:
+
+            if change5 >= change10 * 0.45:
+                score += 8
+
+        if change10 > 0 and change15 > 0:
+
+            if change10 >= change15 * 0.45:
+                score += 5
+
+    # -----------------------------
     # RSI
-    # -------------------------
+    # -----------------------------
 
     if rsi is not None:
 
@@ -206,266 +314,283 @@ def calculate_score(
             score += 6
 
         elif 72 < rsi <= 78:
-            score += 5
+            score += 4
 
         elif rsi > 82:
             score -= 5
 
-    # -------------------------
-    # EMA trend
-    # -------------------------
+    # -----------------------------
+    # EMA
+    # -----------------------------
 
     if (
-        ema_fast is not None
-        and ema_slow is not None
-        and price > ema_fast > ema_slow
+        ema5 is not None
+        and ema10 is not None
+        and price > ema5 > ema10
     ):
+
         score += 5
 
-    # -------------------------
+    # -----------------------------
     # Breakout
-    # -------------------------
+    # -----------------------------
 
     if breakout:
-        score += 10
+        score += 9
 
-    return max(
-        0,
-        min(score, 100)
-    )
+    return max(0, min(100, score))
 
 
-def send_message(text):
+# --------------------------------------------------
+# تلگرام
+# --------------------------------------------------
+
+def send_telegram(message):
 
     response = requests.post(
         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
         data={
             "chat_id": CHAT_ID,
-            "text": text
+            "text": message
         },
         timeout=20
     )
 
-    print(
-        "TELEGRAM:",
-        response.text
-    )
+    print("TELEGRAM:", response.text)
 
     response.raise_for_status()
 
 
-def analyze_coin(coin):
+# --------------------------------------------------
+# تحلیل هر ارز
+# --------------------------------------------------
 
-    data = get_chart(coin)
+def analyze_coin(coin, history, current_time):
 
-    prices = [
-        float(x[1])
-        for x in data.get("prices", [])
+    coin_id = coin["id"]
+    symbol = coin["symbol"].upper()
+
+    price = coin.get("current_price")
+
+    if not price:
+        return None
+
+    records = history.get(coin_id, [])
+
+    # اضافه کردن نمونه فعلی
+    records.append({
+        "time": current_time,
+        "price": price
+    })
+
+    # فقط حدود 2 ساعت تاریخچه نگه می‌داریم
+    cutoff = current_time - (2 * 60 * 60)
+
+    records = [
+        x for x in records
+        if x["time"] >= cutoff
     ]
 
-    volumes = [
-        float(x[1])
-        for x in data.get("total_volumes", [])
-    ]
+    history[coin_id] = records
 
-    if len(prices) < 10:
+    # -----------------------------
+    # تغییرات زمانی
+    # -----------------------------
 
-        raise Exception(
-            "Not enough price data"
-        )
-
-    price = prices[-1]
-
-    # تعداد تقریبی نقاط 5 دقیقه‌ای
-    # از آخرین نقاط موجود استفاده می‌کنیم
-
-    p5 = prices[-2]
-    p10 = prices[-3]
-    p15 = prices[-4]
-
-    change5 = pct(p5, price)
-    change10 = pct(p10, price)
-    change15 = pct(p15, price)
-
-    # -------------------------
-    # Volume acceleration
-    # -------------------------
-
-    volume_ratio = 1
-
-    if len(volumes) >= 8:
-
-        recent = volumes[-1]
-        baseline = sum(
-            volumes[-8:-1]
-        ) / 7
-
-        if baseline > 0:
-
-            volume_ratio = (
-                recent / baseline
-            )
-
-    # -------------------------
-    # RSI
-    # -------------------------
-
-    rsi = calculate_rsi(
-        prices[-30:]
+    change5 = historical_change(
+        records,
+        5,
+        price,
+        current_time
     )
 
-    # -------------------------
-    # EMA
-    # -------------------------
+    change10 = historical_change(
+        records,
+        10,
+        price,
+        current_time
+    )
 
-    ema_fast = ema(
-        prices[-20:],
+    change15 = historical_change(
+        records,
+        15,
+        price,
+        current_time
+    )
+
+    # -----------------------------
+    # RSI
+    # -----------------------------
+
+    prices = [
+        x["price"]
+        for x in records
+    ]
+
+    rsi = calculate_rsi(prices)
+
+    # -----------------------------
+    # EMA
+    # -----------------------------
+
+    ema5 = calculate_ema(
+        prices,
         5
     )
 
-    ema_slow = ema(
-        prices[-20:],
+    ema10 = calculate_ema(
+        prices,
         10
     )
 
-    # -------------------------
+    # -----------------------------
     # Breakout
-    # -------------------------
-
-    lookback = prices[-13:-3]
+    # -----------------------------
 
     breakout = False
 
-    if lookback:
+    if len(prices) >= 10:
+
+        previous_prices = prices[-10:-1]
 
         previous_high = max(
-            lookback
+            previous_prices
         )
 
         if price > previous_high:
-
             breakout = True
+
+    # -----------------------------
+    # Score
+    # -----------------------------
 
     score = calculate_score(
         change5,
         change10,
         change15,
-        volume_ratio,
         rsi,
-        ema_fast,
-        ema_slow,
+        ema5,
+        ema10,
         price,
         breakout
     )
 
     return {
-        "symbol": coin,
+        "symbol": symbol,
         "price": price,
         "change5": change5,
         "change10": change10,
         "change15": change15,
-        "volume_ratio": volume_ratio,
         "rsi": rsi,
-        "ema_fast": ema_fast,
-        "ema_slow": ema_slow,
+        "ema5": ema5,
+        "ema10": ema10,
         "breakout": breakout,
-        "score": score
+        "score": score,
+        "samples": len(records)
     }
 
 
+# --------------------------------------------------
+# برنامه اصلی
+# --------------------------------------------------
+
 def main():
+
+    current_time = now()
+
+    history = load_history()
+
+    market = get_market()
 
     results = []
 
     failed = []
 
-    for coin in COINS:
+    for coin in market:
 
         try:
 
             result = analyze_coin(
-                coin
-            )
-
-            results.append(
-                result
-            )
-
-            print(
                 coin,
-                "SCORE:",
-                result["score"],
-                "5m:",
-                round(
-                    result["change5"],
-                    2
-                )
+                history,
+                current_time
             )
+
+            if result:
+                results.append(result)
 
         except Exception as e:
 
             print(
-                coin,
+                coin["id"],
                 "ERROR:",
                 e
             )
 
             failed.append(
-                coin
+                coin["id"]
             )
 
-        # کمی فاصله برای Rate Limit
-        time.sleep(1)
+    save_history(history)
 
     if not results:
 
         raise Exception(
-            "No market data received"
+            "No valid market data"
         )
+
+    # -----------------------------
+    # مرتب‌سازی
+    # -----------------------------
 
     results.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    # --------------------------------
-    # پیام اصلی
-    # --------------------------------
+    # -----------------------------
+    # پیام تلگرام
+    # -----------------------------
 
     message = (
         "🚨 PUMP SCANNER 5M\n"
-        "━━━━━━━━━━━━━━\n\n"
+        "━━━━━━━━━━━━━━\n"
     )
 
-    # --------------------------------
-    # هشدارهای قوی
-    # --------------------------------
+    # -----------------------------
+    # سیگنال‌های قوی
+    # -----------------------------
 
-    alerts = [
+    strong = [
         x for x in results
-        if x["score"] >= 70
+        if (
+            x["score"] >= 70
+            and x["change5"] is not None
+            and x["change5"] > 0
+        )
     ]
 
-    if alerts:
+    if strong:
 
-        message += "🔥 STRONG SIGNALS\n\n"
+        message += "\n🔥 STRONG PUMP SIGNAL\n\n"
 
-        for x in alerts[:5]:
+        for x in strong[:5]:
 
-            rsi = (
+            rsi_text = (
                 f"{x['rsi']:.0f}"
                 if x["rsi"] is not None
                 else "N/A"
             )
 
             message += (
-                f"🚨 {x['symbol'].upper()}\n"
+                f"🚨 {x['symbol']}\n"
                 f"⭐ Score: {x['score']}/100\n"
                 f"5m: {x['change5']:+.2f}%\n"
-                f"10m: {x['change10']:+.2f}%\n"
-                f"15m: {x['change15']:+.2f}%\n"
-                f"Volume: {x['volume_ratio']:.1f}x\n"
-                f"RSI: {rsi}\n"
+                f"10m: "
+                f"{x['change10']:+.2f}%\n"
+                f"15m: "
+                f"{x['change15']:+.2f}%\n"
+                f"RSI: {rsi_text}\n"
                 f"Breakout: "
                 f"{'✅' if x['breakout'] else '❌'}\n\n"
             )
@@ -473,66 +598,59 @@ def main():
     else:
 
         message += (
-            "⚪ فعلاً سیگنال قوی نداریم.\n\n"
+            "\n⚪ فعلاً سیگنال قوی وجود ندارد.\n"
         )
 
-    # --------------------------------
+    # -----------------------------
     # TOP 5
-    # --------------------------------
+    # -----------------------------
 
-    message += "🏆 TOP 5\n\n"
+    message += "\n🏆 TOP 5\n\n"
 
     for i, x in enumerate(
         results[:5],
         1
     ):
 
-        message += (
-            f"{i}. "
-            f"{x['symbol'].upper()} "
-            f"⭐{x['score']}\n"
-            f"5m {x['change5']:+.2f}% | "
-            f"15m {x['change15']:+.2f}% | "
-            f"RSI "
+        c5 = (
+            f"{x['change5']:+.2f}%"
+            if x["change5"] is not None
+            else "N/A"
+        )
+
+        c15 = (
+            f"{x['change15']:+.2f}%"
+            if x["change15"] is not None
+            else "N/A"
+        )
+
+        rsi = (
             f"{x['rsi']:.0f}"
             if x["rsi"] is not None
-            else
-            f"{i}. "
-            f"{x['symbol'].upper()} "
-            f"⭐{x['score']}\n"
-            f"5m {x['change5']:+.2f}% | "
-            f"15m {x['change15']:+.2f}% | "
-            f"RSI N/A"
+            else "N/A"
         )
 
-        message += "\n"
+        message += (
+            f"{i}. {x['symbol']} "
+            f"⭐ {x['score']}/100\n"
+            f"   5m {c5} | "
+            f"15m {c15} | "
+            f"RSI {rsi}\n"
+        )
 
-    # --------------------------------
+    # -----------------------------
     # وضعیت سیستم
-    # --------------------------------
+    # -----------------------------
 
     message += (
-        "\n📡 Source: CoinGecko\n"
-        f"✅ Successful: {len(results)}/30\n"
-        f"❌ Failed: {len(failed)}/30\n"
-        "⏱ Timeframe: ~5m\n"
+        "\n━━━━━━━━━━━━━━\n"
+        f"📊 Scanned: {len(results)}/30\n"
+        f"❌ Failed: {len(failed)}\n"
+        "⏱ Timeframe: 5m\n"
+        "📡 Source: CoinGecko\n"
     )
 
-    # --------------------------------
-    # ارسال
-    # --------------------------------
-
-    for start in range(
-        0,
-        len(message),
-        3500
-    ):
-
-        send_message(
-            message[
-                start:start + 3500
-            ]
-        )
+    send_telegram(message)
 
 
 if __name__ == "__main__":
