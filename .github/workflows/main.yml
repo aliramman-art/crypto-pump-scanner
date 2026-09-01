@@ -1,10 +1,12 @@
-
 name: Pump Scanner
 
 on:
   workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
 
 jobs:
 
@@ -16,6 +18,8 @@ jobs:
 
       - name: Get code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -25,14 +29,6 @@ jobs:
       - name: Install requests
         run: pip install requests
 
-      - name: Restore price history
-        uses: actions/cache/restore@v4
-        with:
-          path: price_data.json
-          key: pump-history-${{ github.run_id }}
-          restore-keys: |
-            pump-history-
-
       - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
@@ -40,7 +36,14 @@ jobs:
         run: python scanner.py
 
       - name: Save price history
-        uses: actions/cache/save@v4
-        with:
-          path: price_data.json
-          key: pump-history-${{ github.run_id }}
+
+        run: |
+
+          git config user.name "Pump Scanner"
+          git config user.email "pump-scanner@users.noreply.github.com"
+
+          git add price_data.json
+
+          git diff --cached --quiet || git commit -m "Update price history"
+
+          git push
