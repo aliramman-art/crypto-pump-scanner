@@ -7,12 +7,10 @@ import requests
 
 
 # =========================================================
-# EARLY PUMP/DUMP ENGINE v5.1
-# REAL CLOSED 5M OHLCV
-# 2-CANDLE CONFIRMATION
-# VOLUME FILTER
-# TRADE MANAGER
-# PERFORMANCE TRACKER
+# EARLY PUMP / DUMP ENGINE v5.2
+# REAL 5M OHLCV
+# VOLUME + BREAKOUT + ICHIMOKU
+# CONFIRMATION + TRADE MANAGER
 # =========================================================
 
 
@@ -34,6 +32,7 @@ KRAKEN_CANDLE_URL = (
     "https://futures.kraken.com/api/charts/v1"
 )
 
+HISTORY_FILE = "candle_data.json"
 TRADE_FILE = "trade_state.json"
 SIGNAL_FILE = "signal_state.json"
 PERFORMANCE_FILE = "performance.json"
@@ -45,8 +44,6 @@ PERFORMANCE_FILE = "performance.json"
 
 MIN_SCORE = 75
 
-MIN_VOLUME_RATIO = 1.5
-
 MAX_ACTIVE_TRADES = 5
 
 SL_PERCENT = 1.20
@@ -55,11 +52,11 @@ TP1_R = 1.0
 TP2_R = 2.0
 TP3_R = 3.0
 
-TRAIL_AFTER_TP2 = 0.75
+TRAIL_AFTER_TP3 = 0.75
 
 CONFIRMATIONS_REQUIRED = 2
 
-CANDLE_MINUTES = 5
+VOLUME_MIN_SIGNAL = 1.5
 
 
 # =========================================================
@@ -213,7 +210,7 @@ def save_json(filename, data):
 
 
 # =========================================================
-# KRAKEN 5M CANDLES
+# KRAKEN FUTURES 5M OHLCV
 # =========================================================
 
 def get_kraken_candles(symbol):
@@ -232,7 +229,7 @@ def get_kraken_candles(symbol):
             },
             headers={
                 "User-Agent":
-                    "early-pump-engine-v5.1"
+                    "early-pump-engine-v5.2"
             },
             timeout=30,
         )
@@ -251,54 +248,175 @@ def get_kraken_candles(symbol):
             [],
         )
 
+        if not candles:
+
+            print(
+                f"{symbol}: no candles"
+            )
+
+            return []
+
         result = []
 
         for candle in candles:
 
             try:
 
-                raw_time = int(
-                    candle["time"]
+                if isinstance(
+                    candle,
+                    dict,
+                ):
+
+                    timestamp = candle.get(
+                        "time",
+                        candle.get(
+                            "timestamp"
+                        ),
+                    )
+
+                    open_price = candle.get(
+                        "open"
+                    )
+
+                    high_price = candle.get(
+                        "high"
+                    )
+
+                    low_price = candle.get(
+                        "low"
+                    )
+
+                    close_price = candle.get(
+                        "close"
+                    )
+
+                    volume_value = candle.get(
+                        "volume",
+                        candle.get(
+                            "vol"
+                        ),
+                    )
+
+                elif isinstance(
+                    candle,
+                    list,
+                ):
+
+                    if len(candle) < 6:
+                        continue
+
+                    timestamp = candle[0]
+                    open_price = candle[1]
+                    high_price = candle[2]
+                    low_price = candle[3]
+                    close_price = candle[4]
+                    volume_value = candle[5]
+
+                else:
+
+                    continue
+
+                if (
+                    timestamp is None
+                    or open_price is None
+                    or high_price is None
+                    or low_price is None
+                    or close_price is None
+                    or volume_value is None
+                ):
+
+                    continue
+
+                timestamp = float(
+                    timestamp
                 )
 
-                # Kraken returns milliseconds
-                if raw_time > 10_000_000_000:
-                    candle_time = raw_time // 1000
-                else:
-                    candle_time = raw_time
+                if timestamp > 10_000_000_000:
+
+                    timestamp /= 1000
 
                 result.append(
                     {
-                        "time": candle_time,
+                        "time":
+                            int(timestamp),
 
-                        "open": float(
-                            candle["open"]
-                        ),
+                        "open":
+                            float(
+                                open_price
+                            ),
 
-                        "high": float(
-                            candle["high"]
-                        ),
+                        "high":
+                            float(
+                                high_price
+                            ),
 
-                        "low": float(
-                            candle["low"]
-                        ),
+                        "low":
+                            float(
+                                low_price
+                            ),
 
-                        "close": float(
-                            candle["close"]
-                        ),
+                        "close":
+                            float(
+                                close_price
+                            ),
 
-                        "volume": float(
-                            candle["volume"]
-                        ),
+                        "volume":
+                            float(
+                                volume_value
+                            ),
                     }
                 )
 
-            except Exception:
+            except Exception as e:
+
+                print(
+                    f"{symbol} parse error:",
+                    e,
+                )
+
                 continue
 
         result.sort(
-            key=lambda x: x["time"]
+            key=lambda x:
+                x["time"]
         )
+
+        # -----------------------------------------------------
+        # Remove current unfinished candle
+        # -----------------------------------------------------
+
+        now = int(
+            time.time()
+        )
+
+        closed = []
+
+        for candle in result:
+
+            candle_end = (
+                candle["time"] + 300
+            )
+
+            if candle_end <= now:
+
+                closed.append(
+                    candle
+                )
+
+        result = closed
+
+        print(
+            f"{symbol}: "
+            f"{len(result)} closed candles"
+        )
+
+        if result:
+
+            print(
+                f"{symbol}: "
+                f"close={result[-1]['close']} "
+                f"volume={result[-1]['volume']}"
+            )
 
         return result
 
@@ -313,28 +431,6 @@ def get_kraken_candles(symbol):
 
 
 # =========================================================
-# CLOSED CANDLES ONLY
-# =========================================================
-
-def get_closed_candles(candles):
-
-    if not candles:
-        return []
-
-    current_bucket = (
-        int(time.time() // 300) * 300
-    )
-
-    closed = [
-        candle
-        for candle in candles
-        if int(candle["time"]) < current_bucket
-    ]
-
-    return closed
-
-
-# =========================================================
 # ALL MARKET DATA
 # =========================================================
 
@@ -344,37 +440,19 @@ def get_all_candles():
 
     for symbol, kraken_symbol in COINS.items():
 
-        raw = get_kraken_candles(
+        candles = get_kraken_candles(
             kraken_symbol
-        )
-
-        candles = get_closed_candles(
-            raw
         )
 
         if candles:
 
             market[symbol] = candles
 
-            print(
-                symbol,
-                "closed candles:",
-                len(candles),
-                "last:",
-                candles[-1]["time"],
-            )
-
-            print(
-                symbol,
-                "last volume:",
-                candles[-1].get("volume"),
-            )
-
     return market
 
 
 # =========================================================
-# BASIC INDICATORS
+# BASIC
 # =========================================================
 
 def closes(candles):
@@ -385,43 +463,62 @@ def closes(candles):
     ]
 
 
+# =========================================================
+# EMA
+# =========================================================
+
 def calculate_ema(
     candles,
     period,
 ):
 
-    prices = closes(candles)
+    prices = closes(
+        candles
+    )
 
     if len(prices) < period:
+
         return None
 
     multiplier = (
-        2 / (period + 1)
+        2 /
+        (period + 1)
     )
 
     ema = (
-        sum(prices[:period])
+        sum(
+            prices[:period]
+        )
         / period
     )
 
     for price in prices[period:]:
 
         ema = (
-            (price - ema)
+            (
+                price - ema
+            )
             * multiplier
         ) + ema
 
     return ema
 
 
+# =========================================================
+# RSI
+# =========================================================
+
 def calculate_rsi(
     candles,
     period=14,
 ):
 
-    prices = closes(candles)
+    prices = closes(
+        candles
+    )
 
     if len(prices) < period + 1:
+
         return None
 
     changes = []
@@ -436,7 +533,9 @@ def calculate_rsi(
             - prices[i - 1]
         )
 
-    recent = changes[-period:]
+    recent = changes[
+        -period:
+    ]
 
     gains = [
         x if x > 0 else 0
@@ -444,7 +543,9 @@ def calculate_rsi(
     ]
 
     losses = [
-        abs(x) if x < 0 else 0
+        abs(x)
+        if x < 0
+        else 0
         for x in recent
     ]
 
@@ -461,11 +562,15 @@ def calculate_rsi(
     if avg_loss == 0:
 
         if avg_gain == 0:
+
             return 50.0
 
         return 100.0
 
-    rs = avg_gain / avg_loss
+    rs = (
+        avg_gain
+        / avg_loss
+    )
 
     return (
         100
@@ -477,7 +582,7 @@ def calculate_rsi(
 
 
 # =========================================================
-# CHANGE
+# PRICE CHANGE
 # =========================================================
 
 def candle_change(
@@ -490,6 +595,7 @@ def candle_change(
     )
 
     if len(candles) <= required:
+
         return None
 
     current = float(
@@ -503,10 +609,13 @@ def candle_change(
     )
 
     if previous <= 0:
+
         return None
 
     return (
-        (current - previous)
+        (
+            current - previous
+        )
         / previous
     ) * 100
 
@@ -520,58 +629,38 @@ def volume_ratio(
     lookback=10,
 ):
 
-    if len(candles) < lookback + 2:
-        return None
-
-    try:
-
-        current = float(
-            candles[-1]["volume"]
-        )
-
-    except Exception:
+    if len(candles) < lookback + 1:
 
         return None
 
-    if current <= 0:
-        return None
+    current = float(
+        candles[-1]["volume"]
+    )
 
-    previous_volumes = []
+    previous = [
+        float(x["volume"])
+        for x in candles[
+            -lookback - 1:-1
+        ]
+    ]
 
-    for candle in candles[
-        -lookback - 1:-1
-    ]:
+    if not previous:
 
-        try:
-
-            volume = float(
-                candle.get(
-                    "volume",
-                    0
-                )
-            )
-
-            if volume > 0:
-                previous_volumes.append(
-                    volume
-                )
-
-        except Exception:
-
-            continue
-
-    if len(previous_volumes) < 5:
         return None
 
     average = (
-        sum(previous_volumes)
-        / len(previous_volumes)
+        sum(previous)
+        / len(previous)
     )
 
     if average <= 0:
+
         return None
 
-    return current / average
+    return (
+        current
+        / average
+    )
 
 
 # =========================================================
@@ -593,7 +682,9 @@ def breakout_data(candles):
         candles[-1]["close"]
     )
 
-    previous = candles[-7:-1]
+    previous = candles[
+        -7:-1
+    ]
 
     high = max(
         float(x["high"])
@@ -608,14 +699,18 @@ def breakout_data(candles):
     return {
 
         "breakout":
-            current > high * 1.0005,
+            current >
+            high * 1.0005,
 
         "breakdown":
-            current < low * 0.9995,
+            current <
+            low * 0.9995,
 
-        "high": high,
+        "high":
+            high,
 
-        "low": low,
+        "low":
+            low,
     }
 
 
@@ -705,11 +800,14 @@ def ichimoku(candles):
             price < cloud_bottom
             and tenkan < kijun,
 
-        "tenkan": tenkan,
+        "tenkan":
+            tenkan,
 
-        "kijun": kijun,
+        "kijun":
+            kijun,
 
-        "cloud_top": cloud_top,
+        "cloud_top":
+            cloud_top,
 
         "cloud_bottom":
             cloud_bottom,
@@ -720,9 +818,12 @@ def ichimoku(candles):
 # BTC REGIME
 # =========================================================
 
-def btc_regime(btc_candles):
+def btc_regime(
+    btc_candles
+):
 
     if not btc_candles:
+
         return "UNKNOWN"
 
     c15 = candle_change(
@@ -758,7 +859,7 @@ def btc_regime(btc_candles):
 
 
 # =========================================================
-# SCORE
+# SCORE ENGINE
 # =========================================================
 
 def calculate_scores(
@@ -814,9 +915,9 @@ def calculate_scores(
     pump_reasons = []
     dump_reasons = []
 
-    # -----------------------------------------------------
-    # 5M
-    # -----------------------------------------------------
+    # =====================================================
+    # 5M MOMENTUM
+    # =====================================================
 
     if c5 is not None:
 
@@ -852,9 +953,9 @@ def calculate_scores(
 
             dump += 4
 
-    # -----------------------------------------------------
+    # =====================================================
     # 10M
-    # -----------------------------------------------------
+    # =====================================================
 
     if c10 is not None:
 
@@ -882,9 +983,9 @@ def calculate_scores(
 
             dump += 5
 
-    # -----------------------------------------------------
+    # =====================================================
     # 15M
-    # -----------------------------------------------------
+    # =====================================================
 
     if c15 is not None:
 
@@ -912,9 +1013,9 @@ def calculate_scores(
 
             dump += 5
 
-    # -----------------------------------------------------
+    # =====================================================
     # ACCELERATION
-    # -----------------------------------------------------
+    # =====================================================
 
     if (
         c5 is not None
@@ -945,9 +1046,9 @@ def calculate_scores(
                 "Down acceleration"
             )
 
-    # -----------------------------------------------------
+    # =====================================================
     # RSI
-    # -----------------------------------------------------
+    # =====================================================
 
     if rsi is not None:
 
@@ -967,6 +1068,10 @@ def calculate_scores(
 
             pump -= 5
 
+            pump_reasons.append(
+                "RSI overheated"
+            )
+
         if 30 <= rsi <= 45:
 
             dump += 10
@@ -979,9 +1084,9 @@ def calculate_scores(
 
             dump -= 5
 
-    # -----------------------------------------------------
+    # =====================================================
     # EMA
-    # -----------------------------------------------------
+    # =====================================================
 
     if (
         ema5 is not None
@@ -996,7 +1101,7 @@ def calculate_scores(
                 "EMA bullish"
             )
 
-        if ema5 < ema10:
+        elif ema5 < ema10:
 
             dump += 10
 
@@ -1004,9 +1109,9 @@ def calculate_scores(
                 "EMA bearish"
             )
 
-    # -----------------------------------------------------
+    # =====================================================
     # VOLUME
-    # -----------------------------------------------------
+    # =====================================================
 
     if vol is not None:
 
@@ -1033,9 +1138,13 @@ def calculate_scores(
             pump += 5
             dump += 5
 
-    # -----------------------------------------------------
+            pump_reasons.append(
+                f"Volume {vol:.1f}x"
+            )
+
+    # =====================================================
     # BREAKOUT
-    # -----------------------------------------------------
+    # =====================================================
 
     if levels["breakout"]:
 
@@ -1053,9 +1162,9 @@ def calculate_scores(
             "BREAKDOWN"
         )
 
-    # -----------------------------------------------------
+    # =====================================================
     # ICHIMOKU
-    # -----------------------------------------------------
+    # =====================================================
 
     if ichi.get("ready"):
 
@@ -1075,9 +1184,9 @@ def calculate_scores(
                 "Ichimoku bearish"
             )
 
-    # -----------------------------------------------------
+    # =====================================================
     # BTC FILTER
-    # -----------------------------------------------------
+    # =====================================================
 
     if regime == "BULLISH":
 
@@ -1095,60 +1204,71 @@ def calculate_scores(
             "BTC bearish"
         )
 
-        if pump > 0:
-            pump -= 5
+        pump -= 5
 
-    # -----------------------------------------------------
-    # Clamp
-    # -----------------------------------------------------
+    # =====================================================
+    # CLAMP
+    # =====================================================
 
     pump = max(
         0,
-        min(100, pump)
+        min(
+            100,
+            pump,
+        )
     )
 
     dump = max(
         0,
-        min(100, dump)
+        min(
+            100,
+            dump,
+        )
     )
 
     if pump >= dump:
 
         direction = "PUMP"
-
         score = pump
-
         reasons = pump_reasons
 
     else:
 
         direction = "DUMP"
-
         score = dump
-
         reasons = dump_reasons
 
     return {
 
-        "direction": direction,
+        "direction":
+            direction,
 
-        "score": score,
+        "score":
+            score,
 
-        "pump_score": pump,
+        "pump_score":
+            pump,
 
-        "dump_score": dump,
+        "dump_score":
+            dump,
 
-        "reasons": reasons,
+        "reasons":
+            reasons,
 
-        "c5": c5,
+        "c5":
+            c5,
 
-        "c10": c10,
+        "c10":
+            c10,
 
-        "c15": c15,
+        "c15":
+            c15,
 
-        "rsi": rsi,
+        "rsi":
+            rsi,
 
-        "volume": vol,
+        "volume":
+            vol,
 
         "breakout":
             levels["breakout"],
@@ -1156,47 +1276,60 @@ def calculate_scores(
         "breakdown":
             levels["breakdown"],
 
-        "ichimoku": ichi,
+        "ichimoku":
+            ichi,
 
-        "btc_1h": btc_1h,
+        "btc_1h":
+            btc_1h,
 
-        "regime": regime,
+        "regime":
+            regime,
 
         "price":
-            float(candles[-1]["close"]),
-
-        "candle_time":
-            int(candles[-1]["time"]),
+            float(
+                candles[-1]["close"]
+            ),
     }
 
 
 # =========================================================
-# SIGNAL CONFIRMATION
+# CONFIRMATION
 # =========================================================
+
+def signal_key(
+    symbol,
+    direction,
+):
+
+    return (
+        f"{symbol}_"
+        f"{direction}"
+    )
+
 
 def confirmation_count(
     state,
     symbol,
     direction,
     score,
-    candle_time,
 ):
 
-    key = symbol
+    key = signal_key(
+        symbol,
+        direction,
+    )
 
     if key not in state:
 
         state[key] = {
 
-            "direction":
-                direction,
-
-            "count": 0,
+            "count":
+                0,
 
             "last_score":
                 score,
 
-            "last_candle_time":
+            "last_time":
                 0,
 
             "status":
@@ -1205,72 +1338,32 @@ def confirmation_count(
 
     entry = state[key]
 
-    last_candle = int(
-        entry.get(
-            "last_candle_time",
-            0
-        )
+    now = int(
+        time.time()
     )
 
-    # -----------------------------------------------------
-    # Same candle = don't count twice
-    # -----------------------------------------------------
-
-    if candle_time == last_candle:
-
-        return int(
-            entry.get(
-                "count",
-                0
-            )
+    if (
+        now
+        - entry.get(
+            "last_time",
+            0,
         )
+        > 15 * 60
+    ):
 
-    # -----------------------------------------------------
-    # Direction changed
-    # -----------------------------------------------------
+        entry["count"] = 0
 
-    if entry.get(
-        "direction"
-    ) != direction:
-
-        entry["direction"] = direction
-
-        entry["count"] = 1
-
-        entry["status"] = "WATCH"
-
-    else:
-
-        # Consecutive candle
-        if candle_time > last_candle:
-
-            entry["count"] = (
-                int(
-                    entry.get(
-                        "count",
-                        0
-                    )
-                )
-                + 1
-            )
+    entry["count"] += 1
 
     entry["last_score"] = score
 
-    entry["last_candle_time"] = candle_time
-
-    if entry["count"] >= CONFIRMATIONS_REQUIRED:
-
-        entry["status"] = "CONFIRMED"
-
-    else:
-
-        entry["status"] = "WATCH"
+    entry["last_time"] = now
 
     return entry["count"]
 
 
 # =========================================================
-# TRADE CREATION
+# CREATE TRADE
 # =========================================================
 
 def create_trade(
@@ -1278,7 +1371,6 @@ def create_trade(
     direction,
     score,
     entry,
-    candle_time,
 ):
 
     risk = (
@@ -1337,56 +1429,71 @@ def create_trade(
 
     return {
 
-        "id": trade_id,
+        "id":
+            trade_id,
 
-        "symbol": symbol,
+        "symbol":
+            symbol,
 
-        "direction": direction,
+        "direction":
+            direction,
 
-        "score": score,
+        "score":
+            score,
 
-        "entry": entry,
+        "entry":
+            entry,
 
-        "initial_risk":
-            risk,
+        "sl":
+            sl,
 
-        "sl": sl,
+        "tp1":
+            tp1,
 
-        "tp1": tp1,
+        "tp2":
+            tp2,
 
-        "tp2": tp2,
+        "tp3":
+            tp3,
 
-        "tp3": tp3,
+        "trailing_stop":
+            None,
 
-        "trailing_stop": None,
+        "highest":
+            entry,
 
-        "highest": entry,
+        "lowest":
+            entry,
 
-        "lowest": entry,
+        "tp1_hit":
+            False,
 
-        "tp1_hit": False,
+        "tp2_hit":
+            False,
 
-        "tp2_hit": False,
+        "tp3_hit":
+            False,
 
-        "tp3_hit": False,
-
-        "status": "ACTIVE",
+        "status":
+            "ACTIVE",
 
         "opened_at":
             now.isoformat(),
 
-        "signal_candle_time":
-            candle_time,
+        "closed_at":
+            None,
 
-        "closed_at": None,
+        "exit_price":
+            None,
 
-        "exit_price": None,
+        "exit_reason":
+            None,
 
-        "exit_reason": None,
+        "realized_percent":
+            0,
 
-        "realized_percent": 0,
-
-        "realized_r": 0,
+        "realized_r":
+            0,
     }
 
 
@@ -1404,12 +1511,16 @@ def trade_percent(
     if trade["direction"] == "PUMP":
 
         return (
-            (price - entry)
+            (
+                price - entry
+            )
             / entry
         ) * 100
 
     return (
-        (entry - price)
+        (
+            entry - price
+        )
         / entry
     ) * 100
 
@@ -1419,62 +1530,47 @@ def trade_r(
     price,
 ):
 
-    entry = trade["entry"]
+    if trade["direction"] == "PUMP":
 
-    risk = trade.get(
-        "initial_risk",
-        entry * SL_PERCENT / 100
+        risk = (
+            trade["entry"]
+            - (
+                trade["entry"]
+                * (
+                    1
+                    - SL_PERCENT
+                    / 100
+                )
+            )
+        )
+
+        if risk <= 0:
+            return 0
+
+        return (
+            price
+            - trade["entry"]
+        ) / risk
+
+    risk = (
+        (
+            trade["entry"]
+            * (
+                1
+                + SL_PERCENT
+                / 100
+            )
+        )
+        - trade["entry"]
     )
 
     if risk <= 0:
         return 0
 
-    if trade["direction"] == "PUMP":
-
-        return (
-            price - entry
-        ) / risk
-
     return (
-        entry - price
+        trade["entry"]
+        - price
     ) / risk
-
-
-# =========================================================
-# TRADE CLOSE
-# =========================================================
-
-def close_trade(
-    trade,
-    price,
-    reason,
-):
-
-    trade["status"] = "CLOSED"
-
-    trade["closed_at"] = (
-        datetime.now(
-            timezone.utc
-        ).isoformat()
-    )
-
-    trade["exit_price"] = price
-
-    trade["exit_reason"] = reason
-
-    trade["realized_percent"] = (
-        trade_percent(
-            trade,
-            price
-        )
-    )
-
-    trade["realized_r"] = (
-        trade_r(
-            trade,
-            price
-        )
-    )
 
 
 # =========================================================
@@ -1487,6 +1583,7 @@ def manage_trade(
 ):
 
     if trade["status"] != "ACTIVE":
+
         return None
 
     direction = trade[
@@ -1504,17 +1601,41 @@ def manage_trade(
             trade["highest"] = price
 
         # STOP LOSS
+
         if price <= trade["sl"]:
 
-            close_trade(
+            trade["status"] = "CLOSED"
+
+            trade["closed_at"] = (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            )
+
+            trade["exit_price"] = price
+
+            trade["exit_reason"] = (
+                "STOP LOSS"
+            )
+
+            trade[
+                "realized_percent"
+            ] = trade_percent(
                 trade,
                 price,
-                "STOP LOSS",
+            )
+
+            trade[
+                "realized_r"
+            ] = trade_r(
+                trade,
+                price,
             )
 
             return "SL"
 
         # TP1
+
         if (
             not trade["tp1_hit"]
             and price >= trade["tp1"]
@@ -1530,6 +1651,7 @@ def manage_trade(
             return "TP1"
 
         # TP2
+
         if (
             trade["tp1_hit"]
             and not trade["tp2_hit"]
@@ -1540,8 +1662,7 @@ def manage_trade(
 
             trade["sl"] = (
                 trade["entry"]
-                +
-                (
+                + (
                     price
                     - trade["entry"]
                 ) * 0.50
@@ -1550,6 +1671,7 @@ def manage_trade(
             return "TP2"
 
         # TP3
+
         if (
             trade["tp2_hit"]
             and not trade["tp3_hit"]
@@ -1561,14 +1683,14 @@ def manage_trade(
             return "TP3"
 
         # TRAILING
+
         if trade["tp3_hit"]:
 
             trailing = (
                 trade["highest"]
-                *
-                (
+                * (
                     1
-                    - TRAIL_AFTER_TP2
+                    - TRAIL_AFTER_TP3
                     / 100
                 )
             )
@@ -1579,10 +1701,32 @@ def manage_trade(
 
             if price <= trailing:
 
-                close_trade(
+                trade["status"] = "CLOSED"
+
+                trade["closed_at"] = (
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                )
+
+                trade["exit_price"] = price
+
+                trade["exit_reason"] = (
+                    "TRAILING STOP"
+                )
+
+                trade[
+                    "realized_percent"
+                ] = trade_percent(
                     trade,
                     price,
-                    "TRAILING STOP",
+                )
+
+                trade[
+                    "realized_r"
+                ] = trade_r(
+                    trade,
+                    price,
                 )
 
                 return "TRAIL"
@@ -1598,17 +1742,41 @@ def manage_trade(
             trade["lowest"] = price
 
         # STOP LOSS
+
         if price >= trade["sl"]:
 
-            close_trade(
+            trade["status"] = "CLOSED"
+
+            trade["closed_at"] = (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            )
+
+            trade["exit_price"] = price
+
+            trade["exit_reason"] = (
+                "STOP LOSS"
+            )
+
+            trade[
+                "realized_percent"
+            ] = trade_percent(
                 trade,
                 price,
-                "STOP LOSS",
+            )
+
+            trade[
+                "realized_r"
+            ] = trade_r(
+                trade,
+                price,
             )
 
             return "SL"
 
         # TP1
+
         if (
             not trade["tp1_hit"]
             and price <= trade["tp1"]
@@ -1624,6 +1792,7 @@ def manage_trade(
             return "TP1"
 
         # TP2
+
         if (
             trade["tp1_hit"]
             and not trade["tp2_hit"]
@@ -1634,8 +1803,7 @@ def manage_trade(
 
             trade["sl"] = (
                 trade["entry"]
-                -
-                (
+                - (
                     trade["entry"]
                     - price
                 ) * 0.50
@@ -1644,6 +1812,7 @@ def manage_trade(
             return "TP2"
 
         # TP3
+
         if (
             trade["tp2_hit"]
             and not trade["tp3_hit"]
@@ -1655,14 +1824,14 @@ def manage_trade(
             return "TP3"
 
         # TRAILING
+
         if trade["tp3_hit"]:
 
             trailing = (
                 trade["lowest"]
-                *
-                (
+                * (
                     1
-                    + TRAIL_AFTER_TP2
+                    + TRAIL_AFTER_TP3
                     / 100
                 )
             )
@@ -1673,10 +1842,32 @@ def manage_trade(
 
             if price >= trailing:
 
-                close_trade(
+                trade["status"] = "CLOSED"
+
+                trade["closed_at"] = (
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                )
+
+                trade["exit_price"] = price
+
+                trade["exit_reason"] = (
+                    "TRAILING STOP"
+                )
+
+                trade[
+                    "realized_percent"
+                ] = trade_percent(
                     trade,
                     price,
-                    "TRAILING STOP",
+                )
+
+                trade[
+                    "realized_r"
+                ] = trade_r(
+                    trade,
+                    price,
                 )
 
                 return "TRAIL"
@@ -1706,7 +1897,7 @@ def manage_active_trades(
 
         candles = market.get(
             symbol,
-            []
+            [],
         )
 
         if not candles:
@@ -1726,7 +1917,7 @@ def manage_active_trades(
             events.append(
                 (
                     event,
-                    trade.copy()
+                    trade.copy(),
                 )
             )
 
@@ -1734,428 +1925,152 @@ def manage_active_trades(
 
 
 # =========================================================
-# PERFORMANCE TRACKER
+# PERFORMANCE
 # =========================================================
 
-def ensure_performance_structure(performance):
-
-    if not isinstance(
-        performance,
-        dict
-    ):
-
-        performance = {}
-
-    performance.setdefault(
-        "trades",
-        []
-    )
-
-    return performance
-
-
-def record_performance(
+def update_performance(
     performance,
     trade,
 ):
 
-    performance = (
-        ensure_performance_structure(
-            performance
-        )
+    if trade["status"] != "CLOSED":
+
+        return
+
+    if trade.get(
+        "performance_recorded",
+        False,
+    ):
+
+        return
+
+    performance.append(
+        {
+            "id":
+                trade["id"],
+
+            "symbol":
+                trade["symbol"],
+
+            "direction":
+                trade["direction"],
+
+            "score":
+                trade["score"],
+
+            "entry":
+                trade["entry"],
+
+            "exit":
+                trade["exit_price"],
+
+            "reason":
+                trade["exit_reason"],
+
+            "percent":
+                trade["realized_percent"],
+
+            "R":
+                trade.get(
+                    "realized_r",
+                    0,
+                ),
+
+            "closed_at":
+                trade["closed_at"],
+        }
     )
 
-    trade_id = trade.get(
-        "id"
-    )
-
-    if not trade_id:
-        return performance
-
-    # Prevent duplicate recording
-    for old_trade in performance[
-        "trades"
-    ]:
-
-        if old_trade.get(
-            "id"
-        ) == trade_id:
-
-            return performance
-
-    r = float(
-        trade.get(
-            "realized_r",
-            0
-        )
-    )
-
-    if r > 0.05:
-
-        result = "WIN"
-
-    elif r < -0.05:
-
-        result = "LOSS"
-
-    else:
-
-        result = "BE"
-
-    record = {
-
-        "id": trade_id,
-
-        "symbol":
-            trade.get("symbol"),
-
-        "direction":
-            trade.get("direction"),
-
-        "score":
-            trade.get("score"),
-
-        "entry":
-            trade.get("entry"),
-
-        "exit":
-            trade.get("exit_price"),
-
-        "reason":
-            trade.get("exit_reason"),
-
-        "realized_percent":
-            trade.get(
-                "realized_percent",
-                0
-            ),
-
-        "realized_r":
-            r,
-
-        "result":
-            result,
-
-        "tp1_hit":
-            trade.get(
-                "tp1_hit",
-                False
-            ),
-
-        "tp2_hit":
-            trade.get(
-                "tp2_hit",
-                False
-            ),
-
-        "tp3_hit":
-            trade.get(
-                "tp3_hit",
-                False
-            ),
-
-        "opened_at":
-            trade.get(
-                "opened_at"
-            ),
-
-        "closed_at":
-            trade.get(
-                "closed_at"
-            ),
-    }
-
-    performance[
-        "trades"
-    ].append(record)
-
-    return performance
+    trade[
+        "performance_recorded"
+    ] = True
 
 
-# =========================================================
-# PERFORMANCE STATS
-# =========================================================
-
-def calculate_performance_stats(
+def performance_stats(
     performance
 ):
 
-    trades = performance.get(
-        "trades",
-        []
-    )
-
-    total = len(trades)
-
-    if total == 0:
+    if not performance:
 
         return {
-
-            "total": 0,
-
+            "trades": 0,
             "wins": 0,
-
             "losses": 0,
-
-            "be": 0,
-
             "win_rate": 0,
-
             "avg_r": 0,
-
             "profit_factor": 0,
-
-            "tp1_rate": 0,
-
-            "tp2_rate": 0,
-
-            "tp3_rate": 0,
         }
 
-    wins = sum(
-        1
-        for x in trades
-        if x.get("result") == "WIN"
-    )
+    wins = [
+        x for x in performance
+        if x.get("percent", 0) > 0
+    ]
 
-    losses = sum(
-        1
-        for x in trades
-        if x.get("result") == "LOSS"
-    )
+    losses = [
+        x for x in performance
+        if x.get("percent", 0) <= 0
+    ]
 
-    be = sum(
-        1
-        for x in trades
-        if x.get("result") == "BE"
-    )
-
-    positive_r = sum(
-        max(
-            0,
-            float(
-                x.get(
-                    "realized_r",
-                    0
-                )
-            )
-        )
-        for x in trades
-    )
-
-    negative_r = sum(
-        abs(
-            min(
-                0,
-                float(
-                    x.get(
-                        "realized_r",
-                        0
-                    )
-                )
-            )
-        )
-        for x in trades
-    )
+    win_rate = (
+        len(wins)
+        / len(performance)
+    ) * 100
 
     avg_r = (
         sum(
-            float(
-                x.get(
-                    "realized_r",
-                    0
-                )
-            )
-            for x in trades
+            x.get("R", 0)
+            for x in performance
         )
-        / total
+        / len(performance)
     )
 
-    if negative_r > 0:
+    gross_profit = sum(
+        x.get("percent", 0)
+        for x in wins
+    )
+
+    gross_loss = abs(
+        sum(
+            x.get("percent", 0)
+            for x in losses
+        )
+    )
+
+    if gross_loss > 0:
 
         profit_factor = (
-            positive_r
-            / negative_r
+            gross_profit
+            / gross_loss
         )
 
     else:
 
-        profit_factor = (
-            positive_r
-            if positive_r > 0
-            else 0
-        )
-
-    tp1_hits = sum(
-        1
-        for x in trades
-        if x.get("tp1_hit")
-    )
-
-    tp2_hits = sum(
-        1
-        for x in trades
-        if x.get("tp2_hit")
-    )
-
-    tp3_hits = sum(
-        1
-        for x in trades
-        if x.get("tp3_hit")
-    )
+        profit_factor = 0
 
     return {
 
-        "total": total,
+        "trades":
+            len(performance),
 
-        "wins": wins,
+        "wins":
+            len(wins),
 
-        "losses": losses,
-
-        "be": be,
+        "losses":
+            len(losses),
 
         "win_rate":
-            wins / total * 100,
+            win_rate,
 
         "avg_r":
             avg_r,
 
         "profit_factor":
             profit_factor,
-
-        "tp1_rate":
-            tp1_hits / total * 100,
-
-        "tp2_rate":
-            tp2_hits / total * 100,
-
-        "tp3_rate":
-            tp3_hits / total * 100,
     }
 
 
 # =========================================================
-# DIRECTION STATS
-# =========================================================
-
-def direction_stats(
-    performance,
-    direction,
-):
-
-    trades = [
-        x
-        for x in performance.get(
-            "trades",
-            []
-        )
-        if x.get(
-            "direction"
-        ) == direction
-    ]
-
-    total = len(trades)
-
-    if total == 0:
-
-        return {
-            "total": 0,
-            "wins": 0,
-            "win_rate": 0,
-        }
-
-    wins = sum(
-        1
-        for x in trades
-        if x.get("result") == "WIN"
-    )
-
-    return {
-
-        "total": total,
-
-        "wins": wins,
-
-        "win_rate":
-            wins / total * 100,
-    }
-
-
-# =========================================================
-# PERFORMANCE MESSAGE
-# =========================================================
-
-def performance_message(
-    performance
-):
-
-    stats = calculate_performance_stats(
-        performance
-    )
-
-    pump = direction_stats(
-        performance,
-        "PUMP",
-    )
-
-    dump = direction_stats(
-        performance,
-        "DUMP",
-    )
-
-    if stats["total"] == 0:
-
-        return (
-            "📊 <b>PERFORMANCE v5.1</b>\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            "No completed trades yet.\n"
-            "Waiting for real data..."
-        )
-
-    return (
-
-        "📊 <b>PERFORMANCE v5.1</b>\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-
-        f"Trades: <b>{stats['total']}</b>\n"
-
-        f"🟢 Wins: <b>{stats['wins']}</b>\n"
-
-        f"🔴 Losses: <b>{stats['losses']}</b>\n"
-
-        f"⚪ BE: <b>{stats['be']}</b>\n\n"
-
-        f"🎯 Win Rate: "
-        f"<b>{stats['win_rate']:.1f}%</b>\n"
-
-        f"📈 Avg R: "
-        f"<b>{stats['avg_r']:+.2f}R</b>\n"
-
-        f"💰 Profit Factor: "
-        f"<b>{stats['profit_factor']:.2f}</b>\n\n"
-
-        f"📌 TP1: "
-        f"<b>{stats['tp1_rate']:.1f}%</b>\n"
-
-        f"📌 TP2: "
-        f"<b>{stats['tp2_rate']:.1f}%</b>\n"
-
-        f"📌 TP3: "
-        f"<b>{stats['tp3_rate']:.1f}%</b>\n\n"
-
-        f"🟢 PUMP: "
-        f"<b>{pump['total']}</b> "
-        f"| WR {pump['win_rate']:.1f}%\n"
-
-        f"🔴 DUMP: "
-        f"<b>{dump['total']}</b> "
-        f"| WR {dump['win_rate']:.1f}%"
-
-    )
-
-
-# =========================================================
-# NEW CONFIRMED SIGNAL
+# PROCESS SIGNAL
 # =========================================================
 
 def process_signal(
@@ -2173,57 +2088,31 @@ def process_signal(
         "score"
     ]
 
-    # -----------------------------------------------------
     # SCORE
-    # -----------------------------------------------------
 
     if score < MIN_SCORE:
 
         return None
 
-    # -----------------------------------------------------
-    # VOLUME
-    # -----------------------------------------------------
-
-    volume = result.get(
-        "volume"
-    )
+    # =====================================================
+    # REQUIRED PRICE DIRECTION
+    # =====================================================
 
     if (
-        volume is None
-        or volume < MIN_VOLUME_RATIO
+        result["c5"] is None
+        or result["c10"] is None
+        or result["c15"] is None
     ):
 
-        print(
-            symbol,
-            "rejected: volume",
-            volume,
-        )
-
         return None
-
-    # -----------------------------------------------------
-    # Strong direction
-    # -----------------------------------------------------
 
     if direction == "PUMP":
 
         if not (
-
-            result["c5"] is not None
-
-            and result["c10"] is not None
-
-            and result["c15"] is not None
-
-            and result["c5"] > 0
-
+            result["c5"] > 0
             and result["c10"] > 0
-
             and result["c15"] > 0
-
             and result["c5"] < 5
-
         ):
 
             return None
@@ -2231,113 +2120,100 @@ def process_signal(
     else:
 
         if not (
-
-            result["c5"] is not None
-
-            and result["c10"] is not None
-
-            and result["c15"] is not None
-
-            and result["c5"] < 0
-
+            result["c5"] < 0
             and result["c10"] < 0
-
             and result["c15"] < 0
-
         ):
 
             return None
 
-    # -----------------------------------------------------
-    # Confirmation
-    # -----------------------------------------------------
+    # =====================================================
+    # VOLUME FILTER
+    # =====================================================
 
-    count = confirmation_count(
-
-        confirmations,
-
-        symbol,
-
-        direction,
-
-        score,
-
-        result["candle_time"],
+    volume = result.get(
+        "volume"
     )
 
-    print(
-
-        f"{symbol} "
-
-        f"{direction} "
-
-        f"confirmation "
-
-        f"{count}/"
-        f"{CONFIRMATIONS_REQUIRED}"
-
-    )
-
-    if count < CONFIRMATIONS_REQUIRED:
+    if (
+        volume is None
+        or volume < VOLUME_MIN_SIGNAL
+    ):
 
         return None
 
-    # -----------------------------------------------------
-    # Duplicate active trade
-    # -----------------------------------------------------
+    # =====================================================
+    # CONFIRMATION
+    # =====================================================
+
+    count = confirmation_count(
+        confirmations,
+        symbol,
+        direction,
+        score,
+    )
+
+    print(
+        f"{symbol} "
+        f"{direction} "
+        f"confirmation "
+        f"{count}/"
+        f"{CONFIRMATIONS_REQUIRED}"
+    )
+
+    if (
+        count
+        < CONFIRMATIONS_REQUIRED
+    ):
+
+        return None
+
+    # =====================================================
+    # NO DUPLICATE ACTIVE TRADE
+    # =====================================================
 
     for trade in trades.values():
 
         if (
-
             trade["status"] == "ACTIVE"
-
             and trade["symbol"] == symbol
-
         ):
 
             return None
 
-    # -----------------------------------------------------
-    # Max active trades
-    # -----------------------------------------------------
+    # =====================================================
+    # MAX ACTIVE
+    # =====================================================
 
     active_count = sum(
-
         1
-
         for x in trades.values()
-
         if x["status"] == "ACTIVE"
-
     )
 
-    if active_count >= MAX_ACTIVE_TRADES:
+    if (
+        active_count
+        >= MAX_ACTIVE_TRADES
+    ):
 
         return None
 
-    # -----------------------------------------------------
-    # Create
-    # -----------------------------------------------------
+    # =====================================================
+    # CREATE
+    # =====================================================
 
     trade = create_trade(
-
         symbol,
-
         direction,
-
         score,
-
         result["price"],
-
-        result["candle_time"],
     )
 
     return trade
 
 
 # =========================================================
-# SIGNAL MESSAGE
+# TRADE MESSAGE
 # =========================================================
 
 def create_trade_message(
@@ -2348,15 +2224,13 @@ def create_trade_message(
     if trade["direction"] == "PUMP":
 
         title = (
-            "🟢 "
-            "<b>CONFIRMED EARLY PUMP</b>"
+            "🟢 <b>CONFIRMED EARLY PUMP</b>"
         )
 
     else:
 
         title = (
-            "🔴 "
-            "<b>CONFIRMED EARLY DUMP</b>"
+            "🔴 <b>CONFIRMED EARLY DUMP</b>"
         )
 
     volume = result.get(
@@ -2364,12 +2238,9 @@ def create_trade_message(
     )
 
     volume_text = (
-
         "N/A"
-
         if volume is None
-
-        else f"{volume:.1f}x"
+        else f"{volume:.2f}x"
     )
 
     btc = result.get(
@@ -2377,26 +2248,24 @@ def create_trade_message(
     )
 
     btc_text = (
-
         "N/A"
-
         if btc is None
-
         else f"{btc:+.2f}%"
     )
 
     reasons = result.get(
         "reasons",
-        []
+        [],
     )
 
     return (
 
         f"{title}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
 
-        "━━━━━━━━━━━━━━━━━━\n"
-
-        f"💎 <b>{trade['symbol']}</b>\n\n"
+        f"💎 <b>"
+        f"{trade['symbol']}"
+        f"</b>\n\n"
 
         f"⭐ Score: "
         f"<b>{trade['score']}/100</b>\n"
@@ -2425,19 +2294,16 @@ def create_trade_message(
         f"🌐 BTC Regime: "
         f"<b>{result.get('regime')}</b>\n\n"
 
-        f"🔁 Confirmation: "
-        f"<b>2/2</b>\n\n"
-
         f"📌 "
         f"{', '.join(reasons[:7])}\n\n"
 
-        "🤖 "
-        "<b>Trade Manager ACTIVE</b>"
+        f"🤖 "
+        f"<b>Trade Manager ACTIVE</b>"
     )
 
 
 # =========================================================
-# TRADE EVENT MESSAGE
+# EVENT MESSAGE
 # =========================================================
 
 def event_message(
@@ -2462,93 +2328,105 @@ def event_message(
 
         return (
 
-            "🎯 <b>TP1 HIT</b>\n\n"
+            f"🎯 <b>TP1 HIT</b>\n\n"
 
             f"{symbol}\n"
 
-            f"Price: {price:.8g}\n"
+            f"Price: "
+            f"{price:.8g}\n"
 
-            "🛡 SL moved to BE"
+            f"🛡 SL moved to BE"
         )
 
     if event == "TP2":
 
         return (
 
-            "🔥 <b>TP2 HIT</b>\n\n"
+            f"🔥 <b>TP2 HIT</b>\n\n"
 
             f"{symbol}\n"
 
-            f"Price: {price:.8g}\n"
+            f"Price: "
+            f"{price:.8g}\n"
 
-            "🛡 Trailing protection"
+            f"🛡 Trailing protection"
         )
 
     if event == "TP3":
 
         return (
 
-            "🚀 <b>TP3 HIT</b>\n\n"
+            f"🚀 <b>TP3 HIT</b>\n\n"
 
             f"{symbol}\n"
 
-            f"Price: {price:.8g}\n"
+            f"Price: "
+            f"{price:.8g}\n"
 
-            "🛡 Trailing Stop ACTIVE"
+            f"🛡 Trailing Stop ACTIVE"
         )
 
     if event == "SL":
 
         return (
 
-            "🛑 <b>STOP LOSS</b>\n\n"
+            f"🛑 <b>STOP LOSS</b>\n\n"
 
             f"{symbol}\n"
 
-            f"Exit: {price:.8g}\n"
+            f"Exit: "
+            f"{price:.8g}\n"
 
             f"Result: "
-            f"<b>{trade['realized_percent']:+.2f}%</b>\n"
+            f"<b>"
+            f"{trade['realized_percent']:+.2f}%"
+            f"</b>\n"
 
             f"R: "
-            f"<b>{trade['realized_r']:+.2f}R</b>"
+            f"<b>"
+            f"{trade.get('realized_r', 0):+.2f}R"
+            f"</b>"
         )
 
     if event == "TRAIL":
 
         return (
 
-            "🚪 <b>TRAILING EXIT</b>\n\n"
+            f"🚪 <b>TRAILING EXIT</b>\n\n"
 
             f"{symbol}\n"
 
-            f"Exit: {price:.8g}\n"
+            f"Exit: "
+            f"{price:.8g}\n"
 
             f"Result: "
-            f"<b>{trade['realized_percent']:+.2f}%</b>\n"
+            f"<b>"
+            f"{trade['realized_percent']:+.2f}%"
+            f"</b>\n"
 
             f"R: "
-            f"<b>{trade['realized_r']:+.2f}R</b>"
+            f"<b>"
+            f"{trade.get('realized_r', 0):+.2f}R"
+            f"</b>"
         )
 
     return None
 
 
 # =========================================================
-# WATCHLIST MESSAGE
+# WATCHLIST
 # =========================================================
 
 def watchlist_message(
     results,
     active_trades,
     regime,
-    performance,
+    stats,
 ):
 
     lines = [
 
-        "👀 "
-        "<b>TOP 5 WATCHLIST v5.1</b>",
+        "👀 <b>TOP 5 WATCHLIST v5.2</b>",
 
         "━━━━━━━━━━━━━━━━━━",
     ]
@@ -2559,81 +2437,60 @@ def watchlist_message(
     ):
 
         emoji = (
-
             "🟢"
-
-            if item["direction"] == "PUMP"
-
+            if item["direction"]
+            == "PUMP"
             else "🔴"
         )
 
         c5 = (
-
             "N/A"
-
             if item["c5"] is None
-
             else f"{item['c5']:+.2f}%"
         )
 
         c10 = (
-
             "N/A"
-
             if item["c10"] is None
-
             else f"{item['c10']:+.2f}%"
         )
 
         c15 = (
-
             "N/A"
-
             if item["c15"] is None
-
             else f"{item['c15']:+.2f}%"
         )
 
         rsi = (
-
             "N/A"
-
             if item["rsi"] is None
-
             else f"{item['rsi']:.1f}"
         )
 
         vol = (
-
             "N/A"
-
             if item["volume"] is None
-
-            else f"{item['volume']:.1f}x"
+            else f"{item['volume']:.2f}x"
         )
 
         lines.append(
 
             f"{i}. {emoji} "
-
             f"<b>{item['symbol']}</b> "
-
-            f"⭐ {item['score']}/100"
+            f"⭐ "
+            f"{item['score']}/100"
         )
 
         lines.append(
 
             f"5m {c5} | "
-
             f"10m {c10} | "
-
             f"15m {c15}"
         )
 
         lines.append(
 
             f"RSI {rsi} | "
-
             f"Vol {vol}"
         )
 
@@ -2676,10 +2533,6 @@ def watchlist_message(
                 )
             )
 
-    stats = calculate_performance_stats(
-        performance
-    )
-
     lines.extend(
 
         [
@@ -2695,7 +2548,7 @@ def watchlist_message(
             f"<b>{active_trades}</b>",
 
             f"📊 Trades: "
-            f"<b>{stats['total']}</b>",
+            f"<b>{stats['trades']}</b>",
 
             f"🎯 Win Rate: "
             f"<b>{stats['win_rate']:.1f}%</b>",
@@ -2708,7 +2561,7 @@ def watchlist_message(
 
             "📡 <b>Closed 5M OHLCV</b>",
 
-            "🤖 <b>Engine v5.1</b>",
+            "🤖 <b>Engine v5.2</b>",
         ]
     )
 
@@ -2718,7 +2571,7 @@ def watchlist_message(
 
 
 # =========================================================
-# MAIN
+# MAIN SCAN
 # =========================================================
 
 def scan():
@@ -2728,59 +2581,47 @@ def scan():
     )
 
     print(
-        "EARLY PUMP/DUMP ENGINE v5.1"
+        "EARLY PUMP/DUMP ENGINE v5.2"
     )
 
     print(
-        "CLOSED 5M OHLCV"
+        "REAL CLOSED 5M OHLCV"
     )
 
     print(
-        "2-CANDLE CONFIRMATION"
+        "VOLUME + BREAKOUT + ICHIMOKU"
     )
 
     print(
-        "VOLUME FILTER"
-    )
-
-    print(
-        "PERFORMANCE TRACKER"
+        "CONFIRMATION + TRADE MANAGER"
     )
 
     print(
         "========================================"
     )
 
-    # -----------------------------------------------------
-    # Load state
-    # -----------------------------------------------------
+    # =====================================================
+    # LOAD
+    # =====================================================
 
     trades = load_json(
         TRADE_FILE,
-        {}
+        {},
     )
 
     confirmations = load_json(
         SIGNAL_FILE,
-        {}
+        {},
     )
 
     performance = load_json(
         PERFORMANCE_FILE,
-        {
-            "trades": []
-        }
+        [],
     )
 
-    performance = (
-        ensure_performance_structure(
-            performance
-        )
-    )
-
-    # -----------------------------------------------------
-    # Market
-    # -----------------------------------------------------
+    # =====================================================
+    # MARKET
+    # =====================================================
 
     market = get_all_candles()
 
@@ -2788,28 +2629,28 @@ def scan():
 
         send_telegram(
 
-            "🔴 "
-            "<b>SCANNER ERROR</b>\n\n"
-            "No Kraken closed 5M candle data."
+            "🔴 <b>SCANNER ERROR</b>\n\n"
+
+            "No Kraken 5M candle data."
         )
 
         return
 
-    # -----------------------------------------------------
+    # =====================================================
     # BTC
-    # -----------------------------------------------------
+    # =====================================================
 
     btc = market.get(
         "BTC",
-        []
+        [],
     )
 
     if not btc:
 
         send_telegram(
 
-            "🔴 "
-            "<b>SCANNER ERROR</b>\n\n"
+            "🔴 <b>SCANNER ERROR</b>\n\n"
+
             "BTC 5M data unavailable."
         )
 
@@ -2821,33 +2662,33 @@ def scan():
 
     btc_1h = candle_change(
         btc,
-        60
+        60,
     )
 
     print(
         "BTC regime:",
-        regime
+        regime,
     )
 
     print(
         "BTC 1H:",
-        btc_1h
+        btc_1h,
     )
 
-    # -----------------------------------------------------
-    # Manage existing trades
-    # -----------------------------------------------------
+    # =====================================================
+    # MANAGE ACTIVE TRADES
+    # =====================================================
 
     events = manage_active_trades(
         trades,
-        market
+        market,
     )
 
     for event, trade in events:
 
         message = event_message(
             event,
-            trade
+            trade,
         )
 
         if message:
@@ -2856,29 +2697,16 @@ def scan():
                 message
             )
 
-        # -------------------------------------------------
-        # Record ONLY completed trades
-        # -------------------------------------------------
-
         if trade["status"] == "CLOSED":
 
-            performance = (
-                record_performance(
-                    performance,
-                    trade
-                )
+            update_performance(
+                performance,
+                trade,
             )
 
-            # Send performance after close
-            send_telegram(
-                performance_message(
-                    performance
-                )
-            )
-
-    # -----------------------------------------------------
-    # Analyze all coins
-    # -----------------------------------------------------
+    # =====================================================
+    # ANALYZE
+    # =====================================================
 
     results = []
 
@@ -2889,17 +2717,14 @@ def scan():
             print(
                 symbol,
                 "not enough candles:",
-                len(candles)
+                len(candles),
             )
 
             continue
 
         result = calculate_scores(
-
             candles,
-
             btc_1h,
-
             regime,
         )
 
@@ -2909,21 +2734,21 @@ def scan():
             result
         )
 
-    # -----------------------------------------------------
-    # Sort
-    # -----------------------------------------------------
+    # =====================================================
+    # SORT
+    # =====================================================
 
     results.sort(
 
         key=lambda x:
             x["score"],
 
-        reverse=True
+        reverse=True,
     )
 
-    # -----------------------------------------------------
-    # Confirm signals
-    # -----------------------------------------------------
+    # =====================================================
+    # CONFIRMED SIGNALS
+    # =====================================================
 
     new_trades = []
 
@@ -2949,13 +2774,13 @@ def scan():
             new_trades.append(
                 (
                     trade,
-                    result
+                    result,
                 )
             )
 
-    # -----------------------------------------------------
-    # Send confirmed signals
-    # -----------------------------------------------------
+    # =====================================================
+    # SEND SIGNALS
+    # =====================================================
 
     for trade, result in new_trades:
 
@@ -2963,32 +2788,36 @@ def scan():
 
             create_trade_message(
                 trade,
-                result
+                result,
             )
         )
 
-    # -----------------------------------------------------
-    # Save states
-    # -----------------------------------------------------
+    # =====================================================
+    # SAVE
+    # =====================================================
 
     save_json(
         TRADE_FILE,
-        trades
+        trades,
     )
 
     save_json(
         SIGNAL_FILE,
-        confirmations
+        confirmations,
     )
 
     save_json(
         PERFORMANCE_FILE,
-        performance
+        performance,
     )
 
-    # -----------------------------------------------------
-    # Watchlist
-    # -----------------------------------------------------
+    # =====================================================
+    # STATS
+    # =====================================================
+
+    stats = performance_stats(
+        performance
+    )
 
     active_count = sum(
 
@@ -2999,6 +2828,10 @@ def scan():
         if x["status"] == "ACTIVE"
     )
 
+    # =====================================================
+    # WATCHLIST
+    # =====================================================
+
     message = watchlist_message(
 
         results,
@@ -3007,18 +2840,20 @@ def scan():
 
         regime,
 
-        performance,
+        stats,
     )
 
-    print(message)
+    print(
+        message
+    )
 
     send_telegram(
         message
     )
 
-    # -----------------------------------------------------
-    # Cleanup old confirmations
-    # -----------------------------------------------------
+    # =====================================================
+    # CLEAN OLD CONFIRMATIONS
+    # =====================================================
 
     now = int(
         time.time()
@@ -3028,21 +2863,14 @@ def scan():
         confirmations.keys()
     ):
 
-        last_time = int(
-
-            confirmations[key].get(
-
-                "last_candle_time",
-
-                0
-            )
-        )
-
         if (
 
-            last_time > 0
+            now
+            - confirmations[key].get(
+                "last_time",
+                0,
+            )
 
-            and now - last_time
             > 30 * 60
 
         ):
@@ -3051,8 +2879,12 @@ def scan():
 
     save_json(
         SIGNAL_FILE,
-        confirmations
+        confirmations,
     )
+
+    # =====================================================
+    # FINAL LOG
+    # =====================================================
 
     print(
         "========================================"
@@ -3064,46 +2896,32 @@ def scan():
 
     print(
         "Coins:",
-        len(market)
+        len(market),
     )
 
     print(
         "Results:",
-        len(results)
+        len(results),
     )
 
     print(
         "Active trades:",
-        active_count
+        active_count,
     )
 
     print(
         "New confirmed:",
-        len(new_trades)
-    )
-
-    stats = calculate_performance_stats(
-        performance
+        len(new_trades),
     )
 
     print(
-        "Completed trades:",
-        stats["total"]
+        "Performance trades:",
+        stats["trades"],
     )
 
     print(
         "Win rate:",
-        f"{stats['win_rate']:.1f}%"
-    )
-
-    print(
-        "Avg R:",
-        f"{stats['avg_r']:+.2f}R"
-    )
-
-    print(
-        "Profit factor:",
-        f"{stats['profit_factor']:.2f}"
+        f"{stats['win_rate']:.1f}%",
     )
 
     print(
