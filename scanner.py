@@ -16,9 +16,21 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/markets"
 
 HISTORY_FILE = "price_data.json"
+TRADE_FILE = "trade_state.json"
 
-# Keep approximately 8 hours of history
 HISTORY_SECONDS = 8 * 60 * 60
+
+# Risk / reward
+SL_PERCENT = 1.20
+
+TP1_R = 1.0
+TP2_R = 2.0
+TP3_R = 3.0
+
+TRAIL_AFTER_TP1 = 0.50
+TRAIL_AFTER_TP2 = 0.75
+
+MAX_ACTIVE_TRADES = 5
 
 COINS = [
     "bitcoin",
@@ -61,7 +73,7 @@ COINS = [
 def send_telegram(text):
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram secrets are missing.")
+        print("Telegram secrets missing.")
         return False
 
     url = (
@@ -88,76 +100,81 @@ def send_telegram(text):
 
         result = response.json()
 
-        if result.get("ok"):
-            print("Telegram message sent.")
-            return True
-
-        print("Telegram rejected message:", result)
-        return False
+        return result.get("ok", False)
 
     except Exception as e:
 
         print("Telegram error:", e)
+
         return False
 
 
 # =========================================================
-# HISTORY
+# JSON HELPERS
 # =========================================================
 
-def load_history():
+def load_json(filename, default):
 
-    if not os.path.exists(HISTORY_FILE):
-        return {}
+    if not os.path.exists(filename):
+        return default
 
     try:
 
         with open(
-            HISTORY_FILE,
+            filename,
             "r",
             encoding="utf-8",
-        ) as file:
+        ) as f:
 
-            data = json.load(file)
+            data = json.load(f)
 
-        if isinstance(data, dict):
-            return data
+        return data
 
     except Exception as e:
 
-        print("History read error:", e)
+        print(
+            f"{filename} read error:",
+            e,
+        )
 
-    return {}
+        return default
 
 
-def save_history(history):
+def save_json(filename, data):
 
     try:
 
-        temp_file = HISTORY_FILE + ".tmp"
+        temp = filename + ".tmp"
 
         with open(
-            temp_file,
+            temp,
             "w",
             encoding="utf-8",
-        ) as file:
+        ) as f:
 
             json.dump(
-                history,
-                file,
+                data,
+                f,
                 ensure_ascii=False,
-                separators=(",", ":"),
+                indent=2,
             )
 
         os.replace(
-            temp_file,
-            HISTORY_FILE,
+            temp,
+            filename,
         )
 
     except Exception as e:
 
-        print("History save error:", e)
+        print(
+            f"{filename} save error:",
+            e,
+        )
 
+
+# =========================================================
+# MARKET HISTORY
+# =========================================================
 
 def update_history(history, market_data):
 
@@ -168,9 +185,7 @@ def update_history(history, market_data):
     for coin in market_data:
 
         coin_id = coin.get("id")
-
         price = coin.get("current_price")
-
         volume = coin.get("total_volume")
 
         if not coin_id or price is None:
@@ -188,9 +203,9 @@ def update_history(history, market_data):
         )
 
         history[coin_id] = [
-            item
-            for item in history[coin_id]
-            if int(item.get("time", 0)) >= cutoff
+            x
+            for x in history[coin_id]
+            if int(x.get("time", 0)) >= cutoff
         ]
 
         if len(history[coin_id]) > 150:
@@ -208,16 +223,15 @@ def get_change(items, minutes):
 
     latest = items[-1]
 
-    latest_time = int(latest["time"])
-
-    target_time = latest_time - (
-        minutes * 60
+    target_time = (
+        int(latest["time"])
+        - minutes * 60
     )
 
     candidates = [
-        item
-        for item in items[:-1]
-        if int(item.get("time", 0))
+        x
+        for x in items[:-1]
+        if int(x.get("time", 0))
         <= target_time
     ]
 
@@ -231,20 +245,20 @@ def get_change(items, minutes):
         ),
     )
 
-    previous_price = float(
+    old_price = float(
         previous["price"]
     )
 
-    latest_price = float(
+    new_price = float(
         latest["price"]
     )
 
-    if previous_price <= 0:
+    if old_price <= 0:
         return None
 
     return (
-        (latest_price - previous_price)
-        / previous_price
+        (new_price - old_price)
+        / old_price
     ) * 100
 
 
@@ -257,7 +271,6 @@ def calculate_rsi(items, period=14):
     prices = [
         float(x["price"])
         for x in items
-        if x.get("price") is not None
     ]
 
     if len(prices) < period + 1:
@@ -285,10 +298,7 @@ def calculate_rsi(items, period=14):
 
     if avg_loss == 0:
 
-        if avg_gain == 0:
-            return 50.0
-
-        return 100.0
+        return 100.0 if avg_gain > 0 else 50.0
 
     rs = avg_gain / avg_loss
 
@@ -306,7 +316,6 @@ def calculate_ema(items, period):
     prices = [
         float(x["price"])
         for x in items
-        if x.get("price") is not None
     ]
 
     if len(prices) < period:
@@ -314,10 +323,9 @@ def calculate_ema(items, period):
 
     multiplier = 2 / (period + 1)
 
-    ema = (
-        sum(prices[:period])
-        / period
-    )
+    ema = sum(
+        prices[:period]
+    ) / period
 
     for price in prices[period:]:
 
@@ -341,42 +349,39 @@ def calculate_volume_ratio(
     if len(items) < lookback + 1:
         return None
 
-    current_volume = float(
+    current = float(
         items[-1].get("volume", 0)
     )
 
-    previous_volumes = [
+    previous = [
         float(x.get("volume", 0))
         for x in items[-lookback - 1:-1]
     ]
 
-    previous_volumes = [
-        x for x in previous_volumes
+    previous = [
+        x for x in previous
         if x > 0
     ]
 
-    if not previous_volumes:
+    if not previous:
         return None
 
-    average_volume = (
-        sum(previous_volumes)
-        / len(previous_volumes)
+    average = (
+        sum(previous)
+        / len(previous)
     )
 
-    if average_volume <= 0:
+    if average <= 0:
         return None
 
-    return (
-        current_volume
-        / average_volume
-    )
+    return current / average
 
 
 # =========================================================
 # BREAKOUT / BREAKDOWN
 # =========================================================
 
-def calculate_breakout(items):
+def calculate_levels(items):
 
     if len(items) < 7:
 
@@ -385,40 +390,24 @@ def calculate_breakout(items):
             "breakdown": False,
         }
 
-    current_price = float(
+    current = float(
         items[-1]["price"]
     )
 
-    previous = items[-7:-1]
-
-    prices = [
+    previous = [
         float(x["price"])
-        for x in previous
+        for x in items[-7:-1]
     ]
 
-    if not prices:
-
-        return {
-            "breakout": False,
-            "breakdown": False,
-        }
-
-    previous_high = max(prices)
-    previous_low = min(prices)
-
-    breakout = (
-        current_price
-        > previous_high * 1.0005
-    )
-
-    breakdown = (
-        current_price
-        < previous_low * 0.9995
-    )
+    high = max(previous)
+    low = min(previous)
 
     return {
-        "breakout": breakout,
-        "breakdown": breakdown,
+        "breakout":
+            current > high * 1.0005,
+
+        "breakdown":
+            current < low * 0.9995,
     }
 
 
@@ -441,20 +430,20 @@ def calculate_ichimoku(items):
         for x in items
     ]
 
-    current_price = prices[-1]
+    current = prices[-1]
 
-    tenkan_prices = prices[-9:]
-    kijun_prices = prices[-26:]
-    span_b_prices = prices[-52:]
+    tenkan_data = prices[-9:]
+    kijun_data = prices[-26:]
+    span_b_data = prices[-52:]
 
     tenkan = (
-        max(tenkan_prices)
-        + min(tenkan_prices)
+        max(tenkan_data)
+        + min(tenkan_data)
     ) / 2
 
     kijun = (
-        max(kijun_prices)
-        + min(kijun_prices)
+        max(kijun_data)
+        + min(kijun_data)
     ) / 2
 
     span_a = (
@@ -462,8 +451,8 @@ def calculate_ichimoku(items):
     ) / 2
 
     span_b = (
-        max(span_b_prices)
-        + min(span_b_prices)
+        max(span_b_data)
+        + min(span_b_data)
     ) / 2
 
     cloud_top = max(
@@ -476,39 +465,33 @@ def calculate_ichimoku(items):
         span_b,
     )
 
-    bullish = (
-        current_price > cloud_top
-        and tenkan > kijun
-    )
-
-    bearish = (
-        current_price < cloud_bottom
-        and tenkan < kijun
-    )
-
     return {
         "ready": True,
-        "bullish": bullish,
-        "bearish": bearish,
+        "bullish":
+            current > cloud_top
+            and tenkan > kijun,
+
+        "bearish":
+            current < cloud_bottom
+            and tenkan < kijun,
+
         "tenkan": tenkan,
         "kijun": kijun,
-        "span_a": span_a,
-        "span_b": span_b,
     }
 
 
 # =========================================================
-# SCORE PUMP
+# PUMP SCORE
 # =========================================================
 
-def calculate_pump_score(
+def pump_score(
     c5,
     c10,
     c15,
     rsi,
     ema5,
     ema10,
-    volume_ratio,
+    volume,
     breakout,
     ichimoku,
     btc_1h,
@@ -517,7 +500,6 @@ def calculate_pump_score(
     score = 0
     reasons = []
 
-    # 5m momentum
     if c5 is not None:
 
         if 0.5 <= c5 < 2.5:
@@ -530,7 +512,6 @@ def calculate_pump_score(
         elif c5 > 0:
             score += 4
 
-    # 10m momentum
     if c10 is not None:
 
         if c10 >= 2:
@@ -540,7 +521,6 @@ def calculate_pump_score(
         elif c10 > 0:
             score += 5
 
-    # 15m trend
     if c15 is not None:
 
         if c15 >= 3:
@@ -550,7 +530,6 @@ def calculate_pump_score(
         elif c15 > 0:
             score += 5
 
-    # acceleration
     if (
         c5 is not None
         and c10 is not None
@@ -562,24 +541,18 @@ def calculate_pump_score(
         score += 10
         reasons.append("Acceleration")
 
-    # RSI
     if rsi is not None:
 
         if 55 <= rsi <= 70:
-
             score += 10
             reasons.append("RSI healthy")
 
         elif 70 < rsi <= 78:
-
             score += 6
 
         elif rsi > 82:
-
             score -= 5
-            reasons.append("RSI overheated")
 
-    # EMA
     if (
         ema5 is not None
         and ema10 is not None
@@ -589,67 +562,45 @@ def calculate_pump_score(
         score += 10
         reasons.append("EMA bullish")
 
-    # Volume
-    if volume_ratio is not None:
+    if volume is not None:
 
-        if volume_ratio >= 3:
-
+        if volume >= 3:
             score += 10
             reasons.append(
-                f"Volume {volume_ratio:.1f}x"
+                f"Volume {volume:.1f}x"
             )
 
-        elif volume_ratio >= 2:
-
+        elif volume >= 2:
             score += 8
-            reasons.append(
-                f"Volume {volume_ratio:.1f}x"
-            )
 
-        elif volume_ratio >= 1.5:
-
+        elif volume >= 1.5:
             score += 5
-            reasons.append(
-                f"Volume {volume_ratio:.1f}x"
-            )
 
-    # Breakout
     if breakout:
 
         score += 15
         reasons.append("BREAKOUT")
 
-    # Ichimoku
-    if ichimoku.get("ready"):
+    if ichimoku.get("bullish"):
 
-        if ichimoku.get("bullish"):
+        score += 15
+        reasons.append("Ichimoku bullish")
 
-            score += 15
-            reasons.append(
-                "Ichimoku bullish"
-            )
+    elif (
+        ichimoku.get("tenkan")
+        and ichimoku.get("kijun")
+        and ichimoku["tenkan"]
+        > ichimoku["kijun"]
+    ):
 
-        elif (
-            ichimoku.get("tenkan")
-            and ichimoku.get("kijun")
-            and ichimoku["tenkan"]
-            > ichimoku["kijun"]
-        ):
+        score += 6
 
-            score += 6
-
-    # BTC
     if btc_1h is not None:
 
         if btc_1h > 0:
-
             score += 5
-            reasons.append(
-                "BTC supportive"
-            )
 
         elif btc_1h < -1:
-
             score -= 5
 
     return max(
@@ -659,17 +610,17 @@ def calculate_pump_score(
 
 
 # =========================================================
-# SCORE DUMP
+# DUMP SCORE
 # =========================================================
 
-def calculate_dump_score(
+def dump_score(
     c5,
     c10,
     c15,
     rsi,
     ema5,
     ema10,
-    volume_ratio,
+    volume,
     breakdown,
     ichimoku,
     btc_1h,
@@ -678,7 +629,6 @@ def calculate_dump_score(
     score = 0
     reasons = []
 
-    # 5m downside
     if c5 is not None:
 
         if -2.5 < c5 <= -0.5:
@@ -691,31 +641,24 @@ def calculate_dump_score(
         elif c5 < 0:
             score += 4
 
-    # 10m downside
     if c10 is not None:
 
         if c10 <= -2:
-
             score += 10
             reasons.append("10m selling")
 
         elif c10 < 0:
-
             score += 5
 
-    # 15m downside
     if c15 is not None:
 
         if c15 <= -3:
-
             score += 10
             reasons.append("15m bearish")
 
         elif c15 < 0:
-
             score += 5
 
-    # acceleration
     if (
         c5 is not None
         and c10 is not None
@@ -727,22 +670,15 @@ def calculate_dump_score(
         score += 10
         reasons.append("Down acceleration")
 
-    # RSI
     if rsi is not None:
 
         if 30 <= rsi <= 45:
-
             score += 10
             reasons.append("RSI weak")
 
         elif rsi < 25:
-
             score -= 5
-            reasons.append(
-                "RSI oversold"
-            )
 
-    # EMA
     if (
         ema5 is not None
         and ema10 is not None
@@ -752,64 +688,43 @@ def calculate_dump_score(
         score += 10
         reasons.append("EMA bearish")
 
-    # Volume
-    if volume_ratio is not None:
+    if volume is not None:
 
-        if volume_ratio >= 3:
-
+        if volume >= 3:
             score += 10
             reasons.append(
-                f"Volume {volume_ratio:.1f}x"
+                f"Volume {volume:.1f}x"
             )
 
-        elif volume_ratio >= 2:
-
+        elif volume >= 2:
             score += 8
-            reasons.append(
-                f"Volume {volume_ratio:.1f}x"
-            )
 
-        elif volume_ratio >= 1.5:
-
+        elif volume >= 1.5:
             score += 5
-            reasons.append(
-                f"Volume {volume_ratio:.1f}x"
-            )
 
-    # Breakdown
     if breakdown:
 
         score += 15
         reasons.append("BREAKDOWN")
 
-    # Ichimoku
-    if ichimoku.get("ready"):
+    if ichimoku.get("bearish"):
 
-        if ichimoku.get("bearish"):
+        score += 15
+        reasons.append("Ichimoku bearish")
 
-            score += 15
-            reasons.append(
-                "Ichimoku bearish"
-            )
+    elif (
+        ichimoku.get("tenkan")
+        and ichimoku.get("kijun")
+        and ichimoku["tenkan"]
+        < ichimoku["kijun"]
+    ):
 
-        elif (
-            ichimoku.get("tenkan")
-            and ichimoku.get("kijun")
-            and ichimoku["tenkan"]
-            < ichimoku["kijun"]
-        ):
+        score += 6
 
-            score += 6
-
-    # BTC
     if btc_1h is not None:
 
         if btc_1h < 0:
-
             score += 5
-            reasons.append(
-                "BTC bearish"
-            )
 
     return max(
         0,
@@ -834,7 +749,7 @@ def get_market_data():
 
     headers = {
         "User-Agent":
-            "early-pump-engine/3.0"
+            "early-pump-engine/4.0"
     }
 
     try:
@@ -855,10 +770,11 @@ def get_market_data():
 
         data = response.json()
 
-        if not isinstance(data, list):
-            return []
-
-        return data
+        return (
+            data
+            if isinstance(data, list)
+            else []
+        )
 
     except Exception as e:
 
@@ -871,41 +787,612 @@ def get_market_data():
 
 
 # =========================================================
-# FORMAT
+# TRADE CALCULATIONS
 # =========================================================
 
-def fmt_percent(value):
+def create_trade(
+    symbol,
+    direction,
+    score,
+    entry,
+):
 
-    if value is None:
-        return "N/A"
+    risk = entry * (
+        SL_PERCENT / 100
+    )
 
-    return f"{value:+.2f}%"
+    if direction == "PUMP":
 
+        sl = entry - risk
 
-def fmt_rsi(value):
+        tp1 = entry + (
+            risk * TP1_R
+        )
 
-    if value is None:
-        return "N/A"
+        tp2 = entry + (
+            risk * TP2_R
+        )
 
-    return f"{value:.1f}"
+        tp3 = entry + (
+            risk * TP3_R
+        )
 
+    else:
 
-def fmt_volume(value):
+        sl = entry + risk
 
-    if value is None:
-        return "N/A"
+        tp1 = entry - (
+            risk * TP1_R
+        )
 
-    return f"{value:.1f}x"
+        tp2 = entry - (
+            risk * TP2_R
+        )
+
+        tp3 = entry - (
+            risk * TP3_R
+        )
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    trade_id = (
+        f"{symbol}-"
+        f"{now.strftime('%Y%m%d-%H%M')}-"
+        f"{direction}"
+    )
+
+    return {
+        "id": trade_id,
+        "symbol": symbol,
+        "direction": direction,
+        "score": score,
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "trailing_stop": None,
+        "highest": entry,
+        "lowest": entry,
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "tp3_hit": False,
+        "status": "ACTIVE",
+        "opened_at":
+            now.isoformat(),
+        "closed_at": None,
+        "exit_price": None,
+        "exit_reason": None,
+        "realized_percent": 0,
+    }
 
 
 # =========================================================
-# MAIN SCANNER
+# TRADE PERCENT
+# =========================================================
+
+def trade_percent(trade, price):
+
+    entry = trade["entry"]
+
+    if trade["direction"] == "PUMP":
+
+        return (
+            (price - entry)
+            / entry
+        ) * 100
+
+    return (
+        (entry - price)
+        / entry
+    ) * 100
+
+
+# =========================================================
+# TRADE MANAGER
+# =========================================================
+
+def manage_trade(
+    trade,
+    price,
+):
+
+    if trade["status"] != "ACTIVE":
+        return None
+
+    direction = trade["direction"]
+
+    # -----------------------------------------------------
+    # PUMP
+    # -----------------------------------------------------
+
+    if direction == "PUMP":
+
+        if price > trade["highest"]:
+            trade["highest"] = price
+
+        # STOP LOSS
+        if price <= trade["sl"]:
+
+            trade["status"] = "CLOSED"
+            trade["closed_at"] = (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            )
+
+            trade["exit_price"] = price
+            trade["exit_reason"] = "STOP LOSS"
+            trade["realized_percent"] = (
+                trade_percent(
+                    trade,
+                    price
+                )
+            )
+
+            return "SL"
+
+        # TP1
+        if (
+            not trade["tp1_hit"]
+            and price >= trade["tp1"]
+        ):
+
+            trade["tp1_hit"] = True
+
+            # Move SL to near breakeven
+            trade["sl"] = (
+                trade["entry"]
+                * 1.0005
+            )
+
+            send_telegram(
+                f"🎯 <b>TP1 HIT</b>\n\n"
+                f"{trade['symbol']}\n"
+                f"📈 +{trade_percent(trade, price):.2f}%\n\n"
+                f"🛡 SL → BE"
+            )
+
+            return "TP1"
+
+        # TP2
+        if (
+            trade["tp1_hit"]
+            and not trade["tp2_hit"]
+            and price >= trade["tp2"]
+        ):
+
+            trade["tp2_hit"] = True
+
+            trade["sl"] = (
+                trade["entry"]
+                + (
+                    price
+                    - trade["entry"]
+                ) * 0.50
+            )
+
+            return "TP2"
+
+        # TP3
+        if (
+            trade["tp2_hit"]
+            and not trade["tp3_hit"]
+            and price >= trade["tp3"]
+        ):
+
+            trade["tp3_hit"] = True
+
+            trade["trailing_stop"] = (
+                price
+                * (
+                    1
+                    - TRAIL_AFTER_TP2
+                    / 100
+                )
+            )
+
+            return "TP3"
+
+        # TRAILING
+        if trade["tp3_hit"]:
+
+            trailing = (
+                trade["highest"]
+                * (
+                    1
+                    - TRAIL_AFTER_TP2
+                    / 100
+                )
+            )
+
+            trade["trailing_stop"] = trailing
+
+            if price <= trailing:
+
+                trade["status"] = "CLOSED"
+                trade["closed_at"] = (
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                )
+
+                trade["exit_price"] = price
+                trade["exit_reason"] = (
+                    "TRAILING STOP"
+                )
+
+                trade["realized_percent"] = (
+                    trade_percent(
+                        trade,
+                        price
+                    )
+                )
+
+                return "TRAIL"
+
+    # -----------------------------------------------------
+    # DUMP / SHORT
+    # -----------------------------------------------------
+
+    else:
+
+        if price < trade["lowest"]:
+            trade["lowest"] = price
+
+        # STOP LOSS
+        if price >= trade["sl"]:
+
+            trade["status"] = "CLOSED"
+            trade["closed_at"] = (
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
+            )
+
+            trade["exit_price"] = price
+            trade["exit_reason"] = "STOP LOSS"
+            trade["realized_percent"] = (
+                trade_percent(
+                    trade,
+                    price
+                )
+            )
+
+            return "SL"
+
+        # TP1
+        if (
+            not trade["tp1_hit"]
+            and price <= trade["tp1"]
+        ):
+
+            trade["tp1_hit"] = True
+
+            trade["sl"] = (
+                trade["entry"]
+                * 0.9995
+            )
+
+            send_telegram(
+                f"🎯 <b>TP1 HIT</b>\n\n"
+                f"{trade['symbol']}\n"
+                f"📉 +{trade_percent(trade, price):.2f}%\n\n"
+                f"🛡 SL → BE"
+            )
+
+            return "TP1"
+
+        # TP2
+        if (
+            trade["tp1_hit"]
+            and not trade["tp2_hit"]
+            and price <= trade["tp2"]
+        ):
+
+            trade["tp2_hit"] = True
+
+            trade["sl"] = (
+                trade["entry"]
+                - (
+                    trade["entry"]
+                    - price
+                ) * 0.50
+            )
+
+            return "TP2"
+
+        # TP3
+        if (
+            trade["tp2_hit"]
+            and not trade["tp3_hit"]
+            and price <= trade["tp3"]
+        ):
+
+            trade["tp3_hit"] = True
+
+            trade["trailing_stop"] = (
+                price
+                * (
+                    1
+                    + TRAIL_AFTER_TP2
+                    / 100
+                )
+            )
+
+            return "TP3"
+
+        # TRAILING
+        if trade["tp3_hit"]:
+
+            trailing = (
+                trade["lowest"]
+                * (
+                    1
+                    + TRAIL_AFTER_TP2
+                    / 100
+                )
+            )
+
+            trade["trailing_stop"] = trailing
+
+            if price >= trailing:
+
+                trade["status"] = "CLOSED"
+                trade["closed_at"] = (
+                    datetime.now(
+                        timezone.utc
+                    ).isoformat()
+                )
+
+                trade["exit_price"] = price
+                trade["exit_reason"] = (
+                    "TRAILING STOP"
+                )
+
+                trade["realized_percent"] = (
+                    trade_percent(
+                        trade,
+                        price
+                    )
+                )
+
+                return "TRAIL"
+
+    return None
+
+
+# =========================================================
+# NEW SIGNAL
+# =========================================================
+
+def create_signal_if_valid(
+    result,
+    active_trades,
+):
+
+    if len(active_trades) >= MAX_ACTIVE_TRADES:
+        return None
+
+    if result["score"] < 75:
+        return None
+
+    symbol = result["symbol"]
+    direction = result["direction"]
+
+    # Don't duplicate same coin/direction
+    for trade in active_trades.values():
+
+        if (
+            trade["symbol"] == symbol
+            and trade["direction"] == direction
+            and trade["status"] == "ACTIVE"
+        ):
+
+            return None
+
+    # Strong signal requirements
+    if direction == "PUMP":
+
+        if not (
+            result["c5"] is not None
+            and result["c10"] is not None
+            and result["c15"] is not None
+            and result["c5"] > 0
+            and result["c10"] > 0
+            and result["c15"] > 0
+            and result["c5"] < 5
+        ):
+
+            return None
+
+    else:
+
+        if not (
+            result["c5"] is not None
+            and result["c10"] is not None
+            and result["c15"] is not None
+            and result["c5"] < 0
+            and result["c10"] < 0
+            and result["c15"] < 0
+        ):
+
+            return None
+
+    trade = create_trade(
+        symbol,
+        direction,
+        result["score"],
+        result["price"],
+    )
+
+    return trade
+
+
+# =========================================================
+# FORMAT TRADE
+# =========================================================
+
+def trade_message(trade):
+
+    direction = trade["direction"]
+
+    if direction == "PUMP":
+
+        title = "🔥 <b>EARLY PUMP SIGNAL</b>"
+
+        entry_icon = "🟢"
+
+    else:
+
+        title = "🔴 <b>EARLY DUMP SIGNAL</b>"
+
+        entry_icon = "🔴"
+
+    return (
+        f"{title}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{entry_icon} "
+        f"<b>{trade['symbol']}</b>\n\n"
+        f"⭐ Score: "
+        f"<b>{trade['score']}/100</b>\n\n"
+        f"💰 Entry: "
+        f"<b>{trade['entry']:.8g}</b>\n"
+        f"🛑 SL: "
+        f"<b>{trade['sl']:.8g}</b>\n\n"
+        f"🎯 TP1: "
+        f"<b>{trade['tp1']:.8g}</b>\n"
+        f"🎯 TP2: "
+        f"<b>{trade['tp2']:.8g}</b>\n"
+        f"🎯 TP3: "
+        f"<b>{trade['tp3']:.8g}</b>\n\n"
+        f"📊 Risk: "
+        f"{SL_PERCENT:.2f}%\n"
+        f"📈 R:R: 1 : 2 : 3\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🤖 <b>Trade Manager ACTIVE</b>"
+    )
+
+
+# =========================================================
+# MANAGE ACTIVE TRADES
+# =========================================================
+
+def process_active_trades(
+    trades,
+    market_data,
+):
+
+    prices = {
+        x["symbol"].upper():
+            float(x["current_price"])
+        for x in market_data
+        if x.get("symbol")
+        and x.get("current_price") is not None
+    }
+
+    changed = False
+
+    for trade_id, trade in list(
+        trades.items()
+    ):
+
+        if trade["status"] != "ACTIVE":
+            continue
+
+        symbol = trade["symbol"]
+
+        if symbol not in prices:
+            continue
+
+        price = prices[symbol]
+
+        event = manage_trade(
+            trade,
+            price,
+        )
+
+        if event:
+
+            changed = True
+
+            if event == "TP1":
+
+                send_telegram(
+                    f"🎯 <b>TP1 HIT</b>\n\n"
+                    f"{symbol}\n"
+                    f"Price: {price:.8g}\n"
+                    f"Progress: "
+                    f"+{trade_percent(trade, price):.2f}%"
+                )
+
+            elif event == "TP2":
+
+                send_telegram(
+                    f"🔥 <b>TP2 HIT</b>\n\n"
+                    f"{symbol}\n"
+                    f"Price: {price:.8g}\n"
+                    f"Progress: "
+                    f"+{trade_percent(trade, price):.2f}%\n"
+                    f"🛡 Trailing activated"
+                )
+
+            elif event == "TP3":
+
+                send_telegram(
+                    f"🚀 <b>TP3 HIT</b>\n\n"
+                    f"{symbol}\n"
+                    f"Price: {price:.8g}\n"
+                    f"🛡 Trailing Stop ACTIVE"
+                )
+
+            elif event in (
+                "SL",
+                "TRAIL",
+            ):
+
+                emoji = (
+                    "🛑"
+                    if event == "SL"
+                    else "🚪"
+                )
+
+                send_telegram(
+                    f"{emoji} <b>TRADE CLOSED</b>\n\n"
+                    f"{symbol}\n"
+                    f"Reason: "
+                    f"{trade['exit_reason']}\n"
+                    f"Exit: "
+                    f"{price:.8g}\n"
+                    f"Result: "
+                    f"<b>{trade['realized_percent']:+.2f}%</b>"
+                )
+
+    return changed
+
+
+# =========================================================
+# MAIN
 # =========================================================
 
 def scan():
 
     print(
-        "EARLY PUMP/DUMP ENGINE v3 START"
+        "================================"
+    )
+
+    print(
+        "EARLY PUMP/DUMP ENGINE v4"
+    )
+
+    print(
+        "SIGNAL + TRADE MANAGER"
+    )
+
+    print(
+        "================================"
     )
 
     market_data = get_market_data()
@@ -919,14 +1406,46 @@ def scan():
 
         return
 
-    history = load_history()
+    # -----------------------------------------------------
+    # Load state
+    # -----------------------------------------------------
+
+    history = load_json(
+        HISTORY_FILE,
+        {}
+    )
+
+    trades = load_json(
+        TRADE_FILE,
+        {}
+    )
+
+    # -----------------------------------------------------
+    # Update prices
+    # -----------------------------------------------------
 
     update_history(
         history,
         market_data
     )
 
-    save_history(history)
+    save_json(
+        HISTORY_FILE,
+        history
+    )
+
+    # -----------------------------------------------------
+    # Manage existing trades FIRST
+    # -----------------------------------------------------
+
+    process_active_trades(
+        trades,
+        market_data
+    )
+
+    # -----------------------------------------------------
+    # BTC regime
+    # -----------------------------------------------------
 
     btc_history = history.get(
         "bitcoin",
@@ -940,9 +1459,9 @@ def scan():
 
     results = []
 
-    # =====================================================
-    # ANALYZE
-    # =====================================================
+    # -----------------------------------------------------
+    # Calculate signals
+    # -----------------------------------------------------
 
     for coin in market_data:
 
@@ -953,7 +1472,11 @@ def scan():
             ""
         ).upper()
 
-        if not coin_id:
+        price = coin.get(
+            "current_price"
+        )
+
+        if not coin_id or price is None:
             continue
 
         items = history.get(
@@ -993,11 +1516,11 @@ def scan():
             10
         )
 
-        volume_ratio = calculate_volume_ratio(
+        volume = calculate_volume_ratio(
             items
         )
 
-        levels = calculate_breakout(
+        levels = calculate_levels(
             items
         )
 
@@ -1005,261 +1528,128 @@ def scan():
             items
         )
 
-        pump_score, pump_reasons = (
-            calculate_pump_score(
-                c5,
-                c10,
-                c15,
-                rsi,
-                ema5,
-                ema10,
-                volume_ratio,
-                levels["breakout"],
-                ichimoku,
-                btc_1h,
-            )
+        p_score, p_reasons = pump_score(
+            c5,
+            c10,
+            c15,
+            rsi,
+            ema5,
+            ema10,
+            volume,
+            levels["breakout"],
+            ichimoku,
+            btc_1h,
         )
 
-        dump_score, dump_reasons = (
-            calculate_dump_score(
-                c5,
-                c10,
-                c15,
-                rsi,
-                ema5,
-                ema10,
-                volume_ratio,
-                levels["breakdown"],
-                ichimoku,
-                btc_1h,
-            )
+        d_score, d_reasons = dump_score(
+            c5,
+            c10,
+            c15,
+            rsi,
+            ema5,
+            ema10,
+            volume,
+            levels["breakdown"],
+            ichimoku,
+            btc_1h,
         )
 
-        if pump_score >= dump_score:
+        if p_score >= d_score:
 
             direction = "PUMP"
-            score = pump_score
-            reasons = pump_reasons
+            score = p_score
+            reasons = p_reasons
 
         else:
 
             direction = "DUMP"
-            score = dump_score
-            reasons = dump_reasons
+            score = d_score
+            reasons = d_reasons
 
         results.append(
             {
                 "symbol": symbol,
-                "score": score,
+                "price": float(price),
                 "direction": direction,
-                "pump_score": pump_score,
-                "dump_score": dump_score,
+                "score": score,
+                "pump_score": p_score,
+                "dump_score": d_score,
                 "c5": c5,
                 "c10": c10,
                 "c15": c15,
                 "rsi": rsi,
-                "volume_ratio": volume_ratio,
-                "breakout": levels["breakout"],
-                "breakdown": levels["breakdown"],
+                "volume": volume,
+                "breakout":
+                    levels["breakout"],
+                "breakdown":
+                    levels["breakdown"],
                 "ichimoku": ichimoku,
-                "samples": len(items),
                 "reasons": reasons,
             }
         )
-
-    # =====================================================
-    # WATCHLIST
-    # =====================================================
 
     results.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
+    # -----------------------------------------------------
+    # Create new trades
+    # -----------------------------------------------------
+
+    new_signals = []
+
+    for result in results:
+
+        trade = create_signal_if_valid(
+            result,
+            trades
+        )
+
+        if trade:
+
+            trades[
+                trade["id"]
+            ] = trade
+
+            new_signals.append(
+                trade
+            )
+
+            if len(trades) >= MAX_ACTIVE_TRADES:
+                break
+
+    # -----------------------------------------------------
+    # Save trade state
+    # -----------------------------------------------------
+
+    save_json(
+        TRADE_FILE,
+        trades
+    )
+
+    # -----------------------------------------------------
+    # Send new signals
+    # -----------------------------------------------------
+
+    for trade in new_signals:
+
+        send_telegram(
+            trade_message(trade)
+        )
+
+    # -----------------------------------------------------
+    # Watchlist
+    # -----------------------------------------------------
+
     watchlist = results[:5]
 
-    # =====================================================
-    # STRONG SIGNALS
-    # =====================================================
-
-    strong_pumps = [
-        x
-        for x in results
-        if (
-            x["direction"] == "PUMP"
-            and x["score"] >= 75
-            and x["c5"] is not None
-            and x["c10"] is not None
-            and x["c15"] is not None
-            and x["c5"] > 0
-            and x["c10"] > 0
-            and x["c15"] > 0
-            and x["c5"] < 5
-        )
-    ]
-
-    strong_dumps = [
-        x
-        for x in results
-        if (
-            x["direction"] == "DUMP"
-            and x["score"] >= 75
-            and x["c5"] is not None
-            and x["c10"] is not None
-            and x["c15"] is not None
-            and x["c5"] < 0
-            and x["c10"] < 0
-            and x["c15"] < 0
-        )
-    ]
-
-    # =====================================================
-    # MESSAGE
-    # =====================================================
-
     lines = [
-        "🚨 <b>EARLY PUMP/DUMP ENGINE v3</b>",
-        "━━━━━━━━━━━━━━━━━━",
-    ]
-
-    # =====================================================
-    # STRONG PUMP
-    # =====================================================
-
-    if strong_pumps:
-
-        lines.append(
-            "🔥 <b>STRONG EARLY PUMP</b>"
-        )
-
-        for item in strong_pumps[:3]:
-
-            lines.append(
-                f"🟢 <b>{item['symbol']}</b> "
-                f"⭐ <b>{item['score']}/100</b>"
-            )
-
-            lines.append(
-                f"5m {fmt_percent(item['c5'])} | "
-                f"10m {fmt_percent(item['c10'])} | "
-                f"15m {fmt_percent(item['c15'])}"
-            )
-
-            lines.append(
-                f"RSI {fmt_rsi(item['rsi'])} | "
-                f"Vol {fmt_volume(item['volume_ratio'])}"
-            )
-
-            lines.append(
-                "💥 Breakout: "
-                + (
-                    "YES"
-                    if item["breakout"]
-                    else "NO"
-                )
-            )
-
-            lines.append(
-                "☁️ Ichimoku: "
-                + (
-                    "BULLISH"
-                    if item["ichimoku"].get(
-                        "bullish"
-                    )
-                    else "NO"
-                )
-            )
-
-            if item["reasons"]:
-
-                lines.append(
-                    "📌 "
-                    + ", ".join(
-                        item["reasons"][:6]
-                    )
-                )
-
-            lines.append("")
-
-    # =====================================================
-    # STRONG DUMP
-    # =====================================================
-
-    if strong_dumps:
-
-        lines.append(
-            "🔴 <b>STRONG EARLY DUMP</b>"
-        )
-
-        for item in strong_dumps[:3]:
-
-            lines.append(
-                f"🔴 <b>{item['symbol']}</b> "
-                f"⭐ <b>{item['score']}/100</b>"
-            )
-
-            lines.append(
-                f"5m {fmt_percent(item['c5'])} | "
-                f"10m {fmt_percent(item['c10'])} | "
-                f"15m {fmt_percent(item['c15'])}"
-            )
-
-            lines.append(
-                f"RSI {fmt_rsi(item['rsi'])} | "
-                f"Vol {fmt_volume(item['volume_ratio'])}"
-            )
-
-            lines.append(
-                "💥 Breakdown: "
-                + (
-                    "YES"
-                    if item["breakdown"]
-                    else "NO"
-                )
-            )
-
-            lines.append(
-                "☁️ Ichimoku: "
-                + (
-                    "BEARISH"
-                    if item["ichimoku"].get(
-                        "bearish"
-                    )
-                    else "NO"
-                )
-            )
-
-            if item["reasons"]:
-
-                lines.append(
-                    "📌 "
-                    + ", ".join(
-                        item["reasons"][:6]
-                    )
-                )
-
-            lines.append("")
-
-    if (
-        not strong_pumps
-        and not strong_dumps
-    ):
-
-        lines.append(
-            "🟢 فعلاً سیگنال قوی نداریم."
-        )
-
-    # =====================================================
-    # WATCHLIST
-    # =====================================================
-
-    lines += [
-        "",
         "👀 <b>TOP 5 WATCHLIST</b>",
         "━━━━━━━━━━━━━━━━━━",
     ]
 
-    for index, item in enumerate(
+    for i, item in enumerate(
         watchlist,
         1
     ):
@@ -1270,86 +1660,71 @@ def scan():
             else "🔴"
         )
 
+        rsi_text = (
+            "N/A"
+            if item["rsi"] is None
+            else f"{item['rsi']:.1f}"
+        )
+
+        volume_text = (
+            "N/A"
+            if item["volume"] is None
+            else f"{item['volume']:.1f}x"
+        )
+
         lines.append(
-            f"{index}. {emoji} "
+            f"{i}. {emoji} "
             f"<b>{item['symbol']}</b> "
             f"⭐ {item['score']}/100"
         )
 
         lines.append(
-            f"5m {fmt_percent(item['c5'])} | "
-            f"10m {fmt_percent(item['c10'])} | "
-            f"15m {fmt_percent(item['c15'])}"
+            f"5m "
+            f"{item['c5']:+.2f}% "
+            if item["c5"] is not None
+            else "5m N/A"
         )
 
         lines.append(
-            f"RSI {fmt_rsi(item['rsi'])} | "
-            f"Vol {fmt_volume(item['volume_ratio'])}"
+            f"10m "
+            f"{item['c10']:+.2f}% | "
+            f"15m "
+            f"{item['c15']:+.2f}%"
+            if (
+                item["c10"] is not None
+                and item["c15"] is not None
+            )
+            else "10m/15m N/A"
         )
 
-        features = []
+        lines.append(
+            f"RSI {rsi_text} | "
+            f"Vol {volume_text}"
+        )
 
-        if item["breakout"]:
-            features.append(
-                "Breakout"
-            )
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
 
-        if item["breakdown"]:
-            features.append(
-                "Breakdown"
-            )
+    btc_text = (
+        "N/A"
+        if btc_1h is None
+        else f"{btc_1h:+.2f}%"
+    )
 
-        if item["ichimoku"].get(
-            "bullish"
-        ):
+    lines.append(
+        f"₿ BTC 1H: {btc_text}"
+    )
 
-            features.append(
-                "Ichimoku 🟢"
-            )
-
-        elif item["ichimoku"].get(
-            "bearish"
-        ):
-
-            features.append(
-                "Ichimoku 🔴"
-            )
-
-        if features:
-
-            lines.append(
-                "📌 "
-                + " | ".join(features)
-            )
-
-    # =====================================================
-    # FOOTER
-    # =====================================================
-
-    lines += [
-        "",
-        "━━━━━━━━━━━━━━━━━━",
+    active = [
+        x
+        for x in trades.values()
+        if x["status"] == "ACTIVE"
     ]
 
-    if btc_1h is None:
-
-        lines.append(
-            "₿ BTC 1H: N/A"
-        )
-
-    else:
-
-        btc_regime = "🟢" if btc_1h > 0 else "🔴"
-
-        lines.append(
-            f"₿ BTC 1H: "
-            f"{btc_regime} "
-            f"{btc_1h:+.2f}%"
-        )
-
-    total_samples = sum(
-        len(v)
-        for v in history.values()
+    lines.append(
+        f"📌 Active Trades: "
+        f"{len(active)}"
     )
 
     lines.append(
@@ -1358,31 +1733,18 @@ def scan():
     )
 
     lines.append(
-        f"🧠 History: "
-        f"{total_samples} snapshots"
-    )
-
-    lines.append(
         "📡 Source: CoinGecko"
     )
 
-    now = datetime.now(
-        timezone.utc
-    ).strftime(
-        "%Y-%m-%d %H:%M UTC"
-    )
-
     lines.append(
-        f"🕐 {now}"
+        "🤖 v4 Signal + Trade Manager"
     )
 
     message = "\n".join(lines)
 
     print(message)
 
-    send_telegram(
-        message
-    )
+    send_telegram(message)
 
     print(
         "Scanner finished."
