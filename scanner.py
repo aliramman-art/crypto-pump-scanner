@@ -17,7 +17,7 @@ COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/markets"
 
 HISTORY_FILE = "price_data.json"
 
-# 8 hours history
+# Keep approximately 8 hours of history
 HISTORY_SECONDS = 8 * 60 * 60
 
 COINS = [
@@ -59,11 +59,15 @@ COINS = [
 # =========================================================
 
 def send_telegram(text):
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram secrets are missing.")
         return False
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -73,10 +77,11 @@ def send_telegram(text):
     }
 
     try:
+
         response = requests.post(
             url,
             json=payload,
-            timeout=20
+            timeout=20,
         )
 
         response.raise_for_status()
@@ -84,14 +89,15 @@ def send_telegram(text):
         result = response.json()
 
         if result.get("ok"):
-            print("Telegram message sent successfully.")
+            print("Telegram message sent.")
             return True
 
-        print(f"Telegram rejected message: {result}")
+        print("Telegram rejected message:", result)
         return False
 
     except Exception as e:
-        print(f"Telegram error: {e}")
+
+        print("Telegram error:", e)
         return False
 
 
@@ -102,7 +108,6 @@ def send_telegram(text):
 def load_history():
 
     if not os.path.exists(HISTORY_FILE):
-        print("No previous history found.")
         return {}
 
     try:
@@ -110,7 +115,7 @@ def load_history():
         with open(
             HISTORY_FILE,
             "r",
-            encoding="utf-8"
+            encoding="utf-8",
         ) as file:
 
             data = json.load(file)
@@ -119,7 +124,8 @@ def load_history():
             return data
 
     except Exception as e:
-        print(f"History read error: {e}")
+
+        print("History read error:", e)
 
     return {}
 
@@ -133,25 +139,24 @@ def save_history(history):
         with open(
             temp_file,
             "w",
-            encoding="utf-8"
+            encoding="utf-8",
         ) as file:
 
             json.dump(
                 history,
                 file,
                 ensure_ascii=False,
-                separators=(",", ":")
+                separators=(",", ":"),
             )
 
         os.replace(
             temp_file,
-            HISTORY_FILE
+            HISTORY_FILE,
         )
 
-        print("History saved.")
-
     except Exception as e:
-        print(f"History save error: {e}")
+
+        print("History save error:", e)
 
 
 def update_history(history, market_data):
@@ -188,36 +193,32 @@ def update_history(history, market_data):
             if int(item.get("time", 0)) >= cutoff
         ]
 
-        # Keep enough snapshots for Ichimoku
         if len(history[coin_id]) > 150:
             history[coin_id] = history[coin_id][-150:]
 
 
 # =========================================================
-# TIME CHANGE
+# PRICE CHANGE
 # =========================================================
 
 def get_change(items, minutes):
 
-    if not items or len(items) < 2:
+    if len(items) < 2:
         return None
 
     latest = items[-1]
 
     latest_time = int(latest["time"])
 
-    target_time = latest_time - minutes * 60
-
-    # We allow GitHub Actions schedule delays.
-    max_distance = max(
-        300,
-        int(minutes * 60 * 0.80)
+    target_time = latest_time - (
+        minutes * 60
     )
 
     candidates = [
         item
         for item in items[:-1]
-        if int(item.get("time", 0)) <= target_time
+        if int(item.get("time", 0))
+        <= target_time
     ]
 
     if not candidates:
@@ -227,13 +228,8 @@ def get_change(items, minutes):
         candidates,
         key=lambda x: abs(
             int(x["time"]) - target_time
-        )
+        ),
     )
-
-    previous_time = int(previous["time"])
-
-    if abs(previous_time - target_time) > max_distance:
-        return None
 
     previous_price = float(
         previous["price"]
@@ -257,9 +253,6 @@ def get_change(items, minutes):
 # =========================================================
 
 def calculate_rsi(items, period=14):
-
-    if len(items) < period + 1:
-        return None
 
     prices = [
         float(x["price"])
@@ -287,18 +280,17 @@ def calculate_rsi(items, period=14):
         for x in recent
     ]
 
-    average_gain = sum(gains) / period
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
 
-    average_loss = sum(losses) / period
+    if avg_loss == 0:
 
-    if average_loss == 0:
-
-        if average_gain == 0:
+        if avg_gain == 0:
             return 50.0
 
         return 100.0
 
-    rs = average_gain / average_loss
+    rs = avg_gain / avg_loss
 
     return 100 - (
         100 / (1 + rs)
@@ -322,9 +314,10 @@ def calculate_ema(items, period):
 
     multiplier = 2 / (period + 1)
 
-    ema = sum(
-        prices[:period]
-    ) / period
+    ema = (
+        sum(prices[:period])
+        / period
+    )
 
     for price in prices[period:]:
 
@@ -337,48 +330,65 @@ def calculate_ema(items, period):
 
 
 # =========================================================
-# VOLUME TREND
+# VOLUME RATIO
 # =========================================================
 
-def calculate_volume_trend(items):
+def calculate_volume_ratio(
+    items,
+    lookback=10,
+):
 
-    if len(items) < 4:
+    if len(items) < lookback + 1:
         return None
 
-    latest_volume = float(
+    current_volume = float(
         items[-1].get("volume", 0)
     )
 
-    old_volume = float(
-        items[-4].get("volume", 0)
+    previous_volumes = [
+        float(x.get("volume", 0))
+        for x in items[-lookback - 1:-1]
+    ]
+
+    previous_volumes = [
+        x for x in previous_volumes
+        if x > 0
+    ]
+
+    if not previous_volumes:
+        return None
+
+    average_volume = (
+        sum(previous_volumes)
+        / len(previous_volumes)
     )
 
-    if old_volume <= 0:
+    if average_volume <= 0:
         return None
 
     return (
-        (latest_volume - old_volume)
-        / old_volume
-    ) * 100
+        current_volume
+        / average_volume
+    )
 
 
 # =========================================================
-# BREAKOUT PROXY
+# BREAKOUT / BREAKDOWN
 # =========================================================
 
 def calculate_breakout(items):
 
     if len(items) < 7:
+
         return {
             "breakout": False,
-            "distance": None,
+            "breakdown": False,
         }
 
-    latest_price = float(
+    current_price = float(
         items[-1]["price"]
     )
 
-    # Previous ~30 minutes
     previous = items[-7:-1]
 
     prices = [
@@ -387,45 +397,43 @@ def calculate_breakout(items):
     ]
 
     if not prices:
+
         return {
             "breakout": False,
-            "distance": None,
+            "breakdown": False,
         }
 
     previous_high = max(prices)
+    previous_low = min(prices)
 
-    distance = (
-        (latest_price - previous_high)
-        / previous_high
-    ) * 100
+    breakout = (
+        current_price
+        > previous_high * 1.0005
+    )
 
-    breakout = latest_price > (
-        previous_high * 1.0005
+    breakdown = (
+        current_price
+        < previous_low * 0.9995
     )
 
     return {
         "breakout": breakout,
-        "distance": distance,
+        "breakdown": breakdown,
     }
 
 
 # =========================================================
-# ICHIMOKU PROXY
+# ICHIMOKU
 # =========================================================
 
 def calculate_ichimoku(items):
 
-    # Standard periods:
-    # Tenkan = 9
-    # Kijun = 26
-    # Senkou B = 52
-
     if len(items) < 52:
+
         return {
             "ready": False,
             "bullish": False,
-            "strong": False,
-            "distance_kijun": None,
+            "bearish": False,
         }
 
     prices = [
@@ -433,22 +441,20 @@ def calculate_ichimoku(items):
         for x in items
     ]
 
-    latest_price = prices[-1]
+    current_price = prices[-1]
 
-    tenkan_window = prices[-9:]
-
-    kijun_window = prices[-26:]
-
-    span_b_window = prices[-52:]
+    tenkan_prices = prices[-9:]
+    kijun_prices = prices[-26:]
+    span_b_prices = prices[-52:]
 
     tenkan = (
-        max(tenkan_window)
-        + min(tenkan_window)
+        max(tenkan_prices)
+        + min(tenkan_prices)
     ) / 2
 
     kijun = (
-        max(kijun_window)
-        + min(kijun_window)
+        max(kijun_prices)
+        + min(kijun_prices)
     ) / 2
 
     span_a = (
@@ -456,230 +462,169 @@ def calculate_ichimoku(items):
     ) / 2
 
     span_b = (
-        max(span_b_window)
-        + min(span_b_window)
+        max(span_b_prices)
+        + min(span_b_prices)
     ) / 2
 
     cloud_top = max(
         span_a,
-        span_b
+        span_b,
     )
 
     cloud_bottom = min(
         span_a,
-        span_b
+        span_b,
     )
 
-    distance_kijun = (
-        (latest_price - kijun)
-        / kijun
-    ) * 100 if kijun else None
-
     bullish = (
-        latest_price > cloud_top
+        current_price > cloud_top
         and tenkan > kijun
     )
 
-    strong = (
-        bullish
-        and span_a > span_b
+    bearish = (
+        current_price < cloud_bottom
+        and tenkan < kijun
     )
 
     return {
         "ready": True,
         "bullish": bullish,
-        "strong": strong,
+        "bearish": bearish,
         "tenkan": tenkan,
         "kijun": kijun,
         "span_a": span_a,
         "span_b": span_b,
-        "cloud_top": cloud_top,
-        "cloud_bottom": cloud_bottom,
-        "distance_kijun": distance_kijun,
     }
 
 
 # =========================================================
-# SCORE
+# SCORE PUMP
 # =========================================================
 
-def calculate_score(
+def calculate_pump_score(
     c5,
     c10,
     c15,
     rsi,
     ema5,
     ema10,
-    volume_trend,
+    volume_ratio,
     breakout,
     ichimoku,
-    btc_change,
+    btc_1h,
 ):
 
     score = 0
-
     reasons = []
 
-    # -----------------------------------------------------
-    # 5M MOMENTUM = 15
-    # -----------------------------------------------------
-
+    # 5m momentum
     if c5 is not None:
 
-        if c5 >= 2:
+        if 0.5 <= c5 < 2.5:
             score += 15
-            reasons.append("5m momentum 🔥")
-
-        elif c5 >= 1:
-            score += 11
             reasons.append("5m momentum")
 
-        elif c5 >= 0.5:
-            score += 7
+        elif 2.5 <= c5 < 5:
+            score += 10
 
         elif c5 > 0:
-            score += 3
+            score += 4
 
-    # -----------------------------------------------------
-    # 10M = 10
-    # -----------------------------------------------------
-
+    # 10m momentum
     if c10 is not None:
 
-        if c10 >= 3:
+        if c10 >= 2:
             score += 10
-            reasons.append("10m acceleration 🔥")
-
-        elif c10 >= 1.5:
-            score += 7
-            reasons.append("10m acceleration")
+            reasons.append("10m momentum")
 
         elif c10 > 0:
-            score += 3
+            score += 5
 
-    # -----------------------------------------------------
-    # 15M = 10
-    # -----------------------------------------------------
-
+    # 15m trend
     if c15 is not None:
 
-        if c15 >= 4:
+        if c15 >= 3:
             score += 10
-            reasons.append("15m trend 🔥")
-
-        elif c15 >= 2:
-            score += 7
             reasons.append("15m trend")
 
         elif c15 > 0:
-            score += 3
+            score += 5
 
-    # -----------------------------------------------------
-    # ACCELERATION = 10
-    # -----------------------------------------------------
-
+    # acceleration
     if (
         c5 is not None
         and c10 is not None
         and c5 > 0
         and c10 > 0
+        and c5 > c10 / 2
     ):
 
-        expected_5m = c10 / 2
+        score += 10
+        reasons.append("Acceleration")
 
-        if c5 > expected_5m:
-
-            score += 10
-
-            reasons.append(
-                "Acceleration ⚡"
-            )
-
-        elif c5 > expected_5m * 0.75:
-
-            score += 5
-
-    # -----------------------------------------------------
-    # RSI = 10
-    # -----------------------------------------------------
-
+    # RSI
     if rsi is not None:
 
-        if 52 <= rsi <= 68:
+        if 55 <= rsi <= 70:
 
             score += 10
+            reasons.append("RSI healthy")
 
-            reasons.append(
-                "RSI healthy"
-            )
+        elif 70 < rsi <= 78:
 
-        elif 68 < rsi <= 76:
-
-            score += 7
-
-            reasons.append(
-                "RSI strong"
-            )
-
-        elif 76 < rsi <= 82:
-
-            score += 3
+            score += 6
 
         elif rsi > 82:
 
             score -= 5
+            reasons.append("RSI overheated")
 
-            reasons.append(
-                "RSI overheated"
-            )
-
-    # -----------------------------------------------------
-    # EMA = 10
-    # -----------------------------------------------------
-
+    # EMA
     if (
         ema5 is not None
         and ema10 is not None
+        and ema5 > ema10
     ):
 
-        if ema5 > ema10:
+        score += 10
+        reasons.append("EMA bullish")
+
+    # Volume
+    if volume_ratio is not None:
+
+        if volume_ratio >= 3:
 
             score += 10
-
             reasons.append(
-                "EMA bullish"
+                f"Volume {volume_ratio:.1f}x"
             )
 
-    # -----------------------------------------------------
-    # BREAKOUT = 15
-    # -----------------------------------------------------
+        elif volume_ratio >= 2:
 
+            score += 8
+            reasons.append(
+                f"Volume {volume_ratio:.1f}x"
+            )
+
+        elif volume_ratio >= 1.5:
+
+            score += 5
+            reasons.append(
+                f"Volume {volume_ratio:.1f}x"
+            )
+
+    # Breakout
     if breakout:
 
         score += 15
+        reasons.append("BREAKOUT")
 
-        reasons.append(
-            "BREAKOUT 💥"
-        )
-
-    # -----------------------------------------------------
-    # ICHIMOKU = 15
-    # -----------------------------------------------------
-
+    # Ichimoku
     if ichimoku.get("ready"):
 
-        if ichimoku.get("strong"):
+        if ichimoku.get("bullish"):
 
             score += 15
-
-            reasons.append(
-                "Ichimoku bullish ☁️"
-            )
-
-        elif ichimoku.get("bullish"):
-
-            score += 10
-
             reasons.append(
                 "Ichimoku bullish"
             )
@@ -691,62 +636,185 @@ def calculate_score(
             > ichimoku["kijun"]
         ):
 
-            score += 5
+            score += 6
 
-    # -----------------------------------------------------
-    # BTC FILTER = 5
-    # -----------------------------------------------------
+    # BTC
+    if btc_1h is not None:
 
-    if btc_change is not None:
-
-        if btc_change > 0:
+        if btc_1h > 0:
 
             score += 5
-
             reasons.append(
                 "BTC supportive"
             )
 
-        elif btc_change < -1:
+        elif btc_1h < -1:
 
             score -= 5
 
+    return max(
+        0,
+        min(100, score)
+    ), reasons
+
+
+# =========================================================
+# SCORE DUMP
+# =========================================================
+
+def calculate_dump_score(
+    c5,
+    c10,
+    c15,
+    rsi,
+    ema5,
+    ema10,
+    volume_ratio,
+    breakdown,
+    ichimoku,
+    btc_1h,
+):
+
+    score = 0
+    reasons = []
+
+    # 5m downside
+    if c5 is not None:
+
+        if -2.5 < c5 <= -0.5:
+            score += 15
+            reasons.append("5m selling")
+
+        elif -5 < c5 <= -2.5:
+            score += 10
+
+        elif c5 < 0:
+            score += 4
+
+    # 10m downside
+    if c10 is not None:
+
+        if c10 <= -2:
+
+            score += 10
+            reasons.append("10m selling")
+
+        elif c10 < 0:
+
+            score += 5
+
+    # 15m downside
+    if c15 is not None:
+
+        if c15 <= -3:
+
+            score += 10
+            reasons.append("15m bearish")
+
+        elif c15 < 0:
+
+            score += 5
+
+    # acceleration
+    if (
+        c5 is not None
+        and c10 is not None
+        and c5 < 0
+        and c10 < 0
+        and c5 < c10 / 2
+    ):
+
+        score += 10
+        reasons.append("Down acceleration")
+
+    # RSI
+    if rsi is not None:
+
+        if 30 <= rsi <= 45:
+
+            score += 10
+            reasons.append("RSI weak")
+
+        elif rsi < 25:
+
+            score -= 5
+            reasons.append(
+                "RSI oversold"
+            )
+
+    # EMA
+    if (
+        ema5 is not None
+        and ema10 is not None
+        and ema5 < ema10
+    ):
+
+        score += 10
+        reasons.append("EMA bearish")
+
+    # Volume
+    if volume_ratio is not None:
+
+        if volume_ratio >= 3:
+
+            score += 10
+            reasons.append(
+                f"Volume {volume_ratio:.1f}x"
+            )
+
+        elif volume_ratio >= 2:
+
+            score += 8
+            reasons.append(
+                f"Volume {volume_ratio:.1f}x"
+            )
+
+        elif volume_ratio >= 1.5:
+
+            score += 5
+            reasons.append(
+                f"Volume {volume_ratio:.1f}x"
+            )
+
+    # Breakdown
+    if breakdown:
+
+        score += 15
+        reasons.append("BREAKDOWN")
+
+    # Ichimoku
+    if ichimoku.get("ready"):
+
+        if ichimoku.get("bearish"):
+
+            score += 15
+            reasons.append(
+                "Ichimoku bearish"
+            )
+
+        elif (
+            ichimoku.get("tenkan")
+            and ichimoku.get("kijun")
+            and ichimoku["tenkan"]
+            < ichimoku["kijun"]
+        ):
+
+            score += 6
+
+    # BTC
+    if btc_1h is not None:
+
+        if btc_1h < 0:
+
+            score += 5
             reasons.append(
                 "BTC bearish"
             )
 
-    # -----------------------------------------------------
-    # VOLUME = 10
-    # -----------------------------------------------------
-
-    if volume_trend is not None:
-
-        if volume_trend >= 20:
-
-            score += 10
-
-            reasons.append(
-                "Volume spike"
-            )
-
-        elif volume_trend >= 10:
-
-            score += 7
-
-            reasons.append(
-                "Volume rising"
-            )
-
-        elif volume_trend >= 3:
-
-            score += 3
-
-    score = max(
+    return max(
         0,
         min(100, score)
-    )
-
-    return score, reasons
+    ), reasons
 
 
 # =========================================================
@@ -766,7 +834,7 @@ def get_market_data():
 
     headers = {
         "User-Agent":
-            "crypto-pump-scanner/2.0"
+            "early-pump-engine/3.0"
     }
 
     try:
@@ -779,8 +847,8 @@ def get_market_data():
         )
 
         print(
-            f"CoinGecko HTTP: "
-            f"{response.status_code}"
+            "CoinGecko HTTP:",
+            response.status_code,
         )
 
         response.raise_for_status()
@@ -788,11 +856,6 @@ def get_market_data():
         data = response.json()
 
         if not isinstance(data, list):
-
-            print(
-                "CoinGecko returned invalid data."
-            )
-
             return []
 
         return data
@@ -800,7 +863,8 @@ def get_market_data():
     except Exception as e:
 
         print(
-            f"CoinGecko request failed: {e}"
+            "CoinGecko error:",
+            e,
         )
 
         return []
@@ -826,36 +890,34 @@ def fmt_rsi(value):
     return f"{value:.1f}"
 
 
+def fmt_volume(value):
+
+    if value is None:
+        return "N/A"
+
+    return f"{value:.1f}x"
+
+
 # =========================================================
-# SCANNER
+# MAIN SCANNER
 # =========================================================
 
 def scan():
 
-    print("=" * 60)
-
     print(
-        "EARLY PUMP ENGINE v2 START"
+        "EARLY PUMP/DUMP ENGINE v3 START"
     )
-
-    print("=" * 60)
 
     market_data = get_market_data()
 
     if not market_data:
 
         send_telegram(
-            "🔴 <b>PUMP SCANNER ERROR</b>\n\n"
-            "CoinGecko data unavailable.\n"
-            "Scanner stopped safely."
+            "🔴 <b>SCANNER ERROR</b>\n\n"
+            "CoinGecko data unavailable."
         )
 
-        return False
-
-    print(
-        f"Market data received: "
-        f"{len(market_data)} coins"
-    )
+        return
 
     history = load_history()
 
@@ -865,8 +927,6 @@ def scan():
     )
 
     save_history(history)
-
-    results = []
 
     btc_history = history.get(
         "bitcoin",
@@ -878,8 +938,10 @@ def scan():
         60
     )
 
+    results = []
+
     # =====================================================
-    # ANALYZE COINS
+    # ANALYZE
     # =====================================================
 
     for coin in market_data:
@@ -891,11 +953,6 @@ def scan():
             ""
         ).upper()
 
-        name = coin.get(
-            "name",
-            symbol
-        )
-
         if not coin_id:
             continue
 
@@ -904,7 +961,7 @@ def scan():
             []
         )
 
-        if not items:
+        if len(items) < 3:
             continue
 
         c5 = get_change(
@@ -923,8 +980,7 @@ def scan():
         )
 
         rsi = calculate_rsi(
-            items,
-            14
+            items
         )
 
         ema5 = calculate_ema(
@@ -937,147 +993,149 @@ def scan():
             10
         )
 
-        volume_trend = calculate_volume_trend(
+        volume_ratio = calculate_volume_ratio(
             items
         )
 
-        breakout_data = calculate_breakout(
+        levels = calculate_breakout(
             items
         )
-
-        breakout = breakout_data[
-            "breakout"
-        ]
 
         ichimoku = calculate_ichimoku(
             items
         )
 
-        score, reasons = calculate_score(
-            c5,
-            c10,
-            c15,
-            rsi,
-            ema5,
-            ema10,
-            volume_trend,
-            breakout,
-            ichimoku,
-            btc_1h,
+        pump_score, pump_reasons = (
+            calculate_pump_score(
+                c5,
+                c10,
+                c15,
+                rsi,
+                ema5,
+                ema10,
+                volume_ratio,
+                levels["breakout"],
+                ichimoku,
+                btc_1h,
+            )
         )
+
+        dump_score, dump_reasons = (
+            calculate_dump_score(
+                c5,
+                c10,
+                c15,
+                rsi,
+                ema5,
+                ema10,
+                volume_ratio,
+                levels["breakdown"],
+                ichimoku,
+                btc_1h,
+            )
+        )
+
+        if pump_score >= dump_score:
+
+            direction = "PUMP"
+            score = pump_score
+            reasons = pump_reasons
+
+        else:
+
+            direction = "DUMP"
+            score = dump_score
+            reasons = dump_reasons
 
         results.append(
             {
-                "id": coin_id,
                 "symbol": symbol,
-                "name": name,
                 "score": score,
+                "direction": direction,
+                "pump_score": pump_score,
+                "dump_score": dump_score,
                 "c5": c5,
                 "c10": c10,
                 "c15": c15,
                 "rsi": rsi,
-                "volume_trend": volume_trend,
-                "breakout": breakout,
+                "volume_ratio": volume_ratio,
+                "breakout": levels["breakout"],
+                "breakdown": levels["breakdown"],
                 "ichimoku": ichimoku,
                 "samples": len(items),
                 "reasons": reasons,
             }
         )
 
-    # Highest score first
+    # =====================================================
+    # WATCHLIST
+    # =====================================================
+
     results.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    # =====================================================
-    # STRONG SIGNAL
-    # =====================================================
-
-    strong = []
-
-    for item in results:
-
-        if item["score"] < 75:
-            continue
-
-        if (
-            item["c5"] is None
-            or item["c10"] is None
-            or item["c15"] is None
-        ):
-            continue
-
-        if (
-            item["c5"] <= 0
-            or item["c10"] <= 0
-            or item["c15"] <= 0
-        ):
-            continue
-
-        # Avoid chasing a candle that already exploded
-        if item["c5"] >= 5:
-            continue
-
-        # Need either breakout or acceleration
-        has_acceleration = False
-
-        if (
-            item["c5"] is not None
-            and item["c10"] is not None
-        ):
-
-            if (
-                item["c5"] > 0
-                and item["c10"] > 0
-                and item["c5"]
-                > item["c10"] / 2
-            ):
-
-                has_acceleration = True
-
-        if (
-            not item["breakout"]
-            and not has_acceleration
-        ):
-            continue
-
-        strong.append(item)
-
-    # =====================================================
-    # TOP 5 ALWAYS
-    # =====================================================
-
     watchlist = results[:5]
 
     # =====================================================
-    # TELEGRAM MESSAGE
+    # STRONG SIGNALS
+    # =====================================================
+
+    strong_pumps = [
+        x
+        for x in results
+        if (
+            x["direction"] == "PUMP"
+            and x["score"] >= 75
+            and x["c5"] is not None
+            and x["c10"] is not None
+            and x["c15"] is not None
+            and x["c5"] > 0
+            and x["c10"] > 0
+            and x["c15"] > 0
+            and x["c5"] < 5
+        )
+    ]
+
+    strong_dumps = [
+        x
+        for x in results
+        if (
+            x["direction"] == "DUMP"
+            and x["score"] >= 75
+            and x["c5"] is not None
+            and x["c10"] is not None
+            and x["c15"] is not None
+            and x["c5"] < 0
+            and x["c10"] < 0
+            and x["c15"] < 0
+        )
+    ]
+
+    # =====================================================
+    # MESSAGE
     # =====================================================
 
     lines = [
-        "🚨 <b>EARLY PUMP ENGINE v2</b>",
+        "🚨 <b>EARLY PUMP/DUMP ENGINE v3</b>",
         "━━━━━━━━━━━━━━━━━━",
     ]
 
-    # -----------------------------------------------------
-    # STRONG
-    # -----------------------------------------------------
+    # =====================================================
+    # STRONG PUMP
+    # =====================================================
 
-    if strong:
+    if strong_pumps:
 
-        lines += [
-            "🔥 <b>STRONG EARLY PUMP</b>",
-            "",
-        ]
+        lines.append(
+            "🔥 <b>STRONG EARLY PUMP</b>"
+        )
 
-        for index, item in enumerate(
-            strong[:3],
-            1
-        ):
+        for item in strong_pumps[:3]:
 
             lines.append(
-                f"{index}. "
-                f"<b>{item['symbol']}</b> "
+                f"🟢 <b>{item['symbol']}</b> "
                 f"⭐ <b>{item['score']}/100</b>"
             )
 
@@ -1089,48 +1147,114 @@ def scan():
 
             lines.append(
                 f"RSI {fmt_rsi(item['rsi'])} | "
-                f"Samples {item['samples']}"
+                f"Vol {fmt_volume(item['volume_ratio'])}"
             )
 
-            features = []
-
-            if item["breakout"]:
-                features.append(
-                    "💥 Breakout"
+            lines.append(
+                "💥 Breakout: "
+                + (
+                    "YES"
+                    if item["breakout"]
+                    else "NO"
                 )
+            )
 
-            if item["ichimoku"].get("bullish"):
-                features.append(
-                    "☁️ Ichimoku"
+            lines.append(
+                "☁️ Ichimoku: "
+                + (
+                    "BULLISH"
+                    if item["ichimoku"].get(
+                        "bullish"
+                    )
+                    else "NO"
                 )
-
-            if features:
-                lines.append(
-                    " | ".join(features)
-                )
+            )
 
             if item["reasons"]:
+
                 lines.append(
                     "📌 "
                     + ", ".join(
-                        item["reasons"][:5]
+                        item["reasons"][:6]
                     )
                 )
 
             lines.append("")
 
-    else:
+    # =====================================================
+    # STRONG DUMP
+    # =====================================================
 
-        lines += [
-            "🟢 <b>فعلاً Strong Early Pump نداریم</b>",
-            "",
-        ]
+    if strong_dumps:
 
-    # -----------------------------------------------------
-    # TOP 5
-    # -----------------------------------------------------
+        lines.append(
+            "🔴 <b>STRONG EARLY DUMP</b>"
+        )
+
+        for item in strong_dumps[:3]:
+
+            lines.append(
+                f"🔴 <b>{item['symbol']}</b> "
+                f"⭐ <b>{item['score']}/100</b>"
+            )
+
+            lines.append(
+                f"5m {fmt_percent(item['c5'])} | "
+                f"10m {fmt_percent(item['c10'])} | "
+                f"15m {fmt_percent(item['c15'])}"
+            )
+
+            lines.append(
+                f"RSI {fmt_rsi(item['rsi'])} | "
+                f"Vol {fmt_volume(item['volume_ratio'])}"
+            )
+
+            lines.append(
+                "💥 Breakdown: "
+                + (
+                    "YES"
+                    if item["breakdown"]
+                    else "NO"
+                )
+            )
+
+            lines.append(
+                "☁️ Ichimoku: "
+                + (
+                    "BEARISH"
+                    if item["ichimoku"].get(
+                        "bearish"
+                    )
+                    else "NO"
+                )
+            )
+
+            if item["reasons"]:
+
+                lines.append(
+                    "📌 "
+                    + ", ".join(
+                        item["reasons"][:6]
+                    )
+                )
+
+            lines.append("")
+
+    if (
+        not strong_pumps
+        and not strong_dumps
+    ):
+
+        lines.append(
+            "🟢 فعلاً سیگنال قوی نداریم."
+        )
+
+    # =====================================================
+    # WATCHLIST
+    # =====================================================
 
     lines += [
+        "",
         "👀 <b>TOP 5 WATCHLIST</b>",
         "━━━━━━━━━━━━━━━━━━",
     ]
@@ -1140,24 +1264,16 @@ def scan():
         1
     ):
 
-        readiness = ""
-
-        if item["samples"] < 15:
-            readiness = " 🕐"
-
-        elif item["samples"] < 52:
-            readiness = " 📊"
-
-        elif not item["ichimoku"].get(
-            "ready"
-        ):
-            readiness = " ☁️"
+        emoji = (
+            "🟢"
+            if item["direction"] == "PUMP"
+            else "🔴"
+        )
 
         lines.append(
-            f"{index}. "
+            f"{index}. {emoji} "
             f"<b>{item['symbol']}</b> "
             f"⭐ {item['score']}/100"
-            f"{readiness}"
         )
 
         lines.append(
@@ -1168,21 +1284,47 @@ def scan():
 
         lines.append(
             f"RSI {fmt_rsi(item['rsi'])} | "
-            f"Samples {item['samples']}"
+            f"Vol {fmt_volume(item['volume_ratio'])}"
         )
 
-        if item["reasons"]:
+        features = []
+
+        if item["breakout"]:
+            features.append(
+                "Breakout"
+            )
+
+        if item["breakdown"]:
+            features.append(
+                "Breakdown"
+            )
+
+        if item["ichimoku"].get(
+            "bullish"
+        ):
+
+            features.append(
+                "Ichimoku 🟢"
+            )
+
+        elif item["ichimoku"].get(
+            "bearish"
+        ):
+
+            features.append(
+                "Ichimoku 🔴"
+            )
+
+        if features:
 
             lines.append(
                 "📌 "
-                + ", ".join(
-                    item["reasons"][:3]
-                )
+                + " | ".join(features)
             )
 
-    # -----------------------------------------------------
+    # =====================================================
     # FOOTER
-    # -----------------------------------------------------
+    # =====================================================
 
     lines += [
         "",
@@ -1197,8 +1339,11 @@ def scan():
 
     else:
 
+        btc_regime = "🟢" if btc_1h > 0 else "🔴"
+
         lines.append(
             f"₿ BTC 1H: "
+            f"{btc_regime} "
             f"{btc_1h:+.2f}%"
         )
 
@@ -1215,11 +1360,6 @@ def scan():
     lines.append(
         f"🧠 History: "
         f"{total_samples} snapshots"
-    )
-
-    lines.append(
-        "☁️ Ichimoku: "
-        "5m price proxy"
     )
 
     lines.append(
@@ -1245,14 +1385,12 @@ def scan():
     )
 
     print(
-        "EARLY PUMP ENGINE v2 FINISHED."
+        "Scanner finished."
     )
-
-    return True
 
 
 # =========================================================
-# MAIN
+# RUN
 # =========================================================
 
 if __name__ == "__main__":
