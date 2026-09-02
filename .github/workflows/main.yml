@@ -1,0 +1,20 @@
+- name: Restore scanner state
+  uses: actions/cache/restore@v4
+  with:
+    path: |
+      trade_state.json
+      signal_state.json
+      performance.json
+    key: pump-v5-${{ github.run_id }}
+    restore-keys: |
+      pump-v5-
+
+- name: Save scanner state
+  if: always()
+  uses: actions/cache/save@v4
+  with:
+    path: |
+      trade_state.json
+      signal_state.json
+      performance.json
+    key: pump-v5-${{ github.run_id }}
