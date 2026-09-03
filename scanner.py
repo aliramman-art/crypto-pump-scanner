@@ -1,465 +1,213 @@
-import os
-import requests
-import pandas as pd
-import numpy as np
+# ============================================================
+# UT BOT ALERT — ADDITION ONLY
+# Pine Script UT Bot Alerts
+# Key Value = 3
+# ATR Period = 10
+# Heikin Ashi = False
+# Closed 5m candles
+# ============================================================
 
-# ==========================================
-# SETTINGS
-# ==========================================
-
-SYMBOL = "ZECUSDT"
-INTERVAL = "5m"
-
-KEY_VALUE = 3
-ATR_PERIOD = 10
-
-HEIKIN_ASHI = False
-
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-
-BINANCE_URL = "https://api.binance.com/api/v3/klines"
+UT_KEY_VALUE = 3
+UT_ATR_PERIOD = 10
 
 
-# ==========================================
-# GET BINANCE DATA
-# ==========================================
+def calculate_utbot_atr(candles, period=10):
+    """
+    Pine Script ATR = RMA(True Range, period)
+    """
+    if len(candles) < period + 1:
+        return [0.0] * len(candles)
 
-def get_klines(limit=300):
+    tr = [0.0] * len(candles)
 
-    params = {
-        "symbol": SYMBOL,
-        "interval": INTERVAL,
-        "limit": limit
-    }
+    for i in range(1, len(candles)):
+        high = candles[i]["high"]
+        low = candles[i]["low"]
+        prev_close = candles[i - 1]["close"]
 
-    response = requests.get(
-        BINANCE_URL,
-        params=params,
-        timeout=20
-    )
+        tr[i] = max(
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close)
+        )
 
-    response.raise_for_status()
+    atr = [0.0] * len(candles)
 
-    data = response.json()
+    # Pine RMA seed = SMA
+    first_values = tr[1:period + 1]
 
-    df = pd.DataFrame(data, columns=[
-        "time",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "close_time",
-        "quote_volume",
-        "trades",
-        "buy_volume",
-        "buy_quote_volume",
-        "ignore"
-    ])
+    if len(first_values) < period:
+        return atr
 
-    for column in ["open", "high", "low", "close"]:
-        df[column] = df[column].astype(float)
+    atr[period] = sum(first_values) / period
 
-    return df
+    alpha = 1.0 / period
 
-
-# ==========================================
-# HEIKIN ASHI
-# ==========================================
-
-def calculate_heikin_ashi(df):
-
-    ha = pd.DataFrame(index=df.index)
-
-    ha["close"] = (
-        df["open"] +
-        df["high"] +
-        df["low"] +
-        df["close"]
-    ) / 4
-
-    ha["open"] = 0.0
-
-    for i in range(len(df)):
-
-        if i == 0:
-            ha.iloc[i, ha.columns.get_loc("open")] = (
-                df.iloc[i]["open"] +
-                df.iloc[i]["close"]
-            ) / 2
-        else:
-            ha.iloc[i, ha.columns.get_loc("open")] = (
-                ha.iloc[i - 1]["open"] +
-                ha.iloc[i - 1]["close"]
-            ) / 2
-
-    ha["high"] = pd.concat(
-        [
-            df["high"],
-            ha["open"],
-            ha["close"]
-        ],
-        axis=1
-    ).max(axis=1)
-
-    ha["low"] = pd.concat(
-        [
-            df["low"],
-            ha["open"],
-            ha["close"]
-        ],
-        axis=1
-    ).min(axis=1)
-
-    return ha
-
-
-# ==========================================
-# TRUE RANGE
-# ==========================================
-
-def calculate_true_range(df):
-
-    previous_close = df["close"].shift(1)
-
-    tr1 = df["high"] - df["low"]
-
-    tr2 = (
-        df["high"] -
-        previous_close
-    ).abs()
-
-    tr3 = (
-        df["low"] -
-        previous_close
-    ).abs()
-
-    return pd.concat(
-        [tr1, tr2, tr3],
-        axis=1
-    ).max(axis=1)
-
-
-# ==========================================
-# ATR
-# ==========================================
-
-def calculate_atr(df, period):
-
-    tr = calculate_true_range(df)
-
-    # TradingView Pine v4 ATR uses RMA
-    atr = tr.ewm(
-        alpha=1 / period,
-        adjust=False
-    ).mean()
+    for i in range(period + 1, len(candles)):
+        atr[i] = (
+            alpha * tr[i]
+            + (1 - alpha) * atr[i - 1]
+        )
 
     return atr
 
 
-# ==========================================
-# UT BOT
-# ==========================================
+def calculate_utbot_signal(candles):
+    """
+    Exact UT Bot logic based on the supplied Pine Script.
 
-def calculate_utbot(df):
+    a = 3
+    c = 10
+    h = false
+    """
 
-    # Source
-    if HEIKIN_ASHI:
+    if len(candles) < 30:
+        return None
 
-        ha = calculate_heikin_ashi(df)
+    src = [
+        c["close"]
+        for c in candles
+    ]
 
-        src = ha["close"].copy()
+    atr = calculate_utbot_atr(
+        candles,
+        UT_ATR_PERIOD
+    )
 
-        # For HA source, Pine's security() supplies HA close.
-        # ATR in the original script is calculated from the
-        # chart's regular OHLC.
-        atr = calculate_atr(
-            df,
-            ATR_PERIOD
-        )
+    nloss = [
+        UT_KEY_VALUE * x
+        for x in atr
+    ]
 
-    else:
+    trailing = [0.0] * len(candles)
+    pos = [0] * len(candles)
 
-        src = df["close"].copy()
+    # --------------------------------------------------------
+    # Pine:
+    #
+    # xATRTrailingStop := iff(
+    #   src > nz(stop[1],0) and src[1] > nz(stop[1],0),
+    #   max(stop[1], src-nLoss),
+    #
+    #   iff(
+    #     src < stop[1] and src[1] < stop[1],
+    #     min(stop[1], src+nLoss),
+    #
+    #     iff(
+    #       src > stop[1],
+    #       src-nLoss,
+    #       src+nLoss
+    #     )
+    #   )
+    # )
+    # --------------------------------------------------------
 
-        atr = calculate_atr(
-            df,
-            ATR_PERIOD
-        )
-
-    n_loss = KEY_VALUE * atr
-
-    trailing_stop = np.zeros(len(df))
-
-    # ==========================================
-    # EXACT UT BOT TRAILING STOP LOGIC
-    # ==========================================
-
-    for i in range(len(df)):
+    for i in range(len(candles)):
 
         if i == 0:
-
-            trailing_stop[i] = 0.0
-
+            trailing[i] = 0.0
+            pos[i] = 0
             continue
 
-        previous_stop = trailing_stop[i - 1]
-
-        current_src = src.iloc[i]
-        previous_src = src.iloc[i - 1]
-
-        # Pine:
-        #
-        # iff(
-        # src > stop[1] and src[1] > stop[1],
-        # max(stop[1], src - nLoss),
-        #
-        # iff(
-        # src < stop[1] and src[1] < stop[1],
-        # min(stop[1], src + nLoss),
-        #
-        # iff(
-        # src > stop[1],
-        # src - nLoss,
-        # src + nLoss
-        # )))
+        prev_stop = trailing[i - 1]
 
         if (
-            current_src > previous_stop
-            and previous_src > previous_stop
+            src[i] > prev_stop
+            and src[i - 1] > prev_stop
         ):
-
-            trailing_stop[i] = max(
-                previous_stop,
-                current_src - n_loss.iloc[i]
+            trailing[i] = max(
+                prev_stop,
+                src[i] - nloss[i]
             )
 
         elif (
-            current_src < previous_stop
-            and previous_src < previous_stop
+            src[i] < prev_stop
+            and src[i - 1] < prev_stop
         ):
-
-            trailing_stop[i] = min(
-                previous_stop,
-                current_src + n_loss.iloc[i]
+            trailing[i] = min(
+                prev_stop,
+                src[i] + nloss[i]
             )
 
-        elif current_src > previous_stop:
-
-            trailing_stop[i] = (
-                current_src -
-                n_loss.iloc[i]
-            )
+        elif src[i] > prev_stop:
+            trailing[i] = src[i] - nloss[i]
 
         else:
+            trailing[i] = src[i] + nloss[i]
 
-            trailing_stop[i] = (
-                current_src +
-                n_loss.iloc[i]
-            )
+        # ----------------------------------------------------
+        # pos
+        # ----------------------------------------------------
 
-    df["src"] = src
-    df["atr"] = atr
-    df["nLoss"] = n_loss
-    df["trailing_stop"] = trailing_stop
+        if (
+            src[i - 1] < prev_stop
+            and src[i] > prev_stop
+        ):
+            pos[i] = 1
 
-    # ==========================================
-    # EMA 1
-    # ==========================================
+        elif (
+            src[i - 1] > prev_stop
+            and src[i] < prev_stop
+        ):
+            pos[i] = -1
 
-    # Pine:
-    # ema = ema(src,1)
+        else:
+            pos[i] = pos[i - 1]
+
+    # --------------------------------------------------------
+    # EMA(src, 1) = src
     #
-    # EMA period 1 = source itself
+    # crossover(ema, trailing)
+    # crossover(trailing, ema)
+    # --------------------------------------------------------
 
-    ema = src.copy()
+    i = len(candles) - 1
 
-    df["ema"] = ema
+    if i < 1:
+        return None
 
-    # ==========================================
-    # CROSSOVER
-    # ==========================================
+    ema_now = src[i]
+    ema_prev = src[i - 1]
 
-    # Pine:
-    #
-    # above = crossover(ema, trailingStop)
-    #
-    # crossover(a,b):
-    # a > b AND previous a <= previous b
+    stop_now = trailing[i]
+    stop_prev = trailing[i - 1]
 
     above = (
-        (ema > df["trailing_stop"]) &
-        (
-            ema.shift(1) <=
-            df["trailing_stop"].shift(1)
-        )
+        ema_now > stop_now
+        and ema_prev <= stop_prev
     )
-
-    # Pine:
-    #
-    # below = crossover(trailingStop, ema)
 
     below = (
-        (df["trailing_stop"] > ema) &
-        (
-            df["trailing_stop"].shift(1) <=
-            ema.shift(1)
-        )
+        stop_now > ema_now
+        and stop_prev <= ema_prev
     )
 
-    # ==========================================
-    # BUY / SELL
-    # ==========================================
-
     buy = (
-        (src > df["trailing_stop"]) &
-        above
+        src[i] > trailing[i]
+        and above
     )
 
     sell = (
-        (src < df["trailing_stop"]) &
-        below
+        src[i] < trailing[i]
+        and below
     )
 
-    df["buy"] = buy
-    df["sell"] = sell
+    if buy:
+        return {
+            "signal": "BUY",
+            "price": src[i],
+            "candle_time": candles[i]["time"],
+            "trailing_stop": trailing[i],
+            "atr": atr[i],
+        }
 
-    return df
+    if sell:
+        return {
+            "signal": "SELL",
+            "price": src[i],
+            "candle_time": candles[i]["time"],
+            "trailing_stop": trailing[i],
+            "atr": atr[i],
+        }
 
-
-# ==========================================
-# TELEGRAM
-# ==========================================
-
-def send_telegram(message):
-
-    if not TELEGRAM_TOKEN:
-        raise ValueError(
-            "TELEGRAM_TOKEN is missing"
-        )
-
-    if not TELEGRAM_CHAT_ID:
-        raise ValueError(
-            "TELEGRAM_CHAT_ID is missing"
-        )
-
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/sendMessage"
-    )
-
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
-
-    response = requests.post(
-        url,
-        data=payload,
-        timeout=20
-    )
-
-    response.raise_for_status()
-
-
-# ==========================================
-# MAIN
-# ==========================================
-
-def main():
-
-    print("================================")
-    print("ZEC UT BOT ALERT")
-    print("================================")
-    print(f"Symbol: {SYMBOL}")
-    print(f"Timeframe: {INTERVAL}")
-    print(f"Key Value: {KEY_VALUE}")
-    print(f"ATR Period: {ATR_PERIOD}")
-    print(f"Heikin Ashi: {HEIKIN_ASHI}")
-    print("================================")
-
-    df = get_klines()
-
-    df = calculate_utbot(df)
-
-    # ==========================================
-    # LAST CLOSED CANDLE
-    # ==========================================
-
-    # Binance's last candle can still be open.
-    # Therefore use [-2].
-
-    candle = df.iloc[-2]
-
-    candle_time = pd.to_datetime(
-        candle["time"],
-        unit="ms",
-        utc=True
-    )
-
-    price = candle["close"]
-
-    print(
-        f"Last closed candle: {candle_time}"
-    )
-
-    print(
-        f"Price: {price}"
-    )
-
-    # ==========================================
-    # SIGNAL
-    # ==========================================
-
-    if candle["buy"]:
-
-        message = f"""🟢 ZEC/USDT BUY
-
-🤖 UT Bot Alerts
-
-⚙️ Key Value: 3
-⚙️ ATR Period: 10
-⏱ Timeframe: 5m
-
-💰 Price: {price:.4f}
-
-📊 Signal: BUY
-🕯 Candle: {candle_time}
-
-#ZEC #ZECUSDT #BUY
-"""
-
-        send_telegram(message)
-
-        print("🟢 BUY SIGNAL SENT")
-
-    elif candle["sell"]:
-
-        message = f"""🔴 ZEC/USDT SELL
-
-🤖 UT Bot Alerts
-
-⚙️ Key Value: 3
-⚙️ ATR Period: 10
-⏱ Timeframe: 5m
-
-💰 Price: {price:.4f}
-
-📊 Signal: SELL
-🕯 Candle: {candle_time}
-
-#ZEC #ZECUSDT #SELL
-"""
-
-        send_telegram(message)
-
-        print("🔴 SELL SIGNAL SENT")
-
-    else:
-
-        print("No new signal.")
-
-
-if __name__ == "__main__":
-    main()
+    return None
