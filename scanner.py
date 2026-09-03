@@ -7,12 +7,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# CRYPTO PUMP / DUMP SCANNER v5.5 FAST
+# CRYPTO PUMP / DUMP SCANNER v5.5 ULTRA FAST
 # KRAKEN FUTURES - CLOSED 5M CANDLES
 # UT BOT SETUP ENGINE
 # ============================================================
 
-VERSION = "5.5 FAST"
+VERSION = "5.5 ULTRA FAST"
 
 # ============================================================
 # TELEGRAM
@@ -20,6 +20,15 @@ VERSION = "5.5 FAST"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+TELEGRAM_TIMEOUT = 5
+
+# Telegram ارسال جدا از Scan
+TELEGRAM_WORKERS = 4
+
+telegram_executor = ThreadPoolExecutor(
+    max_workers=TELEGRAM_WORKERS
+)
 
 # ============================================================
 # KRAKEN
@@ -31,17 +40,15 @@ STATE_FILE = "signal_state.json"
 
 CANDLE_HISTORY = 500
 
-# تعداد درخواست‌های همزمان
-MAX_WORKERS = 15
+# تعداد درخواست همزمان Kraken
+MAX_WORKERS = 10
 
-# Timeout درخواست Kraken
-KRAKEN_TIMEOUT = 8
-
-# Timeout Telegram
-TELEGRAM_TIMEOUT = 10
+# Timeout اتصال و دریافت
+KRAKEN_CONNECT_TIMEOUT = 3
+KRAKEN_READ_TIMEOUT = 6
 
 # ============================================================
-# UT BOT SETTINGS
+# UT BOT
 # ============================================================
 
 UT_KEY_VALUE = 3
@@ -90,23 +97,39 @@ COINS = {
 # ============================================================
 
 def load_json_state():
+
     if not os.path.exists(STATE_FILE):
         return {}
 
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             return json.load(f)
 
     except Exception as e:
+
         print("STATE LOAD ERROR:", e)
+
         return {}
 
 
 def save_json_state(state):
+
     try:
+
         tmp_file = STATE_FILE + ".tmp"
 
-        with open(tmp_file, "w", encoding="utf-8") as f:
+        with open(
+            tmp_file,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
             json.dump(
                 state,
                 f,
@@ -114,24 +137,32 @@ def save_json_state(state):
                 indent=2
             )
 
-        os.replace(tmp_file, STATE_FILE)
+        os.replace(
+            tmp_file,
+            STATE_FILE
+        )
 
     except Exception as e:
+
         print("STATE SAVE ERROR:", e)
 
 
 # ============================================================
 # TELEGRAM
+# IMPORTANT:
+# TELEGRAM DOES NOT BLOCK SCANNER
 # ============================================================
 
-def send_telegram(message):
+def _telegram_send_worker(message):
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(message)
+
+        print("\n" + message)
+
         return False
 
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
@@ -146,7 +177,10 @@ def send_telegram(message):
         r = requests.post(
             url,
             json=payload,
-            timeout=TELEGRAM_TIMEOUT
+            timeout=(
+                2,
+                TELEGRAM_TIMEOUT
+            )
         )
 
         if r.ok:
@@ -154,8 +188,7 @@ def send_telegram(message):
 
         print(
             "TELEGRAM ERROR:",
-            r.status_code,
-            r.text
+            r.status_code
         )
 
         return False
@@ -163,17 +196,32 @@ def send_telegram(message):
     except Exception as e:
 
         print(
-            "TELEGRAM EXCEPTION:",
+            "TELEGRAM ERROR:",
             e
         )
 
         return False
 
 
+def send_telegram(message):
+
+    if not message:
+        return
+
+    # ارسال در Thread جدا
+    telegram_executor.submit(
+        _telegram_send_worker,
+        message
+    )
+
+
 def send_telegram_chunks(
     message,
     chunk_size=3800
 ):
+
+    if not message:
+        return
 
     if len(message) <= chunk_size:
 
@@ -208,7 +256,6 @@ def send_telegram_chunks(
             cut:
         ].lstrip()
 
-    # بدون sleep غیرضروری
     for chunk in chunks:
 
         send_telegram(chunk)
@@ -233,27 +280,46 @@ def get_candles(
 
         r = requests.get(
             url,
-            timeout=KRAKEN_TIMEOUT
+            timeout=(
+                KRAKEN_CONNECT_TIMEOUT,
+                KRAKEN_READ_TIMEOUT
+            )
         )
 
         if not r.ok:
 
             print(
-                "KRAKEN ERROR:",
-                symbol,
-                r.status_code
+                f"✗ KRAKEN {symbol}: "
+                f"HTTP {r.status_code}"
             )
 
             return []
 
         data = r.json()
 
+    except requests.exceptions.Timeout:
+
+        print(
+            f"⏱️ KRAKEN TIMEOUT: "
+            f"{symbol}"
+        )
+
+        return []
+
+    except requests.exceptions.RequestException as e:
+
+        print(
+            f"✗ KRAKEN REQUEST: "
+            f"{symbol} | {e}"
+        )
+
+        return []
+
     except Exception as e:
 
         print(
-            "KRAKEN REQUEST ERROR:",
-            symbol,
-            e
+            f"✗ KRAKEN JSON: "
+            f"{symbol} | {e}"
         )
 
         return []
@@ -266,18 +332,21 @@ def get_candles(
             data.get("candles"),
             list
         ):
+
             raw = data["candles"]
 
         elif isinstance(
             data.get("data"),
             list
         ):
+
             raw = data["data"]
 
         elif isinstance(
             data.get("result"),
             list
         ):
+
             raw = data["result"]
 
     elif isinstance(data, list):
@@ -323,24 +392,25 @@ def get_candles(
 
                 continue
 
+            if timestamp is None:
+                continue
+
             timestamp = float(
                 timestamp
             )
 
-            # milliseconds -> seconds
             if timestamp > 10_000_000_000:
+
                 timestamp /= 1000
 
-            candle = {
+            candles.append({
                 "time": int(timestamp),
                 "open": float(o),
                 "high": float(h),
                 "low": float(l),
                 "close": float(c),
                 "volume": float(v or 0)
-            }
-
-            candles.append(candle)
+            })
 
         except Exception:
 
@@ -354,13 +424,19 @@ def get_candles(
         return []
 
     # ========================================================
-    # REMOVE CURRENT OPEN 5M CANDLE
+    # REMOVE CURRENT OPEN CANDLE
     # ========================================================
 
-    now = int(time.time())
+    now = int(
+        time.time()
+    )
 
     current_bucket = (
-        now - (now % (interval * 60))
+        now
+        - (
+            now
+            % (interval * 60)
+        )
     )
 
     candles = [
@@ -375,7 +451,7 @@ def get_candles(
 
 
 # ============================================================
-# FAST KRAKEN MULTI FETCH
+# FETCH ONE COIN
 # ============================================================
 
 def fetch_coin_data(
@@ -397,9 +473,20 @@ def fetch_coin_data(
             "error": "insufficient candles"
         }
 
-    analysis = scanner_score(
-        candles
-    )
+    try:
+
+        analysis = scanner_score(
+            candles
+        )
+
+    except Exception as e:
+
+        return {
+            "symbol": symbol,
+            "candles": [],
+            "analysis": None,
+            "error": f"analysis error: {e}"
+        }
 
     return {
         "symbol": symbol,
@@ -409,42 +496,55 @@ def fetch_coin_data(
     }
 
 
+# ============================================================
+# FAST MULTI FETCH
+# ============================================================
+
 def fetch_all_coins_fast():
 
-    results = []
+    results_map = {}
 
     started = time.time()
+
+    print(
+        f"⚡ Starting parallel Kraken scan "
+        f"({len(COINS)} coins / "
+        f"{MAX_WORKERS} workers)..."
+    )
 
     with ThreadPoolExecutor(
         max_workers=MAX_WORKERS
     ) as executor:
 
-        futures = {
-            executor.submit(
+        futures = {}
+
+        for symbol, kraken_symbol in COINS.items():
+
+            future = executor.submit(
                 fetch_coin_data,
                 symbol,
                 kraken_symbol
-            ): symbol
+            )
 
-            for symbol, kraken_symbol
-            in COINS.items()
-        }
+            futures[future] = symbol
 
         for future in as_completed(
             futures
         ):
 
-            symbol = futures[future]
+            symbol = futures[
+                future
+            ]
 
             try:
 
                 result = future.result()
 
-                if result["candles"]:
+                results_map[
+                    symbol
+                ] = result
 
-                    results.append(
-                        result
-                    )
+                if result["candles"]:
 
                     print(
                         f"✓ {symbol}: "
@@ -462,13 +562,37 @@ def fetch_all_coins_fast():
             except Exception as e:
 
                 print(
-                    f"✗ {symbol}: ERROR {e}"
+                    f"✗ {symbol}: "
+                    f"THREAD ERROR {e}"
                 )
 
-    elapsed = time.time() - started
+    # ========================================================
+    # حفظ ترتیب اصلی COINS
+    # ========================================================
+
+    results = []
+
+    for symbol in COINS:
+
+        if symbol in results_map:
+
+            result = results_map[
+                symbol
+            ]
+
+            if result["candles"]:
+
+                results.append(
+                    result
+                )
+
+    elapsed = (
+        time.time()
+        - started
+    )
 
     print(
-        f"\n⚡ Kraken parallel fetch: "
+        f"\n⚡ Kraken fetch: "
         f"{elapsed:.2f}s"
     )
 
@@ -525,8 +649,13 @@ def calculate_rsi(
             gains.append(0)
             losses.append(abs(diff))
 
-    gains = gains[-period:]
-    losses = losses[-period:]
+    gains = gains[
+        -period:
+    ]
+
+    losses = losses[
+        -period:
+    ]
 
     avg_gain = mean(gains)
     avg_loss = mean(losses)
@@ -534,7 +663,10 @@ def calculate_rsi(
     if avg_loss == 0:
         return 100
 
-    rs = avg_gain / avg_loss
+    rs = (
+        avg_gain
+        / avg_loss
+    )
 
     return 100 - (
         100 / (1 + rs)
@@ -575,9 +707,6 @@ def calculate_atr(
         )
 
         trs.append(tr)
-
-    if len(trs) < period:
-        return None
 
     return mean(
         trs[-period:]
@@ -635,30 +764,14 @@ def calculate_ichimoku(candles):
         for x in candles
     ]
 
-    tenkan_high = max(
-        highs[-9:]
-    )
-
-    tenkan_low = min(
-        lows[-9:]
-    )
-
     tenkan = (
-        tenkan_high
-        + tenkan_low
+        max(highs[-9:])
+        + min(lows[-9:])
     ) / 2
 
-    kijun_high = max(
-        highs[-26:]
-    )
-
-    kijun_low = min(
-        lows[-26:]
-    )
-
     kijun = (
-        kijun_high
-        + kijun_low
+        max(highs[-26:])
+        + min(lows[-26:])
     ) / 2
 
     span_a = (
@@ -666,17 +779,9 @@ def calculate_ichimoku(candles):
         + kijun
     ) / 2
 
-    span_b_high = max(
-        highs[-52:]
-    )
-
-    span_b_low = min(
-        lows[-52:]
-    )
-
     span_b = (
-        span_b_high
-        + span_b_low
+        max(highs[-52:])
+        + min(lows[-52:])
     ) / 2
 
     price = candles[-1][
@@ -695,38 +800,6 @@ def calculate_ichimoku(candles):
 # ============================================================
 # TRENDLINE
 # ============================================================
-
-def swing_high(
-    candles,
-    lookback=20
-):
-
-    if len(candles) < lookback:
-        return None
-
-    return max(
-        x["high"]
-        for x in candles[
-            -lookback:
-        ]
-    )
-
-
-def swing_low(
-    candles,
-    lookback=20
-):
-
-    if len(candles) < lookback:
-        return None
-
-    return min(
-        x["low"]
-        for x in candles[
-            -lookback:
-        ]
-    )
-
 
 def trendline_status(candles):
 
@@ -756,7 +829,9 @@ def trendline_status(candles):
         for x in previous
     )
 
-    close = candles[-1]["close"]
+    close = candles[-1][
+        "close"
+    ]
 
     if (
         recent_high > previous_high
@@ -776,7 +851,7 @@ def trendline_status(candles):
 
 
 # ============================================================
-# NORMAL SCANNER SCORE
+# NORMAL SCANNER
 # ============================================================
 
 def scanner_score(candles):
@@ -793,7 +868,9 @@ def scanner_score(candles):
             "trendline": "NEUTRAL"
         }
 
-    close = candles[-1]["close"]
+    close = candles[-1][
+        "close"
+    ]
 
     rsi = calculate_rsi(
         candles
@@ -860,9 +937,11 @@ def scanner_score(candles):
             score -= 10
 
     if trendline == "BREAKOUT":
+
         score += 20
 
     elif trendline == "BREAKDOWN":
+
         score -= 20
 
     score = max(
@@ -871,12 +950,15 @@ def scanner_score(candles):
     )
 
     if score >= 20:
+
         direction = "LONG"
 
     elif score <= -20:
+
         direction = "SHORT"
 
     else:
+
         direction = "NEUTRAL"
 
     return {
@@ -925,7 +1007,7 @@ def two_candle_confirmation(
 
 
 # ============================================================
-# PRICE FORMAT
+# PRICE
 # ============================================================
 
 def format_price(price):
@@ -983,7 +1065,7 @@ def calculate_pnl_pct(
 
 
 # ============================================================
-# NORMAL SIGNAL LEVELS
+# NORMAL LEVELS
 # ============================================================
 
 def calculate_normal_levels(
@@ -998,7 +1080,9 @@ def calculate_normal_levels(
     if atr is None:
         return None
 
-    entry = candles[-1]["close"]
+    entry = candles[-1][
+        "close"
+    ]
 
     if direction == "LONG":
 
@@ -1045,9 +1129,6 @@ def calculate_normal_levels(
 
 # ============================================================
 # BTC REGIME
-# FIXED:
-# Uses already downloaded BTC candles
-# NO EXTRA KRAKEN REQUEST
 # ============================================================
 
 def btc_regime_from_candles(
@@ -1074,7 +1155,7 @@ def btc_regime_from_candles(
 
 
 # ============================================================
-# NORMAL SIGNAL MESSAGE
+# NORMAL MESSAGE
 # ============================================================
 
 def normal_signal_message(
@@ -1102,7 +1183,9 @@ def normal_signal_message(
         else "🔴"
     )
 
-    rsi = analysis["rsi"]
+    rsi = analysis[
+        "rsi"
+    ]
 
     rsi_text = (
         f"{rsi:.1f}"
@@ -1154,7 +1237,9 @@ def create_watchlist(
         reverse=True
     )
 
-    top = sorted_results[:limit]
+    top = sorted_results[
+        :limit
+    ]
 
     lines = [
         "👀 **TOP 5 WATCHLIST v5.5**",
@@ -1166,13 +1251,17 @@ def create_watchlist(
         1
     ):
 
-        symbol = item["symbol"]
+        symbol = item[
+            "symbol"
+        ]
 
         candles = item[
             "candles"
         ]
 
-        a = item["analysis"]
+        a = item[
+            "analysis"
+        ]
 
         direction = a[
             "direction"
@@ -1236,7 +1325,7 @@ def create_watchlist(
 
 
 # ============================================================
-# UT BOT ATR
+# UT ATR
 # ============================================================
 
 def calculate_ut_atr(
@@ -1305,10 +1394,9 @@ def calculate_utbot_signal(
     if atr is None:
         return None
 
-    key = UT_KEY_VALUE
-
     stop_distance = (
-        key * atr
+        UT_KEY_VALUE
+        * atr
     )
 
     trailing = [
@@ -1325,12 +1413,15 @@ def calculate_utbot_signal(
         len(closes)
     ):
 
-        prev_close = closes[i - 1]
+        prev_close = closes[
+            i - 1
+        ]
+
         close = closes[i]
 
-        previous_stop = (
-            trailing[i - 1]
-        )
+        previous_stop = trailing[
+            i - 1
+        ]
 
         if previous_stop is None:
 
@@ -1375,11 +1466,21 @@ def calculate_utbot_signal(
                 + stop_distance
             )
 
-    previous_close = closes[-2]
-    current_close = closes[-1]
+    previous_close = closes[
+        -2
+    ]
 
-    previous_stop = trailing[-2]
-    current_stop = trailing[-1]
+    current_close = closes[
+        -1
+    ]
+
+    previous_stop = trailing[
+        -2
+    ]
+
+    current_stop = trailing[
+        -1
+    ]
 
     if (
         previous_close <= previous_stop
@@ -1414,7 +1515,7 @@ def calculate_utbot_signal(
 
 
 # ============================================================
-# UT SETUP LEVELS
+# UT LEVELS
 # ============================================================
 
 def calculate_ut_setup_levels(
@@ -1430,7 +1531,9 @@ def calculate_ut_setup_levels(
     if atr is None:
         return None
 
-    entry = candles[-1]["close"]
+    entry = candles[-1][
+        "close"
+    ]
 
     if signal == "BUY":
 
@@ -1472,7 +1575,7 @@ def calculate_ut_setup_levels(
 
 
 # ============================================================
-# UT SETUP MESSAGE
+# UT MESSAGE
 # ============================================================
 
 def ut_setup_message(
@@ -1517,7 +1620,6 @@ def ut_setup_message(
 
 # ============================================================
 # UT STATE
-# ALSO REPAIRS OLD CLOSED SIGNALS
 # ============================================================
 
 def get_ut_state():
@@ -1528,29 +1630,44 @@ def get_ut_state():
         state,
         dict
     ):
+
         state = {}
 
     if "_utbot" not in state:
+
         state["_utbot"] = {}
 
     if not isinstance(
         state["_utbot"],
         dict
     ):
+
         state["_utbot"] = {}
 
-    if "setups" not in state["_utbot"]:
-        state["_utbot"]["setups"] = []
+    if "setups" not in state[
+        "_utbot"
+    ]:
+
+        state[
+            "_utbot"
+        ]["setups"] = []
 
     if not isinstance(
         state["_utbot"]["setups"],
         list
     ):
-        state["_utbot"]["setups"] = []
 
-    if "stats" not in state["_utbot"]:
+        state[
+            "_utbot"
+        ]["setups"] = []
 
-        state["_utbot"]["stats"] = {
+    if "stats" not in state[
+        "_utbot"
+    ]:
+
+        state[
+            "_utbot"
+        ]["stats"] = {
             "total": 0,
             "wins": 0,
             "losses": 0,
@@ -1576,7 +1693,7 @@ def get_ut_state():
             stats[key] = 0
 
     # ========================================================
-    # REPAIR LEGACY CLOSED SIGNALS
+    # REPAIR OLD EXIT PRICE
     # ========================================================
 
     repaired = False
@@ -1588,6 +1705,7 @@ def get_ut_state():
         if setup.get(
             "status"
         ) != "CLOSED":
+
             continue
 
         result = setup.get(
@@ -1630,149 +1748,64 @@ def get_ut_state():
             "LONG"
         )
 
-        # ----------------------------------------------------
-        # TP1
-        # ----------------------------------------------------
+        target = None
 
         if result == "WIN_1R":
 
-            tp = setup.get(
+            target = setup.get(
                 "tp1"
             )
 
-            if tp is not None:
-
-                tp = float(tp)
-
-                if (
-                    old_exit is None
-                    or
-                    abs(
-                        old_exit - entry
-                    ) < 1e-12
-                ):
-
-                    setup[
-                        "exit_price"
-                    ] = tp
-
-                    setup[
-                        "result_pct"
-                    ] = calculate_pnl_pct(
-                        entry,
-                        tp,
-                        direction
-                    )
-
-                    repaired = True
-
-        # ----------------------------------------------------
-        # TP2
-        # ----------------------------------------------------
-
         elif result == "WIN_15R":
 
-            tp = setup.get(
+            target = setup.get(
                 "tp15"
             )
 
-            if tp is not None:
-
-                tp = float(tp)
-
-                if (
-                    old_exit is None
-                    or
-                    abs(
-                        old_exit - entry
-                    ) < 1e-12
-                ):
-
-                    setup[
-                        "exit_price"
-                    ] = tp
-
-                    setup[
-                        "result_pct"
-                    ] = calculate_pnl_pct(
-                        entry,
-                        tp,
-                        direction
-                    )
-
-                    repaired = True
-
-        # ----------------------------------------------------
-        # TP3
-        # ----------------------------------------------------
-
         elif result == "WIN_2R":
 
-            tp = setup.get(
+            target = setup.get(
                 "tp2"
             )
 
-            if tp is not None:
-
-                tp = float(tp)
-
-                if (
-                    old_exit is None
-                    or
-                    abs(
-                        old_exit - entry
-                    ) < 1e-12
-                ):
-
-                    setup[
-                        "exit_price"
-                    ] = tp
-
-                    setup[
-                        "result_pct"
-                    ] = calculate_pnl_pct(
-                        entry,
-                        tp,
-                        direction
-                    )
-
-                    repaired = True
-
-        # ----------------------------------------------------
-        # LOSS
-        # ----------------------------------------------------
-
         elif result == "LOSS":
 
-            sl = setup.get(
+            target = setup.get(
                 "sl"
             )
 
-            if sl is not None:
+        if target is None:
+            continue
 
-                sl = float(sl)
+        try:
 
-                if (
-                    old_exit is None
-                    or
-                    abs(
-                        old_exit - entry
-                    ) < 1e-12
-                ):
+            target = float(target)
 
-                    setup[
-                        "exit_price"
-                    ] = sl
+        except Exception:
 
-                    setup[
-                        "result_pct"
-                    ] = calculate_pnl_pct(
-                        entry,
-                        sl,
-                        direction
-                    )
+            continue
 
-                    repaired = True
+        if (
+            old_exit is None
+            or
+            abs(
+                old_exit - entry
+            ) < 1e-12
+        ):
+
+            setup[
+                "exit_price"
+            ] = target
+
+            setup[
+                "result_pct"
+            ] = calculate_pnl_pct(
+                entry,
+                target,
+                direction
+            )
+
+            repaired = True
 
     if repaired:
 
@@ -1931,9 +1964,7 @@ def update_ut_setups(
                 "current_pnl_pct"
             ] = calculate_pnl_pct(
                 entry,
-                candles[-1][
-                    "close"
-                ],
+                candles[-1]["close"],
                 direction
             )
 
@@ -1964,8 +1995,7 @@ def update_ut_setups(
                 hit_tp2 = low <= tp2
 
             # =================================================
-            # SAME CANDLE:
-            # SL HAS PRIORITY
+            # SL PRIORITY
             # =================================================
 
             if hit_sl and (
@@ -2011,7 +2041,7 @@ def update_ut_setups(
                 break
 
             # =================================================
-            # TP3 / 2R
+            # TP3
             # =================================================
 
             if hit_tp2:
@@ -2059,7 +2089,7 @@ def update_ut_setups(
                 break
 
             # =================================================
-            # TP2 / 1.5R
+            # TP2
             # =================================================
 
             if hit_tp15:
@@ -2107,7 +2137,7 @@ def update_ut_setups(
                 break
 
             # =================================================
-            # TP1 / 1R
+            # TP1
             # =================================================
 
             if hit_tp1:
@@ -2160,10 +2190,6 @@ def update_ut_setups(
                 "time"
             ]
 
-        # ====================================================
-        # STILL OPEN
-        # ====================================================
-
         if setup.get(
             "status"
         ) != "CLOSED":
@@ -2184,9 +2210,7 @@ def update_ut_setups(
                 "current_pnl_pct"
             ] = calculate_pnl_pct(
                 entry,
-                candles[-1][
-                    "close"
-                ],
+                candles[-1]["close"],
                 direction
             )
 
@@ -2263,10 +2287,6 @@ def ut_live_status_message(
             symbol
         )
 
-        # ====================================================
-        # OPEN
-        # ====================================================
-
         if status != "CLOSED":
 
             current_price = setup.get(
@@ -2315,10 +2335,6 @@ def ut_live_status_message(
                 f"{format_price(setup.get('tp2'))}"
             )
 
-        # ====================================================
-        # CLOSED
-        # ====================================================
-
         else:
 
             result = setup.get(
@@ -2338,34 +2354,22 @@ def ut_live_status_message(
 
             if result == "LOSS":
 
-                result_text = (
-                    "❌ SL HIT"
-                )
-
+                result_text = "❌ SL HIT"
                 r_text = "0R"
 
             elif result == "WIN_1R":
 
-                result_text = (
-                    "✅ TP1 HIT — 1R"
-                )
-
+                result_text = "✅ TP1 HIT — 1R"
                 r_text = "1R"
 
             elif result == "WIN_15R":
 
-                result_text = (
-                    "✅ TP2 HIT — 1.5R"
-                )
-
+                result_text = "✅ TP2 HIT — 1.5R"
                 r_text = "1.5R"
 
             elif result == "WIN_2R":
 
-                result_text = (
-                    "🏆 TP3 HIT — 2R"
-                )
-
+                result_text = "🏆 TP3 HIT — 2R"
                 r_text = "2R"
 
             else:
@@ -2393,10 +2397,6 @@ def ut_live_status_message(
                 f"{float(result_pct):+.2f}%\n"
                 f"{result_text}"
             )
-
-    # ========================================================
-    # STATS
-    # ========================================================
 
     stats = calculate_ut_stats(
         state
@@ -2446,13 +2446,11 @@ def process_ut_top5(
         )
 
         if key:
-            existing_keys.add(key)
+            existing_keys.add(
+                key
+            )
 
     new_signals = []
-
-    # ========================================================
-    # ALL FRESH UT SIGNALS IN TOP5
-    # ========================================================
 
     for item in top5_results:
 
@@ -2488,11 +2486,9 @@ def process_ut_top5(
         if signal_key in existing_keys:
             continue
 
-        levels = (
-            calculate_ut_setup_levels(
-                candles,
-                signal
-            )
+        levels = calculate_ut_setup_levels(
+            candles,
+            signal
         )
 
         if not levels:
@@ -2511,64 +2507,30 @@ def process_ut_top5(
         )
 
         setup = {
-
             "id": setup_id,
-
             "symbol": symbol,
-
             "direction": direction,
-
             "signal": signal,
-
             "signal_key": signal_key,
-
             "candle_time": candle_time,
 
-            "entry": levels[
-                "entry"
-            ],
-
-            "sl": levels[
-                "sl"
-            ],
-
-            "tp1": levels[
-                "tp1"
-            ],
-
-            "tp15": levels[
-                "tp15"
-            ],
-
-            "tp2": levels[
-                "tp2"
-            ],
-
-            "risk": levels[
-                "risk"
-            ],
-
-            "atr": levels[
-                "atr"
-            ],
+            "entry": levels["entry"],
+            "sl": levels["sl"],
+            "tp1": levels["tp1"],
+            "tp15": levels["tp15"],
+            "tp2": levels["tp2"],
+            "risk": levels["risk"],
+            "atr": levels["atr"],
 
             "status": "OPEN",
-
             "result": None,
-
             "exit_price": None,
-
             "result_pct": 0,
 
-            "last_price": levels[
-                "entry"
-            ],
-
+            "last_price": levels["entry"],
             "current_pnl_pct": 0,
 
-            "last_checked_candle": (
-                candle_time
-            ),
+            "last_checked_candle": candle_time,
 
             "created_at": int(
                 time.time()
@@ -2589,10 +2551,6 @@ def process_ut_top5(
             setup
         )
 
-    # ========================================================
-    # SAVE + SEND NEW SIGNALS
-    # ========================================================
-
     if new_signals:
 
         state[
@@ -2610,43 +2568,20 @@ def process_ut_top5(
         for setup in new_signals:
 
             levels = {
-
-                "entry": setup[
-                    "entry"
-                ],
-
-                "sl": setup[
-                    "sl"
-                ],
-
-                "tp1": setup[
-                    "tp1"
-                ],
-
-                "tp15": setup[
-                    "tp15"
-                ],
-
-                "tp2": setup[
-                    "tp2"
-                ],
-
-                "risk": setup[
-                    "risk"
-                ],
-
-                "atr": setup[
-                    "atr"
-                ]
+                "entry": setup["entry"],
+                "sl": setup["sl"],
+                "tp1": setup["tp1"],
+                "tp15": setup["tp15"],
+                "tp2": setup["tp2"],
+                "risk": setup["risk"],
+                "atr": setup["atr"]
             }
 
-            message = (
-                ut_setup_message(
-                    setup["symbol"],
-                    setup["signal"],
-                    levels,
-                    setup["id"]
-                )
+            message = ut_setup_message(
+                setup["symbol"],
+                setup["signal"],
+                levels,
+                setup["id"]
             )
 
             send_telegram_chunks(
@@ -2686,25 +2621,32 @@ def run_scanner():
         f"{time.time() - state_started:.2f}s"
     )
 
-    candles_by_symbol = {}
+    # ========================================================
+    # KRAKEN
+    # ========================================================
 
-    # ========================================================
-    # FAST KRAKEN FETCH
-    # ========================================================
+    fetch_started = time.time()
 
     results = fetch_all_coins_fast()
+
+    print(
+        f"Fetch section: "
+        f"{time.time() - fetch_started:.2f}s"
+    )
 
     if not results:
 
         print(
-            "No results."
+            "❌ No Kraken results."
         )
 
         return
 
     # ========================================================
-    # BUILD CANDLE MAP
+    # CANDLE MAP
     # ========================================================
+
+    candles_by_symbol = {}
 
     for item in results:
 
@@ -2724,23 +2666,19 @@ def run_scanner():
         reverse=True
     )
 
-    top5 = sorted_results[:5]
+    top5 = sorted_results[
+        :5
+    ]
 
     # ========================================================
     # BTC REGIME
-    # IMPORTANT:
-    # NO EXTRA API CALL
     # ========================================================
-
-    btc_candles = (
-        candles_by_symbol.get(
-            "BTC"
-        )
-    )
 
     btc_regime_value = (
         btc_regime_from_candles(
-            btc_candles
+            candles_by_symbol.get(
+                "BTC"
+            )
         )
     )
 
@@ -2779,10 +2717,6 @@ def run_scanner():
 
     for item in top5:
 
-        symbol = item[
-            "symbol"
-        ]
-
         candles = item[
             "candles"
         ]
@@ -2797,28 +2731,18 @@ def run_scanner():
 
             continue
 
-        if analysis[
-            "score"
-        ] == 0:
-
-            continue
-
         if not two_candle_confirmation(
             candles,
-            analysis[
-                "direction"
-            ]
+            analysis["direction"]
         ):
 
             continue
 
-        message = (
-            normal_signal_message(
-                symbol,
-                candles,
-                analysis,
-                btc_regime_value
-            )
+        message = normal_signal_message(
+            item["symbol"],
+            candles,
+            analysis,
+            btc_regime_value
         )
 
         if message:
@@ -2827,11 +2751,22 @@ def run_scanner():
                 message
             )
 
-    # ارسال بدون sleep اضافه
-    for message in normal_messages:
+    # ========================================================
+    # NORMAL SIGNALS:
+    # SEND AS ONE TELEGRAM MESSAGE
+    # ========================================================
+
+    if normal_messages:
+
+        combined_normal = (
+            "\n\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+        ).join(
+            normal_messages
+        )
 
         send_telegram_chunks(
-            message
+            combined_normal
         )
 
     print(
@@ -2840,7 +2775,7 @@ def run_scanner():
     )
 
     # ========================================================
-    # UPDATE OLD UT SETUPS
+    # UPDATE OLD UT
     # ========================================================
 
     update_started = time.time()
@@ -2856,7 +2791,7 @@ def run_scanner():
     )
 
     # ========================================================
-    # PROCESS NEW UT SIGNALS
+    # NEW UT
     # ========================================================
 
     ut_started = time.time()
@@ -2878,11 +2813,9 @@ def run_scanner():
 
     status_started = time.time()
 
-    live_status = (
-        ut_live_status_message(
-            state,
-            candles_by_symbol
-        )
+    live_status = ut_live_status_message(
+        state,
+        candles_by_symbol
     )
 
     send_telegram_chunks(
@@ -2918,6 +2851,30 @@ def run_scanner():
         f"{len(results)}/{len(COINS)}"
     )
 
+    if total_time <= 15:
+
+        print(
+            "🚀 SCAN SPEED: EXCELLENT"
+        )
+
+    elif total_time <= 30:
+
+        print(
+            "🟢 SCAN SPEED: GOOD"
+        )
+
+    elif total_time <= 60:
+
+        print(
+            "🟡 SCAN SPEED: ACCEPTABLE"
+        )
+
+    else:
+
+        print(
+            "🔴 SCAN SPEED: SLOW"
+        )
+
     print(
         "========================================\n"
     )
@@ -2951,7 +2908,7 @@ if __name__ == "__main__":
             )
 
         # ====================================================
-        # WAIT FOR NEXT CLOSED 5M CANDLE
+        # NEXT CLOSED 5M CANDLE
         # ====================================================
 
         now = int(
@@ -2959,7 +2916,9 @@ if __name__ == "__main__":
         )
 
         next_5m = (
-            ((now // 300) + 1)
+            (
+                (now // 300) + 1
+            )
             * 300
         )
 
