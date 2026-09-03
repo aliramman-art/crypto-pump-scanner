@@ -16,7 +16,10 @@
 # TOP 5 ONLY
 # 5m / Key Value 3 / ATR 10 / Heikin Ashi OFF
 # Live Setup Tracking
+# Live PnL Tracking
 # Win Rate Tracking
+# Previous Signal Status Tracking
+# Duplicate Signal Protection
 # ============================================================
 
 import os
@@ -1273,6 +1276,8 @@ def confirmation_ok(
 
 def fmt_price(price):
 
+    price = float(price)
+
     if price >= 1000:
         return f"{price:.2f}"
 
@@ -1289,6 +1294,35 @@ def fmt_price(price):
         return f"{price:.6f}"
 
     return f"{price:.8f}"
+
+
+# ============================================================
+# PNL CALCULATION
+# ============================================================
+
+def calculate_pnl_pct(
+    entry,
+    current,
+    direction
+):
+
+    entry = float(entry)
+    current = float(current)
+
+    if entry <= 0:
+        return 0.0
+
+    if direction == "LONG":
+
+        return (
+            (current - entry)
+            / entry
+        ) * 100
+
+    return (
+        (entry - current)
+        / entry
+    ) * 100
 
 
 # ============================================================
@@ -2269,6 +2303,10 @@ def update_ut_setups(results):
             setup["candle_time"]
         )
 
+        # ----------------------------------------------------
+        # Check candles AFTER signal candle
+        # ----------------------------------------------------
+
         future_candles = [
             c
             for c in candles
@@ -2281,6 +2319,8 @@ def update_ut_setups(results):
 
         result = None
         result_level = None
+        exit_price = None
+        exit_candle_time = None
 
         # ----------------------------------------------------
         # LONG
@@ -2309,8 +2349,9 @@ def update_ut_setups(results):
                     high >= tp1
                 )
 
-                # Conservative rule:
-                # SL + TP in same candle = LOSS
+                # Conservative:
+                # if SL and TP happen in same candle,
+                # assume SL happened first.
                 if hit_sl and (
                     hit_tp2
                     or hit_tp15
@@ -2319,6 +2360,8 @@ def update_ut_setups(results):
 
                     result = "LOSS"
                     result_level = "SL"
+                    exit_price = sl
+                    exit_candle_time = candle["time"]
 
                     break
 
@@ -2326,6 +2369,8 @@ def update_ut_setups(results):
 
                     result = "LOSS"
                     result_level = "SL"
+                    exit_price = sl
+                    exit_candle_time = candle["time"]
 
                     break
 
@@ -2333,6 +2378,8 @@ def update_ut_setups(results):
 
                     result = "WIN_2R"
                     result_level = "2R"
+                    exit_price = tp2
+                    exit_candle_time = candle["time"]
 
                     break
 
@@ -2340,6 +2387,8 @@ def update_ut_setups(results):
 
                     result = "WIN_15R"
                     result_level = "1.5R"
+                    exit_price = tp15
+                    exit_candle_time = candle["time"]
 
                     break
 
@@ -2347,6 +2396,8 @@ def update_ut_setups(results):
 
                     result = "WIN_1R"
                     result_level = "1R"
+                    exit_price = tp1
+                    exit_candle_time = candle["time"]
 
                     break
 
@@ -2386,6 +2437,8 @@ def update_ut_setups(results):
 
                     result = "LOSS"
                     result_level = "SL"
+                    exit_price = sl
+                    exit_candle_time = candle["time"]
 
                     break
 
@@ -2393,6 +2446,8 @@ def update_ut_setups(results):
 
                     result = "LOSS"
                     result_level = "SL"
+                    exit_price = sl
+                    exit_candle_time = candle["time"]
 
                     break
 
@@ -2400,6 +2455,8 @@ def update_ut_setups(results):
 
                     result = "WIN_2R"
                     result_level = "2R"
+                    exit_price = tp2
+                    exit_candle_time = candle["time"]
 
                     break
 
@@ -2407,6 +2464,8 @@ def update_ut_setups(results):
 
                     result = "WIN_15R"
                     result_level = "1.5R"
+                    exit_price = tp15
+                    exit_candle_time = candle["time"]
 
                     break
 
@@ -2414,12 +2473,28 @@ def update_ut_setups(results):
 
                     result = "WIN_1R"
                     result_level = "1R"
+                    exit_price = tp1
+                    exit_candle_time = candle["time"]
 
                     break
+
+        # ----------------------------------------------------
+        # Still OPEN
+        # ----------------------------------------------------
 
         if not result:
 
             continue
+
+        # ----------------------------------------------------
+        # Calculate final result %
+        # ----------------------------------------------------
+
+        result_pct = calculate_pnl_pct(
+            entry,
+            exit_price,
+            direction
+        )
 
         setup["status"] = "CLOSED"
 
@@ -2427,6 +2502,14 @@ def update_ut_setups(results):
 
         setup["result_level"] = (
             result_level
+        )
+
+        setup["exit_price"] = exit_price
+
+        setup["result_pct"] = result_pct
+
+        setup["exit_candle_time"] = (
+            exit_candle_time
         )
 
         setup["closed_time"] = int(
@@ -2503,7 +2586,8 @@ def update_ut_setups(results):
             f"UT RESULT: "
             f"{symbol} "
             f"{direction} "
-            f"{result}"
+            f"{result} "
+            f"{result_pct:+.2f}%"
         )
 
     if changed:
@@ -2517,6 +2601,350 @@ def update_ut_setups(results):
 
 
 # ============================================================
+# UT LIVE STATUS
+# ============================================================
+
+def ut_live_status_message(results):
+
+    state = get_ut_state()
+
+    signals = state[
+        "_utbot"
+    ].get(
+        "signals",
+        {}
+    )
+
+    if not signals:
+
+        return """
+📊 <b>UT BOT LIVE STATUS</b>
+━━━━━━━━━━━━━━━━━━
+
+📭 <b>No UT Bot setups recorded yet.</b>
+
+━━━━━━━━━━━━━━━━━━
+🤖 <b>UT Setup Engine</b>
+""".strip()
+
+    # --------------------------------------------------------
+    # Current prices
+    # --------------------------------------------------------
+
+    current_prices = {}
+
+    for item in results:
+
+        symbol = item.get(
+            "symbol"
+        )
+
+        candles = item.get(
+            "data",
+            {}
+        ).get(
+            "candles",
+            []
+        )
+
+        if symbol and candles:
+
+            current_prices[symbol] = (
+                candles[-1]["close"]
+            )
+
+    lines = [
+        "📊 <b>UT BOT LIVE STATUS</b>",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+
+    # --------------------------------------------------------
+    # Sort newest setups first
+    # --------------------------------------------------------
+
+    setup_items = list(
+        signals.items()
+    )
+
+    setup_items.sort(
+        key=lambda x: int(
+            x[1].get(
+                "created_time",
+                0
+            )
+        ),
+        reverse=True
+    )
+
+    for index, (key, setup) in enumerate(
+        setup_items,
+        1
+    ):
+
+        if not isinstance(
+            setup,
+            dict
+        ):
+
+            continue
+
+        symbol = setup.get(
+            "symbol",
+            "UNKNOWN"
+        )
+
+        direction = setup.get(
+            "direction",
+            "UNKNOWN"
+        )
+
+        status = setup.get(
+            "status",
+            "UNKNOWN"
+        )
+
+        entry = float(
+            setup.get(
+                "entry",
+                0
+            )
+        )
+
+        sl = float(
+            setup.get(
+                "sl",
+                0
+            )
+        )
+
+        tp1 = float(
+            setup.get(
+                "tp1",
+                0
+            )
+        )
+
+        tp15 = float(
+            setup.get(
+                "tp15",
+                0
+            )
+        )
+
+        tp2 = float(
+            setup.get(
+                "tp2",
+                0
+            )
+        )
+
+        # ====================================================
+        # OPEN
+        # ====================================================
+
+        if status == "OPEN":
+
+            current = current_prices.get(
+                symbol
+            )
+
+            if current is None:
+
+                current = entry
+
+            pnl = calculate_pnl_pct(
+                entry,
+                current,
+                direction
+            )
+
+            if pnl > 0:
+
+                pnl_emoji = "🟢"
+                pnl_text = (
+                    f"+{pnl:.2f}%"
+                )
+                pnl_status = (
+                    "IN PROFIT"
+                )
+
+            elif pnl < 0:
+
+                pnl_emoji = "🔴"
+                pnl_text = (
+                    f"{pnl:.2f}%"
+                )
+                pnl_status = (
+                    "IN LOSS"
+                )
+
+            else:
+
+                pnl_emoji = "⚪"
+                pnl_text = "0.00%"
+                pnl_status = "BREAK EVEN"
+
+            lines.append(
+                f"\n⏳ <b>#{index} "
+                f"{symbol}/USDT — "
+                f"{direction}</b>"
+            )
+
+            lines.append(
+                "📂 <b>Status:</b> OPEN"
+            )
+
+            lines.append(
+                f"💰 <b>Entry:</b> "
+                f"{fmt_price(entry)}"
+            )
+
+            lines.append(
+                f"📍 <b>Current:</b> "
+                f"{fmt_price(current)}"
+            )
+
+            lines.append(
+                f"{pnl_emoji} "
+                f"<b>Current PnL:</b> "
+                f"{pnl_text}"
+            )
+
+            lines.append(
+                f"📌 <b>{pnl_status}</b>"
+            )
+
+            lines.append(
+                f"🎯 TP1: "
+                f"{fmt_price(tp1)}"
+            )
+
+            lines.append(
+                f"🎯 TP2: "
+                f"{fmt_price(tp15)}"
+            )
+
+            lines.append(
+                f"🚀 TP3: "
+                f"{fmt_price(tp2)}"
+            )
+
+            lines.append(
+                f"🛑 SL: "
+                f"{fmt_price(sl)}"
+            )
+
+        # ====================================================
+        # CLOSED
+        # ====================================================
+
+        elif status == "CLOSED":
+
+            result = setup.get(
+                "result",
+                "UNKNOWN"
+            )
+
+            result_level = setup.get(
+                "result_level",
+                "-"
+            )
+
+            exit_price = float(
+                setup.get(
+                    "exit_price",
+                    entry
+                )
+            )
+
+            result_pct = float(
+                setup.get(
+                    "result_pct",
+                    0
+                )
+            )
+
+            if result == "LOSS":
+
+                result_emoji = "🔴"
+
+            else:
+
+                result_emoji = "🟢"
+
+            lines.append(
+                f"\n{result_emoji} "
+                f"<b>#{index} "
+                f"{symbol}/USDT — "
+                f"{direction}</b>"
+            )
+
+            lines.append(
+                "📂 <b>Status:</b> CLOSED"
+            )
+
+            lines.append(
+                f"💰 <b>Entry:</b> "
+                f"{fmt_price(entry)}"
+            )
+
+            lines.append(
+                f"🏁 <b>Exit:</b> "
+                f"{fmt_price(exit_price)}"
+            )
+
+            lines.append(
+                f"🎯 <b>Result:</b> "
+                f"{result_level}"
+            )
+
+            lines.append(
+                f"📊 <b>Result:</b> "
+                f"{result_pct:+.2f}%"
+            )
+
+            if result == "LOSS":
+
+                lines.append(
+                    "❌ <b>STOP LOSS HIT</b>"
+                )
+
+            elif result == "WIN_1R":
+
+                lines.append(
+                    "✅ <b>TP1 HIT — 1R</b>"
+                )
+
+            elif result == "WIN_15R":
+
+                lines.append(
+                    "✅ <b>TP2 HIT — 1.5R</b>"
+                )
+
+            elif result == "WIN_2R":
+
+                lines.append(
+                    "🚀 <b>TP3 HIT — 2R</b>"
+                )
+
+    lines.append(
+        "\n━━━━━━━━━━━━━━━━━━"
+    )
+
+    lines.append(
+        "📡 <b>Status checked on every scan</b>"
+    )
+
+    lines.append(
+        "🤖 <b>UT Setup Engine</b>"
+    )
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
 # CREATE UT SETUP
 # ============================================================
 
@@ -2524,7 +2952,11 @@ def process_ut_top5(top5):
 
     if not top5:
 
-        return
+        print(
+            "UT TOP 5: EMPTY"
+        )
+
+        return False
 
     # --------------------------------------------------------
     # Find ALL fresh UT signals inside TOP 5
@@ -2577,7 +3009,7 @@ def process_ut_top5(top5):
             "UT TOP 5: NO FRESH SIGNAL"
         )
 
-        return
+        return False
 
     # --------------------------------------------------------
     # Best = highest scanner score
@@ -2630,7 +3062,7 @@ def process_ut_top5(top5):
             f"{signal_key}"
         )
 
-        return
+        return False
 
     # --------------------------------------------------------
     # Levels
@@ -2648,7 +3080,7 @@ def process_ut_top5(top5):
             f"for {symbol}"
         )
 
-        return
+        return False
 
     # --------------------------------------------------------
     # Save setup
@@ -2711,19 +3143,10 @@ def process_ut_top5(top5):
         message
     )
 
-    # --------------------------------------------------------
-    # Send current stats
-    # --------------------------------------------------------
-
-    stats_message = ut_stats_message()
-
-    print(
-        stats_message
-    )
-
-    send_telegram(
-        stats_message
-    )
+    # IMPORTANT:
+    # Stats are NOT sent here anymore.
+    # They are sent every scan from main().
+    return True
 
 
 # ============================================================
@@ -2904,11 +3327,46 @@ def main():
     )
 
     # ========================================================
-    # UT BOT ON TOP 5
+    # CHECK FOR NEW UT BOT SIGNAL
     # ========================================================
 
     process_ut_top5(
         top5
+    )
+
+    # ========================================================
+    # UT LIVE STATUS
+    #
+    # This is sent EVERY scan.
+    # It does NOT depend on a new signal.
+    # ========================================================
+
+    live_status = ut_live_status_message(
+        results
+    )
+
+    print(
+        live_status
+    )
+
+    send_telegram(
+        live_status
+    )
+
+    # ========================================================
+    # UT PERFORMANCE / WIN RATE
+    #
+    # This is also sent EVERY scan.
+    # ========================================================
+
+    stats_message = ut_stats_message()
+
+    print(
+        stats_message
+    )
+
+    send_telegram(
+        stats_message
     )
 
     # ========================================================
