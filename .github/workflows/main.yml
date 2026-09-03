@@ -2,7 +2,7 @@ name: Crypto Divergence Scanner
 
 on:
   schedule:
-    - cron: "* * * * *"
+    - cron: "*/5 * * * *"
 
   workflow_dispatch:
 
@@ -14,9 +14,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-
   scan:
-
     runs-on: ubuntu-latest
 
     timeout-minutes: 5
@@ -32,7 +30,6 @@ jobs:
         with:
           fetch-depth: 0
 
-
       # ==================================================
       # PYTHON
       # ==================================================
@@ -42,7 +39,6 @@ jobs:
         with:
           python-version: "3.11"
 
-
       # ==================================================
       # INSTALL DEPENDENCIES
       # ==================================================
@@ -51,7 +47,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-
 
       # ==================================================
       # RUN SCANNER
@@ -63,7 +58,6 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python scanner.py
-
 
       # ==================================================
       # SAVE STATE
