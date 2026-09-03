@@ -84,22 +84,37 @@ UT_ATR_PERIOD = 10
 # ============================================================
 
 def load_json(path, default):
+
     try:
+
         if not os.path.exists(path):
             return default
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(
+            path,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             data = json.load(f)
 
         return data
 
     except Exception:
+
         return default
 
 
 def save_json(path, data):
+
     try:
-        with open(path, "w", encoding="utf-8") as f:
+
+        with open(
+            path,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
             json.dump(
                 data,
                 f,
@@ -108,7 +123,11 @@ def save_json(path, data):
             )
 
     except Exception as e:
-        print("SAVE ERROR:", e)
+
+        print(
+            "SAVE ERROR:",
+            e
+        )
 
 
 # ============================================================
@@ -117,8 +136,13 @@ def save_json(path, data):
 
 def send_telegram(text):
 
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if (
+        not TELEGRAM_BOT_TOKEN
+        or not TELEGRAM_CHAT_ID
+    ):
+
         print(text)
+
         return False
 
     url = (
@@ -151,7 +175,9 @@ def send_telegram(text):
 
             return False
 
-        print("Telegram: MESSAGE SENT")
+        print(
+            "Telegram: MESSAGE SENT"
+        )
 
         return True
 
@@ -192,7 +218,14 @@ def parse_candle(item):
                 or 0
             )
 
-            if None in (t, o, h, l, c):
+            if None in (
+                t,
+                o,
+                h,
+                l,
+                c
+            ):
+
                 return None
 
             t = float(t)
@@ -209,7 +242,10 @@ def parse_candle(item):
                 "volume": float(v),
             }
 
-        if isinstance(item, (list, tuple)):
+        if isinstance(
+            item,
+            (list, tuple)
+        ):
 
             if len(item) < 5:
                 return None
@@ -233,6 +269,7 @@ def parse_candle(item):
             }
 
     except Exception:
+
         return None
 
     return None
@@ -254,11 +291,17 @@ def extract_candles(data):
 
             value = data.get(key)
 
-            if isinstance(value, list):
+            if isinstance(
+                value,
+                list
+            ):
 
                 candidates.extend(value)
 
-            elif isinstance(value, dict):
+            elif isinstance(
+                value,
+                dict
+            ):
 
                 for nested_key in (
                     "candles",
@@ -272,8 +315,14 @@ def extract_candles(data):
                         nested_key
                     )
 
-                    if isinstance(nested, list):
-                        candidates.extend(nested)
+                    if isinstance(
+                        nested,
+                        list
+                    ):
+
+                        candidates.extend(
+                            nested
+                        )
 
         if not candidates:
 
@@ -288,16 +337,24 @@ def extract_candles(data):
                         value[0],
                         (dict, list, tuple)
                     ):
-                        candidates.extend(value)
+
+                        candidates.extend(
+                            value
+                        )
 
         parsed = []
 
         for item in candidates:
 
-            candle = parse_candle(item)
+            candle = parse_candle(
+                item
+            )
 
             if candle:
-                parsed.append(candle)
+
+                parsed.append(
+                    candle
+                )
 
         return parsed
 
@@ -307,10 +364,15 @@ def extract_candles(data):
 
         for item in data:
 
-            candle = parse_candle(item)
+            candle = parse_candle(
+                item
+            )
 
             if candle:
-                parsed.append(candle)
+
+                parsed.append(
+                    candle
+                )
 
         return parsed
 
@@ -374,14 +436,19 @@ def get_candles(
 
             return []
 
-        if isinstance(data, dict):
+        if isinstance(
+            data,
+            dict
+        ):
 
             print(
                 f"{symbol} RESPONSE KEYS:",
                 list(data.keys())
             )
 
-        candles = extract_candles(data)
+        candles = extract_candles(
+            data
+        )
 
         if not candles:
 
@@ -403,7 +470,10 @@ def get_candles(
         unique = {}
 
         for candle in candles:
-            unique[candle["time"]] = candle
+
+            unique[
+                candle["time"]
+            ] = candle
 
         candles = list(
             unique.values()
@@ -414,7 +484,8 @@ def get_candles(
         )
 
         current_bucket = (
-            int(time.time() // 300) * 300
+            int(time.time() // 300)
+            * 300
         )
 
         closed = [
@@ -535,17 +606,22 @@ def calculate_rsi(
     losses = losses[-period:]
 
     avg_gain = (
-        sum(gains) / period
+        sum(gains)
+        / period
     )
 
     avg_loss = (
-        sum(losses) / period
+        sum(losses)
+        / period
     )
 
     if avg_loss == 0:
         return 100.0
 
-    rs = avg_gain / avg_loss
+    rs = (
+        avg_gain
+        / avg_loss
+    )
 
     return 100 - (
         100 / (1 + rs)
@@ -573,6 +649,7 @@ def calculate_atr(
 
         high = candles[i]["high"]
         low = candles[i]["low"]
+
         prev_close = candles[
             i - 1
         ]["close"]
@@ -619,13 +696,16 @@ def volume_ratio(
     if not previous:
         return 0.0
 
-    avg_volume = mean(previous)
+    avg_volume = mean(
+        previous
+    )
 
     if avg_volume <= 0:
         return 0.0
 
     return (
-        current / avg_volume
+        current
+        / avg_volume
     )
 
 
@@ -708,12 +788,14 @@ def ichimoku_signal(candles):
         close > cloud_top
         and tenkan > kijun
     ):
+
         return 1
 
     if (
         close < cloud_bottom
         and tenkan < kijun
     ):
+
         return -1
 
     return 0
@@ -733,6 +815,7 @@ def find_swing_highs(
     if len(candles) < (
         window * 2 + 1
     ):
+
         return points
 
     for i in range(
@@ -780,6 +863,7 @@ def find_swing_lows(
     if len(candles) < (
         window * 2 + 1
     ):
+
         return points
 
     for i in range(
@@ -879,13 +963,19 @@ def trendline_break(candles):
             line_prev = (
                 y1
                 + slope
-                * (previous_index - x1)
+                * (
+                    previous_index
+                    - x1
+                )
             )
 
             line_now = (
                 y1
                 + slope
-                * (last_index - x1)
+                * (
+                    last_index
+                    - x1
+                )
             )
 
             buffer = (
@@ -924,13 +1014,19 @@ def trendline_break(candles):
             line_prev = (
                 y1
                 + slope
-                * (previous_index - x1)
+                * (
+                    previous_index
+                    - x1
+                )
             )
 
             line_now = (
                 y1
                 + slope
-                * (last_index - x1)
+                * (
+                    last_index
+                    - x1
+                )
             )
 
             buffer = (
@@ -1027,15 +1123,19 @@ def calculate_score(candles):
             short_score += 15
 
     if ichi == 1:
+
         long_score += 10
 
     elif ichi == -1:
+
         short_score += 10
 
     if tl["type"] == "BREAKOUT":
+
         long_score += 10
 
     elif tl["type"] == "BREAKDOWN":
+
         short_score += 10
 
     long_score = min(
@@ -1092,9 +1192,11 @@ def confirmation_ok(
         state,
         dict
     ):
+
         state = {}
 
     if symbol not in state:
+
         state[symbol] = {}
 
     item = state[symbol]
@@ -1236,6 +1338,7 @@ def calculate_levels(
         )
 
         sl = entry - risk
+
         tp1 = entry + risk
         tp2 = entry + risk * 2
         tp3 = entry + risk * 3
@@ -1266,6 +1369,7 @@ def calculate_levels(
         )
 
         sl = entry + risk
+
         tp1 = entry - risk
         tp2 = entry - risk * 2
         tp3 = entry - risk * 3
@@ -1303,12 +1407,14 @@ def btc_regime(candles):
         p15 >= 1.0
         and rsi >= 55
     ):
+
         return "BULLISH"
 
     if (
         p15 <= -1.0
         and rsi <= 45
     ):
+
         return "BEARISH"
 
     return "NEUTRAL"
@@ -1409,8 +1515,11 @@ def watchlist_line(
     direction = data["direction"]
 
     if direction == "LONG":
+
         emoji = "🟢"
+
     else:
+
         emoji = "🔴"
 
     features = []
@@ -1485,23 +1594,33 @@ def watchlist_line(
 
 
 # ============================================================
-# ============================================================
 # UT BOT
 # ============================================================
-# ============================================================
 
-def calculate_utbot_atr(candles, period=10):
+def calculate_utbot_atr(
+    candles,
+    period=10
+):
 
     if len(candles) < period + 1:
+
         return []
 
-    tr = [None] * len(candles)
+    tr = [
+        None
+    ] * len(candles)
 
-    for i in range(1, len(candles)):
+    for i in range(
+        1,
+        len(candles)
+    ):
 
         high = candles[i]["high"]
         low = candles[i]["low"]
-        prev_close = candles[i - 1]["close"]
+
+        prev_close = candles[
+            i - 1
+        ]["close"]
 
         tr[i] = max(
             high - low,
@@ -1509,20 +1628,27 @@ def calculate_utbot_atr(candles, period=10):
             abs(low - prev_close)
         )
 
-    atr = [None] * len(candles)
+    atr = [
+        None
+    ] * len(candles)
 
     valid_tr = [
         tr[i]
-        for i in range(1, len(candles))
+        for i in range(
+            1,
+            len(candles)
+        )
         if tr[i] is not None
     ]
 
     if len(valid_tr) < period:
+
         return atr
 
-    first_atr = sum(
-        valid_tr[:period]
-    ) / period
+    first_atr = (
+        sum(valid_tr[:period])
+        / period
+    )
 
     seed_index = period
 
@@ -1535,6 +1661,7 @@ def calculate_utbot_atr(candles, period=10):
     ):
 
         if tr[i] is None:
+
             continue
 
         atr[i] = (
@@ -1548,9 +1675,14 @@ def calculate_utbot_atr(candles, period=10):
     return atr
 
 
-def calculate_utbot_signal(candles):
+def calculate_utbot_signal(
+    candles
+):
 
-    if len(candles) < UT_ATR_PERIOD + 5:
+    if len(candles) < (
+        UT_ATR_PERIOD + 5
+    ):
+
         return None
 
     atr_values = calculate_utbot_atr(
@@ -1563,8 +1695,13 @@ def calculate_utbot_signal(candles):
         for c in candles
     ]
 
-    trailing = [0.0] * len(candles)
-    pos = [0] * len(candles)
+    trailing = [
+        0.0
+    ] * len(candles)
+
+    pos = [
+        0
+    ] * len(candles)
 
     for i in range(
         1,
@@ -1572,6 +1709,7 @@ def calculate_utbot_signal(candles):
     ):
 
         if atr_values[i] is None:
+
             continue
 
         nloss = (
@@ -1579,10 +1717,14 @@ def calculate_utbot_signal(candles):
             * atr_values[i]
         )
 
-        prev_stop = trailing[i - 1]
+        prev_stop = trailing[
+            i - 1
+        ]
 
         current_src = src[i]
-        previous_src = src[i - 1]
+        previous_src = src[
+            i - 1
+        ]
 
         if (
             current_src > prev_stop
@@ -1632,21 +1774,30 @@ def calculate_utbot_signal(candles):
 
         else:
 
-            pos[i] = pos[i - 1]
+            pos[i] = pos[
+                i - 1
+            ]
 
-    # Only the LAST CLOSED candle
+    # Only LAST CLOSED candle
     i = len(candles) - 1
 
     if (
         atr_values[i] is None
         or trailing[i] == 0
     ):
+
         return None
 
-    previous_stop = trailing[i - 1]
+    previous_stop = trailing[
+        i - 1
+    ]
+
     current_stop = trailing[i]
 
-    previous_src = src[i - 1]
+    previous_src = src[
+        i - 1
+    ]
+
     current_src = src[i]
 
     # EMA(1) == source
@@ -1719,6 +1870,7 @@ def calculate_ut_setup_levels(
     )
 
     if atr <= 0:
+
         return None
 
     recent = candles[-12:]
@@ -1869,12 +2021,14 @@ def get_ut_state():
         state,
         dict
     ):
+
         state = {}
 
     if not isinstance(
         state.get("_utbot"),
         dict
     ):
+
         state["_utbot"] = {}
 
     ut = state["_utbot"]
@@ -1883,12 +2037,14 @@ def get_ut_state():
         ut.get("signals"),
         dict
     ):
+
         ut["signals"] = {}
 
     if not isinstance(
         ut.get("stats"),
         dict
     ):
+
         ut["stats"] = {
             "total": 0,
             "closed": 0,
@@ -1910,13 +2066,18 @@ def calculate_win_rate(
     losses
 ):
 
-    total = wins + losses
+    total = (
+        wins
+        + losses
+    )
 
     if total <= 0:
+
         return 0.0
 
     return (
-        wins / total
+        wins
+        / total
     ) * 100
 
 
@@ -1924,7 +2085,9 @@ def ut_stats_message():
 
     state = get_ut_state()
 
-    stats = state["_utbot"]["stats"]
+    stats = state[
+        "_utbot"
+    ]["stats"]
 
     total = int(
         stats.get(
@@ -2019,13 +2182,23 @@ def update_ut_setups(results):
 
     state = get_ut_state()
 
-    ut_state = state["_utbot"]
-    signals = ut_state["signals"]
-    stats = ut_state["stats"]
+    ut_state = state[
+        "_utbot"
+    ]
+
+    signals = ut_state[
+        "signals"
+    ]
+
+    stats = ut_state[
+        "stats"
+    ]
 
     changed = False
 
-    for key in list(signals.keys()):
+    for key in list(
+        signals.keys()
+    ):
 
         setup = signals[key]
 
@@ -2033,14 +2206,21 @@ def update_ut_setups(results):
             setup,
             dict
         ):
+
             continue
 
-        if setup.get("status") != "OPEN":
+        if setup.get(
+            "status"
+        ) != "OPEN":
+
             continue
 
-        symbol = setup.get("symbol")
+        symbol = setup.get(
+            "symbol"
+        )
 
         if not symbol:
+
             continue
 
         candles = None
@@ -2049,13 +2229,16 @@ def update_ut_setups(results):
 
             if item["symbol"] == symbol:
 
-                candles = item["data"].get(
+                candles = item[
+                    "data"
+                ].get(
                     "candles"
                 )
 
                 break
 
         if not candles:
+
             continue
 
         entry = float(
@@ -2078,7 +2261,9 @@ def update_ut_setups(results):
             setup["tp2"]
         )
 
-        direction = setup["direction"]
+        direction = setup[
+            "direction"
+        ]
 
         signal_time = int(
             setup["candle_time"]
@@ -2091,6 +2276,7 @@ def update_ut_setups(results):
         ]
 
         if not future_candles:
+
             continue
 
         result = None
@@ -2107,14 +2293,24 @@ def update_ut_setups(results):
                 high = candle["high"]
                 low = candle["low"]
 
-                hit_sl = low <= sl
-                hit_tp2 = high >= tp2
-                hit_tp15 = high >= tp15
-                hit_tp1 = high >= tp1
+                hit_sl = (
+                    low <= sl
+                )
+
+                hit_tp2 = (
+                    high >= tp2
+                )
+
+                hit_tp15 = (
+                    high >= tp15
+                )
+
+                hit_tp1 = (
+                    high >= tp1
+                )
 
                 # Conservative rule:
-                # if SL and target are both touched
-                # in the same candle, count LOSS.
+                # SL + TP in same candle = LOSS
                 if hit_sl and (
                     hit_tp2
                     or hit_tp15
@@ -2123,30 +2319,35 @@ def update_ut_setups(results):
 
                     result = "LOSS"
                     result_level = "SL"
+
                     break
 
                 if hit_sl:
 
                     result = "LOSS"
                     result_level = "SL"
+
                     break
 
                 if hit_tp2:
 
                     result = "WIN_2R"
                     result_level = "2R"
+
                     break
 
                 if hit_tp15:
 
                     result = "WIN_15R"
                     result_level = "1.5R"
+
                     break
 
                 if hit_tp1:
 
                     result = "WIN_1R"
                     result_level = "1R"
+
                     break
 
         # ----------------------------------------------------
@@ -2160,10 +2361,21 @@ def update_ut_setups(results):
                 high = candle["high"]
                 low = candle["low"]
 
-                hit_sl = high >= sl
-                hit_tp2 = low <= tp2
-                hit_tp15 = low <= tp15
-                hit_tp1 = low <= tp1
+                hit_sl = (
+                    high >= sl
+                )
+
+                hit_tp2 = (
+                    low <= tp2
+                )
+
+                hit_tp15 = (
+                    low <= tp15
+                )
+
+                hit_tp1 = (
+                    low <= tp1
+                )
 
                 # Conservative same-candle rule
                 if hit_sl and (
@@ -2174,39 +2386,52 @@ def update_ut_setups(results):
 
                     result = "LOSS"
                     result_level = "SL"
+
                     break
 
                 if hit_sl:
 
                     result = "LOSS"
                     result_level = "SL"
+
                     break
 
                 if hit_tp2:
 
                     result = "WIN_2R"
                     result_level = "2R"
+
                     break
 
                 if hit_tp15:
 
                     result = "WIN_15R"
                     result_level = "1.5R"
+
                     break
 
                 if hit_tp1:
 
                     result = "WIN_1R"
                     result_level = "1R"
+
                     break
 
         if not result:
+
             continue
 
         setup["status"] = "CLOSED"
+
         setup["result"] = result
-        setup["result_level"] = result_level
-        setup["closed_time"] = int(time.time())
+
+        setup["result_level"] = (
+            result_level
+        )
+
+        setup["closed_time"] = int(
+            time.time()
+        )
 
         stats["closed"] = int(
             stats.get(
@@ -2298,6 +2523,7 @@ def update_ut_setups(results):
 def process_ut_top5(top5):
 
     if not top5:
+
         return
 
     # --------------------------------------------------------
@@ -2311,18 +2537,30 @@ def process_ut_top5(top5):
         1
     ):
 
-        symbol = item["symbol"]
-        data = item["data"]
-        candles = data["candles"]
+        symbol = item[
+            "symbol"
+        ]
+
+        data = item[
+            "data"
+        ]
+
+        candles = data[
+            "candles"
+        ]
 
         ut = calculate_utbot_signal(
             candles
         )
 
         if not ut:
+
             continue
 
-        if not ut.get("signal"):
+        if not ut.get(
+            "signal"
+        ):
+
             continue
 
         candidates.append({
@@ -2370,7 +2608,7 @@ def process_ut_top5(top5):
     )
 
     # --------------------------------------------------------
-    # Build unique signal key
+    # Unique signal key
     # --------------------------------------------------------
 
     signal_key = (
@@ -2381,9 +2619,10 @@ def process_ut_top5(top5):
 
     state = get_ut_state()
 
-    signals = state["_utbot"]["signals"]
+    signals = state[
+        "_utbot"
+    ]["signals"]
 
-    # Already processed
     if signal_key in signals:
 
         print(
@@ -2434,9 +2673,13 @@ def process_ut_top5(top5):
         "created_time": int(time.time()),
     }
 
-    signals[signal_key] = setup
+    signals[
+        signal_key
+    ] = setup
 
-    stats = state["_utbot"]["stats"]
+    stats = state[
+        "_utbot"
+    ]["stats"]
 
     stats["total"] = int(
         stats.get(
@@ -2462,9 +2705,7 @@ def process_ut_top5(top5):
         rank
     )
 
-    print(
-        message
-    )
+    print(message)
 
     send_telegram(
         message
@@ -2497,21 +2738,29 @@ def main():
 
     print(
         "TELEGRAM TOKEN:",
-        "SET" if TELEGRAM_BOT_TOKEN else "MISSING"
+        "SET"
+        if TELEGRAM_BOT_TOKEN
+        else "MISSING"
     )
 
     print(
         "TELEGRAM CHAT ID:",
-        "SET" if TELEGRAM_CHAT_ID else "MISSING"
+        "SET"
+        if TELEGRAM_CHAT_ID
+        else "MISSING"
     )
 
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
 
     print(
         f"CRYPTO PUMP / DUMP SCANNER {VERSION}"
     )
 
-    print("=" * 60)
+    print(
+        "=" * 60
+    )
 
     results = []
 
@@ -2647,7 +2896,7 @@ def main():
     )
 
     # ========================================================
-    # NEW: UPDATE PREVIOUS UT SETUPS
+    # UPDATE PREVIOUS UT SETUPS
     # ========================================================
 
     update_ut_setups(
@@ -2655,36 +2904,49 @@ def main():
     )
 
     # ========================================================
-    # NEW: UT BOT ON TOP 5
+    # UT BOT ON TOP 5
     # ========================================================
 
     process_ut_top5(
         top5
     )
 
-    # --------------------------------------------------------
-    # FINAL SIGNAL
-    # --------------------------------------------------------
+    # ========================================================
+    # EXISTING FINAL SIGNAL
+    # ========================================================
 
     for item in results:
 
-        symbol = item["symbol"]
+        symbol = item[
+            "symbol"
+        ]
 
-        data = item["data"]
+        data = item[
+            "data"
+        ]
 
-        candles = data["candles"]
+        candles = data[
+            "candles"
+        ]
 
-        score = data["score"]
+        score = data[
+            "score"
+        ]
 
-        volume = data["volume"]
+        volume = data[
+            "volume"
+        ]
 
-        direction = data["direction"]
+        direction = data[
+            "direction"
+        ]
 
         # ----------------------------------------------------
         # SCORE
         # ----------------------------------------------------
 
         if score < 75:
+
             continue
 
         # ----------------------------------------------------
@@ -2692,6 +2954,7 @@ def main():
         # ----------------------------------------------------
 
         if volume < 1.5:
+
             continue
 
         # ----------------------------------------------------
@@ -2705,6 +2968,7 @@ def main():
                 and data["p10"] > 0
                 and data["p15"] > 0
             ):
+
                 continue
 
         else:
@@ -2714,33 +2978,38 @@ def main():
                 and data["p10"] < 0
                 and data["p15"] < 0
             ):
+
                 continue
 
         # ----------------------------------------------------
         # TRENDLINE
         # ----------------------------------------------------
 
-        tl = data["trendline"]["type"]
+        tl = data[
+            "trendline"
+        ]["type"]
 
         if (
             direction == "LONG"
             and tl != "BREAKOUT"
         ):
+
             continue
 
         if (
             direction == "SHORT"
             and tl != "BREAKDOWN"
         ):
+
             continue
 
         # ----------------------------------------------------
         # CONFIRMATION
         # ----------------------------------------------------
 
-        candle_time = (
-            candles[-1]["time"]
-        )
+        candle_time = candles[
+            -1
+        ]["time"]
 
         confirmed, count = confirmation_ok(
             symbol,
@@ -2765,4 +3034,82 @@ def main():
         levels = calculate_levels(
             candles,
             direction
-       
+        )
+
+        if not levels:
+
+            print(
+                f"{symbol}: "
+                f"cannot calculate levels"
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # MESSAGE
+        # ----------------------------------------------------
+
+        message = signal_message(
+            symbol,
+            data,
+            levels,
+            count
+        )
+
+        print(
+            message
+        )
+
+        # ----------------------------------------------------
+        # TELEGRAM
+        # ----------------------------------------------------
+
+        sent = send_telegram(
+            message
+        )
+
+        # ----------------------------------------------------
+        # SAVE EXISTING SIGNAL
+        # ----------------------------------------------------
+
+        if sent:
+
+            state = load_json(
+                STATE_FILE,
+                {}
+            )
+
+            if not isinstance(
+                state,
+                dict
+            ):
+
+                state = {}
+
+            state[symbol] = {
+                "direction": direction,
+                "score": score,
+                "entry": levels["entry"],
+                "sl": levels["sl"],
+                "tp1": levels["tp1"],
+                "tp2": levels["tp2"],
+                "tp3": levels["tp3"],
+                "candle_time": candle_time,
+                "timestamp": int(
+                    time.time()
+                ),
+            }
+
+            save_json(
+                STATE_FILE,
+                state
+            )
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
