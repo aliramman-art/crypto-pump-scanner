@@ -1,22 +1,29 @@
 # ============================================================
-# ICHIMOKU TENKAN / KIJUN OVERLAP SCANNER
+# ICHIMOKU SIGNAL SCANNER v2
 # ============================================================
 # Kraken Futures
 # 30 Coins
-# Timeframes: 1m / 5m / 15m / 30m / 1h / 4h
+# Timeframes:
+# 1m / 5m / 15m / 30m / 1h / 4h
 #
-# هدف:
-# پیدا کردن نزدیک‌ترین همپوشانی Tenkan و Kijun
+# NO DIVERGENCE
 #
-# خروجی:
-# فقط TOP 5
+# Detects:
+# - Tenkan / Kijun proximity
+# - Bullish TK Cross
+# - Bearish TK Cross
+# - Tenkan slope
+# - Kijun slope
+# - Cloud position
+# - Multi-timeframe alignment
+#
+# Telegram
 # ============================================================
 
 import os
 import time
 import requests
 import pandas as pd
-import numpy as np
 from datetime import datetime, timezone
 
 
@@ -29,10 +36,14 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 KRAKEN_URL = "https://futures.kraken.com/api/charts/v1/trade"
 
-TOP_N = 5
+TOP_N = 8
 
-# حداکثر فاصله برای در نظر گرفتن Overlap
-MAX_OVERLAP_DISTANCE = 0.10
+# فاصله حداکثری برای کاندید شدن
+MAX_TK_DISTANCE = 0.25
+
+# فاصله‌های مهم
+STRONG_DISTANCE = 0.05
+GOOD_DISTANCE = 0.10
 
 TIMEFRAMES = {
     "1m": 1,
@@ -89,7 +100,7 @@ SYMBOLS = {
 def send_telegram(message):
 
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram secrets are missing.")
+        print("Telegram secrets missing.")
         return False
 
     url = (
@@ -112,19 +123,28 @@ def send_telegram(message):
             timeout=20
         )
 
-        print("Telegram HTTP:", response.status_code)
+        print(
+            "Telegram HTTP:",
+            response.status_code
+        )
 
         if response.status_code == 200:
             print("Telegram message sent.")
             return True
 
-        print("Telegram error:", response.text)
-        return False
+        print(
+            "Telegram error:",
+            response.text
+        )
 
     except Exception as e:
 
-        print("Telegram exception:", e)
-        return False
+        print(
+            "Telegram exception:",
+            e
+        )
+
+    return False
 
 
 # ============================================================
@@ -147,7 +167,8 @@ def get_ohlcv(symbol, interval, limit=200):
         )
 
         print(
-            f"KRAKEN {symbol} {interval} "
+            f"KRAKEN {symbol} "
+            f"{interval} "
             f"HTTP={response.status_code}"
         )
 
@@ -173,11 +194,24 @@ def get_ohlcv(symbol, interval, limit=200):
                         unit="ms",
                         utc=True
                     ),
-                    "open": float(candle["open"]),
-                    "high": float(candle["high"]),
-                    "low": float(candle["low"]),
-                    "close": float(candle["close"]),
-                    "volume": float(candle.get("volume", 0)),
+                    "open": float(
+                        candle["open"]
+                    ),
+                    "high": float(
+                        candle["high"]
+                    ),
+                    "low": float(
+                        candle["low"]
+                    ),
+                    "close": float(
+                        candle["close"]
+                    ),
+                    "volume": float(
+                        candle.get(
+                            "volume",
+                            0
+                        )
+                    ),
                 })
 
             except Exception:
@@ -188,21 +222,22 @@ def get_ohlcv(symbol, interval, limit=200):
 
         df = pd.DataFrame(rows)
 
-        df = df.drop_duplicates(
-            subset=["time"]
+        df = (
+            df
+            .drop_duplicates(
+                subset=["time"]
+            )
+            .sort_values("time")
+            .reset_index(drop=True)
         )
-
-        df = df.sort_values("time")
-
-        df = df.reset_index(drop=True)
 
         return df
 
     except Exception as e:
 
         print(
-            f"KRAKEN ERROR {symbol} "
-            f"{interval}: {e}"
+            f"KRAKEN ERROR "
+            f"{symbol} {interval}: {e}"
         )
 
         return None
@@ -217,25 +252,30 @@ def calculate_ichimoku(df):
     high = df["high"]
     low = df["low"]
 
-    # Tenkan-sen
+    # Tenkan 9
     tenkan = (
         high.rolling(9).max()
-        + low.rolling(9).min()
+        +
+        low.rolling(9).min()
     ) / 2
 
-    # Kijun-sen
+    # Kijun 26
     kijun = (
         high.rolling(26).max()
-        + low.rolling(26).min()
+        +
+        low.rolling(26).min()
     ) / 2
 
     # Senkou A
-    span_a = (tenkan + kijun) / 2
+    span_a = (
+        tenkan + kijun
+    ) / 2
 
-    # Senkou B
+    # Senkou B 52
     span_b = (
         high.rolling(52).max()
-        + low.rolling(52).min()
+        +
+        low.rolling(52).min()
     ) / 2
 
     df["tenkan"] = tenkan
@@ -257,43 +297,133 @@ def analyze_timeframe(df):
 
     df = calculate_ichimoku(df)
 
-    row = df.iloc[-1]
+    current = df.iloc[-1]
+    previous = df.iloc[-2]
 
     if (
-        pd.isna(row["tenkan"])
-        or pd.isna(row["kijun"])
+        pd.isna(current["tenkan"])
+        or
+        pd.isna(current["kijun"])
+        or
+        pd.isna(previous["tenkan"])
+        or
+        pd.isna(previous["kijun"])
     ):
         return None
 
-    price = float(row["close"])
-    tenkan = float(row["tenkan"])
-    kijun = float(row["kijun"])
+    price = float(current["close"])
+
+    tenkan = float(
+        current["tenkan"]
+    )
+
+    kijun = float(
+        current["kijun"]
+    )
+
+    previous_tenkan = float(
+        previous["tenkan"]
+    )
+
+    previous_kijun = float(
+        previous["kijun"]
+    )
 
     if price <= 0:
         return None
 
-    # فاصله Tenkan/Kijun نسبت به قیمت
+    # --------------------------------------------------------
+    # T/K DISTANCE
+    # --------------------------------------------------------
+
     distance = (
         abs(tenkan - kijun)
         / price
         * 100
     )
 
-    # جهت
+    # --------------------------------------------------------
+    # DIRECTION
+    # --------------------------------------------------------
+
     if tenkan > kijun:
         direction = "BULLISH"
+
     elif tenkan < kijun:
         direction = "BEARISH"
+
     else:
         direction = "EQUAL"
 
-    # وضعیت Cloud
-    span_a = row["span_a"]
-    span_b = row["span_b"]
+    # --------------------------------------------------------
+    # TK CROSS
+    # --------------------------------------------------------
+
+    bullish_cross = (
+        previous_tenkan
+        <= previous_kijun
+        and
+        tenkan
+        > kijun
+    )
+
+    bearish_cross = (
+        previous_tenkan
+        >= previous_kijun
+        and
+        tenkan
+        < kijun
+    )
+
+    if bullish_cross:
+        cross = "BULLISH_CROSS"
+
+    elif bearish_cross:
+        cross = "BEARISH_CROSS"
+
+    else:
+        cross = "NONE"
+
+    # --------------------------------------------------------
+    # SLOPES
+    # --------------------------------------------------------
+
+    older_tenkan = df["tenkan"].iloc[-3]
+    older_kijun = df["kijun"].iloc[-3]
+
+    tenkan_slope = "FLAT"
+    kijun_slope = "FLAT"
+
+    if not pd.isna(older_tenkan):
+
+        if tenkan > older_tenkan:
+            tenkan_slope = "UP"
+
+        elif tenkan < older_tenkan:
+            tenkan_slope = "DOWN"
+
+    if not pd.isna(older_kijun):
+
+        if kijun > older_kijun:
+            kijun_slope = "UP"
+
+        elif kijun < older_kijun:
+            kijun_slope = "DOWN"
+
+    # --------------------------------------------------------
+    # CLOUD
+    # --------------------------------------------------------
+
+    span_a = current["span_a"]
+    span_b = current["span_b"]
 
     cloud = "UNKNOWN"
 
-    if not pd.isna(span_a) and not pd.isna(span_b):
+    if (
+        not pd.isna(span_a)
+        and
+        not pd.isna(span_b)
+    ):
 
         cloud_top = max(
             float(span_a),
@@ -314,94 +444,96 @@ def analyze_timeframe(df):
         else:
             cloud = "INSIDE"
 
-    # شیب Tenkan
-    tenkan_slope = 0
-
-    if len(df) >= 3:
-
-        previous_tenkan = df["tenkan"].iloc[-3]
-
-        if not pd.isna(previous_tenkan):
-
-            if tenkan > previous_tenkan:
-                tenkan_slope = 1
-
-            elif tenkan < previous_tenkan:
-                tenkan_slope = -1
-
-    # شیب Kijun
-    kijun_slope = 0
-
-    if len(df) >= 3:
-
-        previous_kijun = df["kijun"].iloc[-3]
-
-        if not pd.isna(previous_kijun):
-
-            if kijun > previous_kijun:
-                kijun_slope = 1
-
-            elif kijun < previous_kijun:
-                kijun_slope = -1
-
     return {
         "price": price,
         "tenkan": tenkan,
         "kijun": kijun,
         "distance": distance,
         "direction": direction,
-        "cloud": cloud,
+        "cross": cross,
         "tenkan_slope": tenkan_slope,
         "kijun_slope": kijun_slope,
+        "cloud": cloud,
     }
 
 
 # ============================================================
-# TIMEFRAME SCORE
+# SCORE ONE TIMEFRAME
 # ============================================================
 
-def calculate_tf_score(data):
+def timeframe_score(data):
 
     if data is None:
         return 0
 
+    score = 0
+
     distance = data["distance"]
 
-    # هرچه فاصله کمتر، امتیاز بیشتر
-    if distance <= 0.01:
-        score = 30
+    # --------------------------------------------------------
+    # DISTANCE
+    # --------------------------------------------------------
 
-    elif distance <= 0.03:
-        score = 27
+    if distance <= STRONG_DISTANCE:
+        score += 30
 
-    elif distance <= 0.05:
-        score = 24
+    elif distance <= GOOD_DISTANCE:
+        score += 24
 
-    elif distance <= 0.07:
-        score = 20
+    elif distance <= MAX_TK_DISTANCE:
+        score += 15
 
-    elif distance <= 0.10:
-        score = 15
+    # --------------------------------------------------------
+    # CROSS
+    # --------------------------------------------------------
 
-    else:
-        score = 0
+    if data["cross"] in (
+        "BULLISH_CROSS",
+        "BEARISH_CROSS"
+    ):
+        score += 25
 
-    # جهت صعودی
+    # --------------------------------------------------------
+    # SLOPE
+    # --------------------------------------------------------
+
     if data["direction"] == "BULLISH":
-        score += 5
 
-    # شیب مثبت
-    if data["tenkan_slope"] == 1:
-        score += 3
+        if data["tenkan_slope"] == "UP":
+            score += 7
 
-    if data["kijun_slope"] == 1:
-        score += 2
+        if data["kijun_slope"] == "UP":
+            score += 5
 
-    # قیمت بالای Cloud
-    if data["cloud"] == "ABOVE":
-        score += 5
+    elif data["direction"] == "BEARISH":
 
-    return score
+        if data["tenkan_slope"] == "DOWN":
+            score += 7
+
+        if data["kijun_slope"] == "DOWN":
+            score += 5
+
+    # --------------------------------------------------------
+    # CLOUD
+    # --------------------------------------------------------
+
+    if data["direction"] == "BULLISH":
+
+        if data["cloud"] == "ABOVE":
+            score += 8
+
+        elif data["cloud"] == "INSIDE":
+            score += 3
+
+    elif data["direction"] == "BEARISH":
+
+        if data["cloud"] == "BELOW":
+            score += 8
+
+        elif data["cloud"] == "INSIDE":
+            score += 3
+
+    return min(score, 100)
 
 
 # ============================================================
@@ -414,8 +546,9 @@ def analyze_coin(name, symbol):
         "coin": name,
         "symbol": symbol,
         "timeframes": {},
-        "overlaps": [],
+        "signals": [],
         "score": 0,
+        "direction": None,
     }
 
     for tf_name, interval in TIMEFRAMES.items():
@@ -427,89 +560,169 @@ def analyze_coin(name, symbol):
 
         data = analyze_timeframe(df)
 
-        result["timeframes"][tf_name] = data
+        result["timeframes"][
+            tf_name
+        ] = data
 
         if data is not None:
 
-            # فقط همپوشانی صعودی
-            if (
-                data["direction"] == "BULLISH"
-                and
-                data["distance"] <= MAX_OVERLAP_DISTANCE
-            ):
+            # ------------------------------------------------
+            # Candidate condition
+            # ------------------------------------------------
 
-                result["overlaps"].append({
+            close_enough = (
+                data["distance"]
+                <= MAX_TK_DISTANCE
+            )
+
+            cross = (
+                data["cross"]
+                != "NONE"
+            )
+
+            if close_enough or cross:
+
+                tf_score = timeframe_score(
+                    data
+                )
+
+                result["signals"].append({
                     "tf": tf_name,
-                    "distance": data["distance"],
+                    "score": tf_score,
                     "data": data,
                 })
 
-        # فشار اضافه روی API ندهیم
         time.sleep(0.10)
 
-    if not result["overlaps"]:
+    if not result["signals"]:
         return None
 
-    # مرتب‌سازی بر اساس نزدیک‌ترین همپوشانی
-    result["overlaps"].sort(
-        key=lambda x: x["distance"]
-    )
+    # ========================================================
+    # DIRECTION FROM SIGNALS
+    # ========================================================
 
-    # امتیاز پایه
-    overlap_count = len(
-        result["overlaps"]
-    )
+    bullish_points = 0
+    bearish_points = 0
 
-    result["score"] = min(
-        100,
-        overlap_count * 15
-    )
-
-    # نزدیک‌ترین فاصله امتیاز اضافه می‌گیرد
-    closest = result["overlaps"][0]["distance"]
-
-    if closest <= 0.01:
-        result["score"] += 25
-
-    elif closest <= 0.03:
-        result["score"] += 20
-
-    elif closest <= 0.05:
-        result["score"] += 15
-
-    elif closest <= 0.07:
-        result["score"] += 10
-
-    else:
-        result["score"] += 5
-
-    # Cloud و شیب را هم در امتیاز لحاظ می‌کنیم
-    for item in result["overlaps"]:
+    for item in result["signals"]:
 
         data = item["data"]
+        score = item["score"]
 
-        if data["cloud"] == "ABOVE":
-            result["score"] += 2
+        if data["direction"] == "BULLISH":
+            bullish_points += score
 
-        if data["tenkan_slope"] == 1:
-            result["score"] += 1
+        elif data["direction"] == "BEARISH":
+            bearish_points += score
 
-        if data["kijun_slope"] == 1:
-            result["score"] += 1
+        if data["cross"] == "BULLISH_CROSS":
+            bullish_points += 20
+
+        elif data["cross"] == "BEARISH_CROSS":
+            bearish_points += 20
+
+    if bullish_points > bearish_points:
+
+        result["direction"] = "BULLISH"
+
+    elif bearish_points > bullish_points:
+
+        result["direction"] = "BEARISH"
+
+    else:
+
+        result["direction"] = "MIXED"
+
+    # ========================================================
+    # MULTI-TIMEFRAME SCORE
+    # ========================================================
+
+    tf_count = len(
+        result["signals"]
+    )
+
+    base_score = sum(
+        x["score"]
+        for x in result["signals"]
+    )
+
+    # چند تایم‌فریم همزمان
+    alignment_bonus = min(
+        tf_count * 5,
+        25
+    )
+
+    # --------------------------------------------------------
+    # Direction alignment
+    # --------------------------------------------------------
+
+    direction_bonus = 0
+
+    if result["direction"] == "BULLISH":
+
+        bullish_tfs = sum(
+            1
+            for x in result["signals"]
+            if x["data"]["direction"]
+            == "BULLISH"
+        )
+
+        if bullish_tfs >= 2:
+            direction_bonus = 10
+
+        if bullish_tfs >= 3:
+            direction_bonus = 15
+
+    elif result["direction"] == "BEARISH":
+
+        bearish_tfs = sum(
+            1
+            for x in result["signals"]
+            if x["data"]["direction"]
+            == "BEARISH"
+        )
+
+        if bearish_tfs >= 2:
+            direction_bonus = 10
+
+        if bearish_tfs >= 3:
+            direction_bonus = 15
+
+    # --------------------------------------------------------
+    # Final score
+    # --------------------------------------------------------
 
     result["score"] = min(
         100,
-        result["score"]
+        int(
+            base_score / tf_count
+            +
+            alignment_bonus
+            +
+            direction_bonus
+        )
+    )
+
+    # نزدیک‌ترین T/K
+    result["signals"].sort(
+        key=lambda x: (
+            x["data"]["distance"],
+            -x["score"]
+        )
+    )
+
+    result["closest"] = (
+        result["signals"][0]
     )
 
     return result
 
 
 # ============================================================
-# FORMAT TELEGRAM
+# FORMAT
 # ============================================================
 
-def format_result(results, total):
+def format_message(results):
 
     now = datetime.now(
         timezone.utc
@@ -518,60 +731,87 @@ def format_result(results, total):
     )
 
     message = (
-        "🔎 <b>ICHIMOKU OVERLAP SCANNER</b>\n"
+        "🔎 <b>ICHIMOKU SIGNAL SCANNER v2</b>\n"
         "━━━━━━━━━━━━━━━━━━\n"
         f"UTC: {now}\n"
-        f"Coins: {total}/30\n"
-        "Strategy: Tenkan/Kijun\n"
-        "Bullish overlap only\n"
+        "TK Overlap + TK Cross\n"
+        "Multi-Timeframe\n"
         "━━━━━━━━━━━━━━━━━━\n\n"
     )
 
     if not results:
 
         message += (
-            "⚪ <b>NO CLOSE OVERLAP</b>\n\n"
-            f"Threshold: ≤ {MAX_OVERLAP_DISTANCE:.2f}%"
+            "⚪ <b>NO ICHIMOKU SETUP</b>"
         )
 
         return message
 
-    message += "🔥 <b>TOP 5 NEAREST</b>\n\n"
+    message += (
+        "🔥 <b>TOP SIGNALS</b>\n\n"
+    )
 
-    for i, result in enumerate(
+    for index, result in enumerate(
         results[:TOP_N],
         start=1
     ):
 
+        if result["direction"] == "BULLISH":
+            direction_icon = "🟢"
+        elif result["direction"] == "BEARISH":
+            direction_icon = "🔴"
+        else:
+            direction_icon = "🟡"
+
         message += (
-            f"<b>{i}. {result['coin']}</b> "
+            f"<b>{index}. "
+            f"{direction_icon} "
+            f"{result['coin']}</b> "
             f"⭐ {result['score']}/100\n"
         )
 
-        for item in result["overlaps"]:
+        for item in result["signals"]:
 
             tf = item["tf"]
-            distance = item["distance"]
-
             data = item["data"]
 
-            if data["direction"] == "BULLISH":
-                icon = "🟢"
+            distance = data["distance"]
+
+            if data["cross"] == "BULLISH_CROSS":
+
+                status = "🚀 CROSS↑"
+
+            elif data["cross"] == "BEARISH_CROSS":
+
+                status = "🔻 CROSS↓"
+
+            elif data["direction"] == "BULLISH":
+
+                status = "🟢 T/K"
+
+            elif data["direction"] == "BEARISH":
+
+                status = "🔴 T/K"
+
             else:
-                icon = "🔴"
+
+                status = "⚪ T/K"
 
             message += (
                 f"   {tf:<3} "
-                f"{icon} {distance:.3f}%\n"
+                f"{status} "
+                f"{distance:.3f}%\n"
             )
 
-        closest = result["overlaps"][0]
+        closest = result["closest"]
 
         message += (
             f"   🎯 Closest: "
             f"{closest['tf']} "
-            f"{closest['distance']:.3f}%\n\n"
+            f"{closest['data']['distance']:.3f}%\n"
         )
+
+        message += "\n"
 
     return message
 
@@ -585,16 +825,18 @@ def main():
     print(
         "=========================================="
     )
+
     print(
-        "ICHIMOKU OVERLAP SCANNER"
+        "ICHIMOKU SIGNAL SCANNER v2"
     )
+
     print(
         "=========================================="
     )
 
     results = []
 
-    successful = 0
+    success = 0
 
     for name, symbol in SYMBOLS.items():
 
@@ -609,26 +851,25 @@ def main():
                 symbol
             )
 
-            successful += 1
+            success += 1
 
-            if result is not None:
+            if result:
 
                 results.append(result)
 
                 print(
                     f"{name}: "
-                    f"OVERLAP "
+                    f"{result['direction']} "
+                    f"score={result['score']} "
                     f"closest="
-                    f"{result['overlaps'][0]['distance']:.4f}% "
-                    f"score="
-                    f"{result['score']}"
+                    f"{result['closest']['data']['distance']:.4f}%"
                 )
 
             else:
 
                 print(
                     f"{name}: "
-                    f"NO CLOSE OVERLAP"
+                    f"NO SETUP"
                 )
 
         except Exception as e:
@@ -643,24 +884,25 @@ def main():
 
     results.sort(
         key=lambda x: (
-            x["overlaps"][0]["distance"],
-            -x["score"]
+            -x["score"],
+            x["closest"]["data"]["distance"]
         )
     )
 
     # ========================================================
-    # TELEGRAM
+    # MESSAGE
     # ========================================================
 
-    message = format_result(
-        results,
-        successful
+    message = format_message(
+        results
     )
 
     print("\n")
     print(message)
 
-    send_telegram(message)
+    send_telegram(
+        message
+    )
 
 
 # ============================================================
