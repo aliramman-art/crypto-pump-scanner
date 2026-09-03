@@ -1,46 +1,6 @@
 # ============================================================
-# CRYPTO DIVERGENCE SCANNER v7.1
-# GITHUB ACTIONS VERSION
-# ============================================================
-#
-# STRATEGY
-#
-# 1) FIRST determine 1H trend
-#
-# BULLISH 1H:
-#   -> Search Hidden Bearish 1H
-#   -> Then search Regular Bullish 1M
-#   -> LONG
-#
-# BEARISH 1H:
-#   -> Search Hidden Bullish 1H
-#   -> Then search Regular Bearish 1M
-#   -> SHORT
-#
-# Hidden 1H maximum age = 24 hours
-# Regular 1M maximum age = 5 minutes
-# Regular 1M MUST happen AFTER Hidden 1H
-#
-# ENTRY:
-#   Latest CLOSED 1M candle close
-#
-# LONG:
-#   SL = slightly below latest valid 1M swing low
-#   TP = Entry + Risk
-#
-# SHORT:
-#   SL = slightly above latest valid 1M swing high
-#   TP = Entry - Risk
-#
-# R:R = 1:1
-#
-# GITHUB ACTIONS:
-# - One scan per workflow execution
-# - Immediate signal when conditions appear
-# - Normal report every 5 minutes
-# - Only CLOSED candles
-# - No Telegram buttons
-# - No ATR
+# CRYPTO DIVERGENCE SCANNER v7.2
+# GITHUB ACTIONS + KRAKEN DEBUG/FIX
 # ============================================================
 
 import requests
@@ -60,12 +20,12 @@ from datetime import datetime, timezone
 
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
-    "PUT_YOUR_BOT_TOKEN_HERE"
+    ""
 )
 
 TELEGRAM_CHAT_ID = os.getenv(
     "TELEGRAM_CHAT_ID",
-    "PUT_YOUR_CHAT_ID_HERE"
+    ""
 )
 
 
@@ -77,31 +37,16 @@ KRAKEN_URL = (
     "https://futures.kraken.com/api/charts/v1/trade"
 )
 
-
-# ============================================================
-# FILES
-# ============================================================
-
 STATE_FILE = "divergence_state_v7.json"
 
-
-# ============================================================
-# SCANNER SETTINGS
-# ============================================================
-
-MAX_WORKERS = 15
+MAX_WORKERS = 10
 
 
 # ============================================================
-# RSI
+# SETTINGS
 # ============================================================
 
 RSI_PERIOD = 14
-
-
-# ============================================================
-# PIVOT
-# ============================================================
 
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
@@ -109,22 +54,10 @@ PIVOT_RIGHT = 2
 MAX_PIVOT_GAP = 60
 
 MIN_PRICE_DIFF_PERCENT = 0.05
-
 MIN_RSI_DIFF = 2.0
 
-
-# ============================================================
-# DIVERGENCE AGE
-# ============================================================
-
 MAX_HIDDEN_AGE_HOURS = 24
-
 MAX_REGULAR_AGE_MINUTES = 5
-
-
-# ============================================================
-# STOP LOSS BUFFER
-# ============================================================
 
 SL_BUFFER_PERCENT = 0.10
 
@@ -134,29 +67,21 @@ SL_BUFFER_PERCENT = 0.10
 # ============================================================
 
 TF_SECONDS = {
-
     "1m": 60,
-
     "5m": 300,
-
     "15m": 900,
-
     "30m": 1800,
-
     "1h": 3600,
-
     "4h": 14400,
-
     "1d": 86400
 }
 
 
 # ============================================================
-# 30 COINS
+# SYMBOLS
 # ============================================================
 
 SYMBOLS = {
-
     "BTC": "pf_xbtusd",
     "ETH": "pf_ethusd",
     "BNB": "pf_bnbusd",
@@ -191,35 +116,27 @@ SYMBOLS = {
 
 
 # ============================================================
-# HTTP SESSION
+# SESSION
 # ============================================================
 
 session = requests.Session()
 
 session.headers.update({
-
-    "User-Agent":
-    "Crypto-Divergence-Scanner/7.1"
+    "User-Agent": "Crypto-Divergence-Scanner/7.2",
+    "Accept": "application/json"
 })
 
-
-# ============================================================
-# SCAN NUMBER
-# ============================================================
 
 scan_number = 0
 
 
 # ============================================================
-# LOAD STATE
+# STATE
 # ============================================================
 
 def load_state():
 
-    if not os.path.exists(
-        STATE_FILE
-    ):
-
+    if not os.path.exists(STATE_FILE):
         return {}
 
     try:
@@ -232,11 +149,7 @@ def load_state():
 
             data = json.load(f)
 
-            if isinstance(
-                data,
-                dict
-            ):
-
+            if isinstance(data, dict):
                 return data
 
             return {}
@@ -251,17 +164,12 @@ def load_state():
         return {}
 
 
-# ============================================================
-# SAVE STATE
-# ============================================================
-
 def save_state(state):
 
     try:
 
         temp_file = (
-            STATE_FILE
-            +
+            STATE_FILE +
             ".tmp"
         )
 
@@ -292,64 +200,50 @@ def save_state(state):
 
 
 # ============================================================
-# TELEGRAM SEND
+# TELEGRAM
 # ============================================================
 
 def send_telegram(message):
 
-    if (
-        not TELEGRAM_BOT_TOKEN
-        or
-        "PUT_YOUR" in TELEGRAM_BOT_TOKEN
-    ):
+    if not TELEGRAM_BOT_TOKEN:
 
         print(
-            "Telegram token not configured."
+            "Telegram token is EMPTY."
         )
 
         return False
 
-    if (
-        not TELEGRAM_CHAT_ID
-        or
-        "PUT_YOUR" in TELEGRAM_CHAT_ID
-    ):
+    if not TELEGRAM_CHAT_ID:
 
         print(
-            "Telegram chat ID not configured."
+            "Telegram chat ID is EMPTY."
         )
 
         return False
 
     url = (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
     payload = {
-
-        "chat_id":
-        TELEGRAM_CHAT_ID,
-
-        "text":
-        message,
-
-        "parse_mode":
-        "HTML",
-
-        "disable_web_page_preview":
-        True
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
 
     try:
 
         response = session.post(
-
             url,
-
             json=payload,
-
             timeout=20
+        )
+
+        print(
+            "Telegram HTTP:",
+            response.status_code
         )
 
         if response.status_code != 200:
@@ -378,7 +272,7 @@ def send_telegram(message):
 
 
 # ============================================================
-# FETCH CANDLES
+# KRAKEN DATA
 # ============================================================
 
 def get_candles(
@@ -396,145 +290,256 @@ def get_candles(
     try:
 
         response = session.get(
-
             url,
+            timeout=20
+        )
 
-            timeout=15
+        print(
+            f"KRAKEN {symbol} {resolution} "
+            f"HTTP={response.status_code}"
         )
 
         if response.status_code != 200:
 
             print(
-                f"Kraken HTTP "
-                f"{response.status_code}: "
+                f"KRAKEN ERROR "
+                f"{symbol} {resolution}: "
+                f"{response.text[:500]}"
+            )
+
+            return None
+
+        try:
+
+            data = response.json()
+
+        except Exception:
+
+            print(
+                f"KRAKEN INVALID JSON "
+                f"{symbol} {resolution}: "
+                f"{response.text[:500]}"
+            )
+
+            return None
+
+
+        # ----------------------------------------------------
+        # Detect common response formats
+        # ----------------------------------------------------
+
+        candles = None
+
+
+        if isinstance(data, list):
+
+            candles = data
+
+
+        elif isinstance(data, dict):
+
+            if "candles" in data:
+
+                candles = data["candles"]
+
+            elif "data" in data:
+
+                candles = data["data"]
+
+            elif "result" in data:
+
+                result = data["result"]
+
+                if isinstance(result, list):
+
+                    candles = result
+
+                elif isinstance(result, dict):
+
+                    if "candles" in result:
+                        candles = result["candles"]
+
+                    elif "data" in result:
+                        candles = result["data"]
+
+
+        if candles is None:
+
+            print(
+                f"KRAKEN UNKNOWN FORMAT "
+                f"{symbol} {resolution}: "
+                f"{str(data)[:1000]}"
+            )
+
+            return None
+
+
+        if not candles:
+
+            print(
+                f"KRAKEN EMPTY DATA "
                 f"{symbol} {resolution}"
             )
 
             return None
 
-        data = response.json()
-
-        # ----------------------------------------------------
-        # API FORMAT
-        # ----------------------------------------------------
-
-        if isinstance(
-            data,
-            dict
-        ):
-
-            if "candles" in data:
-
-                data = data[
-                    "candles"
-                ]
-
-            elif "data" in data:
-
-                data = data[
-                    "data"
-                ]
-
-            else:
-
-                return None
-
-        if not data:
-
-            return None
 
         rows = []
 
-        # ----------------------------------------------------
-        # PARSE
-        # ----------------------------------------------------
 
-        for item in data[-limit:]:
+        for item in candles[-limit:]:
+
+
+            # ----------------------------------------------
+            # Dictionary format
+            # ----------------------------------------------
 
             if isinstance(
                 item,
                 dict
             ):
 
-                rows.append({
+                t = (
+                    item.get("time")
+                    or
+                    item.get("timestamp")
+                    or
+                    item.get("ts")
+                )
 
-                    "time":
-                    item.get("time"),
-
-                    "open":
-                    item.get("open"),
-
-                    "high":
-                    item.get("high"),
-
-                    "low":
-                    item.get("low"),
-
-                    "close":
-                    item.get("close"),
-
-                    "volume":
+                o = item.get("open")
+                h = item.get("high")
+                l = item.get("low")
+                c = item.get("close")
+                v = (
                     item.get("volume")
-                })
+                    or
+                    item.get("vol")
+                    or
+                    0
+                )
 
-            elif (
-                isinstance(item, list)
-                and
-                len(item) >= 6
+                if (
+                    t is not None
+                    and
+                    o is not None
+                    and
+                    h is not None
+                    and
+                    l is not None
+                    and
+                    c is not None
+                ):
+
+                    rows.append({
+                        "time": t,
+                        "open": o,
+                        "high": h,
+                        "low": l,
+                        "close": c,
+                        "volume": v
+                    })
+
+
+            # ----------------------------------------------
+            # Array format
+            # ----------------------------------------------
+
+            elif isinstance(
+                item,
+                (list, tuple)
             ):
 
-                rows.append({
+                if len(item) >= 6:
 
-                    "time":
-                    item[0],
+                    rows.append({
+                        "time": item[0],
+                        "open": item[1],
+                        "high": item[2],
+                        "low": item[3],
+                        "close": item[4],
+                        "volume": item[5]
+                    })
 
-                    "open":
-                    item[1],
-
-                    "high":
-                    item[2],
-
-                    "low":
-                    item[3],
-
-                    "close":
-                    item[4],
-
-                    "volume":
-                    item[5]
-                })
 
         if not rows:
 
+            print(
+                f"KRAKEN NO PARSED CANDLES "
+                f"{symbol} {resolution}"
+            )
+
+            print(
+                "RAW:",
+                str(candles[:2])[:1000]
+            )
+
             return None
 
-        df = pd.DataFrame(
-            rows
-        )
+
+        df = pd.DataFrame(rows)
+
 
         # ----------------------------------------------------
-        # NUMERIC
+        # Numeric conversion
         # ----------------------------------------------------
 
         for column in [
-
             "time",
             "open",
             "high",
             "low",
             "close",
             "volume"
-
         ]:
 
             df[column] = pd.to_numeric(
-
                 df[column],
-
                 errors="coerce"
             )
 
-        df = df.dropna()
+
+        df = df.dropna(
+            subset=[
+                "time",
+                "open",
+                "high",
+                "low",
+                "close"
+            ]
+        )
+
+
+        if df.empty:
+
+            print(
+                f"KRAKEN DATAFRAME EMPTY "
+                f"{symbol} {resolution}"
+            )
+
+            return None
+
+
+        # ----------------------------------------------------
+        # Detect milliseconds
+        # ----------------------------------------------------
+
+        if df["time"].median() > 100000000000:
+
+            df["time"] = (
+                df["time"] / 1000
+            )
+
+
+        df["time"] = (
+            df["time"]
+            .astype(np.int64)
+        )
+
+
+        # ----------------------------------------------------
+        # Sort
+        # ----------------------------------------------------
 
         df = df.sort_values(
             "time"
@@ -544,8 +549,13 @@ def get_candles(
             subset=["time"]
         )
 
+        df = df.reset_index(
+            drop=True
+        )
+
+
         # ----------------------------------------------------
-        # ONLY CLOSED CANDLES
+        # Remove currently open candle
         # ----------------------------------------------------
 
         tf_seconds = TF_SECONDS[
@@ -553,11 +563,11 @@ def get_candles(
         ]
 
         current_bucket = (
-
             int(time.time())
             //
             tf_seconds
         ) * tf_seconds
+
 
         df = df[
             df["time"]
@@ -565,19 +575,63 @@ def get_candles(
             current_bucket
         ]
 
+
         df = df.reset_index(
             drop=True
         )
 
+
+        # ----------------------------------------------------
+        # Final check
+        # ----------------------------------------------------
+
+        if len(df) == 0:
+
+            print(
+                f"KRAKEN NO CLOSED CANDLES "
+                f"{symbol} {resolution}"
+            )
+
+            return None
+
+
+        print(
+            f"KRAKEN OK "
+            f"{symbol} {resolution} "
+            f"candles={len(df)}"
+        )
+
+
         return df
+
+
+    except requests.exceptions.Timeout:
+
+        print(
+            f"KRAKEN TIMEOUT "
+            f"{symbol} {resolution}"
+        )
+
+        return None
+
+
+    except requests.exceptions.ConnectionError as e:
+
+        print(
+            f"KRAKEN CONNECTION ERROR "
+            f"{symbol} {resolution}: "
+            f"{e}"
+        )
+
+        return None
+
 
     except Exception as e:
 
         print(
-            f"API error "
-            f"{symbol} "
-            f"{resolution}:",
-            e
+            f"KRAKEN EXCEPTION "
+            f"{symbol} {resolution}: "
+            f"{e}"
         )
 
         return None
@@ -603,21 +657,16 @@ def calculate_rsi(
     )
 
     avg_gain = gain.ewm(
-
         alpha=1 / period,
-
         adjust=False
     ).mean()
 
     avg_loss = loss.ewm(
-
         alpha=1 / period,
-
         adjust=False
     ).mean()
 
     rs = (
-
         avg_gain
         /
         avg_loss.replace(
@@ -627,7 +676,6 @@ def calculate_rsi(
     )
 
     rsi = (
-
         100
         -
         (
@@ -641,7 +689,7 @@ def calculate_rsi(
 
 
 # ============================================================
-# PIVOT LOWS
+# PIVOTS
 # ============================================================
 
 def find_pivot_lows(
@@ -655,9 +703,7 @@ def find_pivot_lows(
     pivots = []
 
     for i in range(
-
         left,
-
         len(values) - right
     ):
 
@@ -672,13 +718,10 @@ def find_pivot_lows(
         ]
 
         if (
-
             current
             <
             left_side.min()
-
             and
-
             current
             <
             right_side.min()
@@ -688,10 +731,6 @@ def find_pivot_lows(
 
     return pivots
 
-
-# ============================================================
-# PIVOT HIGHS
-# ============================================================
 
 def find_pivot_highs(
     series,
@@ -704,9 +743,7 @@ def find_pivot_highs(
     pivots = []
 
     for i in range(
-
         left,
-
         len(values) - right
     ):
 
@@ -721,13 +758,10 @@ def find_pivot_highs(
         ]
 
         if (
-
             current
             >
             left_side.max()
-
             and
-
             current
             >
             right_side.max()
@@ -752,42 +786,33 @@ def make_divergence(
 
     return {
 
-        "kind":
-        kind,
+        "kind": kind,
 
-        "pivot1":
-        int(i1),
+        "pivot1": int(i1),
 
-        "pivot2":
-        int(i2),
+        "pivot2": int(i2),
 
-        "time1":
-        int(
+        "time1": int(
             df.iloc[i1]["time"]
         ),
 
-        "time2":
-        int(
+        "time2": int(
             df.iloc[i2]["time"]
         ),
 
-        "price1":
-        float(
+        "price1": float(
             df.iloc[i1]["close"]
         ),
 
-        "price2":
-        float(
+        "price2": float(
             df.iloc[i2]["close"]
         ),
 
-        "rsi1":
-        float(
+        "rsi1": float(
             rsi.iloc[i1]
         ),
 
-        "rsi2":
-        float(
+        "rsi2": float(
             rsi.iloc[i2]
         )
     }
@@ -795,62 +820,45 @@ def make_divergence(
 
 # ============================================================
 # HIDDEN BEARISH
-#
-# Price Lower High
-# RSI Higher High
 # ============================================================
 
-def find_hidden_bearish(
-    df
-):
+def find_hidden_bearish(df):
 
     rsi = calculate_rsi(
-
         df["close"],
-
         RSI_PERIOD
     )
 
     pivots = find_pivot_highs(
-
         df["close"],
-
         PIVOT_LEFT,
-
         PIVOT_RIGHT
     )
 
     if len(pivots) < 2:
-
         return []
 
     results = []
 
     for n in range(
-
         len(pivots) - 1
     ):
 
         i1 = pivots[n]
-
         i2 = pivots[n + 1]
 
         if (
-
             i2 - i1
             >
             MAX_PIVOT_GAP
         ):
-
             continue
 
         price1 = float(
-
             df.iloc[i1]["close"]
         )
 
         price2 = float(
-
             df.iloc[i2]["close"]
         )
 
@@ -863,7 +871,6 @@ def find_hidden_bearish(
         )
 
         price_condition = (
-
             price2
             <
             price1
@@ -877,7 +884,6 @@ def find_hidden_bearish(
         )
 
         rsi_condition = (
-
             rsi2
             >
             rsi1
@@ -886,24 +892,17 @@ def find_hidden_bearish(
         )
 
         if (
-
             price_condition
             and
             rsi_condition
         ):
 
             results.append(
-
                 make_divergence(
-
                     "HIDDEN_BEARISH",
-
                     i1,
-
                     i2,
-
                     df,
-
                     rsi
                 )
             )
@@ -913,62 +912,45 @@ def find_hidden_bearish(
 
 # ============================================================
 # HIDDEN BULLISH
-#
-# Price Higher Low
-# RSI Lower Low
 # ============================================================
 
-def find_hidden_bullish(
-    df
-):
+def find_hidden_bullish(df):
 
     rsi = calculate_rsi(
-
         df["close"],
-
         RSI_PERIOD
     )
 
     pivots = find_pivot_lows(
-
         df["close"],
-
         PIVOT_LEFT,
-
         PIVOT_RIGHT
     )
 
     if len(pivots) < 2:
-
         return []
 
     results = []
 
     for n in range(
-
         len(pivots) - 1
     ):
 
         i1 = pivots[n]
-
         i2 = pivots[n + 1]
 
         if (
-
             i2 - i1
             >
             MAX_PIVOT_GAP
         ):
-
             continue
 
         price1 = float(
-
             df.iloc[i1]["close"]
         )
 
         price2 = float(
-
             df.iloc[i2]["close"]
         )
 
@@ -981,7 +963,6 @@ def find_hidden_bullish(
         )
 
         price_condition = (
-
             price2
             >
             price1
@@ -995,7 +976,6 @@ def find_hidden_bullish(
         )
 
         rsi_condition = (
-
             rsi2
             <
             rsi1
@@ -1004,24 +984,17 @@ def find_hidden_bullish(
         )
 
         if (
-
             price_condition
             and
             rsi_condition
         ):
 
             results.append(
-
                 make_divergence(
-
                     "HIDDEN_BULLISH",
-
                     i1,
-
                     i2,
-
                     df,
-
                     rsi
                 )
             )
@@ -1031,9 +1004,6 @@ def find_hidden_bullish(
 
 # ============================================================
 # REGULAR BULLISH
-#
-# Price Lower Low
-# RSI Higher Low
 # ============================================================
 
 def find_regular_bullish(
@@ -1042,61 +1012,47 @@ def find_regular_bullish(
 ):
 
     rsi = calculate_rsi(
-
         df["close"],
-
         RSI_PERIOD
     )
 
     pivots = find_pivot_lows(
-
         df["close"],
-
         PIVOT_LEFT,
-
         PIVOT_RIGHT
     )
 
     if len(pivots) < 2:
-
         return []
 
     results = []
 
     for n in range(
-
         len(pivots) - 1
     ):
 
         i1 = pivots[n]
-
         i2 = pivots[n + 1]
 
         if (
-
             i2 - i1
             >
             MAX_PIVOT_GAP
         ):
-
             continue
 
         time2 = int(
-
             df.iloc[i2]["time"]
         )
 
         if time2 <= after_timestamp:
-
             continue
 
         price1 = float(
-
             df.iloc[i1]["close"]
         )
 
         price2 = float(
-
             df.iloc[i2]["close"]
         )
 
@@ -1109,7 +1065,6 @@ def find_regular_bullish(
         )
 
         price_condition = (
-
             price2
             <
             price1
@@ -1123,7 +1078,6 @@ def find_regular_bullish(
         )
 
         rsi_condition = (
-
             rsi2
             >
             rsi1
@@ -1132,24 +1086,17 @@ def find_regular_bullish(
         )
 
         if (
-
             price_condition
             and
             rsi_condition
         ):
 
             results.append(
-
                 make_divergence(
-
                     "REGULAR_BULLISH",
-
                     i1,
-
                     i2,
-
                     df,
-
                     rsi
                 )
             )
@@ -1159,9 +1106,6 @@ def find_regular_bullish(
 
 # ============================================================
 # REGULAR BEARISH
-#
-# Price Higher High
-# RSI Lower High
 # ============================================================
 
 def find_regular_bearish(
@@ -1170,61 +1114,47 @@ def find_regular_bearish(
 ):
 
     rsi = calculate_rsi(
-
         df["close"],
-
         RSI_PERIOD
     )
 
     pivots = find_pivot_highs(
-
         df["close"],
-
         PIVOT_LEFT,
-
         PIVOT_RIGHT
     )
 
     if len(pivots) < 2:
-
         return []
 
     results = []
 
     for n in range(
-
         len(pivots) - 1
     ):
 
         i1 = pivots[n]
-
         i2 = pivots[n + 1]
 
         if (
-
             i2 - i1
             >
             MAX_PIVOT_GAP
         ):
-
             continue
 
         time2 = int(
-
             df.iloc[i2]["time"]
         )
 
         if time2 <= after_timestamp:
-
             continue
 
         price1 = float(
-
             df.iloc[i1]["close"]
         )
 
         price2 = float(
-
             df.iloc[i2]["close"]
         )
 
@@ -1237,7 +1167,6 @@ def find_regular_bearish(
         )
 
         price_condition = (
-
             price2
             >
             price1
@@ -1251,7 +1180,6 @@ def find_regular_bearish(
         )
 
         rsi_condition = (
-
             rsi2
             <
             rsi1
@@ -1260,24 +1188,17 @@ def find_regular_bearish(
         )
 
         if (
-
             price_condition
             and
             rsi_condition
         ):
 
             results.append(
-
                 make_divergence(
-
                     "REGULAR_BEARISH",
-
                     i1,
-
                     i2,
-
                     df,
-
                     rsi
                 )
             )
@@ -1289,35 +1210,22 @@ def find_regular_bearish(
 # 1H TREND
 # ============================================================
 
-def determine_1h_trend(
-    df
-):
+def determine_1h_trend(df):
 
     if len(df) < 210:
-
         return "NEUTRAL"
 
     close = df["close"]
 
-    ema50 = (
+    ema50 = close.ewm(
+        span=50,
+        adjust=False
+    ).mean()
 
-        close
-        .ewm(
-            span=50,
-            adjust=False
-        )
-        .mean()
-    )
-
-    ema200 = (
-
-        close
-        .ewm(
-            span=200,
-            adjust=False
-        )
-        .mean()
-    )
+    ema200 = close.ewm(
+        span=200,
+        adjust=False
+    ).mean()
 
     last_close = float(
         close.iloc[-1]
@@ -1332,7 +1240,6 @@ def determine_1h_trend(
     )
 
     if (
-
         last_close > last_ema50
         and
         last_ema50 > last_ema200
@@ -1341,7 +1248,6 @@ def determine_1h_trend(
         return "BULLISH"
 
     if (
-
         last_close < last_ema50
         and
         last_ema50 < last_ema200
@@ -1353,7 +1259,7 @@ def determine_1h_trend(
 
 
 # ============================================================
-# GET VALID HIDDEN
+# VALID HIDDEN
 # ============================================================
 
 def get_valid_hidden(
@@ -1365,47 +1271,43 @@ def get_valid_hidden(
         time.time()
     )
 
-    hidden_candidates = []
-
     if trend == "BULLISH":
 
-        hidden_candidates = (
-            find_hidden_bearish(df)
+        candidates = find_hidden_bearish(
+            df
         )
 
     elif trend == "BEARISH":
 
-        hidden_candidates = (
-            find_hidden_bullish(df)
+        candidates = find_hidden_bullish(
+            df
         )
 
     else:
 
         return None
 
-    if not hidden_candidates:
 
+    if not candidates:
         return None
 
-    hidden_candidates.sort(
 
-        key=lambda x:
-        x["time2"],
-
+    candidates.sort(
+        key=lambda x: x["time2"],
         reverse=True
     )
 
-    for hidden in hidden_candidates:
+
+    for hidden in candidates:
 
         age_hours = (
-
             now
             -
             hidden["time2"]
         ) / 3600
 
-        if (
 
+        if (
             0
             <= age_hours
             <= MAX_HIDDEN_AGE_HOURS
@@ -1417,125 +1319,91 @@ def get_valid_hidden(
 
             return hidden
 
+
     return None
 
 
 # ============================================================
-# LAST SWING LOW
+# SWING LOW
 # ============================================================
 
-def get_last_swing_low(
-    df
-):
+def get_last_swing_low(df):
 
     pivots = find_pivot_lows(
-
         df["low"],
-
         PIVOT_LEFT,
-
         PIVOT_RIGHT
     )
 
     if not pivots:
-
         return None
 
     valid = [
-
         p
-
         for p in pivots
-
         if p < len(df) - 1
     ]
 
     if not valid:
-
         return None
 
     p = valid[-1]
 
     return {
-
-        "index":
-        p,
-
-        "time":
-        int(
+        "index": p,
+        "time": int(
             df.iloc[p]["time"]
         ),
-
-        "price":
-        float(
+        "price": float(
             df.iloc[p]["low"]
         )
     }
 
 
 # ============================================================
-# LAST SWING HIGH
+# SWING HIGH
 # ============================================================
 
-def get_last_swing_high(
-    df
-):
+def get_last_swing_high(df):
 
     pivots = find_pivot_highs(
-
         df["high"],
-
         PIVOT_LEFT,
-
         PIVOT_RIGHT
     )
 
     if not pivots:
-
         return None
 
     valid = [
-
         p
-
         for p in pivots
-
         if p < len(df) - 1
     ]
 
     if not valid:
-
         return None
 
     p = valid[-1]
 
     return {
-
-        "index":
-        p,
-
-        "time":
-        int(
+        "index": p,
+        "time": int(
             df.iloc[p]["time"]
         ),
-
-        "price":
-        float(
+        "price": float(
             df.iloc[p]["high"]
         )
     }
 
 
 # ============================================================
-# BUILD LONG SETUP
+# LONG SETUP
 # ============================================================
 
-def build_long_setup(
-    df
-):
+def build_long_setup(df):
 
     entry = float(
-
         df.iloc[-1]["close"]
     )
 
@@ -1544,15 +1412,11 @@ def build_long_setup(
     )
 
     if swing is None:
-
         return None
 
-    swing_low = swing[
-        "price"
-    ]
+    swing_low = swing["price"]
 
     sl = (
-
         swing_low
         *
         (
@@ -1564,49 +1428,32 @@ def build_long_setup(
     )
 
     if sl >= entry:
-
         return None
 
     risk = entry - sl
 
     if risk <= 0:
-
         return None
 
     tp = entry + risk
 
     return {
-
-        "entry":
-        entry,
-
-        "sl":
-        sl,
-
-        "tp":
-        tp,
-
-        "risk":
-        risk,
-
-        "swing_price":
-        swing_low,
-
-        "swing_time":
-        swing["time"]
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "risk": risk,
+        "swing_price": swing_low,
+        "swing_time": swing["time"]
     }
 
 
 # ============================================================
-# BUILD SHORT SETUP
+# SHORT SETUP
 # ============================================================
 
-def build_short_setup(
-    df
-):
+def build_short_setup(df):
 
     entry = float(
-
         df.iloc[-1]["close"]
     )
 
@@ -1615,15 +1462,11 @@ def build_short_setup(
     )
 
     if swing is None:
-
         return None
 
-    swing_high = swing[
-        "price"
-    ]
+    swing_high = swing["price"]
 
     sl = (
-
         swing_high
         *
         (
@@ -1635,41 +1478,27 @@ def build_short_setup(
     )
 
     if sl <= entry:
-
         return None
 
     risk = sl - entry
 
     if risk <= 0:
-
         return None
 
     tp = entry - risk
 
     return {
-
-        "entry":
-        entry,
-
-        "sl":
-        sl,
-
-        "tp":
-        tp,
-
-        "risk":
-        risk,
-
-        "swing_price":
-        swing_high,
-
-        "swing_time":
-        swing["time"]
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "risk": risk,
+        "swing_price": swing_high,
+        "swing_time": swing["time"]
     }
 
 
 # ============================================================
-# PROCESS ONE COIN
+# PROCESS COIN
 # ============================================================
 
 def process_coin(
@@ -1678,47 +1507,29 @@ def process_coin(
 ):
 
     result = {
-
-        "coin":
-        name,
-
-        "trend":
-        "ERROR",
-
-        "hidden":
-        None,
-
-        "regular":
-        None,
-
-        "direction":
-        None,
-
-        "setup":
-        None,
-
-        "status":
-        "ERROR",
-
-        "error":
-        None
+        "coin": name,
+        "trend": "ERROR",
+        "hidden": None,
+        "regular": None,
+        "direction": None,
+        "setup": None,
+        "status": "ERROR",
+        "error": None
     }
 
-    # ========================================================
-    # 1H DATA
-    # ========================================================
+
+    # --------------------------------------------------------
+    # 1H
+    # --------------------------------------------------------
 
     df1h = get_candles(
-
         symbol,
-
         "1h",
-
         300
     )
 
-    if (
 
+    if (
         df1h is None
         or
         len(df1h) < 210
@@ -1730,15 +1541,17 @@ def process_coin(
 
         return result
 
-    # ========================================================
-    # 1H TREND
-    # ========================================================
+
+    # --------------------------------------------------------
+    # TREND
+    # --------------------------------------------------------
 
     trend = determine_1h_trend(
         df1h
     )
 
     result["trend"] = trend
+
 
     if trend == "NEUTRAL":
 
@@ -1748,16 +1561,16 @@ def process_coin(
 
         return result
 
-    # ========================================================
-    # HIDDEN 1H
-    # ========================================================
+
+    # --------------------------------------------------------
+    # HIDDEN
+    # --------------------------------------------------------
 
     hidden = get_valid_hidden(
-
         df1h,
-
         trend
     )
+
 
     if hidden is None:
 
@@ -1767,23 +1580,22 @@ def process_coin(
 
         return result
 
+
     result["hidden"] = hidden
 
-    # ========================================================
-    # 1M DATA
-    # ========================================================
+
+    # --------------------------------------------------------
+    # 1M
+    # --------------------------------------------------------
 
     df1m = get_candles(
-
         symbol,
-
         "1m",
-
         500
     )
 
-    if (
 
+    if (
         df1m is None
         or
         len(df1m) < 50
@@ -1795,26 +1607,27 @@ def process_coin(
 
         return result
 
+
     hidden_time = hidden[
         "time2"
     ]
+
 
     now = int(
         time.time()
     )
 
-    # ========================================================
-    # SELECT DIRECTION
-    # ========================================================
+
+    # --------------------------------------------------------
+    # REGULAR
+    # --------------------------------------------------------
 
     if trend == "BULLISH":
 
         direction = "LONG"
 
         regulars = find_regular_bullish(
-
             df1m,
-
             hidden_time
         )
 
@@ -1823,31 +1636,27 @@ def process_coin(
         direction = "SHORT"
 
         regulars = find_regular_bearish(
-
             df1m,
-
             hidden_time
         )
 
+
     result["direction"] = direction
 
-    # ========================================================
-    # RECENT REGULAR
-    # ========================================================
 
     valid_regulars = []
+
 
     for regular in regulars:
 
         age_minutes = (
-
             now
             -
             regular["time2"]
         ) / 60
 
-        if (
 
+        if (
             0
             <= age_minutes
             <= MAX_REGULAR_AGE_MINUTES
@@ -1861,9 +1670,6 @@ def process_coin(
                 regular
             )
 
-    # ========================================================
-    # WAITING
-    # ========================================================
 
     if not valid_regulars:
 
@@ -1873,25 +1679,21 @@ def process_coin(
 
         return result
 
-    # ========================================================
-    # LATEST REGULAR
-    # ========================================================
 
     valid_regulars.sort(
-
-        key=lambda x:
-        x["time2"],
-
+        key=lambda x: x["time2"],
         reverse=True
     )
+
 
     regular = valid_regulars[0]
 
     result["regular"] = regular
 
-    # ========================================================
-    # BUILD SETUP
-    # ========================================================
+
+    # --------------------------------------------------------
+    # SETUP
+    # --------------------------------------------------------
 
     if direction == "LONG":
 
@@ -1905,6 +1707,7 @@ def process_coin(
             df1m
         )
 
+
     if setup is None:
 
         result["status"] = (
@@ -1913,11 +1716,13 @@ def process_coin(
 
         return result
 
+
     result["setup"] = setup
 
     result["status"] = (
         "VALID_SIGNAL"
     )
+
 
     return result
 
@@ -1926,28 +1731,21 @@ def process_coin(
 # PRICE FORMAT
 # ============================================================
 
-def fmt_price(
-    value
-):
+def fmt_price(value):
 
     if value >= 10000:
-
         return f"{value:,.2f}"
 
     if value >= 1000:
-
         return f"{value:,.3f}"
 
     if value >= 100:
-
         return f"{value:.3f}"
 
     if value >= 1:
-
         return f"{value:.5f}"
 
     if value >= 0.1:
-
         return f"{value:.6f}"
 
     return f"{value:.8f}"
@@ -1957,20 +1755,12 @@ def fmt_price(
 # SIGNAL KEY
 # ============================================================
 
-def make_signal_key(
-    result
-):
+def make_signal_key(result):
 
-    hidden = result[
-        "hidden"
-    ]
-
-    regular = result[
-        "regular"
-    ]
+    hidden = result["hidden"]
+    regular = result["regular"]
 
     return (
-
         f'{result["coin"]}_'
         f'{result["direction"]}_'
         f'{hidden["time2"]}_'
@@ -1982,41 +1772,24 @@ def make_signal_key(
 # SIGNAL MESSAGE
 # ============================================================
 
-def build_signal_message(
-    result
-):
+def build_signal_message(result):
 
-    coin = result[
-        "coin"
-    ]
+    coin = result["coin"]
+    trend = result["trend"]
+    direction = result["direction"]
 
-    trend = result[
-        "trend"
-    ]
+    hidden = result["hidden"]
+    regular = result["regular"]
+    setup = result["setup"]
 
-    direction = result[
-        "direction"
-    ]
 
-    hidden = result[
-        "hidden"
-    ]
+    emoji = (
+        "🟢"
+        if direction == "LONG"
+        else
+        "🔴"
+    )
 
-    regular = result[
-        "regular"
-    ]
-
-    setup = result[
-        "setup"
-    ]
-
-    if direction == "LONG":
-
-        emoji = "🟢"
-
-    else:
-
-        emoji = "🔴"
 
     return f"""
 🚨 <b>NEW DIVERGENCE SIGNAL</b>
@@ -2062,9 +1835,9 @@ Age:
 
 ━━━━━━━━━━━━━━━━━━
 
-✅ 1H Trend confirmed
-✅ Hidden 1H confirmed
-✅ Regular 1M confirmed
+✅ 1H Trend
+✅ Hidden 1H
+✅ Regular 1M
 ✅ Same direction
 ✅ 1M AFTER 1H
 ✅ Closed candles only
@@ -2089,69 +1862,45 @@ def build_report(
         "%Y-%m-%d %H:%M:%S"
     )
 
+
     bullish = [
-
         r for r in results
-
-        if r["trend"]
-        ==
-        "BULLISH"
+        if r["trend"] == "BULLISH"
     ]
 
     bearish = [
-
         r for r in results
-
-        if r["trend"]
-        ==
-        "BEARISH"
+        if r["trend"] == "BEARISH"
     ]
 
     neutral = [
-
         r for r in results
-
-        if r["trend"]
-        ==
-        "NEUTRAL"
+        if r["trend"] == "NEUTRAL"
     ]
 
     hidden = [
-
         r for r in results
-
-        if r["hidden"]
-        is not None
+        if r["hidden"] is not None
     ]
 
     waiting = [
-
         r for r in results
-
-        if r["status"]
-        ==
-        "WAITING_1M"
+        if r["status"] == "WAITING_1M"
     ]
 
     valid = [
-
         r for r in results
-
-        if r["status"]
-        ==
-        "VALID_SIGNAL"
+        if r["status"] == "VALID_SIGNAL"
     ]
 
     errors = [
-
         r for r in results
-
-        if "ERROR"
-        in r["status"]
+        if "ERROR" in r["status"]
     ]
 
+
     msg = f"""
-<b>📊 DIVERGENCE SCANNER v7.1</b>
+<b>📊 DIVERGENCE SCANNER v7.2</b>
 ━━━━━━━━━━━━━━━━━━
 
 🕐 UTC:
@@ -2190,7 +1939,7 @@ def build_report(
 
 ━━━━━━━━━━━━━━━━━━
 
-<b>RULE</b>
+<b>STRATEGY</b>
 
 🟢 Bullish 1H
 → Hidden Bearish 1H
@@ -2214,16 +1963,13 @@ Last Swing ± {SL_BUFFER_PERCENT}%
 <b>1 : 1</b>
 
 ━━━━━━━━━━━━━━━━━━
-⚡ Scan time:
+
+⚡ Scan:
 {elapsed:.2f}s
 
-⏱ GitHub Actions:
-Scheduled scan
+🤖 GitHub Actions
 """.strip()
 
-    # --------------------------------------------------------
-    # WAITING
-    # --------------------------------------------------------
 
     if waiting:
 
@@ -2235,14 +1981,10 @@ Scheduled scan
         for r in waiting:
 
             msg += (
-
-                f"• {r['coin']} "
-                f"→ {r['direction']}\n"
+                f'• {r["coin"]} '
+                f'→ {r["direction"]}\n'
             )
 
-    # --------------------------------------------------------
-    # ACTIVE
-    # --------------------------------------------------------
 
     if valid:
 
@@ -2254,38 +1996,31 @@ Scheduled scan
         for r in valid:
 
             emoji = (
-
                 "🟢"
-
-                if r["direction"]
-                ==
-                "LONG"
-
+                if r["direction"] == "LONG"
                 else
-
                 "🔴"
             )
 
             msg += (
-
-                f"{emoji} "
-                f"<b>{r['coin']}</b> "
-                f"{r['direction']}\n"
+                f'{emoji} '
+                f'<b>{r["coin"]}</b> '
+                f'{r["direction"]}\n'
             )
 
     else:
 
         msg += (
-
             "\n\n⚪ "
             "<b>NO ACTIVE SIGNAL</b>"
         )
+
 
     return msg
 
 
 # ============================================================
-# RUN ONE SCAN
+# RUN SCAN
 # ============================================================
 
 def run_scan():
@@ -2297,6 +2032,7 @@ def run_scan():
     start = time.time()
 
     results = []
+
 
     print()
     print(
@@ -2311,31 +2047,24 @@ def run_scan():
         "=============================================="
     )
 
-    # ========================================================
-    # PARALLEL 30 COINS
-    # ========================================================
 
     with ThreadPoolExecutor(
-
         max_workers=MAX_WORKERS
-
     ) as executor:
+
 
         futures = {
 
             executor.submit(
-
                 process_coin,
-
                 name,
-
                 symbol
-
             ): name
 
             for name, symbol
             in SYMBOLS.items()
         }
+
 
         for future in as_completed(
             futures
@@ -2345,76 +2074,52 @@ def run_scan():
                 future
             ]
 
+
             try:
 
-                result = (
-                    future.result()
-                )
+                result = future.result()
 
                 results.append(
                     result
                 )
 
                 print(
-
                     f"{name}: "
                     f"{result['status']} "
                     f"| "
                     f"{result['trend']}"
                 )
 
+
             except Exception as e:
 
                 print(
-
-                    f"{name}: ERROR "
-                    f"{e}"
+                    f"{name}: ERROR {e}"
                 )
 
                 results.append({
 
-                    "coin":
-                    name,
-
-                    "trend":
-                    "ERROR",
-
-                    "hidden":
-                    None,
-
-                    "regular":
-                    None,
-
-                    "direction":
-                    None,
-
-                    "setup":
-                    None,
-
-                    "status":
-                    "ERROR",
-
-                    "error":
-                    str(e)
+                    "coin": name,
+                    "trend": "ERROR",
+                    "hidden": None,
+                    "regular": None,
+                    "direction": None,
+                    "setup": None,
+                    "status": "ERROR",
+                    "error": str(e)
                 })
 
-    # ========================================================
-    # ORIGINAL ORDER
-    # ========================================================
 
     order = {
-
         coin: index
-
         for index, coin
-
         in enumerate(
             SYMBOLS.keys()
         )
     }
 
-    results.sort(
 
+    results.sort(
         key=lambda x:
         order.get(
             x["coin"],
@@ -2422,12 +2127,13 @@ def run_scan():
         )
     )
 
-    elapsed = (
 
+    elapsed = (
         time.time()
         -
         start
     )
+
 
     # ========================================================
     # STATE
@@ -2437,20 +2143,21 @@ def run_scan():
 
     new_signals = []
 
+
     for result in results:
 
         if (
-
             result["status"]
             !=
             "VALID_SIGNAL"
         ):
-
             continue
+
 
         key = make_signal_key(
             result
         )
+
 
         if key not in state:
 
@@ -2466,16 +2173,19 @@ def run_scan():
                 result["direction"]
             }
 
+
             new_signals.append(
                 result
             )
+
 
     save_state(
         state
     )
 
+
     # ========================================================
-    # IMMEDIATE SIGNALS
+    # NEW SIGNALS
     # ========================================================
 
     for result in new_signals:
@@ -2491,7 +2201,6 @@ def run_scan():
         )
 
         print(
-
             "NEW SIGNAL:",
             result["coin"],
             result["direction"],
@@ -2499,11 +2208,9 @@ def run_scan():
             sent
         )
 
-    # ========================================================
-    # FINISH
-    # ========================================================
 
     print()
+
     print(
         f"SCAN #{scan_number} "
         f"FINISHED IN "
@@ -2515,21 +2222,16 @@ def run_scan():
         f"{len(new_signals)}"
     )
 
+
     return {
-
-        "results":
-        results,
-
-        "new_signals":
-        new_signals,
-
-        "elapsed":
-        elapsed
+        "results": results,
+        "new_signals": new_signals,
+        "elapsed": elapsed
     }
 
 
 # ============================================================
-# SHOULD SEND 5 MINUTE REPORT?
+# REPORT TIME
 # ============================================================
 
 def should_send_report():
@@ -2538,34 +2240,20 @@ def should_send_report():
         timezone.utc
     )
 
-    # Every 5 minutes:
-    #
-    # 00
-    # 05
-    # 10
-    # 15
-    # 20
-    # 25
-    # 30
-    # 35
-    # 40
-    # 45
-    # 50
-    # 55
 
-    if now.minute % 5 == 0:
-
-        return True
-
-    # --------------------------------------------------------
-    # Manual GitHub Actions run
-    # --------------------------------------------------------
-
+    # Manual workflow
     if os.getenv(
         "GITHUB_EVENT_NAME"
     ) == "workflow_dispatch":
 
         return True
+
+
+    # Every 5 minutes
+    if now.minute % 5 == 0:
+
+        return True
+
 
     return False
 
@@ -2577,12 +2265,13 @@ def should_send_report():
 def main():
 
     print()
+
     print(
         "================================================"
     )
 
     print(
-        " CRYPTO DIVERGENCE SCANNER v7.1"
+        " CRYPTO DIVERGENCE SCANNER v7.2"
     )
 
     print(
@@ -2592,6 +2281,7 @@ def main():
     print(
         "================================================"
     )
+
 
     print(
         f"Coins: {len(SYMBOLS)}"
@@ -2624,11 +2314,46 @@ def main():
 
     print()
 
-    # ========================================================
-    # RUN ONE SCAN
-    # ========================================================
+
+    # --------------------------------------------------------
+    # TELEGRAM CONFIG CHECK
+    # --------------------------------------------------------
+
+    if TELEGRAM_BOT_TOKEN:
+
+        print(
+            "Telegram token: CONFIGURED"
+        )
+
+    else:
+
+        print(
+            "Telegram token: MISSING"
+        )
+
+
+    if TELEGRAM_CHAT_ID:
+
+        print(
+            "Telegram chat ID: CONFIGURED"
+        )
+
+    else:
+
+        print(
+            "Telegram chat ID: MISSING"
+        )
+
+
+    print()
+
+
+    # --------------------------------------------------------
+    # SCAN
+    # --------------------------------------------------------
 
     result = run_scan()
+
 
     if result is None:
 
@@ -2638,28 +2363,29 @@ def main():
 
         return
 
-    # ========================================================
-    # 5 MINUTE REPORT
-    # ========================================================
+
+    # --------------------------------------------------------
+    # REPORT
+    # --------------------------------------------------------
 
     if should_send_report():
 
         print(
-            "5-minute report time."
+            "5-minute/manual report time."
         )
+
 
         report = build_report(
-
             result["results"],
-
             scan_number,
-
             result["elapsed"]
         )
+
 
         send_telegram(
             report
         )
+
 
     else:
 
@@ -2668,7 +2394,9 @@ def main():
             "this execution."
         )
 
+
     print()
+
     print(
         "GitHub Actions scan finished."
     )
