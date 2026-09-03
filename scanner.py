@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO PUMP / DUMP SCANNER v5.5
+# CRYPTO PUMP / DUMP SCANNER v5.6
 # ============================================================
 # Kraken Futures
 # Closed 5m Trade OHLCV
@@ -7,19 +7,20 @@
 # RSI / ATR / Ichimoku
 # Trendline Breakout / Breakdown
 # 2-Candle Confirmation
-# Entry / SL / TP1 / TP2 / TP3
+# ATR BASED Entry / SL / TP1 / TP2 / TP3
 # Risk / Reward
 # Telegram
 #
-# ADDED:
 # UT BOT SETUP ENGINE
 # TOP 5 ONLY
 # 5m / Key Value 3 / ATR 10 / Heikin Ashi OFF
-# Live Setup Tracking
-# Live PnL Tracking
-# Win Rate Tracking
-# Previous Signal Status Tracking
-# Duplicate Signal Protection
+#
+# LIVE SETUP TRACKING
+# LIVE PNL TRACKING
+# TP1 / TP2 / TP3 TRACKING
+# SL TRACKING
+# TELEGRAM TP/SL ALERTS
+# DUPLICATE ALERT PROTECTION
 # ============================================================
 
 import os
@@ -29,13 +30,17 @@ import requests
 from statistics import mean
 
 
-VERSION = "v5.5"
+VERSION = "v5.6"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 BASE_URL = "https://futures.kraken.com/api/charts/v1"
 
+
+# ============================================================
+# COINS
+# ============================================================
 
 COINS = {
     "BTC": "pf_xbtusd",
@@ -72,6 +77,21 @@ COINS = {
 
 
 STATE_FILE = "signal_state.json"
+
+
+# ============================================================
+# TRADE / ATR SETTINGS
+# ============================================================
+
+LEVERAGE = 5
+
+ATR_PERIOD = 14
+
+SL_ATR_MULTIPLIER = 1.5
+
+TP1_ATR_MULTIPLIER = 1.5
+TP2_ATR_MULTIPLIER = 3.0
+TP3_ATR_MULTIPLIER = 4.5
 
 
 # ============================================================
@@ -403,7 +423,7 @@ def get_candles(
             timeout=20,
             headers={
                 "User-Agent":
-                "crypto-pump-scanner/5.5"
+                f"crypto-pump-scanner/{VERSION}"
             }
         )
 
@@ -1326,7 +1346,26 @@ def calculate_pnl_pct(
 
 
 # ============================================================
-# ENTRY / SL / TP
+# LEVERAGED PNL
+# ============================================================
+
+def calculate_leveraged_pnl_pct(
+    entry,
+    current,
+    direction
+):
+
+    raw_pnl = calculate_pnl_pct(
+        entry,
+        current,
+        direction
+    )
+
+    return raw_pnl * LEVERAGE
+
+
+# ============================================================
+# ATR BASED LEVELS
 # ============================================================
 
 def calculate_levels(
@@ -1336,77 +1375,63 @@ def calculate_levels(
 
     entry = candles[-1]["close"]
 
+    # 5m ATR(14)
     atr = calculate_atr(
         candles,
-        14
+        ATR_PERIOD
     )
 
     if atr <= 0:
         return None
 
-    recent = candles[-12:]
+    risk = (
+        atr
+        * SL_ATR_MULTIPLIER
+    )
 
     if direction == "LONG":
 
-        swing_low = min(
-            c["low"]
-            for c in recent
-        )
-
-        structural_risk = (
-            entry - swing_low
-        )
-
-        min_risk = atr * 0.8
-
-        risk = max(
-            structural_risk,
-            min_risk
-        )
-
-        max_risk = atr * 2.2
-
-        risk = min(
-            risk,
-            max_risk
-        )
-
         sl = entry - risk
 
-        tp1 = entry + risk
-        tp2 = entry + risk * 2
-        tp3 = entry + risk * 3
+        tp1 = (
+            entry
+            + atr
+            * TP1_ATR_MULTIPLIER
+        )
+
+        tp2 = (
+            entry
+            + atr
+            * TP2_ATR_MULTIPLIER
+        )
+
+        tp3 = (
+            entry
+            + atr
+            * TP3_ATR_MULTIPLIER
+        )
 
     else:
 
-        swing_high = max(
-            c["high"]
-            for c in recent
-        )
-
-        structural_risk = (
-            swing_high - entry
-        )
-
-        min_risk = atr * 0.8
-
-        risk = max(
-            structural_risk,
-            min_risk
-        )
-
-        max_risk = atr * 2.2
-
-        risk = min(
-            risk,
-            max_risk
-        )
-
         sl = entry + risk
 
-        tp1 = entry - risk
-        tp2 = entry - risk * 2
-        tp3 = entry - risk * 3
+        tp1 = (
+            entry
+            - atr
+            * TP1_ATR_MULTIPLIER
+        )
+
+        tp2 = (
+            entry
+            - atr
+            * TP2_ATR_MULTIPLIER
+        )
+
+        tp3 = (
+            entry
+            - atr
+            * TP3_ATR_MULTIPLIER
+        )
 
     return {
         "entry": entry,
@@ -1497,39 +1522,112 @@ def signal_message(
             "➖ Trendline: None"
         )
 
+    tp1_move = calculate_pnl_pct(
+        levels["entry"],
+        levels["tp1"],
+        direction
+    )
+
+    tp2_move = calculate_pnl_pct(
+        levels["entry"],
+        levels["tp2"],
+        direction
+    )
+
+    tp3_move = calculate_pnl_pct(
+        levels["entry"],
+        levels["tp3"],
+        direction
+    )
+
+    sl_move = calculate_pnl_pct(
+        levels["entry"],
+        levels["sl"],
+        direction
+    )
+
+    tp1_lev = tp1_move * LEVERAGE
+    tp2_lev = tp2_move * LEVERAGE
+    tp3_lev = tp3_move * LEVERAGE
+    sl_lev = sl_move * LEVERAGE
+
     message = f"""
 🚨 <b>{title}</b>
-━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━
 
 {emoji} <b>{symbol}/USDT — {direction}</b>
 
-⭐ <b>Score:</b> {data["score"]}/100
+⭐ <b>Score</b>
 
-💰 <b>Entry:</b> {fmt_price(levels["entry"])}
-🛑 <b>Stop Loss:</b> {fmt_price(levels["sl"])}
+{data["score"]}/100
 
-🎯 <b>TP1:</b> {fmt_price(levels["tp1"])}
-🎯 <b>TP2:</b> {fmt_price(levels["tp2"])}
-🚀 <b>TP3:</b> {fmt_price(levels["tp3"])}
 
-📊 <b>Risk:</b> {fmt_price(levels["risk"])}
+💰 <b>ENTRY</b>
 
-📈 <b>R:R:</b> 1:1 / 1:2 / 1:3
+{fmt_price(levels["entry"])}
 
-📊 <b>5m:</b> {data["p5"]:+.2f}%
-📊 <b>10m:</b> {data["p10"]:+.2f}%
-📊 <b>15m:</b> {data["p15"]:+.2f}%
 
-📈 <b>RSI:</b> {data["rsi"]:.1f}
-📊 <b>Volume:</b> {data["volume"]:.2f}x
+🛑 <b>STOP LOSS</b>
+
+{fmt_price(levels["sl"])}
+
+📉 {sl_lev:.2f}% @ {LEVERAGE}x
+
+
+🎯 <b>TAKE PROFIT 1</b>
+
+{fmt_price(levels["tp1"])}
+
+📈 {tp1_lev:.2f}% @ {LEVERAGE}x
+📐 1R
+
+
+🎯 <b>TAKE PROFIT 2</b>
+
+{fmt_price(levels["tp2"])}
+
+📈 {tp2_lev:.2f}% @ {LEVERAGE}x
+📐 2R
+
+
+🚀 <b>TAKE PROFIT 3</b>
+
+{fmt_price(levels["tp3"])}
+
+📈 {tp3_lev:.2f}% @ {LEVERAGE}x
+📐 3R
+
+
+━━━━━━━━━━━━━━━━━━━━
+
+📊 <b>MARKET DATA</b>
+
+5m   {data["p5"]:+.2f}%
+10m  {data["p10"]:+.2f}%
+15m  {data["p15"]:+.2f}%
+
+RSI     {data["rsi"]:.1f}
+Volume  {data["volume"]:.2f}x
 
 {trendline_text}
 
-✅ <b>Confirmation:</b> {confirmation}/2
+✅ <b>Confirmation</b>
 
-📐 <b>ATR:</b> {fmt_price(levels["atr"])}
+{confirmation}/2
 
-━━━━━━━━━━━━━━━━━━
+
+📐 <b>ATR 5m</b>
+
+{fmt_price(levels["atr"])}
+
+
+⚡ <b>Leverage</b>
+
+{LEVERAGE}x
+
+━━━━━━━━━━━━━━━━━━━━
+
 🤖 <b>Engine {VERSION}</b>
 """
 
@@ -1628,7 +1726,7 @@ def watchlist_line(
 
 
 # ============================================================
-# UT BOT
+# UT BOT ATR
 # ============================================================
 
 def calculate_utbot_atr(
@@ -1688,7 +1786,6 @@ def calculate_utbot_atr(
 
     atr[seed_index] = first_atr
 
-    # Wilder RMA / Pine ATR
     for i in range(
         seed_index + 1,
         len(candles)
@@ -1708,6 +1805,10 @@ def calculate_utbot_atr(
 
     return atr
 
+
+# ============================================================
+# UT BOT SIGNAL
+# ============================================================
 
 def calculate_utbot_signal(
     candles
@@ -1812,7 +1913,6 @@ def calculate_utbot_signal(
                 i - 1
             ]
 
-    # Only LAST CLOSED candle
     i = len(candles) - 1
 
     if (
@@ -1834,7 +1934,6 @@ def calculate_utbot_signal(
 
     current_src = src[i]
 
-    # EMA(1) == source
     above = (
         current_src > current_stop
         and previous_src <= previous_stop
@@ -1900,76 +1999,61 @@ def calculate_ut_setup_levels(
 
     atr = calculate_atr(
         candles,
-        14
+        ATR_PERIOD
     )
 
     if atr <= 0:
 
         return None
 
-    recent = candles[-12:]
+    risk = (
+        atr
+        * SL_ATR_MULTIPLIER
+    )
 
     if direction == "LONG":
 
-        swing_low = min(
-            c["low"]
-            for c in recent
-        )
-
-        structural_risk = (
-            entry - swing_low
-        )
-
-        min_risk = atr * 0.8
-
-        risk = max(
-            structural_risk,
-            min_risk
-        )
-
-        max_risk = atr * 2.2
-
-        risk = min(
-            risk,
-            max_risk
-        )
-
         sl = entry - risk
 
-        tp1 = entry + risk
-        tp15 = entry + risk * 1.5
-        tp2 = entry + risk * 2
+        tp1 = (
+            entry
+            + atr
+            * TP1_ATR_MULTIPLIER
+        )
+
+        tp15 = (
+            entry
+            + atr
+            * TP2_ATR_MULTIPLIER
+        )
+
+        tp2 = (
+            entry
+            + atr
+            * TP3_ATR_MULTIPLIER
+        )
 
     else:
 
-        swing_high = max(
-            c["high"]
-            for c in recent
-        )
-
-        structural_risk = (
-            swing_high - entry
-        )
-
-        min_risk = atr * 0.8
-
-        risk = max(
-            structural_risk,
-            min_risk
-        )
-
-        max_risk = atr * 2.2
-
-        risk = min(
-            risk,
-            max_risk
-        )
-
         sl = entry + risk
 
-        tp1 = entry - risk
-        tp15 = entry - risk * 1.5
-        tp2 = entry - risk * 2
+        tp1 = (
+            entry
+            - atr
+            * TP1_ATR_MULTIPLIER
+        )
+
+        tp15 = (
+            entry
+            - atr
+            * TP2_ATR_MULTIPLIER
+        )
+
+        tp2 = (
+            entry
+            - atr
+            * TP3_ATR_MULTIPLIER
+        )
 
     return {
         "entry": entry,
@@ -2006,37 +2090,130 @@ def ut_setup_message(
 
     direction = ut["direction"]
 
+    tp1_lev = (
+        calculate_pnl_pct(
+            levels["entry"],
+            levels["tp1"],
+            direction
+        )
+        * LEVERAGE
+    )
+
+    tp2_lev = (
+        calculate_pnl_pct(
+            levels["entry"],
+            levels["tp15"],
+            direction
+        )
+        * LEVERAGE
+    )
+
+    tp3_lev = (
+        calculate_pnl_pct(
+            levels["entry"],
+            levels["tp2"],
+            direction
+        )
+        * LEVERAGE
+    )
+
+    sl_lev = (
+        calculate_pnl_pct(
+            levels["entry"],
+            levels["sl"],
+            direction
+        )
+        * LEVERAGE
+    )
+
     return f"""
 🚨 <b>{title}</b>
-━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━
 
 {emoji} <b>{symbol}/USDT — {direction}</b>
 
-🏆 <b>TOP 5 Rank:</b> #{rank}
-⭐ <b>Scanner Score:</b> {data["score"]}/100
+🏆 <b>TOP 5 Rank</b>
 
-📡 <b>UT Bot:</b> {ut["signal"]}
-⏱ <b>Timeframe:</b> 5m
+#{rank}
 
-💰 <b>Entry:</b> {fmt_price(levels["entry"])}
-🛑 <b>Stop Loss:</b> {fmt_price(levels["sl"])}
 
-🎯 <b>TP1 — 1R:</b> {fmt_price(levels["tp1"])}
-🎯 <b>TP2 — 1.5R:</b> {fmt_price(levels["tp15"])}
-🚀 <b>TP3 — 2R:</b> {fmt_price(levels["tp2"])}
+⭐ <b>Scanner Score</b>
 
-📊 <b>Risk:</b> {fmt_price(levels["risk"])}
-📐 <b>ATR:</b> {fmt_price(ut["atr"])}
+{data["score"]}/100
 
-📈 <b>RSI:</b> {data["rsi"]:.1f}
-📊 <b>Volume:</b> {data["volume"]:.2f}x
 
-🛑 <b>UT Stop:</b> {fmt_price(ut["trailing_stop"])}
+📡 <b>UT Bot</b>
+
+{ut["signal"]}
+
+
+⏱ <b>Timeframe</b>
+
+5m
+
+
+💰 <b>ENTRY</b>
+
+{fmt_price(levels["entry"])}
+
+
+🛑 <b>STOP LOSS</b>
+
+{fmt_price(levels["sl"])}
+
+📉 {sl_lev:.2f}% @ {LEVERAGE}x
+
+
+🎯 <b>TAKE PROFIT 1</b>
+
+{fmt_price(levels["tp1"])}
+
+📈 {tp1_lev:.2f}% @ {LEVERAGE}x
+📐 1R
+
+
+🎯 <b>TAKE PROFIT 2</b>
+
+{fmt_price(levels["tp15"])}
+
+📈 {tp2_lev:.2f}% @ {LEVERAGE}x
+📐 2R
+
+
+🚀 <b>TAKE PROFIT 3</b>
+
+{fmt_price(levels["tp2"])}
+
+📈 {tp3_lev:.2f}% @ {LEVERAGE}x
+📐 3R
+
+
+📐 <b>ATR 5m</b>
+
+{fmt_price(levels["atr"])}
+
+
+📈 <b>RSI</b>
+
+{data["rsi"]:.1f}
+
+
+📊 <b>Volume</b>
+
+{data["volume"]:.2f}x
+
+
+🛑 <b>UT Stop</b>
+
+{fmt_price(ut["trailing_stop"])}
+
 
 📌 <b>Closed Candle Signal</b>
 
-━━━━━━━━━━━━━━━━━━
-🤖 <b>UT Setup Engine</b>
+━━━━━━━━━━━━━━━━━━━━
+
+🤖 <b>UT Setup Engine {VERSION}</b>
 """.strip()
 
 
@@ -2092,7 +2269,7 @@ def get_ut_state():
 
 
 # ============================================================
-# UT WIN RATE
+# WIN RATE
 # ============================================================
 
 def calculate_win_rate(
@@ -2114,6 +2291,10 @@ def calculate_win_rate(
         / total
     ) * 100
 
+
+# ============================================================
+# UT STATS MESSAGE
+# ============================================================
 
 def ut_stats_message():
 
@@ -2187,25 +2368,155 @@ def ut_stats_message():
 
     return f"""
 📊 <b>UT BOT PERFORMANCE</b>
-━━━━━━━━━━━━━━━━━━
 
-📌 <b>Total Setups:</b> {total}
-📂 <b>Closed:</b> {closed}
-⏳ <b>Open:</b> {open_count}
+━━━━━━━━━━━━━━━━━━━━
 
-🏆 <b>1R Win Rate:</b> {wr1:.1f}%
-🏆 <b>1.5R Win Rate:</b> {wr15:.1f}%
-🏆 <b>2R Win Rate:</b> {wr2:.1f}%
+📌 <b>Total Setups</b>
 
-🟢 <b>1R Wins:</b> {wins_1r}
-🟢 <b>1.5R Wins:</b> {wins_15r}
-🟢 <b>2R Wins:</b> {wins_2r}
+{total}
 
-🔴 <b>Losses:</b> {losses}
 
-━━━━━━━━━━━━━━━━━━
-🤖 <b>UT Setup Engine</b>
+📂 <b>Closed</b>
+
+{closed}
+
+
+⏳ <b>Open</b>
+
+{open_count}
+
+
+🏆 <b>TP1 / 1R Hit Rate</b>
+
+{wr1:.1f}%
+
+
+🏆 <b>TP2 / 2R Hit Rate</b>
+
+{wr15:.1f}%
+
+
+🏆 <b>TP3 / 3R Hit Rate</b>
+
+{wr2:.1f}%
+
+
+🟢 <b>TP1 Hits</b>
+
+{wins_1r}
+
+
+🟢 <b>TP2 Hits</b>
+
+{wins_15r}
+
+
+🟢 <b>TP3 Hits</b>
+
+{wins_2r}
+
+
+🔴 <b>Losses</b>
+
+{losses}
+
+━━━━━━━━━━━━━━━━━━━━
+
+🤖 <b>UT Setup Engine {VERSION}</b>
 """.strip()
+
+
+# ============================================================
+# TP / SL TELEGRAM ALERT
+# ============================================================
+
+def send_trade_alert(
+    setup,
+    level,
+    price,
+    pnl_pct
+):
+
+    symbol = setup["symbol"]
+    direction = setup["direction"]
+
+    leveraged_pnl = (
+        pnl_pct
+        * LEVERAGE
+    )
+
+    if level == "TP1":
+
+        title = "🎯 TAKE PROFIT 1 HIT"
+        result = "1R"
+
+    elif level == "TP2":
+
+        title = "🎯 TAKE PROFIT 2 HIT"
+        result = "2R"
+
+    elif level == "TP3":
+
+        title = "🚀 TAKE PROFIT 3 HIT"
+        result = "3R"
+
+    else:
+
+        title = "🛑 STOP LOSS HIT"
+        result = "LOSS"
+
+    if leveraged_pnl >= 0:
+
+        pnl_text = (
+            f"+{leveraged_pnl:.2f}%"
+        )
+
+    else:
+
+        pnl_text = (
+            f"{leveraged_pnl:.2f}%"
+        )
+
+    message = f"""
+<b>{title}</b>
+
+━━━━━━━━━━━━━━━━━━━━
+
+<b>{symbol}/USDT — {direction}</b>
+
+
+💰 <b>ENTRY</b>
+
+{fmt_price(setup["entry"])}
+
+
+🏁 <b>EXIT</b>
+
+{fmt_price(price)}
+
+
+📊 <b>RESULT</b>
+
+{result}
+
+
+💵 <b>PnL @ {LEVERAGE}x</b>
+
+{pnl_text}
+
+
+⚡ <b>Leverage</b>
+
+{LEVERAGE}x
+
+━━━━━━━━━━━━━━━━━━━━
+
+🤖 <b>UT Setup Engine {VERSION}</b>
+"""
+
+    return send_telegram(
+        message.strip()
+    )
 
 
 # ============================================================
@@ -2287,11 +2598,11 @@ def update_ut_setups(results):
             setup["tp1"]
         )
 
-        tp15 = float(
+        tp2 = float(
             setup["tp15"]
         )
 
-        tp2 = float(
+        tp3 = float(
             setup["tp2"]
         )
 
@@ -2303,9 +2614,20 @@ def update_ut_setups(results):
             setup["candle_time"]
         )
 
-        # ----------------------------------------------------
-        # Check candles AFTER signal candle
-        # ----------------------------------------------------
+        setup.setdefault(
+            "tp1_hit",
+            False
+        )
+
+        setup.setdefault(
+            "tp2_hit",
+            False
+        )
+
+        setup.setdefault(
+            "tp3_hit",
+            False
+        )
 
         future_candles = [
             c
@@ -2317,278 +2639,251 @@ def update_ut_setups(results):
 
             continue
 
-        result = None
-        result_level = None
-        exit_price = None
-        exit_candle_time = None
+        for candle in future_candles:
 
-        # ----------------------------------------------------
-        # LONG
-        # ----------------------------------------------------
+            high = candle["high"]
+            low = candle["low"]
 
-        if direction == "LONG":
+            # =================================================
+            # LONG
+            # =================================================
 
-            for candle in future_candles:
+            if direction == "LONG":
 
-                high = candle["high"]
-                low = candle["low"]
+                hit_sl = low <= sl
+                hit_tp1 = high >= tp1
+                hit_tp2 = high >= tp2
+                hit_tp3 = high >= tp3
 
-                hit_sl = (
-                    low <= sl
+            # =================================================
+            # SHORT
+            # =================================================
+
+            else:
+
+                hit_sl = high >= sl
+                hit_tp1 = low <= tp1
+                hit_tp2 = low <= tp2
+                hit_tp3 = low <= tp3
+
+            # =================================================
+            # SL
+            # =================================================
+
+            if hit_sl:
+
+                pnl = calculate_pnl_pct(
+                    entry,
+                    sl,
+                    direction
                 )
 
-                hit_tp2 = (
-                    high >= tp2
-                )
-
-                hit_tp15 = (
-                    high >= tp15
-                )
-
-                hit_tp1 = (
-                    high >= tp1
-                )
-
-                # Conservative:
-                # if SL and TP happen in same candle,
-                # assume SL happened first.
-                if hit_sl and (
-                    hit_tp2
-                    or hit_tp15
-                    or hit_tp1
+                if not setup.get(
+                    "sl_alert_sent",
+                    False
                 ):
 
-                    result = "LOSS"
-                    result_level = "SL"
-                    exit_price = sl
-                    exit_candle_time = candle["time"]
+                    sent = send_trade_alert(
+                        setup,
+                        "SL",
+                        sl,
+                        pnl
+                    )
 
-                    break
+                    if sent:
 
-                if hit_sl:
+                        setup[
+                            "sl_alert_sent"
+                        ] = True
 
-                    result = "LOSS"
-                    result_level = "SL"
-                    exit_price = sl
-                    exit_candle_time = candle["time"]
+                setup["status"] = "CLOSED"
+                setup["result"] = "LOSS"
+                setup["result_level"] = "SL"
+                setup["exit_price"] = sl
+                setup["result_pct"] = pnl
+                setup["exit_candle_time"] = candle["time"]
+                setup["closed_time"] = int(time.time())
 
-                    break
+                stats["closed"] = int(
+                    stats.get(
+                        "closed",
+                        0
+                    )
+                ) + 1
 
-                if hit_tp2:
+                stats["losses"] = int(
+                    stats.get(
+                        "losses",
+                        0
+                    )
+                ) + 1
 
-                    result = "WIN_2R"
-                    result_level = "2R"
-                    exit_price = tp2
-                    exit_candle_time = candle["time"]
+                changed = True
 
-                    break
+                break
 
-                if hit_tp15:
+            # =================================================
+            # TP1
+            # =================================================
 
-                    result = "WIN_15R"
-                    result_level = "1.5R"
-                    exit_price = tp15
-                    exit_candle_time = candle["time"]
+            if (
+                hit_tp1
+                and not setup["tp1_hit"]
+            ):
 
-                    break
-
-                if hit_tp1:
-
-                    result = "WIN_1R"
-                    result_level = "1R"
-                    exit_price = tp1
-                    exit_candle_time = candle["time"]
-
-                    break
-
-        # ----------------------------------------------------
-        # SHORT
-        # ----------------------------------------------------
-
-        else:
-
-            for candle in future_candles:
-
-                high = candle["high"]
-                low = candle["low"]
-
-                hit_sl = (
-                    high >= sl
+                pnl = calculate_pnl_pct(
+                    entry,
+                    tp1,
+                    direction
                 )
 
-                hit_tp2 = (
-                    low <= tp2
-                )
-
-                hit_tp15 = (
-                    low <= tp15
-                )
-
-                hit_tp1 = (
-                    low <= tp1
-                )
-
-                # Conservative same-candle rule
-                if hit_sl and (
-                    hit_tp2
-                    or hit_tp15
-                    or hit_tp1
+                if not setup.get(
+                    "tp1_alert_sent",
+                    False
                 ):
 
-                    result = "LOSS"
-                    result_level = "SL"
-                    exit_price = sl
-                    exit_candle_time = candle["time"]
+                    sent = send_trade_alert(
+                        setup,
+                        "TP1",
+                        tp1,
+                        pnl
+                    )
 
-                    break
+                    if sent:
 
-                if hit_sl:
+                        setup[
+                            "tp1_alert_sent"
+                        ] = True
 
-                    result = "LOSS"
-                    result_level = "SL"
-                    exit_price = sl
-                    exit_candle_time = candle["time"]
+                setup["tp1_hit"] = True
 
-                    break
+                stats["wins_1r"] = int(
+                    stats.get(
+                        "wins_1r",
+                        0
+                    )
+                ) + 1
 
-                if hit_tp2:
+                changed = True
 
-                    result = "WIN_2R"
-                    result_level = "2R"
-                    exit_price = tp2
-                    exit_candle_time = candle["time"]
+            # =================================================
+            # TP2
+            # =================================================
 
-                    break
+            if (
+                hit_tp2
+                and not setup["tp2_hit"]
+            ):
 
-                if hit_tp15:
-
-                    result = "WIN_15R"
-                    result_level = "1.5R"
-                    exit_price = tp15
-                    exit_candle_time = candle["time"]
-
-                    break
-
-                if hit_tp1:
-
-                    result = "WIN_1R"
-                    result_level = "1R"
-                    exit_price = tp1
-                    exit_candle_time = candle["time"]
-
-                    break
-
-        # ----------------------------------------------------
-        # Still OPEN
-        # ----------------------------------------------------
-
-        if not result:
-
-            continue
-
-        # ----------------------------------------------------
-        # Calculate final result %
-        # ----------------------------------------------------
-
-        result_pct = calculate_pnl_pct(
-            entry,
-            exit_price,
-            direction
-        )
-
-        setup["status"] = "CLOSED"
-
-        setup["result"] = result
-
-        setup["result_level"] = (
-            result_level
-        )
-
-        setup["exit_price"] = exit_price
-
-        setup["result_pct"] = result_pct
-
-        setup["exit_candle_time"] = (
-            exit_candle_time
-        )
-
-        setup["closed_time"] = int(
-            time.time()
-        )
-
-        stats["closed"] = int(
-            stats.get(
-                "closed",
-                0
-            )
-        ) + 1
-
-        if result == "LOSS":
-
-            stats["losses"] = int(
-                stats.get(
-                    "losses",
-                    0
+                pnl = calculate_pnl_pct(
+                    entry,
+                    tp2,
+                    direction
                 )
-            ) + 1
 
-        elif result == "WIN_1R":
+                if not setup.get(
+                    "tp2_alert_sent",
+                    False
+                ):
 
-            stats["wins_1r"] = int(
-                stats.get(
-                    "wins_1r",
-                    0
+                    sent = send_trade_alert(
+                        setup,
+                        "TP2",
+                        tp2,
+                        pnl
+                    )
+
+                    if sent:
+
+                        setup[
+                            "tp2_alert_sent"
+                        ] = True
+
+                setup["tp2_hit"] = True
+
+                stats["wins_15r"] = int(
+                    stats.get(
+                        "wins_15r",
+                        0
+                    )
+                ) + 1
+
+                changed = True
+
+            # =================================================
+            # TP3
+            # =================================================
+
+            if (
+                hit_tp3
+                and not setup["tp3_hit"]
+            ):
+
+                pnl = calculate_pnl_pct(
+                    entry,
+                    tp3,
+                    direction
                 )
-            ) + 1
 
-        elif result == "WIN_15R":
+                if not setup.get(
+                    "tp3_alert_sent",
+                    False
+                ):
 
-            stats["wins_1r"] = int(
-                stats.get(
-                    "wins_1r",
-                    0
+                    sent = send_trade_alert(
+                        setup,
+                        "TP3",
+                        tp3,
+                        pnl
+                    )
+
+                    if sent:
+
+                        setup[
+                            "tp3_alert_sent"
+                        ] = True
+
+                setup["tp3_hit"] = True
+
+                setup["status"] = "CLOSED"
+
+                setup["result"] = "WIN_3R"
+
+                setup["result_level"] = "3R"
+
+                setup["exit_price"] = tp3
+
+                setup["result_pct"] = pnl
+
+                setup["exit_candle_time"] = (
+                    candle["time"]
                 )
-            ) + 1
 
-            stats["wins_15r"] = int(
-                stats.get(
-                    "wins_15r",
-                    0
+                setup["closed_time"] = int(
+                    time.time()
                 )
-            ) + 1
 
-        elif result == "WIN_2R":
+                stats["closed"] = int(
+                    stats.get(
+                        "closed",
+                        0
+                    )
+                ) + 1
 
-            stats["wins_1r"] = int(
-                stats.get(
-                    "wins_1r",
-                    0
-                )
-            ) + 1
+                stats["wins_2r"] = int(
+                    stats.get(
+                        "wins_2r",
+                        0
+                    )
+                ) + 1
 
-            stats["wins_15r"] = int(
-                stats.get(
-                    "wins_15r",
-                    0
-                )
-            ) + 1
+                changed = True
 
-            stats["wins_2r"] = int(
-                stats.get(
-                    "wins_2r",
-                    0
-                )
-            ) + 1
+                break
 
-        changed = True
-
-        print(
-            f"UT RESULT: "
-            f"{symbol} "
-            f"{direction} "
-            f"{result} "
-            f"{result_pct:+.2f}%"
-        )
+        setup[
+            "last_checked_candle"
+        ] = candles[-1]["time"]
 
     if changed:
 
@@ -2619,17 +2914,15 @@ def ut_live_status_message(results):
 
         return """
 📊 <b>UT BOT LIVE STATUS</b>
-━━━━━━━━━━━━━━━━━━
+
+━━━━━━━━━━━━━━━━━━━━
 
 📭 <b>No UT Bot setups recorded yet.</b>
 
-━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━
+
 🤖 <b>UT Setup Engine</b>
 """.strip()
-
-    # --------------------------------------------------------
-    # Current prices
-    # --------------------------------------------------------
 
     current_prices = {}
 
@@ -2655,12 +2948,9 @@ def ut_live_status_message(results):
 
     lines = [
         "📊 <b>UT BOT LIVE STATUS</b>",
-        "━━━━━━━━━━━━━━━━━━",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━",
     ]
-
-    # --------------------------------------------------------
-    # Sort newest setups first
-    # --------------------------------------------------------
 
     setup_items = list(
         signals.items()
@@ -2724,23 +3014,19 @@ def ut_live_status_message(results):
             )
         )
 
-        tp15 = float(
+        tp2 = float(
             setup.get(
                 "tp15",
                 0
             )
         )
 
-        tp2 = float(
+        tp3 = float(
             setup.get(
                 "tp2",
                 0
             )
         )
-
-        # ====================================================
-        # OPEN
-        # ====================================================
 
         if status == "OPEN":
 
@@ -2758,25 +3044,26 @@ def ut_live_status_message(results):
                 direction
             )
 
-            if pnl > 0:
+            leveraged_pnl = (
+                pnl
+                * LEVERAGE
+            )
+
+            if leveraged_pnl > 0:
 
                 pnl_emoji = "🟢"
                 pnl_text = (
-                    f"+{pnl:.2f}%"
+                    f"+{leveraged_pnl:.2f}%"
                 )
-                pnl_status = (
-                    "IN PROFIT"
-                )
+                pnl_status = "IN PROFIT"
 
-            elif pnl < 0:
+            elif leveraged_pnl < 0:
 
                 pnl_emoji = "🔴"
                 pnl_text = (
-                    f"{pnl:.2f}%"
+                    f"{leveraged_pnl:.2f}%"
                 )
-                pnl_status = (
-                    "IN LOSS"
-                )
+                pnl_status = "IN LOSS"
 
             else:
 
@@ -2784,59 +3071,79 @@ def ut_live_status_message(results):
                 pnl_text = "0.00%"
                 pnl_status = "BREAK EVEN"
 
-            lines.append(
-                f"\n⏳ <b>#{index} "
-                f"{symbol}/USDT — "
-                f"{direction}</b>"
-            )
+            if setup.get("tp1_hit"):
+
+                tp1_status = "✅ HIT"
+
+            else:
+
+                tp1_status = "🎯 PENDING"
+
+            if setup.get("tp2_hit"):
+
+                tp2_status = "✅ HIT"
+
+            else:
+
+                tp2_status = "🎯 PENDING"
+
+            if setup.get("tp3_hit"):
+
+                tp3_status = "✅ HIT"
+
+            else:
+
+                tp3_status = "🚀 PENDING"
 
             lines.append(
-                "📂 <b>Status:</b> OPEN"
-            )
+                f"""
+⏳ <b>#{index} {symbol}/USDT — {direction}</b>
 
-            lines.append(
-                f"💰 <b>Entry:</b> "
-                f"{fmt_price(entry)}"
-            )
+📂 <b>Status</b>
 
-            lines.append(
-                f"📍 <b>Current:</b> "
-                f"{fmt_price(current)}"
-            )
+OPEN
 
-            lines.append(
-                f"{pnl_emoji} "
-                f"<b>Current PnL:</b> "
-                f"{pnl_text}"
-            )
 
-            lines.append(
-                f"📌 <b>{pnl_status}</b>"
-            )
+💰 <b>Entry</b>
 
-            lines.append(
-                f"🎯 TP1: "
-                f"{fmt_price(tp1)}"
-            )
+{fmt_price(entry)}
 
-            lines.append(
-                f"🎯 TP2: "
-                f"{fmt_price(tp15)}"
-            )
 
-            lines.append(
-                f"🚀 TP3: "
-                f"{fmt_price(tp2)}"
-            )
+📍 <b>Current</b>
 
-            lines.append(
-                f"🛑 SL: "
-                f"{fmt_price(sl)}"
-            )
+{fmt_price(current)}
 
-        # ====================================================
-        # CLOSED
-        # ====================================================
+
+{pnl_emoji} <b>Current PnL</b>
+
+{pnl_text}
+
+📌 <b>{pnl_status}</b>
+
+
+🎯 <b>TP1</b>
+
+{fmt_price(tp1)}
+{tp1_status}
+
+
+🎯 <b>TP2</b>
+
+{fmt_price(tp2)}
+{tp2_status}
+
+
+🚀 <b>TP3</b>
+
+{fmt_price(tp3)}
+{tp3_status}
+
+
+🛑 <b>SL</b>
+
+{fmt_price(sl)}
+"""
+            )
 
         elif status == "CLOSED":
 
@@ -2864,6 +3171,11 @@ def ut_live_status_message(results):
                 )
             )
 
+            leveraged_result = (
+                result_pct
+                * LEVERAGE
+            )
+
             if result == "LOSS":
 
                 result_emoji = "🔴"
@@ -2873,62 +3185,40 @@ def ut_live_status_message(results):
                 result_emoji = "🟢"
 
             lines.append(
-                f"\n{result_emoji} "
-                f"<b>#{index} "
-                f"{symbol}/USDT — "
-                f"{direction}</b>"
+                f"""
+{result_emoji} <b>#{index} {symbol}/USDT — {direction}</b>
+
+📂 <b>Status</b>
+
+CLOSED
+
+
+💰 <b>Entry</b>
+
+{fmt_price(entry)}
+
+
+🏁 <b>Exit</b>
+
+{fmt_price(exit_price)}
+
+
+🎯 <b>Result</b>
+
+{result_level}
+
+
+📊 <b>PnL @ {LEVERAGE}x</b>
+
+{leveraged_result:+.2f}%
+
+
+📌 <b>{result}</b>
+"""
             )
-
-            lines.append(
-                "📂 <b>Status:</b> CLOSED"
-            )
-
-            lines.append(
-                f"💰 <b>Entry:</b> "
-                f"{fmt_price(entry)}"
-            )
-
-            lines.append(
-                f"🏁 <b>Exit:</b> "
-                f"{fmt_price(exit_price)}"
-            )
-
-            lines.append(
-                f"🎯 <b>Result:</b> "
-                f"{result_level}"
-            )
-
-            lines.append(
-                f"📊 <b>Result:</b> "
-                f"{result_pct:+.2f}%"
-            )
-
-            if result == "LOSS":
-
-                lines.append(
-                    "❌ <b>STOP LOSS HIT</b>"
-                )
-
-            elif result == "WIN_1R":
-
-                lines.append(
-                    "✅ <b>TP1 HIT — 1R</b>"
-                )
-
-            elif result == "WIN_15R":
-
-                lines.append(
-                    "✅ <b>TP2 HIT — 1.5R</b>"
-                )
-
-            elif result == "WIN_2R":
-
-                lines.append(
-                    "🚀 <b>TP3 HIT — 2R</b>"
-                )
 
     lines.append(
-        "\n━━━━━━━━━━━━━━━━━━"
+        "━━━━━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
@@ -2936,7 +3226,7 @@ def ut_live_status_message(results):
     )
 
     lines.append(
-        "🤖 <b>UT Setup Engine</b>"
+        f"🤖 <b>UT Setup Engine {VERSION}</b>"
     )
 
     return "\n".join(
@@ -2957,10 +3247,6 @@ def process_ut_top5(top5):
         )
 
         return False
-
-    # --------------------------------------------------------
-    # Find ALL fresh UT signals inside TOP 5
-    # --------------------------------------------------------
 
     candidates = []
 
@@ -3011,10 +3297,6 @@ def process_ut_top5(top5):
 
         return False
 
-    # --------------------------------------------------------
-    # Best = highest scanner score
-    # --------------------------------------------------------
-
     candidates.sort(
         key=lambda x: (
             x["data"]["score"],
@@ -3039,10 +3321,6 @@ def process_ut_top5(top5):
         f"Rank={rank}"
     )
 
-    # --------------------------------------------------------
-    # Unique signal key
-    # --------------------------------------------------------
-
     signal_key = (
         f"{symbol}_"
         f"{ut['signal']}_"
@@ -3064,10 +3342,6 @@ def process_ut_top5(top5):
 
         return False
 
-    # --------------------------------------------------------
-    # Levels
-    # --------------------------------------------------------
-
     levels = calculate_ut_setup_levels(
         candles,
         ut["direction"]
@@ -3082,10 +3356,6 @@ def process_ut_top5(top5):
 
         return False
 
-    # --------------------------------------------------------
-    # Save setup
-    # --------------------------------------------------------
-
     setup = {
         "symbol": symbol,
         "signal": ut["signal"],
@@ -3093,16 +3363,37 @@ def process_ut_top5(top5):
         "rank": rank,
         "score": data["score"],
         "candle_time": ut["candle_time"],
+
         "entry": levels["entry"],
+
         "sl": levels["sl"],
+
         "tp1": levels["tp1"],
+
         "tp15": levels["tp15"],
+
         "tp2": levels["tp2"],
+
         "risk": levels["risk"],
+
         "atr": levels["atr"],
+
         "ut_stop": ut["trailing_stop"],
+
         "status": "OPEN",
-        "created_time": int(time.time()),
+
+        "tp1_hit": False,
+        "tp2_hit": False,
+        "tp3_hit": False,
+
+        "tp1_alert_sent": False,
+        "tp2_alert_sent": False,
+        "tp3_alert_sent": False,
+        "sl_alert_sent": False,
+
+        "created_time": int(
+            time.time()
+        ),
     }
 
     signals[
@@ -3125,10 +3416,6 @@ def process_ut_top5(top5):
         state
     )
 
-    # --------------------------------------------------------
-    # Send setup
-    # --------------------------------------------------------
-
     message = ut_setup_message(
         symbol,
         data,
@@ -3143,9 +3430,6 @@ def process_ut_top5(top5):
         message
     )
 
-    # IMPORTANT:
-    # Stats are NOT sent here anymore.
-    # They are sent every scan from main().
     return True
 
 
@@ -3154,10 +3438,6 @@ def process_ut_top5(top5):
 # ============================================================
 
 def main():
-
-    # ========================================================
-    # TELEGRAM CONNECTION TEST
-    # ========================================================
 
     print(
         "TELEGRAM TOKEN:",
@@ -3185,11 +3465,39 @@ def main():
         "=" * 60
     )
 
+    print(
+        f"ATR PERIOD: {ATR_PERIOD}"
+    )
+
+    print(
+        f"SL ATR: {SL_ATR_MULTIPLIER}"
+    )
+
+    print(
+        f"TP1 ATR: {TP1_ATR_MULTIPLIER}"
+    )
+
+    print(
+        f"TP2 ATR: {TP2_ATR_MULTIPLIER}"
+    )
+
+    print(
+        f"TP3 ATR: {TP3_ATR_MULTIPLIER}"
+    )
+
+    print(
+        f"LEVERAGE: {LEVERAGE}x"
+    )
+
+    print(
+        "=" * 60
+    )
+
     results = []
 
-    # --------------------------------------------------------
+    # ========================================================
     # BTC
-    # --------------------------------------------------------
+    # ========================================================
 
     btc_candles = get_candles(
         COINS["BTC"]
@@ -3204,9 +3512,9 @@ def main():
         regime
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # ALL COINS
-    # --------------------------------------------------------
+    # ========================================================
 
     for symbol, kraken_symbol in COINS.items():
 
@@ -3245,9 +3553,9 @@ def main():
                 e
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # WATCHLIST
-    # --------------------------------------------------------
+    # ========================================================
 
     results.sort(
         key=lambda x: x["data"]["score"],
@@ -3257,7 +3565,7 @@ def main():
     top5 = results[:5]
 
     watchlist = [
-        "👀 <b>TOP 5 WATCHLIST v5.5</b>",
+        "👀 <b>TOP 5 WATCHLIST v5.6</b>",
         "━━━━━━━━━━━━━━━━━━"
     ]
 
@@ -3320,6 +3628,8 @@ def main():
 
     # ========================================================
     # UPDATE PREVIOUS UT SETUPS
+    #
+    # TP1 / TP2 / TP3 / SL alerts are checked here.
     # ========================================================
 
     update_ut_setups(
@@ -3327,7 +3637,7 @@ def main():
     )
 
     # ========================================================
-    # CHECK FOR NEW UT BOT SIGNAL
+    # CHECK NEW UT BOT SIGNAL
     # ========================================================
 
     process_ut_top5(
@@ -3335,10 +3645,7 @@ def main():
     )
 
     # ========================================================
-    # UT LIVE STATUS
-    #
-    # This is sent EVERY scan.
-    # It does NOT depend on a new signal.
+    # LIVE STATUS
     # ========================================================
 
     live_status = ut_live_status_message(
@@ -3354,9 +3661,7 @@ def main():
     )
 
     # ========================================================
-    # UT PERFORMANCE / WIN RATE
-    #
-    # This is also sent EVERY scan.
+    # PERFORMANCE
     # ========================================================
 
     stats_message = ut_stats_message()
@@ -3552,6 +3857,7 @@ def main():
                 "tp1": levels["tp1"],
                 "tp2": levels["tp2"],
                 "tp3": levels["tp3"],
+                "atr": levels["atr"],
                 "candle_time": candle_time,
                 "timestamp": int(
                     time.time()
