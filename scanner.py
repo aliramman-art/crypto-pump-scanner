@@ -9,11 +9,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
-# CRYPTO DIVERGENCE + TRENDLINE SCANNER v8.2
+# CRYPTO DIVERGENCE + TRENDLINE SCANNER v8.3
 # ============================================================
 
 print("=" * 46)
-print("CRYPTO DIVERGENCE + TRENDLINE SCANNER v8.2")
+print("CRYPTO DIVERGENCE + TRENDLINE SCANNER v8.3")
 print("=" * 46)
 print("30 Coins")
 print("5M Timeframe")
@@ -35,8 +35,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 STATE_FILE = "divergence_state_v8.json"
-
-TIMEFRAME = "5m"
 
 CANDLE_LIMIT = 500
 
@@ -111,10 +109,17 @@ def load_state():
         }
 
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             data = json.load(f)
 
         if not isinstance(data, dict):
+
             return {
                 "trades": [],
                 "last_scan": 0
@@ -141,7 +146,12 @@ def save_state(state):
 
         temp_file = STATE_FILE + ".tmp"
 
-        with open(temp_file, "w", encoding="utf-8") as f:
+        with open(
+            temp_file,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
             json.dump(
                 state,
                 f,
@@ -149,7 +159,10 @@ def save_state(state):
                 indent=2
             )
 
-        os.replace(temp_file, STATE_FILE)
+        os.replace(
+            temp_file,
+            STATE_FILE
+        )
 
     except Exception as e:
 
@@ -187,13 +200,19 @@ def telegram_send(message):
             timeout=15
         )
 
-        print("Telegram HTTP:", r.status_code)
+        print(
+            "Telegram HTTP:",
+            r.status_code
+        )
 
         return r.status_code == 200
 
     except Exception as e:
 
-        print("Telegram ERROR:", e)
+        print(
+            "Telegram ERROR:",
+            e
+        )
 
         return False
 
@@ -202,9 +221,15 @@ def telegram_send(message):
 # KRAKEN DATA
 # ============================================================
 
-def get_candles(symbol, limit=CANDLE_LIMIT):
+def get_candles(
+    symbol,
+    limit=CANDLE_LIMIT
+):
 
-    url = f"{BASE_URL}/trade/{symbol}/5m"
+    url = (
+        f"{BASE_URL}/trade/"
+        f"{symbol}/5m"
+    )
 
     try:
 
@@ -217,54 +242,66 @@ def get_candles(symbol, limit=CANDLE_LIMIT):
             }
         )
 
-        print(f"KRAKEN {symbol} HTTP={r.status_code}")
+        print(
+            f"KRAKEN {symbol} "
+            f"HTTP={r.status_code}"
+        )
 
         if r.status_code != 200:
 
             print(
-                f"{symbol} => HTTP_ERROR "
-                f"{r.status_code}"
+                f"{symbol} => "
+                f"HTTP_ERROR {r.status_code}"
             )
 
-            return None
+            return None, (
+                f"HTTP {r.status_code}"
+            )
 
         try:
+
             data = r.json()
 
         except Exception as e:
 
             print(
-                f"{symbol} => JSON_ERROR: {e}"
+                f"{symbol} => "
+                f"JSON_ERROR: {e}"
             )
 
-            return None
+            return None, "JSON_ERROR"
 
-        # ----------------------------------------------------
-        # Kraken Futures current response
-        # ----------------------------------------------------
+        candles = data.get(
+            "candles"
+        )
 
-        candles = data.get("candles")
-
-        if not isinstance(candles, list):
+        if not isinstance(
+            candles,
+            list
+        ):
 
             print(
-                f"{symbol} => INVALID_RESPONSE"
+                f"{symbol} => "
+                f"INVALID_RESPONSE"
             )
 
             print(
                 str(data)[:500]
             )
 
-            return None
+            return None, "INVALID_RESPONSE"
 
         if len(candles) < 100:
 
             print(
                 f"{symbol} => "
-                f"NOT_ENOUGH_CANDLES: {len(candles)}"
+                f"NOT_ENOUGH_CANDLES: "
+                f"{len(candles)}"
             )
 
-            return None
+            return None, (
+                f"Only {len(candles)} candles"
+            )
 
         rows = []
 
@@ -272,43 +309,58 @@ def get_candles(symbol, limit=CANDLE_LIMIT):
 
             try:
 
-                # Current Kraken format:
-                #
-                # {
-                #   "time": ...,
-                #   "open": ...,
-                #   "high": ...,
-                #   "low": ...,
-                #   "close": ...,
-                #   "volume": ...
-                # }
-
-                if isinstance(candle, dict):
+                if isinstance(
+                    candle,
+                    dict
+                ):
 
                     rows.append({
-                        "time": int(candle["time"]),
-                        "open": float(candle["open"]),
-                        "high": float(candle["high"]),
-                        "low": float(candle["low"]),
-                        "close": float(candle["close"]),
-                        "volume": float(candle["volume"])
+                        "time": int(
+                            candle["time"]
+                        ),
+                        "open": float(
+                            candle["open"]
+                        ),
+                        "high": float(
+                            candle["high"]
+                        ),
+                        "low": float(
+                            candle["low"]
+                        ),
+                        "close": float(
+                            candle["close"]
+                        ),
+                        "volume": float(
+                            candle["volume"]
+                        )
                     })
 
-                # ------------------------------------------------
-                # Fallback for array-based responses
-                # ------------------------------------------------
-
-                elif isinstance(candle, (list, tuple)):
+                elif isinstance(
+                    candle,
+                    (list, tuple)
+                ):
 
                     if len(candle) >= 6:
 
                         rows.append({
-                            "time": int(candle[0]),
-                            "open": float(candle[1]),
-                            "high": float(candle[2]),
-                            "low": float(candle[3]),
-                            "close": float(candle[4]),
-                            "volume": float(candle[5])
+                            "time": int(
+                                candle[0]
+                            ),
+                            "open": float(
+                                candle[1]
+                            ),
+                            "high": float(
+                                candle[2]
+                            ),
+                            "low": float(
+                                candle[3]
+                            ),
+                            "close": float(
+                                candle[4]
+                            ),
+                            "volume": float(
+                                candle[5]
+                            )
                         })
 
             except Exception:
@@ -319,53 +371,45 @@ def get_candles(symbol, limit=CANDLE_LIMIT):
 
             print(
                 f"{symbol} => "
-                f"PARSE_ERROR: {len(rows)} valid candles"
+                f"PARSE_ERROR: "
+                f"{len(rows)} valid candles"
             )
 
-            return None
+            return None, (
+                f"Parse error: {len(rows)} candles"
+            )
 
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(
+            rows
+        )
 
         if df.empty:
 
-            print(
-                f"{symbol} => EMPTY_DATAFRAME"
-            )
-
-            return None
-
-        # Remove duplicates
+            return None, "EMPTY_DATA"
 
         df = df.drop_duplicates(
             subset=["time"]
         )
 
-        # Sort oldest -> newest
-
         df = df.sort_values(
             "time"
-        ).reset_index(drop=True)
+        ).reset_index(
+            drop=True
+        )
 
-        # ----------------------------------------------------
-        # Normalize timestamp
-        # ----------------------------------------------------
+        # Timestamp normalization
 
-        max_time = df["time"].max()
-
-        # Kraken timestamps may be milliseconds
-        # or seconds depending on response format.
-
-        if max_time > 10_000_000_000:
+        if df["time"].max() > 10_000_000_000:
 
             df["time"] = (
                 df["time"] // 1000
             )
 
-        # ----------------------------------------------------
-        # Remove currently forming candle
-        # ----------------------------------------------------
+        # Remove current forming candle
 
-        current_time = int(time.time())
+        current_time = int(
+            time.time()
+        )
 
         current_bucket = (
             current_time // 300
@@ -379,21 +423,27 @@ def get_candles(symbol, limit=CANDLE_LIMIT):
 
             print(
                 f"{symbol} => "
-                f"CLOSED_CANDLES_LOW: {len(df)}"
+                f"CLOSED_CANDLES_LOW: "
+                f"{len(df)}"
             )
 
-            return None
+            return None, (
+                f"Only {len(df)} closed candles"
+            )
 
         df = df.tail(
             limit
-        ).reset_index(drop=True)
+        ).reset_index(
+            drop=True
+        )
 
         print(
-            f"{symbol} => DATA OK "
+            f"{symbol} => "
+            f"DATA OK "
             f"({len(df)} candles)"
         )
 
-        return df
+        return df, None
 
     except requests.exceptions.Timeout:
 
@@ -401,36 +451,45 @@ def get_candles(symbol, limit=CANDLE_LIMIT):
             f"{symbol} => TIMEOUT"
         )
 
-        return None
+        return None, "TIMEOUT"
 
     except requests.exceptions.RequestException as e:
 
         print(
-            f"{symbol} => REQUEST_ERROR: {e}"
+            f"{symbol} => "
+            f"REQUEST_ERROR: {e}"
         )
 
-        return None
+        return None, "REQUEST_ERROR"
 
     except Exception as e:
 
         print(
-            f"{symbol} => EXCEPTION: {e}"
+            f"{symbol} => "
+            f"EXCEPTION: {e}"
         )
 
-        return None
+        return None, str(e)
 
 
 # ============================================================
 # RSI
 # ============================================================
 
-def calculate_rsi(series, period=14):
+def calculate_rsi(
+    series,
+    period=14
+):
 
     delta = series.diff()
 
-    gain = delta.clip(lower=0)
+    gain = delta.clip(
+        lower=0
+    )
 
-    loss = -delta.clip(upper=0)
+    loss = -delta.clip(
+        upper=0
+    )
 
     avg_gain = gain.ewm(
         alpha=1 / period,
@@ -442,13 +501,23 @@ def calculate_rsi(series, period=14):
         adjust=False
     ).mean()
 
-    rs = avg_gain / avg_loss.replace(
-        0,
-        np.nan
+    rs = (
+        avg_gain
+        /
+        avg_loss.replace(
+            0,
+            np.nan
+        )
     )
 
-    rsi = 100 - (
-        100 / (1 + rs)
+    rsi = (
+        100
+        -
+        (
+            100
+            /
+            (1 + rs)
+        )
     )
 
     return rsi.fillna(50)
@@ -474,12 +543,14 @@ def find_pivot_lows(df):
         ]
 
         right = lows[
-            i + 1:i + 1 + PIVOT_RIGHT
+            i + 1:
+            i + 1 + PIVOT_RIGHT
         ]
 
         if (
             lows[i] < left.min()
-            and lows[i] < right.min()
+            and
+            lows[i] < right.min()
         ):
 
             pivots.append(i)
@@ -503,12 +574,14 @@ def find_pivot_highs(df):
         ]
 
         right = highs[
-            i + 1:i + 1 + PIVOT_RIGHT
+            i + 1:
+            i + 1 + PIVOT_RIGHT
         ]
 
         if (
             highs[i] > left.max()
-            and highs[i] > right.max()
+            and
+            highs[i] > right.max()
         ):
 
             pivots.append(i)
@@ -537,9 +610,10 @@ def find_bullish_divergence(
         p1 = pivot_lows[i]
         p2 = pivot_lows[i + 1]
 
-        gap = p2 - p1
-
-        if gap > MAX_PIVOT_GAP:
+        if (
+            p2 - p1
+            > MAX_PIVOT_GAP
+        ):
             continue
 
         price1 = df.iloc[p1]["low"]
@@ -560,11 +634,6 @@ def find_bullish_divergence(
         rsi_change = (
             rsi2 - rsi1
         )
-
-        # Regular bullish:
-        #
-        # Price = Lower Low
-        # RSI   = Higher Low
 
         if (
             price_change
@@ -608,9 +677,10 @@ def find_bearish_divergence(
         p1 = pivot_highs[i]
         p2 = pivot_highs[i + 1]
 
-        gap = p2 - p1
-
-        if gap > MAX_PIVOT_GAP:
+        if (
+            p2 - p1
+            > MAX_PIVOT_GAP
+        ):
             continue
 
         price1 = df.iloc[p1]["high"]
@@ -631,11 +701,6 @@ def find_bearish_divergence(
         rsi_change = (
             rsi2 - rsi1
         )
-
-        # Regular bearish:
-        #
-        # Price = Higher High
-        # RSI   = Lower High
 
         if (
             price_change
@@ -659,7 +724,7 @@ def find_bearish_divergence(
 
 
 # ============================================================
-# TRENDLINE
+# TRENDLINES
 # ============================================================
 
 def get_descending_trendline(
@@ -671,8 +736,6 @@ def get_descending_trendline(
         return None
 
     highs = df["high"]
-
-    # Newest valid pair first
 
     for i in range(
         len(pivot_highs) - 1,
@@ -690,20 +753,22 @@ def get_descending_trendline(
 
             p1 = pivot_highs[j]
 
-            if p2 - p1 > MAX_PIVOT_GAP:
+            if (
+                p2 - p1
+                > MAX_PIVOT_GAP
+            ):
                 continue
 
             y1 = highs.iloc[p1]
             y2 = highs.iloc[p2]
-
-            # Descending line
 
             if y2 >= y1:
                 continue
 
             slope = (
                 (y2 - y1)
-                / (p2 - p1)
+                /
+                (p2 - p1)
             )
 
             return {
@@ -743,20 +808,22 @@ def get_ascending_trendline(
 
             p1 = pivot_lows[j]
 
-            if p2 - p1 > MAX_PIVOT_GAP:
+            if (
+                p2 - p1
+                > MAX_PIVOT_GAP
+            ):
                 continue
 
             y1 = lows.iloc[p1]
             y2 = lows.iloc[p2]
-
-            # Ascending line
 
             if y2 <= y1:
                 continue
 
             slope = (
                 (y2 - y1)
-                / (p2 - p1)
+                /
+                (p2 - p1)
             )
 
             return {
@@ -780,7 +847,11 @@ def trendline_value(
         +
         line["slope"]
         *
-        (index - line["p1"])
+        (
+            index
+            -
+            line["p1"]
+        )
     )
 
 
@@ -796,19 +867,16 @@ def bullish_trendline_break(
     if line is None:
         return False
 
-    if len(df) < 2:
-        return False
-
-    current = len(df) - 1
     previous = len(df) - 2
+    current = len(df) - 1
 
-    prev_close = df.iloc[
-        previous
-    ]["close"]
+    prev_close = float(
+        df.iloc[previous]["close"]
+    )
 
-    curr_close = df.iloc[
-        current
-    ]["close"]
+    curr_close = float(
+        df.iloc[current]["close"]
+    )
 
     prev_line = trendline_value(
         line,
@@ -835,19 +903,16 @@ def bearish_trendline_break(
     if line is None:
         return False
 
-    if len(df) < 2:
-        return False
-
-    current = len(df) - 1
     previous = len(df) - 2
+    current = len(df) - 1
 
-    prev_close = df.iloc[
-        previous
-    ]["close"]
+    prev_close = float(
+        df.iloc[previous]["close"]
+    )
 
-    curr_close = df.iloc[
-        current
-    ]["close"]
+    curr_close = float(
+        df.iloc[current]["close"]
+    )
 
     prev_line = trendline_value(
         line,
@@ -893,10 +958,13 @@ def nearest_resistance(
         if (
             level > entry
             and
-            distance >= MIN_TP_DISTANCE_PERCENT
+            distance
+            >= MIN_TP_DISTANCE_PERCENT
         ):
 
-            levels.append(level)
+            levels.append(
+                level
+            )
 
     if not levels:
         return None
@@ -927,10 +995,13 @@ def nearest_support(
         if (
             level < entry
             and
-            distance >= MIN_TP_DISTANCE_PERCENT
+            distance
+            >= MIN_TP_DISTANCE_PERCENT
         ):
 
-            levels.append(level)
+            levels.append(
+                level
+            )
 
     if not levels:
         return None
@@ -939,13 +1010,12 @@ def nearest_support(
 
 
 # ============================================================
-# BUILD BUY
+# BUY SETUP
 # ============================================================
 
 def build_buy_setup(
     symbol,
     df,
-    divergence,
     pivot_lows,
     pivot_highs
 ):
@@ -953,8 +1023,6 @@ def build_buy_setup(
     entry = float(
         df.iloc[-1]["close"]
     )
-
-    # Latest swing low
 
     valid_lows = [
         x
@@ -973,7 +1041,12 @@ def build_buy_setup(
 
     sl = (
         swing_low
-        * (1 - SL_BUFFER_PERCENT / 100)
+        *
+        (
+            1
+            -
+            SL_BUFFER_PERCENT / 100
+        )
     )
 
     tp = nearest_resistance(
@@ -1011,13 +1084,12 @@ def build_buy_setup(
 
 
 # ============================================================
-# BUILD SELL
+# SELL SETUP
 # ============================================================
 
 def build_sell_setup(
     symbol,
     df,
-    divergence,
     pivot_lows,
     pivot_highs
 ):
@@ -1043,7 +1115,12 @@ def build_sell_setup(
 
     sl = (
         swing_high
-        * (1 + SL_BUFFER_PERCENT / 100)
+        *
+        (
+            1
+            +
+            SL_BUFFER_PERCENT / 100
+        )
     )
 
     tp = nearest_support(
@@ -1081,7 +1158,7 @@ def build_sell_setup(
 
 
 # ============================================================
-# ANALYZE ONE COIN
+# ANALYZE COIN
 # ============================================================
 
 def analyze_coin(
@@ -1089,7 +1166,7 @@ def analyze_coin(
     kraken_symbol
 ):
 
-    df = get_candles(
+    df, data_error = get_candles(
         kraken_symbol,
         CANDLE_LIMIT
     )
@@ -1098,7 +1175,8 @@ def analyze_coin(
 
         return {
             "symbol": symbol,
-            "status": "DATA_ERROR"
+            "status": "DATA_ERROR",
+            "error": data_error
         }
 
     try:
@@ -1130,32 +1208,6 @@ def analyze_coin(
             )
         )
 
-        # ----------------------------------------------------
-        # Latest bullish divergence
-        # ----------------------------------------------------
-
-        bullish_div = None
-
-        if bullish_divs:
-
-            bullish_div = (
-                bullish_divs[-1]
-            )
-
-        # ----------------------------------------------------
-        # Latest bearish divergence
-        # ----------------------------------------------------
-
-        bearish_div = None
-
-        if bearish_divs:
-
-            bearish_div = (
-                bearish_divs[-1]
-            )
-
-        current_index = len(df) - 1
-
         current_time = int(
             df.iloc[-1]["time"]
         )
@@ -1164,9 +1216,13 @@ def analyze_coin(
         # BUY
         # ----------------------------------------------------
 
-        if bullish_div is not None:
+        if bullish_divs:
 
-            div_index = bullish_div[
+            divergence = (
+                bullish_divs[-1]
+            )
+
+            div_index = divergence[
                 "p2"
             ]
 
@@ -1175,7 +1231,9 @@ def analyze_coin(
             )
 
             age_minutes = (
-                current_time - div_time
+                current_time
+                -
+                div_time
             ) / 60
 
             if (
@@ -1183,7 +1241,7 @@ def analyze_coin(
                 <= MAX_DIVERGENCE_AGE_MINUTES
             ):
 
-                descending_line = (
+                line = (
                     get_descending_trendline(
                         df,
                         pivot_highs
@@ -1192,26 +1250,25 @@ def analyze_coin(
 
                 if bullish_trendline_break(
                     df,
-                    descending_line
+                    line
                 ):
 
                     setup = build_buy_setup(
                         symbol,
                         df,
-                        bullish_div,
                         pivot_lows,
                         pivot_highs
                     )
 
                     if setup:
 
-                        setup["divergence_age"] = (
-                            age_minutes
-                        )
+                        setup[
+                            "divergence_age"
+                        ] = age_minutes
 
-                        setup["status"] = (
-                            "SIGNAL"
-                        )
+                        setup[
+                            "status"
+                        ] = "SIGNAL"
 
                         return setup
 
@@ -1219,9 +1276,13 @@ def analyze_coin(
         # SELL
         # ----------------------------------------------------
 
-        if bearish_div is not None:
+        if bearish_divs:
 
-            div_index = bearish_div[
+            divergence = (
+                bearish_divs[-1]
+            )
+
+            div_index = divergence[
                 "p2"
             ]
 
@@ -1230,7 +1291,9 @@ def analyze_coin(
             )
 
             age_minutes = (
-                current_time - div_time
+                current_time
+                -
+                div_time
             ) / 60
 
             if (
@@ -1238,7 +1301,7 @@ def analyze_coin(
                 <= MAX_DIVERGENCE_AGE_MINUTES
             ):
 
-                ascending_line = (
+                line = (
                     get_ascending_trendline(
                         df,
                         pivot_lows
@@ -1247,26 +1310,25 @@ def analyze_coin(
 
                 if bearish_trendline_break(
                     df,
-                    ascending_line
+                    line
                 ):
 
                     setup = build_sell_setup(
                         symbol,
                         df,
-                        bearish_div,
                         pivot_lows,
                         pivot_highs
                     )
 
                     if setup:
 
-                        setup["divergence_age"] = (
-                            age_minutes
-                        )
+                        setup[
+                            "divergence_age"
+                        ] = age_minutes
 
-                        setup["status"] = (
-                            "SIGNAL"
-                        )
+                        setup[
+                            "status"
+                        ] = "SIGNAL"
 
                         return setup
 
@@ -1284,7 +1346,8 @@ def analyze_coin(
     except Exception as e:
 
         print(
-            f"{symbol} => ANALYSIS_ERROR: {e}"
+            f"{symbol} => "
+            f"ANALYSIS_ERROR: {e}"
         )
 
         return {
@@ -1298,7 +1361,9 @@ def analyze_coin(
 # TRADE KEY
 # ============================================================
 
-def trade_key(signal):
+def trade_key(
+    signal
+):
 
     return (
         f"{signal['symbol']}_"
@@ -1329,7 +1394,9 @@ def update_open_trades(
 
     for trade in open_trades:
 
-        symbol = trade["symbol"]
+        symbol = trade[
+            "symbol"
+        ]
 
         kraken_symbol = SYMBOLS.get(
             symbol
@@ -1338,7 +1405,7 @@ def update_open_trades(
         if not kraken_symbol:
             continue
 
-        df = get_candles(
+        df, _ = get_candles(
             kraken_symbol,
             20
         )
@@ -1370,10 +1437,6 @@ def update_open_trades(
 
         result = None
 
-        # Conservative rule:
-        # If one candle touches both,
-        # SL wins.
-
         if direction == "LONG":
 
             hit_sl = low <= sl
@@ -1402,15 +1465,23 @@ def update_open_trades(
 
         if result:
 
-            trade["status"] = "CLOSED"
+            trade[
+                "status"
+            ] = "CLOSED"
 
-            trade["result"] = result
+            trade[
+                "result"
+            ] = result
 
-            trade["close_time"] = int(
+            trade[
+                "close_time"
+            ] = int(
                 last["time"]
             )
 
-            trade["close_price"] = (
+            trade[
+                "close_price"
+            ] = (
                 sl
                 if result == "LOSS"
                 else tp
@@ -1427,7 +1498,9 @@ def update_open_trades(
 # STATISTICS
 # ============================================================
 
-def get_statistics(state):
+def get_statistics(
+    state
+):
 
     trades = state.get(
         "trades",
@@ -1437,36 +1510,39 @@ def get_statistics(state):
     closed = [
         t
         for t in trades
-        if t.get("status") == "CLOSED"
+        if t.get("status")
+        == "CLOSED"
     ]
 
     open_trades = [
         t
         for t in trades
-        if t.get("status") == "OPEN"
+        if t.get("status")
+        == "OPEN"
     ]
 
     wins = [
         t
         for t in closed
-        if t.get("result") == "WIN"
+        if t.get("result")
+        == "WIN"
     ]
 
     losses = [
         t
         for t in closed
-        if t.get("result") == "LOSS"
+        if t.get("result")
+        == "LOSS"
     ]
 
-    total_closed = len(closed)
-
-    if total_closed > 0:
+    if closed:
 
         win_rate = (
             len(wins)
             /
-            total_closed
-            * 100
+            len(closed)
+            *
+            100
         )
 
     else:
@@ -1474,68 +1550,61 @@ def get_statistics(state):
         win_rate = 0
 
     return {
-        "total": len(trades),
-        "open": len(open_trades),
-        "closed": total_closed,
-        "wins": len(wins),
-        "losses": len(losses),
+        "open": len(
+            open_trades
+        ),
+        "closed": len(
+            closed
+        ),
+        "wins": len(
+            wins
+        ),
+        "losses": len(
+            losses
+        ),
         "win_rate": win_rate
     }
 
 
 # ============================================================
-# FORMAT SIGNAL
-# ============================================================
-
-def format_signal(signal):
-
-    direction = signal[
-        "direction"
-    ]
-
-    if direction == "LONG":
-        emoji = "🟢"
-        side = "BUY"
-    else:
-        emoji = "🔴"
-        side = "SELL"
-
-    entry = signal["entry"]
-    sl = signal["sl"]
-    tp = signal["tp"]
-    rr = signal["rr"]
-
-    return (
-        f"🚨 <b>{side} SIGNAL</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"{emoji} <b>{signal['symbol']}/USDT</b>\n\n"
-        f"📊 Timeframe: 5M\n"
-        f"📌 Setup: "
-        f"{signal['divergence']}\n"
-        f"📈 Trendline Break: YES\n\n"
-        f"💰 Entry: <b>{entry:.8g}</b>\n"
-        f"🛑 SL: <b>{sl:.8g}</b>\n"
-        f"🎯 TP: <b>{tp:.8g}</b>\n"
-        f"⚖️ RR: <b>1:{rr:.2f}</b>\n"
-        f"📏 TP Distance: "
-        f"{abs(tp-entry)/entry*100:.2f}%\n"
-        f"⏱ Divergence Age: "
-        f"{signal.get('divergence_age', 0):.0f}m"
-    )
-
-
-# ============================================================
-# FORMAT REPORT
+# TELEGRAM REPORT
 # ============================================================
 
 def format_report(
-    signals,
+    results,
+    new_signals,
     state,
     closed_trades
 ):
 
     stats = get_statistics(
         state
+    )
+
+    total = len(
+        results
+    )
+
+    data_errors = [
+        r
+        for r in results
+        if r.get("status")
+        == "DATA_ERROR"
+    ]
+
+    analysis_errors = [
+        r
+        for r in results
+        if r.get("status")
+        == "ANALYSIS_ERROR"
+    ]
+
+    successful = (
+        total
+        -
+        len(data_errors)
+        -
+        len(analysis_errors)
     )
 
     now = datetime.now(
@@ -1545,43 +1614,140 @@ def format_report(
     )
 
     text = (
-        f"📡 <b>CRYPTO SCANNER 5M</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {now}\n\n"
+        "📡 <b>CRYPTO "
+        "DIVERGENCE SCANNER</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {now}\n"
+        "📊 Timeframe: 5M\n"
+        "📈 Regular Divergence\n"
+        "📉 Trendline Break\n"
+        "🚫 Ichimoku: OFF\n\n"
     )
 
-    if signals:
+    # --------------------------------------------------------
+    # DATA STATUS
+    # --------------------------------------------------------
+
+    if len(data_errors) == 0:
+
+        text += (
+            f"🟢 <b>DATA: "
+            f"{successful}/{total}</b>\n"
+        )
+
+    else:
+
+        text += (
+            f"🟢 DATA OK: "
+            f"{successful}/{total}\n"
+            f"🔴 <b>DATA ERROR: "
+            f"{len(data_errors)}</b>\n"
+        )
+
+        for error in data_errors:
+
+            symbol = error.get(
+                "symbol",
+                "UNKNOWN"
+            )
+
+            reason = error.get(
+                "error",
+                "Unknown"
+            )
+
+            text += (
+                f"   • {symbol}: "
+                f"{reason}\n"
+            )
+
+    if analysis_errors:
+
+        text += (
+            f"⚠️ ANALYSIS ERROR: "
+            f"{len(analysis_errors)}\n"
+        )
+
+        for error in analysis_errors:
+
+            text += (
+                f"   • "
+                f"{error.get('symbol')}\n"
+            )
+
+    text += "\n"
+
+    # --------------------------------------------------------
+    # SIGNALS
+    # --------------------------------------------------------
+
+    if new_signals:
 
         text += (
             f"🚨 <b>NEW SIGNALS: "
-            f"{len(signals)}</b>\n\n"
+            f"{len(new_signals)}</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
         )
 
-        for i, s in enumerate(
-            signals[:TOP_SIGNAL_LIMIT],
+        for i, signal in enumerate(
+            new_signals[
+                :TOP_SIGNAL_LIMIT
+            ],
             1
         ):
 
-            side = (
-                "🟢 BUY"
-                if s["direction"] == "LONG"
-                else "🔴 SELL"
+            if signal[
+                "direction"
+            ] == "LONG":
+
+                side = "🟢 BUY"
+
+            else:
+
+                side = "🔴 SELL"
+
+            entry = signal[
+                "entry"
+            ]
+
+            tp = signal[
+                "tp"
+            ]
+
+            tp_distance = (
+                abs(tp - entry)
+                /
+                entry
+                *
+                100
             )
 
             text += (
                 f"{i}. {side} "
-                f"<b>{s['symbol']}</b>\n"
-                f"Entry: {s['entry']:.8g}\n"
-                f"SL: {s['sl']:.8g}\n"
-                f"TP: {s['tp']:.8g}\n"
-                f"RR: 1:{s['rr']:.2f}\n\n"
+                f"<b>{signal['symbol']}</b>\n"
+                f"Entry: "
+                f"{entry:.8g}\n"
+                f"SL: "
+                f"{signal['sl']:.8g}\n"
+                f"TP: "
+                f"{tp:.8g}\n"
+                f"TP Distance: "
+                f"{tp_distance:.2f}%\n"
+                f"RR: "
+                f"1:{signal['rr']:.2f}\n\n"
             )
 
     else:
 
         text += (
-            "👀 <b>NO NEW SIGNAL</b>\n\n"
+            "👀 <b>NO NEW SIGNAL</b>\n"
+            "شرایط کامل ورود در این اسکن "
+            "وجود نداشت.\n"
         )
+
+    # --------------------------------------------------------
+    # CLOSED TRADES
+    # --------------------------------------------------------
 
     if closed_trades:
 
@@ -1592,28 +1758,31 @@ def format_report(
 
         for trade in closed_trades:
 
-            result = trade.get(
+            if trade.get(
                 "result"
-            )
+            ) == "WIN":
 
-            emoji = (
-                "✅"
-                if result == "WIN"
-                else "❌"
-            )
+                emoji = "✅"
+
+            else:
+
+                emoji = "❌"
 
             text += (
                 f"{emoji} "
                 f"{trade['symbol']} "
                 f"{trade['direction']} "
-                f"→ {result}\n"
+                f"→ "
+                f"{trade['result']}\n"
             )
 
-        text += "\n"
+    # --------------------------------------------------------
+    # STATISTICS
+    # --------------------------------------------------------
 
     text += (
-        "━━━━━━━━━━━━━━━━━━\n"
-        "📈 <b>STATISTICS</b>\n"
+        "\n━━━━━━━━━━━━━━━━━━\n"
+        "📈 <b>TRADE STATISTICS</b>\n"
         f"Open: {stats['open']}\n"
         f"Closed: {stats['closed']}\n"
         f"Wins: {stats['wins']}\n"
@@ -1623,6 +1792,61 @@ def format_report(
     )
 
     return text
+
+
+# ============================================================
+# INDIVIDUAL SIGNAL MESSAGE
+# ============================================================
+
+def format_signal(
+    signal
+):
+
+    if signal[
+        "direction"
+    ] == "LONG":
+
+        side = "🟢 BUY"
+
+    else:
+
+        side = "🔴 SELL"
+
+    entry = signal[
+        "entry"
+    ]
+
+    tp = signal[
+        "tp"
+    ]
+
+    tp_distance = (
+        abs(tp - entry)
+        /
+        entry
+        *
+        100
+    )
+
+    return (
+        f"🚨 <b>{side} SIGNAL</b>\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>"
+        f"{signal['symbol']}/USDT"
+        f"</b>\n\n"
+        "📊 Timeframe: 5M\n"
+        f"📌 {signal['divergence']}\n"
+        "📈 Trendline Break: YES\n\n"
+        f"Entry: <b>{entry:.8g}</b>\n"
+        f"SL: <b>{signal['sl']:.8g}</b>\n"
+        f"TP: <b>{tp:.8g}</b>\n"
+        f"TP Distance: "
+        f"<b>{tp_distance:.2f}%</b>\n"
+        f"RR: <b>1:"
+        f"{signal['rr']:.2f}</b>\n"
+        f"Divergence Age: "
+        f"{signal.get('divergence_age', 0):.0f}m"
+    )
 
 
 # ============================================================
@@ -1640,26 +1864,23 @@ def main():
     )
 
     print("=" * 46)
-    print(f"SCAN #{scan_number}")
+    print(
+        f"SCAN #{scan_number}"
+    )
     print("=" * 46)
 
     # --------------------------------------------------------
-    # Update previous open trades
+    # Update existing trades
     # --------------------------------------------------------
 
-    closed_trades = update_open_trades(
-        state
+    closed_trades = (
+        update_open_trades(
+            state
+        )
     )
 
-    if closed_trades:
-
-        print(
-            f"CLOSED TRADES: "
-            f"{len(closed_trades)}"
-        )
-
     # --------------------------------------------------------
-    # Analyze 30 coins
+    # Analyze all 30 coins
     # --------------------------------------------------------
 
     results = []
@@ -1689,7 +1910,9 @@ def main():
 
             try:
 
-                result = future.result()
+                result = (
+                    future.result()
+                )
 
                 results.append(
                     result
@@ -1704,40 +1927,37 @@ def main():
 
                 results.append({
                     "symbol": symbol,
-                    "status": "ERROR",
+                    "status": "ANALYSIS_ERROR",
                     "error": str(e)
                 })
 
     # --------------------------------------------------------
-    # New signals
+    # Find signals
     # --------------------------------------------------------
 
     signals = [
         r
         for r in results
-        if r.get("status") == "SIGNAL"
+        if r.get("status")
+        == "SIGNAL"
     ]
 
-    # Sort by RR
-
     signals.sort(
-        key=lambda x: x.get(
-            "rr",
-            0
-        ),
+        key=lambda x:
+        x.get("rr", 0),
         reverse=True
     )
 
     # --------------------------------------------------------
-    # Save new signals
+    # Prevent duplicate trades
     # --------------------------------------------------------
-
-    new_signals = []
 
     existing_keys = {
         t.get("key")
         for t in state["trades"]
     }
+
+    new_signals = []
 
     for signal in signals:
 
@@ -1783,7 +2003,9 @@ def main():
             )
         }
 
-        state["trades"].append(
+        state[
+            "trades"
+        ].append(
             trade
         )
 
@@ -1796,10 +2018,12 @@ def main():
         )
 
     # --------------------------------------------------------
-    # Update state
+    # Save state
     # --------------------------------------------------------
 
-    state["last_scan"] = int(
+    state[
+        "last_scan"
+    ] = int(
         time.time()
     )
 
@@ -1808,7 +2032,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Print results
+    # Console statistics
     # --------------------------------------------------------
 
     data_errors = [
@@ -1837,6 +2061,20 @@ def main():
         f"{len(data_errors)}"
     )
 
+    if data_errors:
+
+        print(
+            "DATA ERROR COINS:"
+        )
+
+        for error in data_errors:
+
+            print(
+                f" - "
+                f"{error['symbol']}: "
+                f"{error.get('error')}"
+            )
+
     print(
         f"ANALYSIS ERRORS: "
         f"{len(analysis_errors)}"
@@ -1848,24 +2086,23 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Send individual new signals
+    # Send new signals
     # --------------------------------------------------------
 
     for signal in new_signals:
 
-        message = format_signal(
-            signal
-        )
-
         telegram_send(
-            message
+            format_signal(
+                signal
+            )
         )
 
     # --------------------------------------------------------
-    # Send report
+    # Send ONE complete report
     # --------------------------------------------------------
 
     report = format_report(
+        results,
         new_signals,
         state,
         closed_trades
@@ -1881,7 +2118,8 @@ def main():
 
     elapsed = (
         time.time()
-        - start_time
+        -
+        start_time
     )
 
     print()
@@ -1894,7 +2132,7 @@ def main():
 
 
 # ============================================================
-# RUN
+# START
 # ============================================================
 
 if __name__ == "__main__":
