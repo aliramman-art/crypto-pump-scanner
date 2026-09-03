@@ -11,15 +11,25 @@
 # Risk / Reward
 # Telegram
 #
-# ADDED:
 # UT BOT SETUP ENGINE
 # TOP 5 ONLY
 # 5m / Key Value 3 / ATR 10 / Heikin Ashi OFF
-# Live Setup Tracking
-# Live PnL Tracking
-# Win Rate Tracking
-# Previous Signal Status Tracking
-# Duplicate Signal Protection
+#
+# IMPROVED:
+# - ALL fresh UT signals in TOP5 are tracked
+# - Unique Signal ID
+# - Duplicate protection
+# - Live setup tracking
+# - Live PnL tracking
+# - TP1 / TP2 / TP3 / SL tracking
+# - Conservative same-candle SL rule
+# - Accurate Exit Price
+# - Result %
+# - Result R
+# - Win Rate tracking
+# - Previous Signal Status
+# - Telegram message chunking
+# - 500 closed candles retained for tracking
 # ============================================================
 
 import os
@@ -35,6 +45,11 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 BASE_URL = "https://futures.kraken.com/api/charts/v1"
+
+STATE_FILE = "signal_state.json"
+
+# Keep more history for old OPEN UT setups
+CANDLE_HISTORY = 500
 
 
 COINS = {
@@ -71,9 +86,6 @@ COINS = {
 }
 
 
-STATE_FILE = "signal_state.json"
-
-
 # ============================================================
 # UT BOT SETTINGS
 # ============================================================
@@ -103,7 +115,12 @@ def load_json(path, default):
 
         return data
 
-    except Exception:
+    except Exception as e:
+
+        print(
+            "LOAD ERROR:",
+            e
+        )
 
         return default
 
@@ -112,8 +129,10 @@ def save_json(path, data):
 
     try:
 
+        temp_path = path + ".tmp"
+
         with open(
-            path,
+            temp_path,
             "w",
             encoding="utf-8"
         ) as f:
@@ -124,6 +143,11 @@ def save_json(path, data):
                 indent=2,
                 ensure_ascii=False
             )
+
+        os.replace(
+            temp_path,
+            path
+        )
 
     except Exception as e:
 
@@ -192,6 +216,65 @@ def send_telegram(text):
         )
 
         return False
+
+
+def send_telegram_chunks(
+    text,
+    max_length=3900
+):
+
+    if not text:
+        return False
+
+    if len(text) <= max_length:
+
+        return send_telegram(text)
+
+    chunks = []
+
+    current = ""
+
+    for line in text.split("\n"):
+
+        if len(current) + len(line) + 1 > max_length:
+
+            if current:
+
+                chunks.append(
+                    current
+                )
+
+            current = line
+
+        else:
+
+            if current:
+
+                current += "\n"
+
+            current += line
+
+    if current:
+
+        chunks.append(
+            current
+        )
+
+    success = True
+
+    for chunk in chunks:
+
+        result = send_telegram(
+            chunk
+        )
+
+        if not result:
+
+            success = False
+
+        time.sleep(0.3)
+
+    return success
 
 
 # ============================================================
@@ -432,22 +515,7 @@ def get_candles(
                 e
             )
 
-            print(
-                f"{symbol} RESPONSE:",
-                r.text[:500]
-            )
-
             return []
-
-        if isinstance(
-            data,
-            dict
-        ):
-
-            print(
-                f"{symbol} RESPONSE KEYS:",
-                list(data.keys())
-            )
 
         candles = extract_candles(
             data
@@ -457,11 +525,6 @@ def get_candles(
 
             print(
                 f"{symbol}: NO CANDLES FOUND"
-            )
-
-            print(
-                f"{symbol} SAMPLE:",
-                str(data)[:700]
             )
 
             return []
@@ -497,7 +560,10 @@ def get_candles(
             if c["time"] < current_bucket
         ]
 
-        closed = closed[-120:]
+        # More history for tracking old setups
+        closed = closed[
+            -CANDLE_HISTORY:
+        ]
 
         if closed:
 
@@ -1297,7 +1363,7 @@ def fmt_price(price):
 
 
 # ============================================================
-# PNL CALCULATION
+# PNL
 # ============================================================
 
 def calculate_pnl_pct(
@@ -1548,13 +1614,11 @@ def watchlist_line(
 
     direction = data["direction"]
 
-    if direction == "LONG":
-
-        emoji = "🟢"
-
-    else:
-
-        emoji = "🔴"
+    emoji = (
+        "🟢"
+        if direction == "LONG"
+        else "🔴"
+    )
 
     features = []
 
@@ -1628,7 +1692,7 @@ def watchlist_line(
 
 
 # ============================================================
-# UT BOT
+# UT BOT ATR
 # ============================================================
 
 def calculate_utbot_atr(
@@ -1688,14 +1752,15 @@ def calculate_utbot_atr(
 
     atr[seed_index] = first_atr
 
-    # Wilder RMA / Pine ATR
     for i in range(
         seed_index + 1,
         len(candles)
     ):
 
         if tr[i] is None:
+            continue
 
+        if atr[i - 1] is None:
             continue
 
         atr[i] = (
@@ -1708,6 +1773,10 @@ def calculate_utbot_atr(
 
     return atr
 
+
+# ============================================================
+# UT BOT SIGNAL
+# ============================================================
 
 def calculate_utbot_signal(
     candles
@@ -1760,7 +1829,24 @@ def calculate_utbot_signal(
             i - 1
         ]
 
-        if (
+        # Initialize trailing stop
+        if prev_stop == 0:
+
+            if current_src >= previous_src:
+
+                trailing[i] = (
+                    current_src
+                    - nloss
+                )
+
+            else:
+
+                trailing[i] = (
+                    current_src
+                    + nloss
+                )
+
+        elif (
             current_src > prev_stop
             and previous_src > prev_stop
         ):
@@ -1812,7 +1898,7 @@ def calculate_utbot_signal(
                 i - 1
             ]
 
-    # Only LAST CLOSED candle
+    # Last CLOSED candle only
     i = len(candles) - 1
 
     if (
@@ -1834,15 +1920,25 @@ def calculate_utbot_signal(
 
     current_src = src[i]
 
-    # EMA(1) == source
+    if previous_stop == 0:
+
+        return {
+            "signal": None,
+            "direction": None,
+            "price": current_src,
+            "candle_time": candles[i]["time"],
+            "trailing_stop": current_stop,
+            "atr": atr_values[i],
+        }
+
     above = (
         current_src > current_stop
         and previous_src <= previous_stop
     )
 
     below = (
-        current_stop > current_src
-        and previous_stop <= previous_src
+        current_src < current_stop
+        and previous_src >= previous_stop
     )
 
     buy = (
@@ -1991,7 +2087,8 @@ def ut_setup_message(
     data,
     ut,
     levels,
-    rank
+    rank,
+    setup_id
 ):
 
     if ut["signal"] == "BUY":
@@ -2012,6 +2109,7 @@ def ut_setup_message(
 
 {emoji} <b>{symbol}/USDT — {direction}</b>
 
+🆔 <b>Setup ID:</b> {setup_id}
 🏆 <b>TOP 5 Rank:</b> #{rank}
 ⭐ <b>Scanner Score:</b> {data["score"]}/100
 
@@ -2087,6 +2185,22 @@ def get_ut_state():
             "wins_2r": 0,
             "losses": 0,
         }
+
+    # Migration for missing stats fields
+    defaults = {
+        "total": 0,
+        "closed": 0,
+        "wins_1r": 0,
+        "wins_15r": 0,
+        "wins_2r": 0,
+        "losses": 0,
+    }
+
+    for key, value in defaults.items():
+
+        if key not in ut["stats"]:
+
+            ut["stats"][key] = value
 
     return state
 
@@ -2230,6 +2344,34 @@ def update_ut_setups(results):
 
     changed = False
 
+    # --------------------------------------------------------
+    # Build candle map
+    # --------------------------------------------------------
+
+    candle_map = {}
+
+    for item in results:
+
+        symbol = item.get(
+            "symbol"
+        )
+
+        candles = item.get(
+            "data",
+            {}
+        ).get(
+            "candles",
+            []
+        )
+
+        if symbol and candles:
+
+            candle_map[symbol] = candles
+
+    # --------------------------------------------------------
+    # Process every OPEN setup
+    # --------------------------------------------------------
+
     for key in list(
         signals.keys()
     ):
@@ -2257,19 +2399,9 @@ def update_ut_setups(results):
 
             continue
 
-        candles = None
-
-        for item in results:
-
-            if item["symbol"] == symbol:
-
-                candles = item[
-                    "data"
-                ].get(
-                    "candles"
-                )
-
-                break
+        candles = candle_map.get(
+            symbol
+        )
 
         if not candles:
 
@@ -2304,7 +2436,7 @@ def update_ut_setups(results):
         )
 
         # ----------------------------------------------------
-        # Check candles AFTER signal candle
+        # Only candles after signal candle
         # ----------------------------------------------------
 
         future_candles = [
@@ -2314,6 +2446,13 @@ def update_ut_setups(results):
         ]
 
         if not future_candles:
+
+            # Store latest checked candle
+            if candles:
+
+                setup[
+                    "last_checked_candle_time"
+                ] = candles[-1]["time"]
 
             continue
 
@@ -2337,11 +2476,11 @@ def update_ut_setups(results):
                     low <= sl
                 )
 
-                hit_tp2 = (
+                hit_tp3 = (
                     high >= tp2
                 )
 
-                hit_tp15 = (
+                hit_tp2 = (
                     high >= tp15
                 )
 
@@ -2349,19 +2488,20 @@ def update_ut_setups(results):
                     high >= tp1
                 )
 
-                # Conservative:
-                # if SL and TP happen in same candle,
-                # assume SL happened first.
+                # Conservative rule:
+                # SL + TP in same candle = LOSS
                 if hit_sl and (
-                    hit_tp2
-                    or hit_tp15
+                    hit_tp3
+                    or hit_tp2
                     or hit_tp1
                 ):
 
                     result = "LOSS"
                     result_level = "SL"
                     exit_price = sl
-                    exit_candle_time = candle["time"]
+                    exit_candle_time = (
+                        candle["time"]
+                    )
 
                     break
 
@@ -2370,25 +2510,31 @@ def update_ut_setups(results):
                     result = "LOSS"
                     result_level = "SL"
                     exit_price = sl
-                    exit_candle_time = candle["time"]
+                    exit_candle_time = (
+                        candle["time"]
+                    )
+
+                    break
+
+                if hit_tp3:
+
+                    result = "WIN_2R"
+                    result_level = "2R"
+                    exit_price = tp2
+                    exit_candle_time = (
+                        candle["time"]
+                    )
 
                     break
 
                 if hit_tp2:
 
-                    result = "WIN_2R"
-                    result_level = "2R"
-                    exit_price = tp2
-                    exit_candle_time = candle["time"]
-
-                    break
-
-                if hit_tp15:
-
                     result = "WIN_15R"
                     result_level = "1.5R"
                     exit_price = tp15
-                    exit_candle_time = candle["time"]
+                    exit_candle_time = (
+                        candle["time"]
+                    )
 
                     break
 
@@ -2397,7 +2543,9 @@ def update_ut_setups(results):
                     result = "WIN_1R"
                     result_level = "1R"
                     exit_price = tp1
-                    exit_candle_time = candle["time"]
+                    exit_candle_time = (
+                        candle["time"]
+                    )
 
                     break
 
@@ -2416,11 +2564,11 @@ def update_ut_setups(results):
                     high >= sl
                 )
 
-                hit_tp2 = (
+                hit_tp3 = (
                     low <= tp2
                 )
 
-                hit_tp15 = (
+                hit_tp2 = (
                     low <= tp15
                 )
 
@@ -2430,15 +2578,17 @@ def update_ut_setups(results):
 
                 # Conservative same-candle rule
                 if hit_sl and (
-                    hit_tp2
-                    or hit_tp15
+                    hit_tp3
+                    or hit_tp2
                     or hit_tp1
                 ):
 
                     result = "LOSS"
                     result_level = "SL"
                     exit_price = sl
-                    exit_candle_time = candle["time"]
+                    exit_candle_time = (
+                        candle["time"]
+                    )
 
                     break
 
@@ -2447,25 +2597,31 @@ def update_ut_setups(results):
                     result = "LOSS"
                     result_level = "SL"
                     exit_price = sl
-                    exit_candle_time = candle["time"]
+                    exit_candle_time = (
+                        candle["time"]
+                    )
+
+                    break
+
+                if hit_tp3:
+
+                    result = "WIN_2R"
+                    result_level = "2R"
+                    exit_price = tp2
+                    exit_candle_time = (
+                        candle["time"]
+                    )
 
                     break
 
                 if hit_tp2:
 
-                    result = "WIN_2R"
-                    result_level = "2R"
-                    exit_price = tp2
-                    exit_candle_time = candle["time"]
-
-                    break
-
-                if hit_tp15:
-
                     result = "WIN_15R"
                     result_level = "1.5R"
                     exit_price = tp15
-                    exit_candle_time = candle["time"]
+                    exit_candle_time = (
+                        candle["time"]
+                    )
 
                     break
 
@@ -2474,7 +2630,9 @@ def update_ut_setups(results):
                     result = "WIN_1R"
                     result_level = "1R"
                     exit_price = tp1
-                    exit_candle_time = candle["time"]
+                    exit_candle_time = (
+                        candle["time"]
+                    )
 
                     break
 
@@ -2484,10 +2642,18 @@ def update_ut_setups(results):
 
         if not result:
 
+            if future_candles:
+
+                setup[
+                    "last_checked_candle_time"
+                ] = future_candles[-1]["time"]
+
+                changed = True
+
             continue
 
         # ----------------------------------------------------
-        # Calculate final result %
+        # Final result %
         # ----------------------------------------------------
 
         result_pct = calculate_pnl_pct(
@@ -2504,9 +2670,13 @@ def update_ut_setups(results):
             result_level
         )
 
-        setup["exit_price"] = exit_price
+        setup["exit_price"] = (
+            exit_price
+        )
 
-        setup["result_pct"] = result_pct
+        setup["result_pct"] = (
+            result_pct
+        )
 
         setup["exit_candle_time"] = (
             exit_candle_time
@@ -2658,10 +2828,6 @@ def ut_live_status_message(results):
         "━━━━━━━━━━━━━━━━━━",
     ]
 
-    # --------------------------------------------------------
-    # Sort newest setups first
-    # --------------------------------------------------------
-
     setup_items = list(
         signals.items()
     )
@@ -2676,10 +2842,9 @@ def ut_live_status_message(results):
         reverse=True
     )
 
-    for index, (key, setup) in enumerate(
-        setup_items,
-        1
-    ):
+    display_index = 0
+
+    for key, setup in setup_items:
 
         if not isinstance(
             setup,
@@ -2687,6 +2852,8 @@ def ut_live_status_message(results):
         ):
 
             continue
+
+        display_index += 1
 
         symbol = setup.get(
             "symbol",
@@ -2701,6 +2868,11 @@ def ut_live_status_message(results):
         status = setup.get(
             "status",
             "UNKNOWN"
+        )
+
+        setup_id = setup.get(
+            "setup_id",
+            key
         )
 
         entry = float(
@@ -2782,12 +2954,18 @@ def ut_live_status_message(results):
 
                 pnl_emoji = "⚪"
                 pnl_text = "0.00%"
-                pnl_status = "BREAK EVEN"
+                pnl_status = (
+                    "BREAK EVEN"
+                )
 
             lines.append(
-                f"\n⏳ <b>#{index} "
+                f"\n⏳ <b>#{display_index} "
                 f"{symbol}/USDT — "
                 f"{direction}</b>"
+            )
+
+            lines.append(
+                f"🆔 ID: <code>{setup_id}</code>"
             )
 
             lines.append(
@@ -2815,17 +2993,17 @@ def ut_live_status_message(results):
             )
 
             lines.append(
-                f"🎯 TP1: "
+                f"🎯 TP1 — 1R: "
                 f"{fmt_price(tp1)}"
             )
 
             lines.append(
-                f"🎯 TP2: "
+                f"🎯 TP2 — 1.5R: "
                 f"{fmt_price(tp15)}"
             )
 
             lines.append(
-                f"🚀 TP3: "
+                f"🚀 TP3 — 2R: "
                 f"{fmt_price(tp2)}"
             )
 
@@ -2874,9 +3052,13 @@ def ut_live_status_message(results):
 
             lines.append(
                 f"\n{result_emoji} "
-                f"<b>#{index} "
+                f"<b>#{display_index} "
                 f"{symbol}/USDT — "
                 f"{direction}</b>"
+            )
+
+            lines.append(
+                f"🆔 ID: <code>{setup_id}</code>"
             )
 
             lines.append(
@@ -2894,12 +3076,12 @@ def ut_live_status_message(results):
             )
 
             lines.append(
-                f"🎯 <b>Result:</b> "
+                f"🎯 <b>Result R:</b> "
                 f"{result_level}"
             )
 
             lines.append(
-                f"📊 <b>Result:</b> "
+                f"📊 <b>Result %:</b> "
                 f"{result_pct:+.2f}%"
             )
 
@@ -2945,7 +3127,7 @@ def ut_live_status_message(results):
 
 
 # ============================================================
-# CREATE UT SETUP
+# CREATE ALL UT SETUPS FROM TOP5
 # ============================================================
 
 def process_ut_top5(top5):
@@ -2959,7 +3141,7 @@ def process_ut_top5(top5):
         return False
 
     # --------------------------------------------------------
-    # Find ALL fresh UT signals inside TOP 5
+    # Find ALL fresh UT signals
     # --------------------------------------------------------
 
     candidates = []
@@ -3012,7 +3194,7 @@ def process_ut_top5(top5):
         return False
 
     # --------------------------------------------------------
-    # Best = highest scanner score
+    # Highest scanner score first
     # --------------------------------------------------------
 
     candidates.sort(
@@ -3023,130 +3205,154 @@ def process_ut_top5(top5):
         reverse=True
     )
 
-    best = candidates[0]
-
-    rank = best["rank"]
-    symbol = best["symbol"]
-    data = best["data"]
-    candles = best["candles"]
-    ut = best["ut"]
-
-    print(
-        f"UT SIGNAL FOUND: "
-        f"{symbol} "
-        f"{ut['signal']} "
-        f"Score={data['score']} "
-        f"Rank={rank}"
-    )
-
-    # --------------------------------------------------------
-    # Unique signal key
-    # --------------------------------------------------------
-
-    signal_key = (
-        f"{symbol}_"
-        f"{ut['signal']}_"
-        f"{ut['candle_time']}"
-    )
-
     state = get_ut_state()
 
     signals = state[
         "_utbot"
     ]["signals"]
 
-    if signal_key in signals:
-
-        print(
-            f"UT: already processed "
-            f"{signal_key}"
-        )
-
-        return False
-
-    # --------------------------------------------------------
-    # Levels
-    # --------------------------------------------------------
-
-    levels = calculate_ut_setup_levels(
-        candles,
-        ut["direction"]
-    )
-
-    if not levels:
-
-        print(
-            f"UT: cannot calculate levels "
-            f"for {symbol}"
-        )
-
-        return False
-
-    # --------------------------------------------------------
-    # Save setup
-    # --------------------------------------------------------
-
-    setup = {
-        "symbol": symbol,
-        "signal": ut["signal"],
-        "direction": ut["direction"],
-        "rank": rank,
-        "score": data["score"],
-        "candle_time": ut["candle_time"],
-        "entry": levels["entry"],
-        "sl": levels["sl"],
-        "tp1": levels["tp1"],
-        "tp15": levels["tp15"],
-        "tp2": levels["tp2"],
-        "risk": levels["risk"],
-        "atr": levels["atr"],
-        "ut_stop": ut["trailing_stop"],
-        "status": "OPEN",
-        "created_time": int(time.time()),
-    }
-
-    signals[
-        signal_key
-    ] = setup
-
     stats = state[
         "_utbot"
     ]["stats"]
 
-    stats["total"] = int(
-        stats.get(
-            "total",
-            0
-        )
-    ) + 1
-
-    save_json(
-        STATE_FILE,
-        state
-    )
+    created_any = False
 
     # --------------------------------------------------------
-    # Send setup
-    # --------------------------------------------------------
-
-    message = ut_setup_message(
-        symbol,
-        data,
-        ut,
-        levels,
-        rank
-    )
-
-    print(message)
-
-    send_telegram(
-        message
-    )
-
     # IMPORTANT:
-    # Stats are NOT sent here anymore.
-    # They are sent every scan from main().
-    return True
+    # Process EVERY candidate, not only best
+    # --------------------------------------------------------
+
+    for candidate in candidates:
+
+        rank = candidate["rank"]
+        symbol = candidate["symbol"]
+        data = candidate["data"]
+        candles = candidate["candles"]
+        ut = candidate["ut"]
+
+        signal_key = (
+            f"{symbol}_"
+            f"{ut['signal']}_"
+            f"{ut['candle_time']}"
+        )
+
+        # ----------------------------------------------------
+        # Duplicate protection
+        # ----------------------------------------------------
+
+        if signal_key in signals:
+
+            print(
+                f"UT: already processed "
+                f"{signal_key}"
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Levels
+        # ----------------------------------------------------
+
+        levels = calculate_ut_setup_levels(
+            candles,
+            ut["direction"]
+        )
+
+        if not levels:
+
+            print(
+                f"UT: cannot calculate levels "
+                f"for {symbol}"
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Unique human-readable ID
+        # ----------------------------------------------------
+
+        setup_id = (
+            f"UT-{symbol}-"
+            f"{ut['signal']}-"
+            f"{ut['candle_time']}"
+        )
+
+        # ----------------------------------------------------
+        # Save setup
+        # ----------------------------------------------------
+
+        setup = {
+            "setup_id": setup_id,
+            "symbol": symbol,
+            "signal": ut["signal"],
+            "direction": ut["direction"],
+            "rank": rank,
+            "score": data["score"],
+            "candle_time": ut["candle_time"],
+            "entry": levels["entry"],
+            "sl": levels["sl"],
+            "tp1": levels["tp1"],
+            "tp15": levels["tp15"],
+            "tp2": levels["tp2"],
+            "risk": levels["risk"],
+            "atr": levels["atr"],
+            "ut_stop": ut["trailing_stop"],
+            "status": "OPEN",
+            "created_time": int(time.time()),
+            "last_checked_candle_time": (
+                ut["candle_time"]
+            ),
+        }
+
+        signals[
+            signal_key
+        ] = setup
+
+        stats["total"] = int(
+            stats.get(
+                "total",
+                0
+            )
+        ) + 1
+
+        created_any = True
+
+        # ----------------------------------------------------
+        # Send setup
+        # ----------------------------------------------------
+
+        message = ut_setup_message(
+            symbol,
+            data,
+            ut,
+            levels,
+            rank,
+            setup_id
+        )
+
+        print(message)
+
+        send_telegram(
+            message
+        )
+
+        print(
+            f"UT NEW SETUP: "
+            f"{setup_id}"
+        )
+
+    # --------------------------------------------------------
+    # Save ALL newly created setups at once
+    # --------------------------------------------------------
+
+    if created_any:
+
+        save_json(
+            STATE_FILE,
+            state
+        )
+
+    return created_any
 
 
 # ============================================================
@@ -3154,10 +3360,6 @@ def process_ut_top5(top5):
 # ============================================================
 
 def main():
-
-    # ========================================================
-    # TELEGRAM CONNECTION TEST
-    # ========================================================
 
     print(
         "TELEGRAM TOKEN:",
@@ -3319,7 +3521,7 @@ def main():
     )
 
     # ========================================================
-    # UPDATE PREVIOUS UT SETUPS
+    # UPDATE PREVIOUS UT SETUPS FIRST
     # ========================================================
 
     update_ut_setups(
@@ -3327,7 +3529,7 @@ def main():
     )
 
     # ========================================================
-    # CHECK FOR NEW UT BOT SIGNAL
+    # CHECK ALL NEW UT BOT SIGNALS
     # ========================================================
 
     process_ut_top5(
@@ -3336,9 +3538,6 @@ def main():
 
     # ========================================================
     # UT LIVE STATUS
-    #
-    # This is sent EVERY scan.
-    # It does NOT depend on a new signal.
     # ========================================================
 
     live_status = ut_live_status_message(
@@ -3349,14 +3548,12 @@ def main():
         live_status
     )
 
-    send_telegram(
+    send_telegram_chunks(
         live_status
     )
 
     # ========================================================
-    # UT PERFORMANCE / WIN RATE
-    #
-    # This is also sent EVERY scan.
+    # UT PERFORMANCE
     # ========================================================
 
     stats_message = ut_stats_message()
