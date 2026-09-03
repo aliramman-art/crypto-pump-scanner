@@ -1,5 +1,4 @@
-name: Crypto Divergence Scanner
-
+name: name: Crypto Divergence Scanner v7.2
 on:
   schedule:
     - cron: "*/5 * * * *"
