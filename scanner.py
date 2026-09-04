@@ -1,11 +1,12 @@
 # ============================================================
-# CRYPTO DIVERGENCE SCANNER v10.3
+# CRYPTO DIVERGENCE SCANNER v10.4
 # ============================================================
 # Kraken Futures
 # Closed 5m Candles
 # RSI Divergence
 # Trendline Breakout / Breakdown
 # UT Bot
+# 15M + 1H Trend Filter
 # Automatic Futures Symbol Discovery
 # Trade History
 # Open Signal P&L
@@ -17,20 +18,20 @@
 # SL / TP Percentages
 # Telegram
 #
-# v10.3 CHANGES:
-# - ATR(14) based Stop Loss
-# - SL uses max(Swing + Buffer, ATR x 1.5, minimum 0.35%)
-# - Maximum SL distance 2.0%
-# - TP1 = 1.5R
-# - TP2 = 2.5R
-# - TP3 = 3.5R
-# - SL / TP percentages displayed
-# - Open signal SL / TP percentages displayed
-# - BUY always uses 🟢
-# - SELL always uses 🔴
-# - TP result uses ✅
-# - SL result uses ❌
-# - Old trade_history.json formats preserved
+# v10.4 CHANGES:
+# - NEW STATE FILE: trade_history_v10.4.json
+# - v10.3 statistics/trades are NOT imported
+# - Only one OPEN trade allowed per symbol
+# - No duplicate signal while symbol has OPEN trade
+# - No opposite-direction hedge while symbol has OPEN trade
+# - 15M trend filter
+# - 1H trend filter
+# - BUY requires 15M + 1H bullish trend
+# - SELL requires 15M + 1H bearish trend
+# - Trend = EMA20 / EMA50 + price position
+# - Current P&L displayed in Telegram as Markdown Bold
+# - No P&L emoji
+# - Existing ATR / SL / TP / MFE / MAE logic preserved
 # ============================================================
 
 import os
@@ -87,11 +88,41 @@ COINS = [
     "HBAR",
 ]
 
-STATE_FILE = "trade_history.json"
+
+# ============================================================
+# IMPORTANT:
+# NEW STATE FILE FOR v10.4
+#
+# This intentionally does NOT use v10.3 trade_history.json.
+# Therefore cumulative statistics start from ZERO.
+# ============================================================
+
+STATE_FILE = "trade_history_v10.4.json"
+
+
+# ============================================================
+# ONE OPEN TRADE PER SYMBOL
+#
+# False = no duplicate and no hedge
+# ============================================================
 
 ALLOW_MULTIPLE_OPEN_PER_SYMBOL = False
 
+
 REQUEST_TIMEOUT = 20
+
+
+# ============================================================
+# MULTI-TIMEFRAME TREND FILTER
+# ============================================================
+
+TREND_FAST_EMA = 20
+TREND_SLOW_EMA = 50
+
+TREND_TIMEFRAMES = [
+    "15m",
+    "1h",
+]
 
 
 # ============================================================
@@ -117,22 +148,16 @@ MIN_PRICE_DIFFERENCE_PERCENT = 0.10
 # SL / TP
 # ============================================================
 
-# ATR used specifically for SL calculation
 SL_ATR_PERIOD = 14
 
-# Main ATR multiplier
 SL_ATR_MULTIPLIER = 1.5
 
-# Extra buffer around swing
 SL_BUFFER_PERCENT = 0.10
 
-# Minimum SL distance from entry
 MIN_SL_DISTANCE_PERCENT = 0.35
 
-# Maximum SL distance from entry
 MAX_SL_DISTANCE_PERCENT = 2.00
 
-# Risk / Reward targets
 TP1_R_MULTIPLE = 1.5
 TP2_R_MULTIPLE = 2.5
 TP3_R_MULTIPLE = 3.5
@@ -160,10 +185,11 @@ TELEGRAM_CHAT_ID = os.getenv(
     ""
 )
 
+
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "CryptoDivergenceScanner/10.3",
+    "User-Agent": "CryptoDivergenceScanner/10.4",
     "Accept": "application/json",
 })
 
@@ -192,6 +218,7 @@ def send_telegram(message):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
+        "parse_mode": "Markdown",
         "disable_web_page_preview": True,
     }
 
@@ -216,13 +243,19 @@ def send_telegram(message):
 def default_state():
 
     return {
-        "version": 1,
+        "version": 2,
+        "scanner_version": "10.4",
         "trades": {},
         "last_run": None,
     }
 
 
 def load_state():
+
+    # --------------------------------------------------------
+    # v10.4 deliberately uses a new state file.
+    # Old v10.3 statistics are therefore NOT loaded.
+    # --------------------------------------------------------
 
     if not os.path.exists(STATE_FILE):
         return default_state()
@@ -804,7 +837,10 @@ def get_market_symbol(coin):
 # CANDLES
 # ============================================================
 
-def get_candles(symbol):
+def get_candles(
+    symbol,
+    timeframe="5m"
+):
 
     futures_symbol = get_market_symbol(
         symbol
@@ -813,7 +849,7 @@ def get_candles(symbol):
     url = (
         f"{BASE_URL}/trade/"
         f"{futures_symbol}/"
-        f"{TIMEFRAME}"
+        f"{timeframe}"
     )
 
     params = {
@@ -844,7 +880,8 @@ def get_candles(symbol):
     if not candles:
 
         raise RuntimeError(
-            f"No candles returned for {futures_symbol}"
+            f"No candles returned for "
+            f"{futures_symbol} {timeframe}"
         )
 
     rows = []
@@ -921,7 +958,8 @@ def get_candles(symbol):
     if not rows:
 
         raise RuntimeError(
-            f"Could not parse candles for {futures_symbol}"
+            f"Could not parse candles for "
+            f"{futures_symbol} {timeframe}"
         )
 
     df = pd.DataFrame(
@@ -939,14 +977,29 @@ def get_candles(symbol):
     )
 
     # ========================================================
-    # REMOVE CURRENT INCOMPLETE 5M CANDLE
+    # REMOVE CURRENT INCOMPLETE CANDLE
     # ========================================================
 
     now_ms = int(
         time.time() * 1000
     )
 
-    candle_ms = 5 * 60 * 1000
+    timeframe_minutes = {
+        "5m": 5,
+        "15m": 15,
+        "1h": 60,
+    }
+
+    minutes = timeframe_minutes.get(
+        timeframe,
+        5
+    )
+
+    candle_ms = (
+        minutes
+        * 60
+        * 1000
+    )
 
     if len(df) > 0:
 
@@ -964,10 +1017,136 @@ def get_candles(symbol):
     if len(df) < 50:
 
         raise RuntimeError(
-            f"Not enough closed candles for {symbol}"
+            f"Not enough closed candles for "
+            f"{symbol} {timeframe}"
         )
 
     return df
+
+
+# ============================================================
+# EMA
+# ============================================================
+
+def calculate_ema(
+    series,
+    period
+):
+
+    return series.ewm(
+        span=period,
+        adjust=False
+    ).mean()
+
+
+# ============================================================
+# MULTI-TIMEFRAME TREND
+# ============================================================
+
+def determine_trend(df):
+
+    if df is None or df.empty:
+        return "NEUTRAL"
+
+    if len(df) < TREND_SLOW_EMA + 5:
+        return "NEUTRAL"
+
+    close = df["close"]
+
+    ema_fast = calculate_ema(
+        close,
+        TREND_FAST_EMA
+    )
+
+    ema_slow = calculate_ema(
+        close,
+        TREND_SLOW_EMA
+    )
+
+    current_close = float(
+        close.iloc[-1]
+    )
+
+    current_fast = float(
+        ema_fast.iloc[-1]
+    )
+
+    current_slow = float(
+        ema_slow.iloc[-1]
+    )
+
+    if (
+        current_close > current_fast
+        and current_fast > current_slow
+    ):
+
+        return "BULLISH"
+
+    if (
+        current_close < current_fast
+        and current_fast < current_slow
+    ):
+
+        return "BEARISH"
+
+    return "NEUTRAL"
+
+
+def get_multi_timeframe_trend(
+    symbol
+):
+
+    trend_data = {}
+
+    for timeframe in TREND_TIMEFRAMES:
+
+        df = get_candles(
+            symbol,
+            timeframe
+        )
+
+        trend = determine_trend(
+            df
+        )
+
+        trend_data[
+            timeframe
+        ] = {
+            "trend": trend,
+            "df": df,
+        }
+
+    return trend_data
+
+
+def trend_allows_signal(
+    side,
+    trend_data
+):
+
+    trend_15m = trend_data[
+        "15m"
+    ]["trend"]
+
+    trend_1h = trend_data[
+        "1h"
+    ]["trend"]
+
+    if side == "BUY":
+
+        return (
+            trend_15m == "BULLISH"
+            and trend_1h == "BULLISH"
+        )
+
+    if side == "SELL":
+
+        return (
+            trend_15m == "BEARISH"
+            and trend_1h == "BEARISH"
+        )
+
+    return False
 
 
 # ============================================================
@@ -1594,18 +1773,10 @@ def build_sl_tp(
     if atr is None or atr <= 0:
         return None
 
-    # --------------------------------------------------------
-    # ATR based risk
-    # --------------------------------------------------------
-
     atr_distance = (
         atr
         * SL_ATR_MULTIPLIER
     )
-
-    # --------------------------------------------------------
-    # Swing based risk
-    # --------------------------------------------------------
 
     if side == "BUY":
 
@@ -1651,32 +1822,17 @@ def build_sl_tp(
                 - entry
             )
 
-    # --------------------------------------------------------
-    # Minimum percentage risk
-    # --------------------------------------------------------
-
     minimum_distance = (
         entry
         * MIN_SL_DISTANCE_PERCENT
         / 100
     )
 
-    # --------------------------------------------------------
-    # Final risk distance
-    # --------------------------------------------------------
-
     risk_distance = max(
         atr_distance,
         swing_distance,
         minimum_distance
     )
-
-    # --------------------------------------------------------
-    # Maximum SL filter
-    #
-    # If required SL is above 2%, do not issue signal.
-    # This prevents huge stops on extremely volatile coins.
-    # --------------------------------------------------------
 
     risk_percent = (
         risk_distance
@@ -1687,10 +1843,6 @@ def build_sl_tp(
     if risk_percent > MAX_SL_DISTANCE_PERCENT:
 
         return None
-
-    # --------------------------------------------------------
-    # SL
-    # --------------------------------------------------------
 
     if side == "BUY":
 
@@ -1705,10 +1857,6 @@ def build_sl_tp(
             entry
             + risk_distance
         )
-
-    # --------------------------------------------------------
-    # TP based on R
-    # --------------------------------------------------------
 
     if side == "BUY":
 
@@ -1823,6 +1971,41 @@ def level_percent(
 
 
 # ============================================================
+# CHECK OPEN SYMBOL
+# ============================================================
+
+def has_open_trade_for_symbol(
+    state,
+    symbol
+):
+
+    symbol = str(
+        symbol
+    ).upper()
+
+    for trade in get_all_trades(state):
+
+        status = str(
+            trade.get(
+                "status",
+                ""
+            )
+        ).upper()
+
+        if status != "OPEN":
+            continue
+
+        trade_symbol = normalize_coin(
+            trade
+        )
+
+        if trade_symbol == symbol:
+            return True
+
+    return False
+
+
+# ============================================================
 # SIGNAL REGISTRATION
 # ============================================================
 
@@ -1831,11 +2014,19 @@ def register_signal(
     signal
 ):
 
-    symbol = signal["symbol"]
+    symbol = str(
+        signal["symbol"]
+    ).upper()
 
     trades = get_all_trades(
         state
     )
+
+    # --------------------------------------------------------
+    # HARD BLOCK:
+    # Any OPEN trade on this symbol blocks BOTH BUY and SELL.
+    # This prevents duplicate signals and hedge.
+    # --------------------------------------------------------
 
     if not ALLOW_MULTIPLE_OPEN_PER_SYMBOL:
 
@@ -2037,10 +2228,6 @@ def evaluate_open_trades(
                 candle_time = int(
                     row["time"]
                 )
-
-                # Conservative:
-                # SL wins if both SL and TP are touched
-                # in the same candle.
 
                 if candle_low <= sl:
 
@@ -2738,34 +2925,71 @@ def analyze_coin(
     symbol
 ):
 
+    # ========================================================
+    # MAIN 5M DATA
+    # ========================================================
+
     df = get_candles(
+        symbol,
+        "5m"
+    )
+
+    # ========================================================
+    # MULTI-TIMEFRAME TREND DATA
+    # ========================================================
+
+    trend_data = get_multi_timeframe_trend(
         symbol
     )
 
+    trend_15m = trend_data[
+        "15m"
+    ]["trend"]
+
+    trend_1h = trend_data[
+        "1h"
+    ]["trend"]
+
+    # ========================================================
     # RSI
+    # ========================================================
+
     df["rsi"] = calculate_rsi(
         df["close"],
         RSI_PERIOD
     )
 
-    # ATR(14) specifically for SL
+    # ========================================================
+    # ATR(14) FOR SL
+    # ========================================================
+
     df["atr_sl"] = calculate_atr(
         df,
         SL_ATR_PERIOD
     )
 
-    # ATR(10) for UT Bot
+    # ========================================================
+    # ATR(10) FOR UT BOT
+    # ========================================================
+
     df["atr"] = calculate_atr(
         df,
         UT_ATR_PERIOD
     )
 
-    # UT Bot
+    # ========================================================
+    # UT BOT
+    # ========================================================
+
     df["ut_stop"] = calculate_ut_bot(
         df,
         UT_KEY_VALUE,
         UT_ATR_PERIOD
     )
+
+    # ========================================================
+    # DIVERGENCE
+    # ========================================================
 
     bullish_divergence = (
         find_bullish_divergence(df)
@@ -2774,6 +2998,10 @@ def analyze_coin(
     bearish_divergence = (
         find_bearish_divergence(df)
     )
+
+    # ========================================================
+    # TRENDLINE
+    # ========================================================
 
     bullish_break = (
         descending_trendline_break(df)
@@ -2807,6 +3035,12 @@ def analyze_coin(
 
     # ========================================================
     # BUY
+    #
+    # Requirements:
+    # 1. Bullish RSI divergence
+    # 2. UT or trendline bullish confirmation
+    # 3. 15M bullish
+    # 4. 1H bullish
     # ========================================================
 
     if (
@@ -2815,6 +3049,8 @@ def analyze_coin(
             bullish_break
             or current_close > current_ut
         )
+        and trend_15m == "BULLISH"
+        and trend_1h == "BULLISH"
     ):
 
         support = nearest_support(
@@ -2829,13 +3065,13 @@ def analyze_coin(
             swing_level=support
         )
 
-        # If required SL > 2%, reject signal.
         if sl_tp is None:
 
             return {
                 "symbol": symbol,
                 "df": df,
                 "signal": None,
+                "trend_data": trend_data,
                 "market_symbol": get_market_symbol(
                     symbol
                 ),
@@ -2887,13 +3123,22 @@ def analyze_coin(
                 signal_time / 1000,
                 tz=timezone.utc
             ).isoformat(),
+            "trend_15m": trend_15m,
+            "trend_1h": trend_1h,
             "reason": (
-                "Bullish RSI Divergence + UT/Trendline"
+                "Bullish RSI Divergence + "
+                "UT/Trendline + 15M/1H Bullish"
             ),
         }
 
     # ========================================================
     # SELL
+    #
+    # Requirements:
+    # 1. Bearish RSI divergence
+    # 2. UT or trendline bearish confirmation
+    # 3. 15M bearish
+    # 4. 1H bearish
     # ========================================================
 
     elif (
@@ -2902,6 +3147,8 @@ def analyze_coin(
             bearish_break
             or current_close < current_ut
         )
+        and trend_15m == "BEARISH"
+        and trend_1h == "BEARISH"
     ):
 
         resistance = nearest_resistance(
@@ -2916,13 +3163,13 @@ def analyze_coin(
             swing_level=resistance
         )
 
-        # If required SL > 2%, reject signal.
         if sl_tp is None:
 
             return {
                 "symbol": symbol,
                 "df": df,
                 "signal": None,
+                "trend_data": trend_data,
                 "market_symbol": get_market_symbol(
                     symbol
                 ),
@@ -2974,8 +3221,11 @@ def analyze_coin(
                 signal_time / 1000,
                 tz=timezone.utc
             ).isoformat(),
+            "trend_15m": trend_15m,
+            "trend_1h": trend_1h,
             "reason": (
-                "Bearish RSI Divergence + UT/Trendline"
+                "Bearish RSI Divergence + "
+                "UT/Trendline + 15M/1H Bearish"
             ),
         }
 
@@ -2983,6 +3233,7 @@ def analyze_coin(
         "symbol": symbol,
         "df": df,
         "signal": signal,
+        "trend_data": trend_data,
         "market_symbol": get_market_symbol(
             symbol
         ),
@@ -3083,6 +3334,14 @@ def format_signal(
         f"RR: 1:{TP1_R_MULTIPLE:.1f} / "
         f"1:{TP2_R_MULTIPLE:.1f} / "
         f"1:{TP3_R_MULTIPLE:.1f}"
+    )
+
+    text.append(
+        f"15M Trend: {signal.get('trend_15m', 'N/A')}"
+    )
+
+    text.append(
+        f"1H Trend: {signal.get('trend_1h', 'N/A')}"
     )
 
     text.append(
@@ -3257,8 +3516,12 @@ def format_report(
     results,
     errors,
     open_performance,
-    closed_this_run
+    closed_this_run,
+    blocked_symbols=None
 ):
+
+    if blocked_symbols is None:
+        blocked_symbols = []
 
     stats = calculate_statistics(
         state
@@ -3267,7 +3530,7 @@ def format_report(
     lines = []
 
     lines.append(
-        "📡 CRYPTO DIVERGENCE SCANNER v10.3"
+        "📡 CRYPTO DIVERGENCE SCANNER v10.4"
     )
 
     lines.append(
@@ -3384,6 +3647,8 @@ def format_report(
         x["signal"]
         for x in results
         if x.get("signal") is not None
+        and x["signal"]["symbol"]
+        not in blocked_symbols
     ]
 
     lines.append("")
@@ -3433,9 +3698,6 @@ def format_report(
     if open_performance:
 
         for item in open_performance:
-
-            # IMPORTANT:
-            # Emoji depends ONLY on direction.
 
             direction_icon = direction_emoji(
                 item["side"]
@@ -3524,8 +3786,15 @@ def format_report(
                     f"({tp3_percent:+.2f}%)"
                 )
 
+            # =================================================
+            # CURRENT P&L
+            #
+            # Bold in Telegram.
+            # No emoji.
+            # =================================================
+
             lines.append(
-                f"Current P&L: {pnl:+.2f}%"
+                f"Current P&L: *{pnl:+.2f}%*"
             )
 
             lines.append(
@@ -3607,20 +3876,22 @@ def main():
 
         return
 
-    state = load_state()
+    # ========================================================
+    # LOAD v10.4 STATE
+    #
+    # This is a NEW state file.
+    # Therefore old v10.3 statistics are not included.
+    # ========================================================
 
-    # --------------------------------------------------------
-    # Normalize old/new state safely.
-    # --------------------------------------------------------
+    state = load_state()
 
     rebuild_trade_container(
         state
     )
 
-    # --------------------------------------------------------
-    # Remember trades that were already CLOSED before
-    # this execution.
-    # --------------------------------------------------------
+    # ========================================================
+    # REMEMBER PREVIOUS CLOSED IDS
+    # ========================================================
 
     previous_closed_ids = set()
 
@@ -3651,6 +3922,8 @@ def main():
 
     data_cache = {}
 
+    blocked_symbols = []
+
     # ========================================================
     # FIRST PASS
     # ========================================================
@@ -3680,7 +3953,7 @@ def main():
         )
 
     # ========================================================
-    # CLOSE OLD OPEN TRADES
+    # CLOSE OLD OPEN TRADES FIRST
     # ========================================================
 
     changed = evaluate_open_trades(
@@ -3707,6 +3980,32 @@ def main():
         )
 
         if signal is None:
+            continue
+
+        symbol = signal["symbol"]
+
+        # ----------------------------------------------------
+        # HARD SYMBOL LOCK
+        #
+        # If symbol already has an OPEN trade:
+        # BUY = blocked
+        # SELL = blocked
+        #
+        # This prevents both duplicate and hedge.
+        # ----------------------------------------------------
+
+        if (
+            not ALLOW_MULTIPLE_OPEN_PER_SYMBOL
+            and has_open_trade_for_symbol(
+                state,
+                symbol
+            )
+        ):
+
+            blocked_symbols.append(
+                symbol
+            )
+
             continue
 
         signal_id = make_signal_id(
@@ -3793,7 +4092,8 @@ def main():
         results,
         errors,
         open_performance,
-        closed_this_run
+        closed_this_run,
+        blocked_symbols
     )
 
     print()
