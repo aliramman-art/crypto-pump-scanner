@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO DIVERGENCE SCANNER v10.8 SCORE
+# CRYPTO DIVERGENCE SCANNER v10.9 SCORE
 # Kraken Futures | Closed 5m Candles
 # RSI Divergence | Trendline Breakout/Breakdown
 # TradingView-style UT Bot | 15M + 1H Trend Filter
@@ -39,7 +39,7 @@ COINS = [
     "XLM", "ALGO", "VET", "MATIC", "HBAR",
 ]
 
-STATE_FILE = "trade_history_v10.8.json"
+STATE_FILE = "trade_history_v10.9.json"
 
 ALLOW_MULTIPLE_OPEN_PER_SYMBOL = False
 
@@ -96,7 +96,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "CryptoDivergenceScanner/10.8-SCORE",
+    "User-Agent": "CryptoDivergenceScanner/10.9-SCORE",
     "Accept": "application/json",
 })
 
@@ -114,8 +114,6 @@ def send_telegram(message):
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-    # Telegram limit is 4096 characters.
-    # Keep margin below the limit.
     max_length = 3900
 
     chunks = []
@@ -174,7 +172,7 @@ def send_telegram(message):
 def default_state():
     return {
         "version": 5,
-        "scanner_version": "10.8-SCORE",
+        "scanner_version": "10.9-SCORE",
         "trades": {},
         "last_run": None,
     }
@@ -1636,7 +1634,6 @@ def register_signal(state, signal):
     trade["direction"] = signal["side"]
     trade["name"] = signal["symbol"]
 
-    # Partial TP state
     trade["tp1_hit"] = False
     trade["tp2_hit"] = False
     trade["tp3_hit"] = False
@@ -2096,10 +2093,6 @@ def analyze_coin(symbol):
         diagnostic["candidate_details"].append(candidate_info)
         diagnostic["is_setup_candidate"] = True
 
-    # IMPORTANT:
-    # This is only the best candidate for this symbol.
-    # Global selection happens later across ALL symbols.
-
     symbol_best_signal = None
 
     if final_candidates:
@@ -2165,6 +2158,40 @@ def get_visible_candidates(results):
     return candidates
 
 
+# ============================================================
+# ALL SETUP CANDIDATES
+# ============================================================
+
+def get_all_setup_candidates(results):
+    candidates = []
+
+    for result in results:
+        symbol = result["symbol"]
+
+        diagnostic = result.get(
+            "diagnostic",
+            {},
+        )
+
+        for candidate in diagnostic.get(
+            "candidate_details",
+            [],
+        ):
+            item = dict(candidate)
+            item["symbol"] = symbol
+            candidates.append(item)
+
+    candidates.sort(
+        key=lambda x: (
+            x.get("score", 0),
+            x.get("volume_ratio", 0),
+        ),
+        reverse=True,
+    )
+
+    return candidates
+
+
 def get_global_final_signal(
     results,
     state,
@@ -2174,7 +2201,6 @@ def get_global_final_signal(
     for result in results:
         symbol = result["symbol"]
 
-        # Existing OPEN trade blocks new signal.
         if (
             not ALLOW_MULTIPLE_OPEN_PER_SYMBOL
             and has_open_trade_for_symbol(
@@ -2209,7 +2235,6 @@ def get_global_final_signal(
 
     best = candidates[0]
 
-    # Make absolutely sure the signal ID is unique.
     best["signal_id"] = make_signal_id(
         best["symbol"],
         best["side"],
@@ -2315,19 +2340,37 @@ def format_candidate(
     )
 
     lines = [
-        f"{rank_text}{icon} "
-        f"{symbol}/USDT {side} "
-        f"⭐ {score}/100 {label}",
+        f"{rank_text}🪙 {symbol}/USDT",
+        f"{icon} Direction: {side}",
+        f"⭐ FINAL SCORE: {score}/100 {label}",
 
-        f"RSI Divergence +{components['divergence']}",
-        f"UT Bot +{components['ut']}",
-        f"Trendline +{components['trendline']}",
-        f"15M Trend +{components['trend_15m']}",
-        f"1H Trend +{components['trend_1h']}",
-        f"Volume +{components['volume']} "
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"RSI Divergence: "
+        f"+{components['divergence']}",
+
+        f"UT Bot Trigger: "
+        f"+{components['ut']}",
+
+        f"Trendline: "
+        f"+{components['trendline']}",
+
+        f"15M Trend: "
+        f"+{components['trend_15m']} "
+        f"({candidate['trend_15m']})",
+
+        f"1H Trend: "
+        f"+{components['trend_1h']} "
+        f"({candidate['trend_1h']})",
+
+        f"Volume: "
+        f"+{components['volume']} "
         f"({candidate['volume_ratio']:.2f}x)",
 
-        f"Entry: {format_price(candidate.get('entry'))}",
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"Entry: "
+        f"{format_price(candidate.get('entry'))}",
     ]
 
     if candidate.get("sl") is not None:
@@ -2341,7 +2384,9 @@ def format_candidate(
         )
 
     if candidate["final_ready"]:
-        lines.append("STATUS: 🚨 READY")
+        lines.append(
+            "STATUS: 🚨 READY 75+"
+        )
 
     elif candidate["rejection"] == "SCORE":
         lines.append(
@@ -2900,7 +2945,6 @@ def evaluate_open_trades(
                         + weighted_r
                     )
 
-                    # Move SL to entry.
                     trade["sl"] = entry
                     trade["sl_moved_to_entry"] = True
 
@@ -2967,7 +3011,6 @@ def evaluate_open_trades(
                         + weighted_r
                     )
 
-                    # Move SL to TP1.
                     if tp1 is not None:
                         trade["sl"] = tp1
                         trade["sl_moved_to_tp1"] = True
@@ -3005,9 +3048,7 @@ def evaluate_open_trades(
 
                     trade["tp3_hit"] = True
 
-                    trade["remaining_percent"] = (
-                        0
-                    )
+                    trade["remaining_percent"] = 0
 
                     trade["realized_pnl_percent"] = (
                         float(
@@ -3404,6 +3445,10 @@ def format_report(
 
     visible_candidates = get_visible_candidates(results)
 
+    # NEW:
+    # ALL setup candidates including those below 65.
+    all_setup_candidates = get_all_setup_candidates(results)
+
     global_final = (
         registered_signals[0]
         if registered_signals
@@ -3413,7 +3458,7 @@ def format_report(
     lines = []
 
     lines.append(
-        "📡 CRYPTO DIVERGENCE SCANNER v10.8 SCORE"
+        "📡 CRYPTO DIVERGENCE SCANNER v10.9 SCORE"
     )
 
     lines.append(
@@ -3518,16 +3563,51 @@ def format_report(
     ])
 
     # ========================================================
-    # GLOBAL CANDIDATES
+    # NEW CANDIDATE SCORE BREAKDOWN
     # ========================================================
 
     lines.extend([
         "",
-        "🎯 GLOBAL SETUP CANDIDATES",
+        "🔎 CANDIDATE SCORE BREAKDOWN",
+        "━━━━━━━━━━━━━━━━━━",
+    ])
+
+    if all_setup_candidates:
+
+        for rank, candidate in enumerate(
+            all_setup_candidates,
+            start=1,
+        ):
+            lines.append(
+                format_candidate(
+                    candidate["symbol"],
+                    candidate,
+                    rank,
+                )
+            )
+
+            lines.append(
+                "━━━━━━━━━━━━━━━━━━"
+            )
+
+    else:
+        lines.append(
+            "هیچ Setup Candidate واقعی "
+            "پیدا نشده است."
+        )
+
+    # ========================================================
+    # GLOBAL CANDIDATES 65+
+    # ========================================================
+
+    lines.extend([
+        "",
+        "🎯 GLOBAL SETUP CANDIDATES 65+",
         "━━━━━━━━━━━━━━━━━━",
     ])
 
     if visible_candidates:
+
         for rank, candidate in enumerate(
             visible_candidates,
             start=1,
@@ -3543,6 +3623,7 @@ def format_report(
             lines.append(
                 "━━━━━━━━━━━━━━━━━━"
             )
+
     else:
         lines.append(
             f"فعلاً کاندیدای "
@@ -3560,6 +3641,7 @@ def format_report(
     ])
 
     if global_final:
+
         lines.append(
             format_signal(global_final)
         )
@@ -3583,6 +3665,7 @@ def format_report(
     # ========================================================
 
     if blocked_symbols:
+
         lines.extend([
             "",
             "🔒 SYMBOL LOCK",
@@ -3613,7 +3696,9 @@ def format_report(
     ])
 
     if closed_this_run:
+
         for trade in closed_this_run:
+
             lines.append(
                 format_closed_signal(trade)
             )
@@ -3621,7 +3706,9 @@ def format_report(
             lines.append(
                 "━━━━━━━━━━━━━━━━━━"
             )
+
     else:
+
         lines.append(
             "در این اجرا معامله‌ای بسته نشده است."
         )
@@ -3637,7 +3724,9 @@ def format_report(
     ])
 
     if open_performance:
+
         for item in open_performance:
+
             icon = (
                 "🟢"
                 if item["side"] == "BUY"
@@ -3654,6 +3743,7 @@ def format_report(
             score_text = ""
 
             if score is not None:
+
                 try:
                     score_text = (
                         f" ⭐{float(score):.0f}/100"
@@ -3682,6 +3772,7 @@ def format_report(
             )
 
             if item.get("tp1") is not None:
+
                 status = (
                     "HIT"
                     if item.get("tp1_hit")
@@ -3695,6 +3786,7 @@ def format_report(
                 )
 
             if item.get("tp2") is not None:
+
                 status = (
                     "HIT"
                     if item.get("tp2_hit")
@@ -3708,6 +3800,7 @@ def format_report(
                 )
 
             if item.get("tp3") is not None:
+
                 status = (
                     "HIT"
                     if item.get("tp3_hit")
@@ -3760,6 +3853,7 @@ def format_report(
             )
 
     else:
+
         lines.append(
             "هیچ سیگنال بازی وجود ندارد."
         )
@@ -3769,6 +3863,7 @@ def format_report(
     # ========================================================
 
     if errors:
+
         lines.extend([
             "",
             "⚠️ ERRORS",
@@ -3776,6 +3871,7 @@ def format_report(
         ])
 
         for symbol, error in errors.items():
+
             lines.append(
                 f"{symbol}: {error}"
             )
@@ -3810,11 +3906,13 @@ def format_report(
 # ============================================================
 
 def main():
+
     print(
         "Loading Kraken Futures instruments..."
     )
 
     try:
+
         market_map = load_market_map()
 
         print(
@@ -3822,6 +3920,7 @@ def main():
         )
 
     except Exception as e:
+
         print(f"FATAL: {e}")
         return
 
@@ -3840,6 +3939,7 @@ def main():
     previous_closed_ids = set()
 
     for trade in get_all_trades(state):
+
         if str(
             trade.get(
                 "status",
@@ -3864,7 +3964,9 @@ def main():
     # ========================================================
 
     for symbol in COINS:
+
         try:
+
             result = analyze_coin(symbol)
 
             results.append(result)
@@ -3872,6 +3974,7 @@ def main():
             data_cache[symbol] = result["df"]
 
         except Exception as e:
+
             errors[symbol] = str(e)
 
         time.sleep(0.05)
@@ -3900,6 +4003,7 @@ def main():
     new_registered = []
 
     if global_signal is not None:
+
         symbol = global_signal["symbol"]
 
         if (
@@ -3909,13 +4013,16 @@ def main():
                 symbol,
             )
         ):
+
             blocked_symbols.append(symbol)
 
         else:
+
             if register_signal(
                 state,
                 global_signal,
             ):
+
                 new_registered.append(
                     global_signal
                 )
@@ -3984,9 +4091,13 @@ def main():
     telegram_ok = send_telegram(report)
 
     if telegram_ok:
-        print("Telegram report sent successfully.")
+        print(
+            "Telegram report sent successfully."
+        )
     else:
-        print("Telegram report FAILED.")
+        print(
+            "Telegram report FAILED."
+        )
 
 
 # ============================================================
