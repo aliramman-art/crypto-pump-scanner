@@ -1,9 +1,23 @@
 # ============================================================
-# CRYPTO DIVERGENCE SCANNER v11.0 SCORE
+# CRYPTO DIVERGENCE SCANNER v11.1 SCORE
 # Kraken Futures | Closed 5m Candles
 # RSI Divergence | Trendline Breakout/Breakdown
 # TradingView-style UT Bot | 15M + 1H Trend Filter
 # Candidate Scoring /100 | ONE GLOBAL TOP CANDIDATE
+#
+# NEW LOGIC:
+# Candidate Score
+#       ↓
+# ONE GLOBAL TOP CANDIDATE
+#       ↓
+# SETUP ENGINE
+#       ↓
+# Entry / SL / TP1 / TP2 / TP3
+#       ↓
+# Setup Validation
+#       ↓
+# ONE GLOBAL FINAL SIGNAL
+#
 # One Open Trade Per Symbol | NO HEDGE
 # Partial TP1/TP2/TP3 | Dynamic SL Management
 # Trade History | P&L / R / MFE / MAE / Duration
@@ -25,7 +39,9 @@ from datetime import datetime, timezone
 # ============================================================
 
 BASE_URL = "https://futures.kraken.com/api/charts/v1"
-INSTRUMENTS_URL = "https://futures.kraken.com/derivatives/api/v3/instruments"
+INSTRUMENTS_URL = (
+    "https://futures.kraken.com/derivatives/api/v3/instruments"
+)
 
 TIMEFRAME = "5m"
 CANDLE_LIMIT = 250
@@ -39,7 +55,7 @@ COINS = [
     "XLM", "ALGO", "VET", "MATIC", "HBAR",
 ]
 
-STATE_FILE = "trade_history_v11.0.json"
+STATE_FILE = "trade_history_v11.1.json"
 
 ALLOW_MULTIPLE_OPEN_PER_SYMBOL = False
 
@@ -61,6 +77,7 @@ MIN_PRICE_DIFFERENCE_PERCENT = 0.10
 
 VOLUME_LOOKBACK = 20
 VOLUME_CONFIRMATION_RATIO = 1.20
+
 
 # ============================================================
 # SCORE
@@ -85,6 +102,27 @@ MAX_SCORE = (
 MIN_DISPLAY_CANDIDATE_SCORE = 65
 MIN_SIGNAL_SCORE = 75
 
+
+# ============================================================
+# SETUP VALIDATION
+# ============================================================
+
+# جلوگیری از ورود وقتی قیمت بیش از حد از سیگنال فاصله گرفته
+MAX_ENTRY_CHASE_PERCENT = 0.60
+
+# حداقل R:R مورد قبول
+MIN_RR_TP1 = 1.50
+MIN_RR_TP2 = 2.50
+MIN_RR_TP3 = 3.50
+
+# برای تأیید بهتر ستاپ
+REQUIRE_BOTH_TRENDS = True
+
+# اگر True باشد برای BUY باید روند هر دو تایم‌فریم صعودی
+# و برای SELL هر دو نزولی باشند.
+REQUIRE_TREND_ALIGNMENT = True
+
+
 # ============================================================
 # SL / TP
 # ============================================================
@@ -104,6 +142,7 @@ TP1_CLOSE_PERCENT = 33
 TP2_CLOSE_PERCENT = 33
 TP3_CLOSE_PERCENT = 34
 
+
 # ============================================================
 # UT BOT
 # ============================================================
@@ -111,6 +150,7 @@ TP3_CLOSE_PERCENT = 34
 UT_KEY_VALUE = 3.0
 UT_ATR_PERIOD = 10
 UT_USE_HEIKIN_ASHI = False
+
 
 # ============================================================
 # TELEGRAM
@@ -129,7 +169,7 @@ TELEGRAM_CHAT_ID = os.getenv(
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "CryptoDivergenceScanner/11.0-SCORE",
+    "User-Agent": "CryptoDivergenceScanner/11.1-SCORE",
     "Accept": "application/json",
 })
 
@@ -157,7 +197,6 @@ def send_telegram(message):
     )
 
     max_length = 3900
-
     chunks = []
 
     while len(message) > max_length:
@@ -238,8 +277,8 @@ def send_telegram(message):
 def default_state():
 
     return {
-        "version": 6,
-        "scanner_version": "11.0-SCORE",
+        "version": 7,
+        "scanner_version": "11.1-SCORE",
         "trades": {},
         "last_run": None,
     }
@@ -1547,21 +1586,11 @@ def calculate_atr(
     period=14,
 ):
 
-    high = df["high"].astype(
-        float
-    )
+    high = df["high"].astype(float)
+    low = df["low"].astype(float)
+    close = df["close"].astype(float)
 
-    low = df["low"].astype(
-        float
-    )
-
-    close = df["close"].astype(
-        float
-    )
-
-    previous_close = (
-        close.shift(1)
-    )
+    previous_close = close.shift(1)
 
     tr1 = high - low
 
@@ -1987,9 +2016,7 @@ def calculate_candidate_score(
 
     if divergence:
 
-        score += (
-            RSI_DIVERGENCE_SCORE
-        )
+        score += RSI_DIVERGENCE_SCORE
 
         components[
             "divergence"
@@ -1997,9 +2024,7 @@ def calculate_candidate_score(
 
     if ut_trigger:
 
-        score += (
-            UT_TRIGGER_SCORE
-        )
+        score += UT_TRIGGER_SCORE
 
         components[
             "ut"
@@ -2007,9 +2032,7 @@ def calculate_candidate_score(
 
     if trendline:
 
-        score += (
-            TRENDLINE_SCORE
-        )
+        score += TRENDLINE_SCORE
 
         components[
             "trendline"
@@ -2020,9 +2043,7 @@ def calculate_candidate_score(
         == expected_trend
     ):
 
-        score += (
-            TREND_15M_SCORE
-        )
+        score += TREND_15M_SCORE
 
         components[
             "trend_15m"
@@ -2033,9 +2054,7 @@ def calculate_candidate_score(
         == expected_trend
     ):
 
-        score += (
-            TREND_1H_SCORE
-        )
+        score += TREND_1H_SCORE
 
         components[
             "trend_1h"
@@ -2046,9 +2065,7 @@ def calculate_candidate_score(
         >= VOLUME_CONFIRMATION_RATIO
     ):
 
-        score += (
-            VOLUME_SCORE
-        )
+        score += VOLUME_SCORE
 
         components[
             "volume"
@@ -2249,8 +2266,15 @@ def build_sl_tp(
         "tp3": tp3,
         "risk_distance": risk_distance,
         "risk_percent": risk_percent,
+        "rr1": TP1_R_MULTIPLE,
+        "rr2": TP2_R_MULTIPLE,
+        "rr3": TP3_R_MULTIPLE,
     }
 
+
+# ============================================================
+# PERCENT
+# ============================================================
 
 def level_percent(
     side,
@@ -2300,6 +2324,301 @@ def format_price(price):
         return f"{price:.6f}"
 
     return f"{price:.8f}"
+
+
+# ============================================================
+# SETUP ENGINE
+# ============================================================
+
+def build_trade_setup(
+    candidate,
+    df,
+):
+
+    if candidate is None:
+        return None
+
+    symbol = candidate["symbol"]
+    side = candidate["side"]
+
+    entry = float(
+        candidate["entry"]
+    )
+
+    trend_15m = candidate[
+        "trend_15m"
+    ]
+
+    trend_1h = candidate[
+        "trend_1h"
+    ]
+
+    score = float(
+        candidate["score"]
+    )
+
+    reasons = []
+
+    # ========================================================
+    # SCORE VALIDATION
+    # ========================================================
+
+    if score < MIN_SIGNAL_SCORE:
+
+        return {
+            "valid": False,
+            "reason": (
+                f"SCORE<{MIN_SIGNAL_SCORE}"
+            ),
+            "symbol": symbol,
+            "side": side,
+            "entry": entry,
+            "score": score,
+        }
+
+    # ========================================================
+    # TREND VALIDATION
+    # ========================================================
+
+    expected_trend = (
+        "BULLISH"
+        if side == "BUY"
+        else "BEARISH"
+    )
+
+    if REQUIRE_TREND_ALIGNMENT:
+
+        if (
+            trend_15m
+            != expected_trend
+        ):
+
+            return {
+                "valid": False,
+                "reason": "15M_TREND_FILTER",
+                "symbol": symbol,
+                "side": side,
+                "entry": entry,
+                "score": score,
+            }
+
+        if (
+            trend_1h
+            != expected_trend
+        ):
+
+            return {
+                "valid": False,
+                "reason": "1H_TREND_FILTER",
+                "symbol": symbol,
+                "side": side,
+                "entry": entry,
+                "score": score,
+            }
+
+    # ========================================================
+    # CHASE FILTER
+    # ========================================================
+
+    if len(df) >= 2:
+
+        previous_close = float(
+            df["close"].iloc[-2]
+        )
+
+        if previous_close > 0:
+
+            candle_move = abs(
+                (
+                    entry
+                    - previous_close
+                )
+                / previous_close
+                * 100
+            )
+
+            if (
+                candle_move
+                > MAX_ENTRY_CHASE_PERCENT
+            ):
+
+                return {
+                    "valid": False,
+                    "reason": "ENTRY_CHASE",
+                    "symbol": symbol,
+                    "side": side,
+                    "entry": entry,
+                    "score": score,
+                    "candle_move_percent":
+                        candle_move,
+                }
+
+    # ========================================================
+    # ATR
+    # ========================================================
+
+    atr = float(
+        df["atr_sl"].iloc[-1]
+    )
+
+    if (
+        not np.isfinite(atr)
+        or atr <= 0
+    ):
+
+        return {
+            "valid": False,
+            "reason": "INVALID_ATR",
+            "symbol": symbol,
+            "side": side,
+            "entry": entry,
+            "score": score,
+        }
+
+    # ========================================================
+    # SWING
+    # ========================================================
+
+    if side == "BUY":
+
+        swing_level = (
+            nearest_support(
+                df,
+                entry,
+            )
+        )
+
+    else:
+
+        swing_level = (
+            nearest_resistance(
+                df,
+                entry,
+            )
+        )
+
+    # ========================================================
+    # SL / TP
+    # ========================================================
+
+    sl_tp = build_sl_tp(
+        side,
+        entry,
+        atr,
+        swing_level,
+    )
+
+    if sl_tp is None:
+
+        return {
+            "valid": False,
+            "reason": "INVALID_SL",
+            "symbol": symbol,
+            "side": side,
+            "entry": entry,
+            "score": score,
+        }
+
+    # ========================================================
+    # RR VALIDATION
+    # ========================================================
+
+    rr1 = sl_tp["rr1"]
+    rr2 = sl_tp["rr2"]
+    rr3 = sl_tp["rr3"]
+
+    if rr1 < MIN_RR_TP1:
+
+        return {
+            "valid": False,
+            "reason": "RR_TP1",
+            "symbol": symbol,
+            "side": side,
+            "entry": entry,
+            "score": score,
+            "sl": sl_tp["sl"],
+            "tp1": sl_tp["tp1"],
+            "tp2": sl_tp["tp2"],
+            "tp3": sl_tp["tp3"],
+        }
+
+    if rr2 < MIN_RR_TP2:
+
+        return {
+            "valid": False,
+            "reason": "RR_TP2",
+            "symbol": symbol,
+            "side": side,
+            "entry": entry,
+            "score": score,
+            "sl": sl_tp["sl"],
+            "tp1": sl_tp["tp1"],
+            "tp2": sl_tp["tp2"],
+            "tp3": sl_tp["tp3"],
+        }
+
+    if rr3 < MIN_RR_TP3:
+
+        return {
+            "valid": False,
+            "reason": "RR_TP3",
+            "symbol": symbol,
+            "side": side,
+            "entry": entry,
+            "score": score,
+            "sl": sl_tp["sl"],
+            "tp1": sl_tp["tp1"],
+            "tp2": sl_tp["tp2"],
+            "tp3": sl_tp["tp3"],
+        }
+
+    # ========================================================
+    # FINAL VALID SETUP
+    # ========================================================
+
+    setup = dict(candidate)
+
+    setup.update({
+
+        "valid": True,
+
+        "setup_status": "VALID",
+
+        "setup_reason":
+            "TOP SCORE + TREND + SL + RR VALID",
+
+        "entry": entry,
+
+        "sl": sl_tp["sl"],
+
+        "tp1": sl_tp["tp1"],
+
+        "tp2": sl_tp["tp2"],
+
+        "tp3": sl_tp["tp3"],
+
+        "risk_distance":
+            sl_tp["risk_distance"],
+
+        "risk_percent":
+            sl_tp["risk_percent"],
+
+        "rr1": rr1,
+
+        "rr2": rr2,
+
+        "rr3": rr3,
+
+        "atr": atr,
+
+        "swing_level":
+            swing_level,
+
+        "signal_time":
+            int(df["time"].iloc[-1]),
+    })
+
+    return setup
 
 
 # ============================================================
@@ -2428,69 +2747,96 @@ def register_signal(
 # ============================================================
 
 def create_signal(
-    symbol,
-    side,
-    entry,
-    sl_tp,
-    signal_time,
-    trend_15m,
-    trend_1h,
-    ut_trigger,
-    trendline_break,
-    volume_ratio,
-    score_data,
-    atr,
+    setup,
 ):
 
-    return {
+    signal_time = int(
+        setup["signal_time"]
+    )
 
-        "symbol": symbol,
+    symbol = setup["symbol"]
+    side = setup["side"]
+    entry = setup["entry"]
 
-        "side": side,
+    signal = {
 
-        "entry": entry,
+        "symbol":
+            symbol,
 
-        "sl": sl_tp["sl"],
-
-        "tp1": sl_tp["tp1"],
-
-        "tp2": sl_tp["tp2"],
-
-        "tp3": sl_tp["tp3"],
-
-        "tp": sl_tp["tp1"],
-
-        "sl_percent": level_percent(
+        "side":
             side,
-            entry,
-            sl_tp["sl"],
-        ),
 
-        "tp1_percent": level_percent(
-            side,
+        "entry":
             entry,
-            sl_tp["tp1"],
-        ),
 
-        "tp2_percent": level_percent(
-            side,
-            entry,
-            sl_tp["tp2"],
-        ),
+        "sl":
+            setup["sl"],
 
-        "tp3_percent": level_percent(
-            side,
-            entry,
-            sl_tp["tp3"],
-        ),
+        "tp1":
+            setup["tp1"],
+
+        "tp2":
+            setup["tp2"],
+
+        "tp3":
+            setup["tp3"],
+
+        "tp":
+            setup["tp1"],
+
+        "sl_percent":
+            level_percent(
+                side,
+                entry,
+                setup["sl"],
+            ),
+
+        "tp1_percent":
+            level_percent(
+                side,
+                entry,
+                setup["tp1"],
+            ),
+
+        "tp2_percent":
+            level_percent(
+                side,
+                entry,
+                setup["tp2"],
+            ),
+
+        "tp3_percent":
+            level_percent(
+                side,
+                entry,
+                setup["tp3"],
+            ),
 
         "risk_percent":
-            sl_tp["risk_percent"],
+            setup["risk_percent"],
 
-        "atr": atr,
+        "risk_distance":
+            setup["risk_distance"],
+
+        "atr":
+            setup["atr"],
 
         "atr_multiplier":
             SL_ATR_MULTIPLIER,
+
+        "rr1":
+            setup["rr1"],
+
+        "rr2":
+            setup["rr2"],
+
+        "rr3":
+            setup["rr3"],
+
+        "swing_level":
+            setup.get(
+                "swing_level"
+            ),
 
         "signal_time":
             signal_time,
@@ -2502,36 +2848,59 @@ def create_signal(
             ).isoformat(),
 
         "trend_15m":
-            trend_15m,
+            setup["trend_15m"],
 
         "trend_1h":
-            trend_1h,
+            setup["trend_1h"],
 
         "ut_trigger":
-            ut_trigger,
+            setup["ut"],
 
         "trendline_break":
-            trendline_break,
+            setup["trendline"],
 
         "volume_ratio":
-            volume_ratio,
+            setup["volume_ratio"],
 
         "score":
-            score_data["score"],
+            setup["score"],
 
         "score_label":
-            score_data["label"],
+            setup["label"],
 
         "score_components":
-            score_data["components"],
+            setup["components"],
+
+        "setup_status":
+            "VALID",
+
+        "setup_reason":
+            setup["setup_reason"],
 
         "reason":
             (
+                "TOP GLOBAL SCORE + "
                 "RSI Divergence + "
                 "UT/Trendline + "
-                "15M/1H Trend"
+                "15M/1H Trend + "
+                "Valid SL/RR"
             ),
     }
+
+    signal["signal_id"] = (
+        make_signal_id(
+            symbol,
+            side,
+            signal_time,
+            entry,
+        )
+    )
+
+    signal["id"] = (
+        signal["signal_id"]
+    )
+
+    return signal
 
 
 # ============================================================
@@ -2615,11 +2984,6 @@ def analyze_coin(symbol):
         )
     )
 
-    volume_confirmed = (
-        volume_ratio
-        >= VOLUME_CONFIRMATION_RATIO
-    )
-
     current_close = float(
         df["close"].iloc[-1]
     )
@@ -2658,497 +3022,4 @@ def analyze_coin(symbol):
         or ut_sell
     )
 
-    buy_trend_ok = (
-        trend_15m == "BULLISH"
-        and trend_1h == "BULLISH"
-    )
-
-    sell_trend_ok = (
-        trend_15m == "BEARISH"
-        and trend_1h == "BEARISH"
-    )
-
-    diagnostic = {
-
-        "symbol": symbol,
-
-        "bullish_divergence":
-            bullish_divergence is not None,
-
-        "bearish_divergence":
-            bearish_divergence is not None,
-
-        "bullish_break":
-            bullish_break,
-
-        "bearish_break":
-            bearish_break,
-
-        "ut_buy":
-            ut_buy,
-
-        "ut_sell":
-            ut_sell,
-
-        "bullish_confirmation":
-            bullish_confirmation,
-
-        "bearish_confirmation":
-            bearish_confirmation,
-
-        "buy_trend_ok":
-            buy_trend_ok,
-
-        "sell_trend_ok":
-            sell_trend_ok,
-
-        "trend_15m":
-            trend_15m,
-
-        "trend_1h":
-            trend_1h,
-
-        "current_rsi":
-            current_rsi,
-
-        "ut_stop":
-            current_ut,
-
-        "volume_ratio":
-            volume_ratio,
-
-        "volume_confirmed":
-            volume_confirmed,
-
-        "candidate_sides": [],
-
-        "candidate_details": [],
-
-        "rejections": [],
-
-        "is_setup_candidate":
-            False,
-    }
-
-    final_candidates = []
-
-    # ========================================================
-    # BUY CANDIDATE
-    # ========================================================
-
-    if (
-        bullish_divergence is not None
-        and bullish_confirmation
-    ):
-
-        score_data = (
-            calculate_candidate_score(
-                side="BUY",
-                divergence=True,
-                ut_trigger=ut_buy,
-                trendline=bullish_break,
-                trend_15m=trend_15m,
-                trend_1h=trend_1h,
-                volume_ratio=volume_ratio,
-            )
-        )
-
-        candidate_info = {
-
-            "side": "BUY",
-
-            "divergence": True,
-
-            "ut": ut_buy,
-
-            "trendline":
-                bullish_break,
-
-            "trend_15m":
-                trend_15m,
-
-            "trend_1h":
-                trend_1h,
-
-            "volume_ratio":
-                volume_ratio,
-
-            "volume_confirmed":
-                volume_confirmed,
-
-            "score":
-                score_data["score"],
-
-            "components":
-                score_data["components"],
-
-            "label":
-                score_data["label"],
-
-            "trend_ok":
-                buy_trend_ok,
-
-            "sl_ok":
-                None,
-
-            "final_ready":
-                False,
-
-            "rejection":
-                None,
-
-            "entry":
-                current_close,
-
-            "sl":
-                None,
-
-            "tp1":
-                None,
-
-            "tp2":
-                None,
-
-            "tp3":
-                None,
-        }
-
-        if not buy_trend_ok:
-
-            candidate_info[
-                "rejection"
-            ] = "TREND_FILTER"
-
-        else:
-
-            support = (
-                nearest_support(
-                    df,
-                    current_close,
-                )
-            )
-
-            sl_tp = build_sl_tp(
-                "BUY",
-                current_close,
-                current_atr_sl,
-                support,
-            )
-
-            if sl_tp is None:
-
-                candidate_info[
-                    "sl_ok"
-                ] = False
-
-                candidate_info[
-                    "rejection"
-                ] = "SL"
-
-            else:
-
-                candidate_info[
-                    "sl_ok"
-                ] = True
-
-                candidate_info[
-                    "sl"
-                ] = sl_tp["sl"]
-
-                candidate_info[
-                    "tp1"
-                ] = sl_tp["tp1"]
-
-                candidate_info[
-                    "tp2"
-                ] = sl_tp["tp2"]
-
-                candidate_info[
-                    "tp3"
-                ] = sl_tp["tp3"]
-
-                if (
-                    score_data["score"]
-                    >= MIN_SIGNAL_SCORE
-                ):
-
-                    candidate_info[
-                        "final_ready"
-                    ] = True
-
-                    final_candidates.append(
-                        create_signal(
-                            symbol=symbol,
-                            side="BUY",
-                            entry=current_close,
-                            sl_tp=sl_tp,
-                            signal_time=signal_time,
-                            trend_15m=trend_15m,
-                            trend_1h=trend_1h,
-                            ut_trigger=ut_buy,
-                            trendline_break=bullish_break,
-                            volume_ratio=volume_ratio,
-                            score_data=score_data,
-                            atr=current_atr_sl,
-                        )
-                    )
-
-                else:
-
-                    candidate_info[
-                        "rejection"
-                    ] = "SCORE"
-
-        diagnostic[
-            "candidate_sides"
-        ].append("BUY")
-
-        diagnostic[
-            "candidate_details"
-        ].append(
-            candidate_info
-        )
-
-        diagnostic[
-            "is_setup_candidate"
-        ] = True
-
-    # ========================================================
-    # SELL CANDIDATE
-    # ========================================================
-
-    if (
-        bearish_divergence is not None
-        and bearish_confirmation
-    ):
-
-        score_data = (
-            calculate_candidate_score(
-                side="SELL",
-                divergence=True,
-                ut_trigger=ut_sell,
-                trendline=bearish_break,
-                trend_15m=trend_15m,
-                trend_1h=trend_1h,
-                volume_ratio=volume_ratio,
-            )
-        )
-
-        candidate_info = {
-
-            "side": "SELL",
-
-            "divergence": True,
-
-            "ut": ut_sell,
-
-            "trendline":
-                bearish_break,
-
-            "trend_15m":
-                trend_15m,
-
-            "trend_1h":
-                trend_1h,
-
-            "volume_ratio":
-                volume_ratio,
-
-            "volume_confirmed":
-                volume_confirmed,
-
-            "score":
-                score_data["score"],
-
-            "components":
-                score_data["components"],
-
-            "label":
-                score_data["label"],
-
-            "trend_ok":
-                sell_trend_ok,
-
-            "sl_ok":
-                None,
-
-            "final_ready":
-                False,
-
-            "rejection":
-                None,
-
-            "entry":
-                current_close,
-
-            "sl":
-                None,
-
-            "tp1":
-                None,
-
-            "tp2":
-                None,
-
-            "tp3":
-                None,
-        }
-
-        if not sell_trend_ok:
-
-            candidate_info[
-                "rejection"
-            ] = "TREND_FILTER"
-
-        else:
-
-            resistance = (
-                nearest_resistance(
-                    df,
-                    current_close,
-                )
-            )
-
-            sl_tp = build_sl_tp(
-                "SELL",
-                current_close,
-                current_atr_sl,
-                resistance,
-            )
-
-            if sl_tp is None:
-
-                candidate_info[
-                    "sl_ok"
-                ] = False
-
-                candidate_info[
-                    "rejection"
-                ] = "SL"
-
-            else:
-
-                candidate_info[
-                    "sl_ok"
-                ] = True
-
-                candidate_info[
-                    "sl"
-                ] = sl_tp["sl"]
-
-                candidate_info[
-                    "tp1"
-                ] = sl_tp["tp1"]
-
-                candidate_info[
-                    "tp2"
-                ] = sl_tp["tp2"]
-
-                candidate_info[
-                    "tp3"
-                ] = sl_tp["tp3"]
-
-                if (
-                    score_data["score"]
-                    >= MIN_SIGNAL_SCORE
-                ):
-
-                    candidate_info[
-                        "final_ready"
-                    ] = True
-
-                    final_candidates.append(
-                        create_signal(
-                            symbol=symbol,
-                            side="SELL",
-                            entry=current_close,
-                            sl_tp=sl_tp,
-                            signal_time=signal_time,
-                            trend_15m=trend_15m,
-                            trend_1h=trend_1h,
-                            ut_trigger=ut_sell,
-                            trendline_break=bearish_break,
-                            volume_ratio=volume_ratio,
-                            score_data=score_data,
-                            atr=current_atr_sl,
-                        )
-                    )
-
-                else:
-
-                    candidate_info[
-                        "rejection"
-                    ] = "SCORE"
-
-        diagnostic[
-            "candidate_sides"
-        ].append("SELL")
-
-        diagnostic[
-            "candidate_details"
-        ].append(
-            candidate_info
-        )
-
-        diagnostic[
-            "is_setup_candidate"
-        ] = True
-
-    symbol_best_signal = None
-
-    if final_candidates:
-
-        final_candidates.sort(
-            key=lambda x: (
-                x.get(
-                    "score",
-                    0,
-                ),
-                x.get(
-                    "volume_ratio",
-                    0,
-                ),
-            ),
-            reverse=True,
-        )
-
-        symbol_best_signal = (
-            final_candidates[0]
-        )
-
-    return {
-
-        "symbol": symbol,
-
-        "df": df,
-
-        "signal":
-            symbol_best_signal,
-
-        "final_candidates":
-            final_candidates,
-
-        "trend_data":
-            trend_data,
-
-        "market_symbol":
-            get_market_symbol(symbol),
-
-        "diagnostic":
-            diagnostic,
-    }
-
-
-# ============================================================
-# ONE GLOBAL TOP CANDIDATE
-# ============================================================
-
-def get_global_top_candidate(
-    results
-):
-
-    candidates = []
-
-    for result in results:
-
-        symbol =
+    buy
