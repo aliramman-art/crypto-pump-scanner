@@ -367,7 +367,17 @@
       "reason": "Bullish RSI Divergence + UT/Trendline",
       "signal_id": "84cdb3dfb855810f",
       "id": "84cdb3dfb855810f",
-      "status": "OPEN"
+      "status": "CLOSED",
+      "exit_reason": "SL",
+      "result_reason": "SL",
+      "exit_price": 1.4507247962648866,
+      "result_price": 1.4507247962648866,
+      "exit_time": 1788513600000,
+      "closed_at": "2026-09-04T09:20:00+00:00",
+      "pnl_percent": -0.3896734231744934,
+      "r_multiple": -1.0,
+      "result_r": -1.0,
+      "duration_minutes": 30.0
     },
     "447f0f7428b39c80": {
       "symbol": "ATOM",
@@ -443,7 +453,32 @@
       "signal_id": "c52a99649aa5face",
       "id": "c52a99649aa5face",
       "status": "OPEN"
+    },
+    "635fb4ad1405da5e": {
+      "symbol": "ALGO",
+      "side": "SELL",
+      "direction": "SELL",
+      "name": "ALGO",
+      "entry": 0.0925,
+      "sl": 0.09282375,
+      "tp1": 0.092014375,
+      "tp2": 0.091690625,
+      "tp3": 0.091366875,
+      "tp": 0.092014375,
+      "sl_percent": -0.3499999999999974,
+      "tp1_percent": 0.5250000000000037,
+      "tp2_percent": 0.8750000000000011,
+      "tp3_percent": 1.2249999999999988,
+      "risk_percent": 0.35000000000000003,
+      "atr": 0.00015543887182588702,
+      "atr_multiplier": 1.5,
+      "signal_time": 1788513900000,
+      "signal_time_iso": "2026-09-04T09:25:00+00:00",
+      "reason": "Bearish RSI Divergence + UT/Trendline",
+      "signal_id": "635fb4ad1405da5e",
+      "id": "635fb4ad1405da5e",
+      "status": "OPEN"
     }
   },
-  "last_run": "2026-09-04T09:17:14.865174+00:00"
+  "last_run": "2026-09-04T09:32:05.328883+00:00"
 }
