@@ -1,22 +1,36 @@
 # ============================================================
-# CRYPTO DIVERGENCE SCANNER v11.1 SCORE
+# CRYPTO DIVERGENCE SCANNER v11.1 SCORE - GLOBAL TOP AUTOPSY
+# ============================================================
 # Kraken Futures | Closed 5m Candles
 # RSI Divergence | Trendline Breakout/Breakdown
 # TradingView-style UT Bot | 15M + 1H Trend Filter
 # Candidate Scoring /100 | ONE GLOBAL TOP CANDIDATE
 #
-# NEW LOGIC:
-# Candidate Score
-#       ↓
-# ONE GLOBAL TOP CANDIDATE
-#       ↓
+# CORE LOGIC:
+#
+# ALL SYMBOLS
+#      ↓
+# CANDIDATE GENERATION
+#      ↓
+# SCORE /100
+#      ↓
+# GLOBAL RANKING
+#      ↓
+# HIGHEST SCORE ONLY
+#      ↓
+# AUTOPSY OF HIGHEST SCORE
+#      ↓
 # SETUP ENGINE
-#       ↓
-# Entry / SL / TP1 / TP2 / TP3
-#       ↓
-# Setup Validation
-#       ↓
+#      ↓
+# ENTRY / SL / TP1 / TP2 / TP3
+#      ↓
+# SETUP VALIDATION
+#      ↓
 # ONE GLOBAL FINAL SIGNAL
+#
+# IMPORTANT:
+# The highest-score candidate is NEVER replaced by a lower-score
+# candidate merely because the highest-score setup fails validation.
 #
 # One Open Trade Per Symbol | NO HEDGE
 # Partial TP1/TP2/TP3 | Dynamic SL Management
@@ -39,11 +53,13 @@ from datetime import datetime, timezone
 # ============================================================
 
 BASE_URL = "https://futures.kraken.com/api/charts/v1"
+
 INSTRUMENTS_URL = (
     "https://futures.kraken.com/derivatives/api/v3/instruments"
 )
 
 TIMEFRAME = "5m"
+
 CANDLE_LIMIT = 250
 
 COINS = [
@@ -100,6 +116,7 @@ MAX_SCORE = (
 )
 
 MIN_DISPLAY_CANDIDATE_SCORE = 65
+
 MIN_SIGNAL_SCORE = 75
 
 
@@ -107,19 +124,14 @@ MIN_SIGNAL_SCORE = 75
 # SETUP VALIDATION
 # ============================================================
 
-# جلوگیری از ورود وقتی قیمت بیش از حد از سیگنال فاصله گرفته
 MAX_ENTRY_CHASE_PERCENT = 0.60
 
-# حداقل R:R مورد قبول
 MIN_RR_TP1 = 1.50
 MIN_RR_TP2 = 2.50
 MIN_RR_TP3 = 3.50
 
-# برای تأیید بهتر ستاپ
 REQUIRE_BOTH_TRENDS = True
 
-# اگر True باشد برای BUY باید روند هر دو تایم‌فریم صعودی
-# و برای SELL هر دو نزولی باشند.
 REQUIRE_TREND_ALIGNMENT = True
 
 
@@ -128,18 +140,25 @@ REQUIRE_TREND_ALIGNMENT = True
 # ============================================================
 
 SL_ATR_PERIOD = 14
+
 SL_ATR_MULTIPLIER = 1.5
+
 SL_BUFFER_PERCENT = 0.10
 
 MIN_SL_DISTANCE_PERCENT = 0.35
+
 MAX_SL_DISTANCE_PERCENT = 2.00
 
 TP1_R_MULTIPLE = 1.5
+
 TP2_R_MULTIPLE = 2.5
+
 TP3_R_MULTIPLE = 3.5
 
 TP1_CLOSE_PERCENT = 33
+
 TP2_CLOSE_PERCENT = 33
+
 TP3_CLOSE_PERCENT = 34
 
 
@@ -148,7 +167,9 @@ TP3_CLOSE_PERCENT = 34
 # ============================================================
 
 UT_KEY_VALUE = 3.0
+
 UT_ATR_PERIOD = 10
+
 UT_USE_HEIKIN_ASHI = False
 
 
@@ -197,6 +218,7 @@ def send_telegram(message):
     )
 
     max_length = 3900
+
     chunks = []
 
     while len(message) > max_length:
@@ -277,8 +299,9 @@ def send_telegram(message):
 def default_state():
 
     return {
-        "version": 7,
-        "scanner_version": "11.1-SCORE",
+        "version": 8,
+        "scanner_version":
+            "11.1-SCORE-GLOBAL-TOP-AUTOPSY",
         "trades": {},
         "last_run": None,
     }
@@ -627,6 +650,7 @@ def rebuild_trade_container(state):
                 ).hexdigest()[:16]
 
                 trade["id"] = trade_id
+
                 trade["signal_id"] = trade_id
 
             rebuilt[
@@ -918,10 +942,15 @@ def get_candles(
                     continue
 
                 timestamp = candle[0]
+
                 open_price = candle[1]
+
                 high_price = candle[2]
+
                 low_price = candle[3]
+
                 close_price = candle[4]
+
                 volume = candle[5]
 
             else:
@@ -1224,6 +1253,7 @@ def pivot_highs(
 def find_bullish_divergence(df):
 
     lows = df["low"]
+
     rsi = df["rsi"]
 
     pivots = pivot_lows(
@@ -1297,6 +1327,7 @@ def find_bullish_divergence(df):
     ):
 
         return {
+
             "pivot_index":
                 latest,
 
@@ -1328,6 +1359,7 @@ def find_bullish_divergence(df):
 def find_bearish_divergence(df):
 
     highs = df["high"]
+
     rsi = df["rsi"]
 
     pivots = pivot_highs(
@@ -1401,6 +1433,7 @@ def find_bearish_divergence(df):
     ):
 
         return {
+
             "pivot_index":
                 latest,
 
@@ -1451,6 +1484,7 @@ def descending_trendline_break(df):
         return False
 
     p2 = indexes[-1]
+
     p1 = indexes[-2]
 
     if (
@@ -1523,6 +1557,7 @@ def ascending_trendline_break(df):
         return False
 
     p2 = indexes[-1]
+
     p1 = indexes[-2]
 
     if (
@@ -1587,7 +1622,9 @@ def calculate_atr(
 ):
 
     high = df["high"].astype(float)
+
     low = df["low"].astype(float)
+
     close = df["close"].astype(float)
 
     previous_close = close.shift(1)
@@ -1807,6 +1844,7 @@ def calculate_ut_bot(
         if not np.isfinite(
             previous_stop
         ):
+
             previous_stop = 0.0
 
         if (
@@ -2000,11 +2038,17 @@ def calculate_candidate_score(
     score = 0
 
     components = {
+
         "divergence": 0,
+
         "ut": 0,
+
         "trendline": 0,
+
         "trend_15m": 0,
+
         "trend_1h": 0,
+
         "volume": 0,
     }
 
@@ -2072,10 +2116,18 @@ def calculate_candidate_score(
         ] = VOLUME_SCORE
 
     return {
-        "score": score,
-        "components": components,
-        "label": score_label(score),
-        "volume_ratio": volume_ratio,
+
+        "score":
+            score,
+
+        "components":
+            components,
+
+        "label":
+            score_label(score),
+
+        "volume_ratio":
+            volume_ratio,
     }
 
 
@@ -2146,6 +2198,7 @@ def build_sl_tp(
     if side == "BUY":
 
         if swing_level is None:
+
             swing_distance = 0
 
         else:
@@ -2167,6 +2220,7 @@ def build_sl_tp(
     else:
 
         if swing_level is None:
+
             swing_distance = 0
 
         else:
@@ -2260,15 +2314,33 @@ def build_sl_tp(
         )
 
     return {
-        "sl": sl,
-        "tp1": tp1,
-        "tp2": tp2,
-        "tp3": tp3,
-        "risk_distance": risk_distance,
-        "risk_percent": risk_percent,
-        "rr1": TP1_R_MULTIPLE,
-        "rr2": TP2_R_MULTIPLE,
-        "rr3": TP3_R_MULTIPLE,
+
+        "sl":
+            sl,
+
+        "tp1":
+            tp1,
+
+        "tp2":
+            tp2,
+
+        "tp3":
+            tp3,
+
+        "risk_distance":
+            risk_distance,
+
+        "risk_percent":
+            risk_percent,
+
+        "rr1":
+            TP1_R_MULTIPLE,
+
+        "rr2":
+            TP2_R_MULTIPLE,
+
+        "rr3":
+            TP3_R_MULTIPLE,
     }
 
 
@@ -2338,8 +2410,13 @@ def build_trade_setup(
     if candidate is None:
         return None
 
-    symbol = candidate["symbol"]
-    side = candidate["side"]
+    symbol = candidate[
+        "symbol"
+    ]
+
+    side = candidate[
+        "side"
+    ]
 
     entry = float(
         candidate["entry"]
@@ -2357,27 +2434,35 @@ def build_trade_setup(
         candidate["score"]
     )
 
-    reasons = []
-
     # ========================================================
-    # SCORE VALIDATION
+    # SCORE
     # ========================================================
 
     if score < MIN_SIGNAL_SCORE:
 
         return {
-            "valid": False,
-            "reason": (
-                f"SCORE<{MIN_SIGNAL_SCORE}"
-            ),
-            "symbol": symbol,
-            "side": side,
-            "entry": entry,
-            "score": score,
+
+            "valid":
+                False,
+
+            "reason":
+                f"SCORE<{MIN_SIGNAL_SCORE}",
+
+            "symbol":
+                symbol,
+
+            "side":
+                side,
+
+            "entry":
+                entry,
+
+            "score":
+                score,
         }
 
     # ========================================================
-    # TREND VALIDATION
+    # TREND
     # ========================================================
 
     expected_trend = (
@@ -2394,12 +2479,24 @@ def build_trade_setup(
         ):
 
             return {
-                "valid": False,
-                "reason": "15M_TREND_FILTER",
-                "symbol": symbol,
-                "side": side,
-                "entry": entry,
-                "score": score,
+
+                "valid":
+                    False,
+
+                "reason":
+                    "15M_TREND_FILTER",
+
+                "symbol":
+                    symbol,
+
+                "side":
+                    side,
+
+                "entry":
+                    entry,
+
+                "score":
+                    score,
             }
 
         if (
@@ -2408,16 +2505,28 @@ def build_trade_setup(
         ):
 
             return {
-                "valid": False,
-                "reason": "1H_TREND_FILTER",
-                "symbol": symbol,
-                "side": side,
-                "entry": entry,
-                "score": score,
+
+                "valid":
+                    False,
+
+                "reason":
+                    "1H_TREND_FILTER",
+
+                "symbol":
+                    symbol,
+
+                "side":
+                    side,
+
+                "entry":
+                    entry,
+
+                "score":
+                    score,
             }
 
     # ========================================================
-    # CHASE FILTER
+    # CHASE
     # ========================================================
 
     if len(df) >= 2:
@@ -2443,12 +2552,25 @@ def build_trade_setup(
             ):
 
                 return {
-                    "valid": False,
-                    "reason": "ENTRY_CHASE",
-                    "symbol": symbol,
-                    "side": side,
-                    "entry": entry,
-                    "score": score,
+
+                    "valid":
+                        False,
+
+                    "reason":
+                        "ENTRY_CHASE",
+
+                    "symbol":
+                        symbol,
+
+                    "side":
+                        side,
+
+                    "entry":
+                        entry,
+
+                    "score":
+                        score,
+
                     "candle_move_percent":
                         candle_move,
                 }
@@ -2467,12 +2589,24 @@ def build_trade_setup(
     ):
 
         return {
-            "valid": False,
-            "reason": "INVALID_ATR",
-            "symbol": symbol,
-            "side": side,
-            "entry": entry,
-            "score": score,
+
+            "valid":
+                False,
+
+            "reason":
+                "INVALID_ATR",
+
+            "symbol":
+                symbol,
+
+            "side":
+                side,
+
+            "entry":
+                entry,
+
+            "score":
+                score,
         }
 
     # ========================================================
@@ -2511,91 +2645,174 @@ def build_trade_setup(
     if sl_tp is None:
 
         return {
-            "valid": False,
-            "reason": "INVALID_SL",
-            "symbol": symbol,
-            "side": side,
-            "entry": entry,
-            "score": score,
+
+            "valid":
+                False,
+
+            "reason":
+                "INVALID_SL",
+
+            "symbol":
+                symbol,
+
+            "side":
+                side,
+
+            "entry":
+                entry,
+
+            "score":
+                score,
         }
 
     # ========================================================
-    # RR VALIDATION
+    # RR
     # ========================================================
 
     rr1 = sl_tp["rr1"]
+
     rr2 = sl_tp["rr2"]
+
     rr3 = sl_tp["rr3"]
 
     if rr1 < MIN_RR_TP1:
 
         return {
-            "valid": False,
-            "reason": "RR_TP1",
-            "symbol": symbol,
-            "side": side,
-            "entry": entry,
-            "score": score,
-            "sl": sl_tp["sl"],
-            "tp1": sl_tp["tp1"],
-            "tp2": sl_tp["tp2"],
-            "tp3": sl_tp["tp3"],
+
+            "valid":
+                False,
+
+            "reason":
+                "RR_TP1",
+
+            "symbol":
+                symbol,
+
+            "side":
+                side,
+
+            "entry":
+                entry,
+
+            "score":
+                score,
+
+            "sl":
+                sl_tp["sl"],
+
+            "tp1":
+                sl_tp["tp1"],
+
+            "tp2":
+                sl_tp["tp2"],
+
+            "tp3":
+                sl_tp["tp3"],
         }
 
     if rr2 < MIN_RR_TP2:
 
         return {
-            "valid": False,
-            "reason": "RR_TP2",
-            "symbol": symbol,
-            "side": side,
-            "entry": entry,
-            "score": score,
-            "sl": sl_tp["sl"],
-            "tp1": sl_tp["tp1"],
-            "tp2": sl_tp["tp2"],
-            "tp3": sl_tp["tp3"],
+
+            "valid":
+                False,
+
+            "reason":
+                "RR_TP2",
+
+            "symbol":
+                symbol,
+
+            "side":
+                side,
+
+            "entry":
+                entry,
+
+            "score":
+                score,
+
+            "sl":
+                sl_tp["sl"],
+
+            "tp1":
+                sl_tp["tp1"],
+
+            "tp2":
+                sl_tp["tp2"],
+
+            "tp3":
+                sl_tp["tp3"],
         }
 
     if rr3 < MIN_RR_TP3:
 
         return {
-            "valid": False,
-            "reason": "RR_TP3",
-            "symbol": symbol,
-            "side": side,
-            "entry": entry,
-            "score": score,
-            "sl": sl_tp["sl"],
-            "tp1": sl_tp["tp1"],
-            "tp2": sl_tp["tp2"],
-            "tp3": sl_tp["tp3"],
+
+            "valid":
+                False,
+
+            "reason":
+                "RR_TP3",
+
+            "symbol":
+                symbol,
+
+            "side":
+                side,
+
+            "entry":
+                entry,
+
+            "score":
+                score,
+
+            "sl":
+                sl_tp["sl"],
+
+            "tp1":
+                sl_tp["tp1"],
+
+            "tp2":
+                sl_tp["tp2"],
+
+            "tp3":
+                sl_tp["tp3"],
         }
 
     # ========================================================
-    # FINAL VALID SETUP
+    # VALID SETUP
     # ========================================================
 
-    setup = dict(candidate)
+    setup = dict(
+        candidate
+    )
 
     setup.update({
 
-        "valid": True,
+        "valid":
+            True,
 
-        "setup_status": "VALID",
+        "setup_status":
+            "VALID",
 
         "setup_reason":
             "TOP SCORE + TREND + SL + RR VALID",
 
-        "entry": entry,
+        "entry":
+            entry,
 
-        "sl": sl_tp["sl"],
+        "sl":
+            sl_tp["sl"],
 
-        "tp1": sl_tp["tp1"],
+        "tp1":
+            sl_tp["tp1"],
 
-        "tp2": sl_tp["tp2"],
+        "tp2":
+            sl_tp["tp2"],
 
-        "tp3": sl_tp["tp3"],
+        "tp3":
+            sl_tp["tp3"],
 
         "risk_distance":
             sl_tp["risk_distance"],
@@ -2603,13 +2820,17 @@ def build_trade_setup(
         "risk_percent":
             sl_tp["risk_percent"],
 
-        "rr1": rr1,
+        "rr1":
+            rr1,
 
-        "rr2": rr2,
+        "rr2":
+            rr2,
 
-        "rr3": rr3,
+        "rr3":
+            rr3,
 
-        "atr": atr,
+        "atr":
+            atr,
 
         "swing_level":
             swing_level,
@@ -2702,7 +2923,9 @@ def register_signal(
     trade["name"] = signal["symbol"]
 
     trade["tp1_hit"] = False
+
     trade["tp2_hit"] = False
+
     trade["tp3_hit"] = False
 
     trade["remaining_percent"] = 100.0
@@ -2755,7 +2978,9 @@ def create_signal(
     )
 
     symbol = setup["symbol"]
+
     side = setup["side"]
+
     entry = setup["entry"]
 
     signal = {
@@ -3208,6 +3433,10 @@ def analyze_coin(symbol):
                 ),
         })
 
+    # ========================================================
+    # DIAGNOSTIC
+    # ========================================================
+
     diagnostic = {
 
         "symbol":
@@ -3291,7 +3520,24 @@ def analyze_coin(symbol):
 
 
 # ============================================================
-# ONE GLOBAL TOP CANDIDATE
+# GLOBAL CANDIDATE RANKING
+# ============================================================
+#
+# THIS FUNCTION IS THE CORE OF v11.1.
+#
+# It selects the highest SCORE candidate globally.
+#
+# Setup validation is NOT performed here.
+#
+# Therefore:
+#
+# SCORE 90 INVALID
+# SCORE 85 VALID
+#
+# => TOP CANDIDATE = SCORE 90
+#
+# The system will NOT silently switch to 85.
+#
 # ============================================================
 
 def get_global_top_candidate(
@@ -3300,6 +3546,8 @@ def get_global_top_candidate(
 ):
 
     candidates = []
+
+    blocked = set()
 
     for result in results:
 
@@ -3315,6 +3563,11 @@ def get_global_top_candidate(
                 symbol,
             )
         ):
+
+            blocked.add(
+                symbol
+            )
+
             continue
 
         for candidate in result.get(
@@ -3333,21 +3586,31 @@ def get_global_top_candidate(
     if not candidates:
         return None
 
+    # ========================================================
+    # PURE GLOBAL SCORE RANKING
+    # ========================================================
+
     candidates.sort(
         key=lambda x: (
-            x.get(
-                "score",
-                0,
+            float(
+                x.get(
+                    "score",
+                    0,
+                )
             ),
 
-            x.get(
-                "volume_ratio",
-                0,
+            float(
+                x.get(
+                    "volume_ratio",
+                    0,
+                )
             ),
 
-            x.get(
-                "direction_quality",
-                0,
+            int(
+                x.get(
+                    "direction_quality",
+                    0,
+                )
             ),
 
             int(
@@ -3360,17 +3623,34 @@ def get_global_top_candidate(
         reverse=True,
     )
 
-    return candidates[0]
+    top = candidates[0]
+
+    top["_global_rank"] = 1
+
+    top["_total_global_candidates"] = (
+        len(candidates)
+    )
+
+    top["_blocked_symbols"] = sorted(
+        blocked
+    )
+
+    return top
 
 
 # ============================================================
-# BUILD GLOBAL SETUP
+# GLOBAL TOP SETUP
 # ============================================================
 
 def build_global_top_setup(
     results,
     state,
 ):
+
+    # ========================================================
+    # STEP 1
+    # GET HIGHEST SCORE
+    # ========================================================
 
     top_candidate = (
         get_global_top_candidate(
@@ -3382,10 +3662,21 @@ def build_global_top_setup(
     if top_candidate is None:
 
         return {
-            "candidate": None,
-            "setup": None,
-            "reason": "NO_CANDIDATE",
+
+            "candidate":
+                None,
+
+            "setup":
+                None,
+
+            "reason":
+                "NO_CANDIDATE",
         }
+
+    # ========================================================
+    # STEP 2
+    # FIND DATA FOR SAME SYMBOL
+    # ========================================================
 
     symbol = (
         top_candidate["symbol"]
@@ -3403,14 +3694,21 @@ def build_global_top_setup(
     if result is None:
 
         return {
+
             "candidate":
                 top_candidate,
 
-            "setup": None,
+            "setup":
+                None,
 
             "reason":
                 "RESULT_NOT_FOUND",
         }
+
+    # ========================================================
+    # STEP 3
+    # AUTOPSY SAME TOP CANDIDATE
+    # ========================================================
 
     df = result["df"]
 
@@ -3419,7 +3717,13 @@ def build_global_top_setup(
         df,
     )
 
+    # ========================================================
+    # IMPORTANT:
+    # Never search for another candidate here.
+    # ========================================================
+
     return {
+
         "candidate":
             top_candidate,
 
@@ -3436,6 +3740,75 @@ def build_global_top_setup(
                 else "NO_SETUP"
             ),
     }
+
+
+# ============================================================
+# FORMAT DIVERGENCE AUTOPSY
+# ============================================================
+
+def format_divergence_autopsy(
+    candidate,
+):
+
+    data = candidate.get(
+        "divergence_data"
+    )
+
+    if not data:
+
+        return [
+            "Divergence Detail: N/A"
+        ]
+
+    side = candidate[
+        "side"
+    ]
+
+    lines = []
+
+    if side == "BUY":
+
+        lines.append(
+            "🔎 RSI BULLISH DIVERGENCE"
+        )
+
+    else:
+
+        lines.append(
+            "🔎 RSI BEARISH DIVERGENCE"
+        )
+
+    lines.append(
+        f"Previous Price: "
+        f"{format_price(data.get('price_previous'))}"
+    )
+
+    lines.append(
+        f"Latest Price: "
+        f"{format_price(data.get('price_latest'))}"
+    )
+
+    lines.append(
+        f"Price Change: "
+        f"{float(data.get('price_change', 0)):+.2f}%"
+    )
+
+    lines.append(
+        f"Previous RSI: "
+        f"{float(data.get('rsi_previous', 0)):.2f}"
+    )
+
+    lines.append(
+        f"Latest RSI: "
+        f"{float(data.get('rsi_latest', 0)):.2f}"
+    )
+
+    lines.append(
+        f"RSI Change: "
+        f"{float(data.get('rsi_change', 0)):+.2f}"
+    )
+
+    return lines
 
 
 # ============================================================
@@ -3518,6 +3891,12 @@ def format_top_candidate(
         f"⭐ SCORE: "
         f"{score}/{MAX_SCORE} {label}",
 
+        f"🌐 Global Candidate Rank: "
+        f"{candidate.get('_global_rank', 1)}",
+
+        f"📊 Candidates Compared: "
+        f"{candidate.get('_total_global_candidates', 1)}",
+
         "",
 
         "📊 SCORE BREAKDOWN",
@@ -3557,6 +3936,9 @@ def format_top_candidate(
         f"RSI: "
         f"{candidate['current_rsi']:.2f}",
 
+        f"UT Stop: "
+        f"{format_price(candidate['ut_stop'])}",
+
         f"Trend Filter: "
         f"{'PASS' if candidate['trend_ok'] else 'FAIL'}",
 
@@ -3565,10 +3947,61 @@ def format_top_candidate(
 
         "━━━━━━━━━━━━━━━━━━",
 
+        "🧬 AUTOPSY",
+
+    ]
+
+    lines.extend(
+        format_divergence_autopsy(
+            candidate
+        )
+    )
+
+    lines.extend([
+
+        "",
+
+        "📈 TREND ANALYSIS",
+
+        f"15M: "
+        f"{candidate['trend_15m']}",
+
+        f"1H: "
+        f"{candidate['trend_1h']}",
+
+        "",
+
+        "🤖 UT BOT",
+
+        f"BUY Trigger: "
+        f"{'YES' if candidate['ut'] and side == 'BUY' else 'NO'}",
+
+        f"SELL Trigger: "
+        f"{'YES' if candidate['ut'] and side == 'SELL' else 'NO'}",
+
+        "",
+
+        "📐 TRENDLINE",
+
+        f"Break Direction: "
+        f"{'YES' if candidate['trendline'] else 'NO'}",
+
+        "",
+
+        "🔊 VOLUME",
+
+        f"Volume Ratio: "
+        f"{candidate['volume_ratio']:.2f}x",
+
+        f"Volume Confirmation: "
+        f"{'PASS' if candidate['volume_ratio'] >= VOLUME_CONFIRMATION_RATIO else 'FAIL'}",
+
+        "",
+
         "🧩 SETUP ENGINE",
 
         f"Status: {status}",
-    ]
+    ])
 
     if setup is not None:
 
@@ -3581,6 +4014,12 @@ def format_top_candidate(
 
                 f"Entry: "
                 f"{format_price(setup['entry'])}",
+
+                f"ATR: "
+                f"{format_price(setup['atr'])}",
+
+                f"Swing Level: "
+                f"{format_price(setup.get('swing_level'))}",
 
                 f"SL: "
                 f"{format_price(setup['sl'])} "
@@ -3597,15 +4036,19 @@ def format_top_candidate(
                 f"TP3: "
                 f"{format_price(setup['tp3'])} "
                 f"RR 1:{setup['rr3']:.1f}",
-
             ])
 
         else:
 
-            lines.append(
-                f"Reason: "
-                f"{setup.get('reason', 'UNKNOWN')}"
-            )
+            lines.extend([
+
+                f"❌ Setup Rejection: "
+                f"{setup.get('reason', 'UNKNOWN')}",
+
+                "⚠️ IMPORTANT: "
+                "TOP CANDIDATE remains unchanged. "
+                "No lower-score candidate will replace it.",
+            ])
 
     return "\n".join(lines)
 
@@ -3750,9 +4193,11 @@ def close_trade(
     trade["status"] = "CLOSED"
 
     trade["exit_reason"] = reason
+
     trade["result_reason"] = reason
 
     trade["exit_price"] = price
+
     trade["result_price"] = price
 
     trade["exit_time"] = candle_time
@@ -4781,6 +5226,7 @@ def calculate_statistics(
     ]
 
     wins = []
+
     losses = []
 
     for trade in closed_trades:
@@ -4799,9 +5245,11 @@ def calculate_statistics(
             pnl = 0
 
         if pnl > 0:
+
             wins.append(trade)
 
         else:
+
             losses.append(trade)
 
     total_pnl = sum(
@@ -4938,6 +5386,7 @@ def calculate_diagnostics(
         if diagnostic.get(
             "bullish_divergence"
         ):
+
             stats[
                 "bullish_divergence"
             ] += 1
@@ -4945,6 +5394,7 @@ def calculate_diagnostics(
         if diagnostic.get(
             "bearish_divergence"
         ):
+
             stats[
                 "bearish_divergence"
             ] += 1
@@ -4952,6 +5402,7 @@ def calculate_diagnostics(
         if diagnostic.get(
             "bullish_break"
         ):
+
             stats[
                 "bullish_break"
             ] += 1
@@ -4959,6 +5410,7 @@ def calculate_diagnostics(
         if diagnostic.get(
             "bearish_break"
         ):
+
             stats[
                 "bearish_break"
             ] += 1
@@ -4966,6 +5418,7 @@ def calculate_diagnostics(
         if diagnostic.get(
             "ut_buy"
         ):
+
             stats[
                 "ut_buy"
             ] += 1
@@ -4973,6 +5426,7 @@ def calculate_diagnostics(
         if diagnostic.get(
             "ut_sell"
         ):
+
             stats[
                 "ut_sell"
             ] += 1
@@ -4985,11 +5439,13 @@ def calculate_diagnostics(
         )
 
         if "BUY" in candidate_sides:
+
             stats[
                 "buy_candidates"
             ] += 1
 
         if "SELL" in candidate_sides:
+
             stats[
                 "sell_candidates"
             ] += 1
@@ -5098,7 +5554,7 @@ def format_report(
     )
 
     lines.append(
-        "🎯 ONE GLOBAL TOP CANDIDATE"
+        "🎯 GLOBAL HIGHEST SCORE → AUTOPSY"
     )
 
     lines.append(
@@ -5197,7 +5653,7 @@ def format_report(
     ])
 
     # ========================================================
-    # SCORE
+    # SCORE SYSTEM
     # ========================================================
 
     lines.extend([
@@ -5239,7 +5695,7 @@ def format_report(
     ])
 
     # ========================================================
-    # GLOBAL TOP CANDIDATE
+    # TOP AUTOPSY
     # ========================================================
 
     lines.extend([
@@ -5294,8 +5750,8 @@ def format_report(
         elif top_setup is None:
 
             lines.append(
-                "TOP CANDIDATE ستاپ "
-                "معتبر تشکیل نداد."
+                "TOP CANDIDATE انتخاب شد "
+                "اما Setup ساخته نشد."
             )
 
         elif not top_setup.get(
@@ -5304,13 +5760,18 @@ def format_report(
         ):
 
             lines.append(
-                "TOP CANDIDATE انتخاب شد "
-                "اما SETUP نامعتبر است."
+                "❌ TOP CANDIDATE "
+                "Setup نامعتبر دارد."
             )
 
             lines.append(
                 f"Reason: "
                 f"{top_setup.get('reason', 'UNKNOWN')}"
+            )
+
+            lines.append(
+                "هیچ Candidate با امتیاز "
+                "پایین‌تر جایگزین نشد."
             )
 
         else:
@@ -5413,8 +5874,11 @@ def format_report(
             )
 
             side = item["side"]
+
             entry = item["entry"]
+
             sl = item["sl"]
+
             pnl = item["pnl_percent"]
 
             score = item.get(
@@ -5598,6 +6062,11 @@ def format_report(
         if top_candidate
         else "TOP CANDIDATE: NONE",
 
+        f"TOP SIDE: "
+        f"{top_candidate['side']}"
+        if top_candidate
+        else "TOP SIDE: NONE",
+
         f"TOP SCORE: "
         f"{top_candidate['score']}/100"
         if top_candidate
@@ -5637,10 +6106,13 @@ def format_signal(signal):
     )
 
     entry = signal["entry"]
+
     sl = signal["sl"]
 
     tp1 = signal["tp1"]
+
     tp2 = signal["tp2"]
+
     tp3 = signal["tp3"]
 
     score = signal.get(
@@ -5797,12 +6269,15 @@ def main():
                 )
 
     results = []
+
     errors = {}
+
     data_cache = {}
+
     blocked_symbols = []
 
     # ========================================================
-    # SCAN
+    # SCAN ALL SYMBOLS
     # ========================================================
 
     for symbol in COINS:
@@ -5841,12 +6316,20 @@ def main():
     )
 
     if changed:
+
         save_state(
             state
         )
 
     # ========================================================
     # GLOBAL TOP CANDIDATE
+    # ========================================================
+    #
+    # IMPORTANT:
+    # This selects ONLY the highest score.
+    #
+    # No SL/RR/CHASE validation occurs here.
+    #
     # ========================================================
 
     top_candidate = (
@@ -5857,7 +6340,7 @@ def main():
     )
 
     # ========================================================
-    # TOP CANDIDATE → SETUP ENGINE
+    # TOP CANDIDATE AUTOPSY
     # ========================================================
 
     top_setup = None
@@ -5882,6 +6365,12 @@ def main():
 
     # ========================================================
     # GLOBAL FINAL SIGNAL
+    # ========================================================
+    #
+    # ONLY THE TOP CANDIDATE CAN BECOME A SIGNAL.
+    #
+    # NEVER FALL BACK TO #2.
+    #
     # ========================================================
 
     new_registered = []
