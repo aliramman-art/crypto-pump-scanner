@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO DIVERGENCE SCANNER v9.0
+# CRYPTO DIVERGENCE SCANNER v10.0
 # Kraken Futures
 # 5M CLOSED CANDLES
 #
@@ -19,29 +19,21 @@
 #   +
 #   UT BOT 3,10 = SELL DIRECTION
 #
-# FEATURES
-#   - 30 coins
-#   - 5M timeframe
-#   - Closed candles only
-#   - Regular RSI divergence
-#   - Trendline breakout / breakdown
-#   - UT Bot 3,10 directional filter
-#   - Swing-based SL
-#   - Nearest S/R TP
-#   - Minimum TP distance: 0.30%
-#   - SL percentage
-#   - TP percentage
-#   - RR
-#   - Telegram
+# ADDED:
+#   - Persistent trade history
+#   - Automatic TP / SL evaluation
+#   - WIN / LOSS / OPEN
+#   - Cumulative Win Rate
+#   - Net R
+#   - Expectancy
+#   - Profit Factor
+#   - BUY / SELL statistics
+#   - Duplicate signal protection
 #
-# IMPORTANT
-#   No cumulative statistics
-#   No persistent trade history
-#   No state file
 # ============================================================
 
-
 import os
+import json
 import requests
 import pandas as pd
 import numpy as np
@@ -61,6 +53,13 @@ CANDLE_LIMIT = 500
 MAX_WORKERS = 15
 
 TOP_SIGNAL_LIMIT = 10
+
+# Persistent trade history
+STATE_FILE = "trade_history.json"
+
+# Prevent multiple simultaneous OPEN trades
+# on the same coin.
+ALLOW_MULTIPLE_OPEN_PER_SYMBOL = False
 
 
 # ============================================================
@@ -109,24 +108,9 @@ MIN_TP_DISTANCE_PERCENT = 0.30
 # UT BOT CONFIG
 # ============================================================
 
-# Exact values requested:
-#
-# Key Value = 3
-# ATR Period = 10
-
 UT_KEY_VALUE = 3.0
 
 UT_ATR_PERIOD = 10
-
-# Original Pine:
-#
-# h = input(false)
-#
-# Therefore:
-# False = normal candle close
-# True  = Heikin Ashi close
-#
-# We keep it False to match the source defaults.
 
 UT_USE_HEIKIN_ASHI = False
 
@@ -138,63 +122,34 @@ UT_USE_HEIKIN_ASHI = False
 COINS = {
 
     "BTC": "pf_xbtusd",
-
     "ETH": "pf_ethusd",
-
     "BNB": "pf_bnbusd",
-
     "SOL": "pf_solusd",
-
     "XRP": "pf_xrpusd",
-
     "DOGE": "pf_dogeusd",
-
     "ADA": "pf_adausd",
-
     "AVAX": "pf_avaxusd",
-
     "LINK": "pf_linkusd",
-
     "DOT": "pf_dotusd",
-
     "TRX": "pf_trxusd",
-
     "LTC": "pf_ltcusd",
-
     "BCH": "pf_bchusd",
-
     "ATOM": "pf_atomusd",
-
     "UNI": "pf_uniusd",
-
     "ETC": "pf_etcusd",
-
     "XLM": "pf_xlmusd",
-
     "NEAR": "pf_nearusd",
-
     "APT": "pf_aptusd",
-
     "FIL": "pf_filusd",
-
     "ARB": "pf_arbusd",
-
     "OP": "pf_opusd",
-
     "SUI": "pf_suiusd",
-
     "INJ": "pf_injusd",
-
     "AAVE": "pf_aaveusd",
-
     "MKR": "pf_mkrusd",
-
     "ALGO": "pf_algousd",
-
     "VET": "pf_vetusd",
-
     "SEI": "pf_seiusd",
-
     "TIA": "pf_tiausd",
 
 }
@@ -279,6 +234,885 @@ def send_telegram(text):
 
 
 # ============================================================
+# PERSISTENT STATE
+# ============================================================
+
+def default_state():
+
+    return {
+
+        "version": 1,
+
+        "trades": {}
+
+    }
+
+
+def load_state():
+
+    if not os.path.exists(
+        STATE_FILE
+    ):
+
+        return default_state()
+
+    try:
+
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            state = json.load(f)
+
+        if not isinstance(
+            state,
+            dict
+        ):
+
+            return default_state()
+
+        if "trades" not in state:
+
+            state["trades"] = {}
+
+        return state
+
+    except Exception as e:
+
+        print(
+            "State load error:",
+            e
+        )
+
+        return default_state()
+
+
+def save_state(state):
+
+    try:
+
+        temp_file = (
+            STATE_FILE
+            +
+            ".tmp"
+        )
+
+        with open(
+            temp_file,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+
+                state,
+
+                f,
+
+                ensure_ascii=False,
+
+                indent=2
+
+            )
+
+        os.replace(
+            temp_file,
+            STATE_FILE
+        )
+
+        return True
+
+    except Exception as e:
+
+        print(
+            "State save error:",
+            e
+        )
+
+        return False
+
+
+# ============================================================
+# SIGNAL ID
+# ============================================================
+
+def make_signal_id(signal):
+
+    return "|".join([
+
+        signal["name"],
+
+        signal["direction"],
+
+        signal["signal_time"],
+
+        signal["swing_time"],
+
+        signal["trendline"],
+
+        str(
+            signal.get(
+                "div_p1",
+                ""
+            )
+        ),
+
+        str(
+            signal.get(
+                "div_p2",
+                ""
+            )
+        ),
+
+    ])
+
+
+# ============================================================
+# REGISTER SIGNAL
+# ============================================================
+
+def register_signal(
+    state,
+    signal
+):
+
+    signal_id = make_signal_id(
+        signal
+    )
+
+    # --------------------------------------------------------
+    # Duplicate protection
+    # --------------------------------------------------------
+
+    if signal_id in state["trades"]:
+
+        return False
+
+    # --------------------------------------------------------
+    # Only one OPEN trade per symbol
+    # --------------------------------------------------------
+
+    if not ALLOW_MULTIPLE_OPEN_PER_SYMBOL:
+
+        for trade in state["trades"].values():
+
+            if (
+
+                trade.get("symbol")
+                ==
+                signal["symbol"]
+
+                and
+
+                trade.get("status")
+                ==
+                "OPEN"
+
+            ):
+
+                return False
+
+    # --------------------------------------------------------
+    # Create trade
+    # --------------------------------------------------------
+
+    trade = dict(signal)
+
+    trade["id"] = signal_id
+
+    trade["status"] = "OPEN"
+
+    trade["opened_at"] = (
+        signal["signal_time"]
+    )
+
+    trade["closed_at"] = None
+
+    trade["result_price"] = None
+
+    trade["result_r"] = None
+
+    trade["result_reason"] = None
+
+    state["trades"][
+        signal_id
+    ] = trade
+
+    return True
+
+
+# ============================================================
+# EVALUATE OPEN TRADES
+# ============================================================
+
+def evaluate_open_trades(
+    state
+):
+
+    open_trades = [
+
+        trade
+
+        for trade in
+        state["trades"].values()
+
+        if trade.get("status")
+        ==
+        "OPEN"
+
+    ]
+
+    if not open_trades:
+
+        return 0
+
+    grouped = {}
+
+    for trade in open_trades:
+
+        symbol = trade["symbol"]
+
+        grouped.setdefault(
+            symbol,
+            []
+        ).append(trade)
+
+    closed_count = 0
+
+    symbol_to_name = {
+
+        symbol: name
+
+        for name, symbol
+        in COINS.items()
+
+    }
+
+    for symbol, trades in grouped.items():
+
+        df, error = get_candles(
+            symbol
+        )
+
+        if df is None:
+
+            print(
+
+                "Cannot evaluate",
+                symbol,
+                error
+
+            )
+
+            continue
+
+        for trade in trades:
+
+            try:
+
+                signal_time = pd.Timestamp(
+
+                    trade["signal_time"]
+
+                )
+
+                # ------------------------------------------------
+                # IMPORTANT:
+                #
+                # The signal entry is the CLOSE of the
+                # signal candle.
+                #
+                # Therefore evaluation starts from the
+                # NEXT closed candle.
+                # ------------------------------------------------
+
+                future = df[
+
+                    df["time"]
+                    >
+                    signal_time
+
+                ].sort_values(
+                    "time"
+                )
+
+                if future.empty:
+
+                    continue
+
+                direction = (
+                    trade["direction"]
+                )
+
+                sl = float(
+                    trade["sl"]
+                )
+
+                tp = float(
+                    trade["tp"]
+                )
+
+                rr = float(
+                    trade["rr"]
+                )
+
+                for _, candle in future.iterrows():
+
+                    candle_time = (
+                        candle["time"]
+                    )
+
+                    candle_high = float(
+                        candle["high"]
+                    )
+
+                    candle_low = float(
+                        candle["low"]
+                    )
+
+                    # ====================================================
+                    # BUY
+                    # ====================================================
+
+                    if direction == "BUY":
+
+                        hit_sl = (
+                            candle_low
+                            <=
+                            sl
+                        )
+
+                        hit_tp = (
+                            candle_high
+                            >=
+                            tp
+                        )
+
+                        # ------------------------------------------------
+                        # Both TP and SL inside same candle.
+                        #
+                        # OHLC cannot tell us which happened first.
+                        #
+                        # Conservative classification = LOSS.
+                        # ------------------------------------------------
+
+                        if hit_sl and hit_tp:
+
+                            trade["status"] = "LOSS"
+
+                            trade["closed_at"] = (
+                                candle_time.isoformat()
+                            )
+
+                            trade["result_price"] = sl
+
+                            trade["result_r"] = -1.0
+
+                            trade["result_reason"] = (
+                                "both_hit_same_candle_"
+                                "conservative_loss"
+                            )
+
+                            closed_count += 1
+
+                            print(
+
+                                f"LOSS "
+                                f"{trade['name']} BUY "
+                                f"both TP/SL same candle"
+
+                            )
+
+                            break
+
+                        if hit_sl:
+
+                            trade["status"] = "LOSS"
+
+                            trade["closed_at"] = (
+                                candle_time.isoformat()
+                            )
+
+                            trade["result_price"] = sl
+
+                            trade["result_r"] = -1.0
+
+                            trade["result_reason"] = (
+                                "SL"
+                            )
+
+                            closed_count += 1
+
+                            print(
+
+                                f"LOSS "
+                                f"{trade['name']} BUY "
+                                f"SL"
+
+                            )
+
+                            break
+
+                        if hit_tp:
+
+                            trade["status"] = "WIN"
+
+                            trade["closed_at"] = (
+                                candle_time.isoformat()
+                            )
+
+                            trade["result_price"] = tp
+
+                            trade["result_r"] = rr
+
+                            trade["result_reason"] = (
+                                "TP"
+                            )
+
+                            closed_count += 1
+
+                            print(
+
+                                f"WIN "
+                                f"{trade['name']} BUY "
+                                f"TP +{rr:.2f}R"
+
+                            )
+
+                            break
+
+                    # ====================================================
+                    # SELL
+                    # ====================================================
+
+                    elif direction == "SELL":
+
+                        hit_sl = (
+                            candle_high
+                            >=
+                            sl
+                        )
+
+                        hit_tp = (
+                            candle_low
+                            <=
+                            tp
+                        )
+
+                        if hit_sl and hit_tp:
+
+                            trade["status"] = "LOSS"
+
+                            trade["closed_at"] = (
+                                candle_time.isoformat()
+                            )
+
+                            trade["result_price"] = sl
+
+                            trade["result_r"] = -1.0
+
+                            trade["result_reason"] = (
+                                "both_hit_same_candle_"
+                                "conservative_loss"
+                            )
+
+                            closed_count += 1
+
+                            print(
+
+                                f"LOSS "
+                                f"{trade['name']} SELL "
+                                f"both TP/SL same candle"
+
+                            )
+
+                            break
+
+                        if hit_sl:
+
+                            trade["status"] = "LOSS"
+
+                            trade["closed_at"] = (
+                                candle_time.isoformat()
+                            )
+
+                            trade["result_price"] = sl
+
+                            trade["result_r"] = -1.0
+
+                            trade["result_reason"] = (
+                                "SL"
+                            )
+
+                            closed_count += 1
+
+                            print(
+
+                                f"LOSS "
+                                f"{trade['name']} SELL "
+                                f"SL"
+
+                            )
+
+                            break
+
+                        if hit_tp:
+
+                            trade["status"] = "WIN"
+
+                            trade["closed_at"] = (
+                                candle_time.isoformat()
+                            )
+
+                            trade["result_price"] = tp
+
+                            trade["result_r"] = rr
+
+                            trade["result_reason"] = (
+                                "TP"
+                            )
+
+                            closed_count += 1
+
+                            print(
+
+                                f"WIN "
+                                f"{trade['name']} SELL "
+                                f"TP +{rr:.2f}R"
+
+                            )
+
+                            break
+
+            except Exception as e:
+
+                print(
+
+                    "Trade evaluation error:",
+                    trade.get("name"),
+                    e
+
+                )
+
+    return closed_count
+
+
+# ============================================================
+# CUMULATIVE STATISTICS
+# ============================================================
+
+def calculate_statistics(
+    state
+):
+
+    trades = list(
+        state["trades"].values()
+    )
+
+    total = len(trades)
+
+    open_count = sum(
+
+        1
+
+        for t in trades
+
+        if t.get("status")
+        ==
+        "OPEN"
+
+    )
+
+    closed = [
+
+        t
+
+        for t in trades
+
+        if t.get("status")
+        in
+        (
+            "WIN",
+            "LOSS"
+        )
+
+    ]
+
+    wins = [
+
+        t
+
+        for t in closed
+
+        if t.get("status")
+        ==
+        "WIN"
+
+    ]
+
+    losses = [
+
+        t
+
+        for t in closed
+
+        if t.get("status")
+        ==
+        "LOSS"
+
+    ]
+
+    closed_count = len(closed)
+
+    win_count = len(wins)
+
+    loss_count = len(losses)
+
+    if closed_count > 0:
+
+        win_rate = (
+            win_count
+            /
+            closed_count
+            *
+            100
+        )
+
+    else:
+
+        win_rate = 0.0
+
+    gross_profit_r = sum(
+
+        float(
+            t.get(
+                "result_r",
+                0
+            )
+            or 0
+        )
+
+        for t in wins
+
+    )
+
+    gross_loss_r = abs(
+
+        sum(
+
+            float(
+                t.get(
+                    "result_r",
+                    0
+                )
+                or 0
+            )
+
+            for t in losses
+
+        )
+
+    )
+
+    net_r = (
+        gross_profit_r
+        -
+        gross_loss_r
+    )
+
+    if gross_loss_r > 0:
+
+        profit_factor = (
+            gross_profit_r
+            /
+            gross_loss_r
+        )
+
+    else:
+
+        profit_factor = (
+            float("inf")
+            if gross_profit_r > 0
+            else 0.0
+        )
+
+    if closed_count > 0:
+
+        expectancy = (
+            net_r
+            /
+            closed_count
+        )
+
+    else:
+
+        expectancy = 0.0
+
+    buy_trades = [
+
+        t
+
+        for t in closed
+
+        if t.get("direction")
+        ==
+        "BUY"
+
+    ]
+
+    sell_trades = [
+
+        t
+
+        for t in closed
+
+        if t.get("direction")
+        ==
+        "SELL"
+
+    ]
+
+    buy_wins = sum(
+
+        1
+
+        for t in buy_trades
+
+        if t.get("status")
+        ==
+        "WIN"
+
+    )
+
+    buy_losses = sum(
+
+        1
+
+        for t in buy_trades
+
+        if t.get("status")
+        ==
+        "LOSS"
+
+    )
+
+    sell_wins = sum(
+
+        1
+
+        for t in sell_trades
+
+        if t.get("status")
+        ==
+        "WIN"
+
+    )
+
+    sell_losses = sum(
+
+        1
+
+        for t in sell_trades
+
+        if t.get("status")
+        ==
+        "LOSS"
+
+    )
+
+    buy_closed = len(
+        buy_trades
+    )
+
+    sell_closed = len(
+        sell_trades
+    )
+
+    buy_rate = (
+
+        buy_wins
+        /
+        buy_closed
+        *
+        100
+
+        if buy_closed > 0
+        else 0.0
+
+    )
+
+    sell_rate = (
+
+        sell_wins
+        /
+        sell_closed
+        *
+        100
+
+        if sell_closed > 0
+        else 0.0
+
+    )
+
+    return {
+
+        "total":
+            total,
+
+        "open":
+            open_count,
+
+        "closed":
+            closed_count,
+
+        "wins":
+            win_count,
+
+        "losses":
+            loss_count,
+
+        "win_rate":
+            win_rate,
+
+        "gross_profit_r":
+            gross_profit_r,
+
+        "gross_loss_r":
+            gross_loss_r,
+
+        "net_r":
+            net_r,
+
+        "profit_factor":
+            profit_factor,
+
+        "expectancy":
+            expectancy,
+
+        "buy_wins":
+            buy_wins,
+
+        "buy_losses":
+            buy_losses,
+
+        "buy_rate":
+            buy_rate,
+
+        "sell_wins":
+            sell_wins,
+
+        "sell_losses":
+            sell_losses,
+
+        "sell_rate":
+            sell_rate,
+
+    }
+
+
+# ============================================================
 # RSI
 # ============================================================
 
@@ -314,15 +1148,18 @@ def calculate_rsi(
     ).mean()
 
     rs = (
+
         avg_gain
         /
         avg_loss.replace(
             0,
             np.nan
         )
+
     )
 
     rsi = (
+
         100
         -
         (
@@ -330,6 +1167,7 @@ def calculate_rsi(
             /
             (1 + rs)
         )
+
     )
 
     return rsi.fillna(50)
@@ -391,10 +1229,6 @@ def get_candles(
 
         for c in candles:
 
-            # ------------------------------------------------
-            # Kraken dictionary format
-            # ------------------------------------------------
-
             if isinstance(c, dict):
 
                 rows.append({
@@ -419,27 +1253,29 @@ def get_candles(
 
                 })
 
-            # ------------------------------------------------
-            # Kraken list format
-            # ------------------------------------------------
-
             elif isinstance(c, list):
 
                 if len(c) >= 6:
 
                     rows.append({
 
-                        "time": c[0],
+                        "time":
+                            c[0],
 
-                        "open": c[1],
+                        "open":
+                            c[1],
 
-                        "high": c[2],
+                        "high":
+                            c[2],
 
-                        "low": c[3],
+                        "low":
+                            c[3],
 
-                        "close": c[4],
+                        "close":
+                            c[4],
 
-                        "volume": c[5]
+                        "volume":
+                            c[5]
 
                     })
 
@@ -456,15 +1292,10 @@ def get_candles(
         required = [
 
             "time",
-
             "open",
-
             "high",
-
             "low",
-
             "close",
-
             "volume"
 
         ]
@@ -478,20 +1309,12 @@ def get_candles(
                     f"{col}"
                 )
 
-        # ----------------------------------------------------
-        # Numeric conversion
-        # ----------------------------------------------------
-
         numeric_columns = [
 
             "open",
-
             "high",
-
             "low",
-
             "close",
-
             "volume"
 
         ]
@@ -505,10 +1328,6 @@ def get_candles(
                 errors="coerce"
 
             )
-
-        # ----------------------------------------------------
-        # Time conversion
-        # ----------------------------------------------------
 
         df["time"] = pd.to_datetime(
 
@@ -533,10 +1352,6 @@ def get_candles(
             subset=["time"]
 
         )
-
-        # ----------------------------------------------------
-        # Remove currently forming candle
-        # ----------------------------------------------------
 
         now = pd.Timestamp.now(
             tz="UTC"
@@ -563,10 +1378,13 @@ def get_candles(
             )
 
         return (
+
             df.reset_index(
                 drop=True
             ),
+
             None
+
         )
 
     except Exception as e:
@@ -673,7 +1491,7 @@ def pivot_highs(df):
 
 
 # ============================================================
-# REGULAR BULLISH DIVERGENCE
+# BULLISH DIVERGENCE
 # ============================================================
 
 def find_bullish_divergence(df):
@@ -744,13 +1562,6 @@ def find_bullish_divergence(df):
 
         )
 
-        # ----------------------------------------------------
-        # Regular bullish divergence
-        #
-        # Price = Lower Low
-        # RSI   = Higher Low
-        # ----------------------------------------------------
-
         if (
 
             price_change
@@ -794,7 +1605,7 @@ def find_bullish_divergence(df):
 
 
 # ============================================================
-# REGULAR BEARISH DIVERGENCE
+# BEARISH DIVERGENCE
 # ============================================================
 
 def find_bearish_divergence(df):
@@ -865,13 +1676,6 @@ def find_bearish_divergence(df):
 
         )
 
-        # ----------------------------------------------------
-        # Regular bearish divergence
-        #
-        # Price = Higher High
-        # RSI   = Lower High
-        # ----------------------------------------------------
-
         if (
 
             price_change
@@ -915,7 +1719,7 @@ def find_bearish_divergence(df):
 
 
 # ============================================================
-# DESCENDING TRENDLINE BREAKOUT
+# DESCENDING TRENDLINE BREAK
 # ============================================================
 
 def descending_trendline_break(df):
@@ -973,10 +1777,6 @@ def descending_trendline_break(df):
             df.iloc[p2]["high"]
         )
 
-        # ----------------------------------------------------
-        # Descending highs
-        # ----------------------------------------------------
-
         if h2 >= h1:
 
             continue
@@ -994,9 +1794,7 @@ def descending_trendline_break(df):
         line_prev = (
 
             h2
-
             +
-
             slope
             *
             (
@@ -1008,9 +1806,7 @@ def descending_trendline_break(df):
         line_curr = (
 
             h2
-
             +
-
             slope
             *
             (
@@ -1018,13 +1814,6 @@ def descending_trendline_break(df):
             )
 
         )
-
-        # ----------------------------------------------------
-        # Breakout:
-        #
-        # Previous close below/equal line
-        # Current close above line
-        # ----------------------------------------------------
 
         if (
 
@@ -1057,7 +1846,7 @@ def descending_trendline_break(df):
 
 
 # ============================================================
-# ASCENDING TRENDLINE BREAKDOWN
+# ASCENDING TRENDLINE BREAK
 # ============================================================
 
 def ascending_trendline_break(df):
@@ -1115,10 +1904,6 @@ def ascending_trendline_break(df):
             df.iloc[p2]["low"]
         )
 
-        # ----------------------------------------------------
-        # Ascending lows
-        # ----------------------------------------------------
-
         if l2 <= l1:
 
             continue
@@ -1136,9 +1921,7 @@ def ascending_trendline_break(df):
         line_prev = (
 
             l2
-
             +
-
             slope
             *
             (
@@ -1150,9 +1933,7 @@ def ascending_trendline_break(df):
         line_curr = (
 
             l2
-
             +
-
             slope
             *
             (
@@ -1160,13 +1941,6 @@ def ascending_trendline_break(df):
             )
 
         )
-
-        # ----------------------------------------------------
-        # Breakdown:
-        #
-        # Previous close above/equal line
-        # Current close below line
-        # ----------------------------------------------------
 
         if (
 
@@ -1222,12 +1996,20 @@ def calculate_atr(
     )
 
     tr2 = (
-        (high - previous_close)
+        (
+            high
+            -
+            previous_close
+        )
         .abs()
     )
 
     tr3 = (
-        (low - previous_close)
+        (
+            low
+            -
+            previous_close
+        )
         .abs()
     )
 
@@ -1243,12 +2025,6 @@ def calculate_atr(
 
     ).max(axis=1)
 
-    # TradingView Pine atr()
-    # uses Wilder/RMA smoothing.
-    #
-    # RMA equivalent:
-    # ewm(alpha=1/period)
-
     atr = true_range.ewm(
 
         alpha=1 / period,
@@ -1262,63 +2038,6 @@ def calculate_atr(
 
 # ============================================================
 # UT BOT
-# EXACT LOGIC FROM PROVIDED PINE SCRIPT
-#
-# Pine:
-#
-# a = 3
-# c = 10
-# h = false
-#
-# xATR  = atr(c)
-# nLoss = a * xATR
-#
-# src = close
-#
-# xATRTrailingStop := iff(
-#     src > nz(stop[1],0)
-#     and
-#     src[1] > nz(stop[1],0),
-#     max(stop[1], src - nLoss),
-#
-#     iff(
-#         src < nz(stop[1],0)
-#         and
-#         src[1] < nz(stop[1],0),
-#         min(stop[1], src + nLoss),
-#
-#         iff(
-#             src > nz(stop[1],0),
-#             src - nLoss,
-#             src + nLoss
-#         )
-#     )
-# )
-#
-# pos := iff(
-#     src[1] < stop[1]
-#     and
-#     src > stop[1],
-#     1,
-#
-#     iff(
-#         src[1] > stop[1]
-#         and
-#         src < stop[1],
-#         -1,
-#         pos[1]
-#     )
-# )
-#
-# buy = src > stop and crossover(ema(src,1), stop)
-#
-# sell = src < stop and crossover(stop, ema(src,1))
-#
-# For filtering direction:
-#
-# BUY  = src > trailing stop
-# SELL = src < trailing stop
-#
 # ============================================================
 
 def calculate_ut_bot(
@@ -1329,22 +2048,11 @@ def calculate_ut_bot(
 
     work = df.copy()
 
-    # --------------------------------------------------------
-    # Source
-    #
-    # h=False in original script.
-    # Therefore source = normal close.
-    # --------------------------------------------------------
-
     src = (
         work["close"]
         .astype(float)
         .values
     )
-
-    # --------------------------------------------------------
-    # ATR
-    # --------------------------------------------------------
 
     atr = calculate_atr(
 
@@ -1370,10 +2078,6 @@ def calculate_ut_bot(
         n,
         dtype=int
     )
-
-    # --------------------------------------------------------
-    # Exact recursive UT Bot logic
-    # --------------------------------------------------------
 
     for i in range(n):
 
@@ -1410,28 +2114,6 @@ def calculate_ut_bot(
             previous_pos = (
                 pos[i - 1]
             )
-
-        # ----------------------------------------------------
-        # Pine:
-        #
-        # iff(
-        #   src > stop[1]
-        #   and src[1] > stop[1],
-        #   max(stop[1], src-nLoss),
-        #
-        #   iff(
-        #     src < stop[1]
-        #     and src[1] < stop[1],
-        #     min(stop[1], src+nLoss),
-        #
-        #     iff(
-        #       src > stop[1],
-        #       src-nLoss,
-        #       src+nLoss
-        #     )
-        #   )
-        # )
-        # ----------------------------------------------------
 
         if (
 
@@ -1503,10 +2185,6 @@ def calculate_ut_bot(
 
                 )
 
-        # ----------------------------------------------------
-        # Pine pos logic
-        # ----------------------------------------------------
-
         if i == 0:
 
             pos[i] = 0
@@ -1557,38 +2235,17 @@ def calculate_ut_bot(
 
     work["ut_pos"] = pos
 
-    # --------------------------------------------------------
-    # Direction
-    #
-    # We use the same basic directional state:
-    #
-    # src > trailing stop = BUY PATH
-    # src < trailing stop = SELL PATH
-    # --------------------------------------------------------
-
     direction = []
 
     for i in range(n):
 
-        if (
-
-            src[i]
-            >
-            trailing_stop[i]
-
-        ):
+        if src[i] > trailing_stop[i]:
 
             direction.append(
                 "BUY"
             )
 
-        elif (
-
-            src[i]
-            <
-            trailing_stop[i]
-
-        ):
+        elif src[i] < trailing_stop[i]:
 
             direction.append(
                 "SELL"
@@ -1600,20 +2257,7 @@ def calculate_ut_bot(
                 "NEUTRAL"
             )
 
-    work["ut_direction"] = (
-        direction
-    )
-
-    # --------------------------------------------------------
-    # Exact UT Bot buy/sell event
-    #
-    # EMA(src,1) = src
-    #
-    # crossover(a,b):
-    #
-    # a > b AND previous a <= previous b
-    #
-    # --------------------------------------------------------
+    work["ut_direction"] = direction
 
     buy_signal = np.zeros(
         n,
@@ -1639,9 +2283,6 @@ def calculate_ut_bot(
             trailing_stop[i - 1]
         )
 
-        # Pine:
-        # buy = src > stop and crossover(src, stop)
-
         if (
 
             ema_current
@@ -1657,9 +2298,6 @@ def calculate_ut_bot(
         ):
 
             buy_signal[i] = True
-
-        # Pine:
-        # sell = src < stop and crossover(stop, src)
 
         if (
 
@@ -1718,13 +2356,9 @@ def nearest_resistance(
                 -
                 entry
             )
-
             /
-
             entry
-
             *
-
             100
 
         )
@@ -1776,13 +2410,9 @@ def nearest_support(
                 -
                 price
             )
-
             /
-
             entry
-
             *
-
             100
 
         )
@@ -1841,10 +2471,6 @@ def analyze_coin(
 
     try:
 
-        # ====================================================
-        # RSI
-        # ====================================================
-
         df["rsi"] = calculate_rsi(
 
             df["close"],
@@ -1852,10 +2478,6 @@ def analyze_coin(
             RSI_PERIOD
 
         )
-
-        # ====================================================
-        # UT BOT 3,10
-        # ====================================================
 
         df = calculate_ut_bot(
 
@@ -1866,10 +2488,6 @@ def analyze_coin(
             atr_period=UT_ATR_PERIOD
 
         )
-
-        # ====================================================
-        # DIVERGENCES
-        # ====================================================
 
         bullish = (
             find_bullish_divergence(
@@ -1883,10 +2501,6 @@ def analyze_coin(
             )
         )
 
-        # ====================================================
-        # TRENDLINE BREAKS
-        # ====================================================
-
         down_break = (
             descending_trendline_break(
                 df
@@ -1898,10 +2512,6 @@ def analyze_coin(
                 df
             )
         )
-
-        # ====================================================
-        # LAST CLOSED CANDLE
-        # ====================================================
 
         last_index = (
             len(df) - 1
@@ -1942,7 +2552,7 @@ def analyze_coin(
         candidates = []
 
         # ====================================================
-        # BUY SETUP
+        # BUY
         # ====================================================
 
         if (
@@ -1959,13 +2569,9 @@ def analyze_coin(
                 bullish["p2"]
             )
 
-            break_index = (
-                last_index
-            )
-
             age_bars = (
 
-                break_index
+                last_index
                 -
                 div_index
 
@@ -1974,10 +2580,6 @@ def analyze_coin(
             age_minutes = (
                 age_bars * 5
             )
-
-            # ------------------------------------------------
-            # Divergence must be fresh
-            # ------------------------------------------------
 
             if (
 
@@ -1989,19 +2591,7 @@ def analyze_coin(
 
             ):
 
-                # ------------------------------------------------
-                # UT Bot directional filter
-                #
-                # BUY only when UT Bot is in BUY path.
-                # ------------------------------------------------
-
-                if (
-
-                    ut_direction
-                    ==
-                    "BUY"
-
-                ):
+                if ut_direction == "BUY":
 
                     swing_low = float(
 
@@ -2014,9 +2604,7 @@ def analyze_coin(
                     sl = (
 
                         swing_low
-
                         *
-
                         (
                             1
                             -
@@ -2027,11 +2615,12 @@ def analyze_coin(
 
                     )
 
-                    tp = (
-                        nearest_resistance(
-                            df,
-                            entry
-                        )
+                    tp = nearest_resistance(
+
+                        df,
+
+                        entry
+
                     )
 
                     if tp is not None:
@@ -2051,9 +2640,7 @@ def analyze_coin(
                         if (
 
                             risk > 0
-
                             and
-
                             reward > 0
 
                         ):
@@ -2065,13 +2652,9 @@ def analyze_coin(
                                     -
                                     sl
                                 )
-
                                 /
-
                                 entry
-
                                 *
-
                                 100
 
                             )
@@ -2083,13 +2666,9 @@ def analyze_coin(
                                     -
                                     entry
                                 )
-
                                 /
-
                                 entry
-
                                 *
-
                                 100
 
                             )
@@ -2165,12 +2744,18 @@ def analyze_coin(
                                     ut_stop,
 
                                 "ut_event":
-                                    ut_buy_event
+                                    ut_buy_event,
+
+                                "div_p1":
+                                    bullish["p1"],
+
+                                "div_p2":
+                                    bullish["p2"]
 
                             })
 
         # ====================================================
-        # SELL SETUP
+        # SELL
         # ====================================================
 
         if (
@@ -2187,13 +2772,9 @@ def analyze_coin(
                 bearish["p2"]
             )
 
-            break_index = (
-                last_index
-            )
-
             age_bars = (
 
-                break_index
+                last_index
                 -
                 div_index
 
@@ -2202,10 +2783,6 @@ def analyze_coin(
             age_minutes = (
                 age_bars * 5
             )
-
-            # ------------------------------------------------
-            # Divergence must be fresh
-            # ------------------------------------------------
 
             if (
 
@@ -2217,19 +2794,7 @@ def analyze_coin(
 
             ):
 
-                # ------------------------------------------------
-                # UT Bot directional filter
-                #
-                # SELL only when UT Bot is in SELL path.
-                # ------------------------------------------------
-
-                if (
-
-                    ut_direction
-                    ==
-                    "SELL"
-
-                ):
+                if ut_direction == "SELL":
 
                     swing_high = float(
 
@@ -2242,9 +2807,7 @@ def analyze_coin(
                     sl = (
 
                         swing_high
-
                         *
-
                         (
                             1
                             +
@@ -2255,11 +2818,12 @@ def analyze_coin(
 
                     )
 
-                    tp = (
-                        nearest_support(
-                            df,
-                            entry
-                        )
+                    tp = nearest_support(
+
+                        df,
+
+                        entry
+
                     )
 
                     if tp is not None:
@@ -2279,9 +2843,7 @@ def analyze_coin(
                         if (
 
                             risk > 0
-
                             and
-
                             reward > 0
 
                         ):
@@ -2293,13 +2855,9 @@ def analyze_coin(
                                     -
                                     entry
                                 )
-
                                 /
-
                                 entry
-
                                 *
-
                                 100
 
                             )
@@ -2311,13 +2869,9 @@ def analyze_coin(
                                     -
                                     tp
                                 )
-
                                 /
-
                                 entry
-
                                 *
-
                                 100
 
                             )
@@ -2393,13 +2947,15 @@ def analyze_coin(
                                     ut_stop,
 
                                 "ut_event":
-                                    ut_sell_event
+                                    ut_sell_event,
+
+                                "div_p1":
+                                    bearish["p1"],
+
+                                "div_p2":
+                                    bearish["p2"]
 
                             })
-
-        # ====================================================
-        # NO SIGNAL
-        # ====================================================
 
         if not candidates:
 
@@ -2432,10 +2988,6 @@ def analyze_coin(
                     ut_pos
 
             }
-
-        # ====================================================
-        # RETURN SIGNAL
-        # ====================================================
 
         signal = candidates[0]
 
@@ -2601,7 +3153,8 @@ def format_signal(
 
 def format_report(
     results,
-    new_signals
+    new_signals,
+    stats
 ):
 
     data_ok = sum(
@@ -2650,7 +3203,7 @@ def format_report(
 
         "📡 "
         "<b>CRYPTO DIVERGENCE "
-        "SCANNER v9.0</b>"
+        "SCANNER v10.0</b>"
 
     )
 
@@ -2704,13 +3257,129 @@ def format_report(
     lines.append("")
 
     # ========================================================
-    # SIGNALS
+    # CUMULATIVE PERFORMANCE
+    # ========================================================
+
+    lines.append(
+        "📊 <b>CUMULATIVE PERFORMANCE</b>"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    lines.append(
+
+        f"📈 Total Trades: "
+        f"<b>{stats['total']}</b>"
+
+    )
+
+    lines.append(
+
+        f"⏳ Open: "
+        f"<b>{stats['open']}</b>"
+
+    )
+
+    lines.append(
+
+        f"📁 Closed: "
+        f"<b>{stats['closed']}</b>"
+
+    )
+
+    lines.append(
+
+        f"🟢 Wins: "
+        f"<b>{stats['wins']}</b>"
+
+    )
+
+    lines.append(
+
+        f"🔴 Losses: "
+        f"<b>{stats['losses']}</b>"
+
+    )
+
+    lines.append(
+
+        f"🎯 Win Rate: "
+        f"<b>{stats['win_rate']:.2f}%</b>"
+
+    )
+
+    net_r = stats["net_r"]
+
+    net_emoji = (
+        "🟢"
+        if net_r >= 0
+        else
+        "🔴"
+    )
+
+    lines.append(
+
+        f"{net_emoji} Net R: "
+        f"<b>{net_r:+.2f}R</b>"
+
+    )
+
+    lines.append(
+
+        f"📐 Expectancy: "
+        f"<b>{stats['expectancy']:+.3f}R</b>"
+
+    )
+
+    if stats["profit_factor"] == float("inf"):
+
+        pf_text = "∞"
+
+    else:
+
+        pf_text = (
+            f"{stats['profit_factor']:.2f}"
+        )
+
+    lines.append(
+
+        f"💰 Profit Factor: "
+        f"<b>{pf_text}</b>"
+
+    )
+
+    lines.append("")
+
+    lines.append(
+
+        f"🟢 BUY: "
+        f"{stats['buy_wins']}W / "
+        f"{stats['buy_losses']}L "
+        f"({stats['buy_rate']:.2f}%)"
+
+    )
+
+    lines.append(
+
+        f"🔴 SELL: "
+        f"{stats['sell_wins']}W / "
+        f"{stats['sell_losses']}L "
+        f"({stats['sell_rate']:.2f}%)"
+
+    )
+
+    lines.append("")
+
+    # ========================================================
+    # NEW SIGNALS
     # ========================================================
 
     if new_signals:
 
         lines.append(
-            "🚨 <b>CONFIRMED SIGNALS</b>"
+            "🚨 <b>NEW CONFIRMED SIGNALS</b>"
         )
 
         lines.append(
@@ -2732,7 +3401,7 @@ def format_report(
     else:
 
         lines.append(
-            "👀 <b>NO SIGNAL</b>"
+            "👀 <b>NO NEW SIGNAL</b>"
         )
 
         lines.append("")
@@ -2829,7 +3498,7 @@ def main():
     )
 
     print(
-        "CRYPTO DIVERGENCE SCANNER v9.0"
+        "CRYPTO DIVERGENCE SCANNER v10.0"
     )
 
     print(
@@ -2865,6 +3534,40 @@ def main():
     )
 
     print("")
+
+    # ========================================================
+    # LOAD HISTORY
+    # ========================================================
+
+    state = load_state()
+
+    print(
+        "Historical trades:",
+        len(state["trades"])
+    )
+
+    # ========================================================
+    # EVALUATE OLD OPEN TRADES
+    # ========================================================
+
+    closed_before_scan = (
+        evaluate_open_trades(
+            state
+        )
+    )
+
+    if closed_before_scan:
+
+        print(
+
+            "Trades closed:",
+            closed_before_scan
+
+        )
+
+    save_state(
+        state
+    )
 
     # ========================================================
     # ANALYZE ALL COINS
@@ -2944,7 +3647,7 @@ def main():
     )
 
     # ========================================================
-    # COLLECT SIGNALS
+    # REGISTER NEW SIGNALS
     # ========================================================
 
     new_signals = []
@@ -2955,7 +3658,19 @@ def main():
             "signal"
         )
 
-        if signal:
+        if not signal:
+
+            continue
+
+        registered = register_signal(
+
+            state,
+
+            signal
+
+        )
+
+        if registered:
 
             new_signals.append(
                 signal
@@ -2963,16 +3678,24 @@ def main():
 
             print(
 
-                "SIGNAL:",
+                "NEW SIGNAL:",
+                signal["name"],
+                signal["direction"]
+
+            )
+
+        else:
+
+            print(
+
+                "DUPLICATE / BLOCKED:",
                 signal["name"],
                 signal["direction"]
 
             )
 
     # ========================================================
-    # SORT SIGNALS
-    #
-    # Highest RR first
+    # SORT NEW SIGNALS
     # ========================================================
 
     new_signals.sort(
@@ -2982,6 +3705,39 @@ def main():
 
         reverse=True
 
+    )
+
+    # ========================================================
+    # SAVE NEW SIGNALS
+    # ========================================================
+
+    save_state(
+        state
+    )
+
+    # ========================================================
+    # EVALUATE AGAIN
+    #
+    # Normally newly registered signals remain OPEN because
+    # there are no candles after the signal candle yet.
+    #
+    # This second evaluation also protects against edge cases.
+    # ========================================================
+
+    evaluate_open_trades(
+        state
+    )
+
+    save_state(
+        state
+    )
+
+    # ========================================================
+    # STATISTICS
+    # ========================================================
+
+    stats = calculate_statistics(
+        state
     )
 
     # ========================================================
@@ -3044,12 +3800,95 @@ def main():
     )
 
     print(
-        "CONFIRMED SIGNALS:",
+        "NEW SIGNALS:",
         len(new_signals)
     )
 
+    print("")
+
+    print(
+        "CUMULATIVE PERFORMANCE"
+    )
+
+    print(
+        "----------------------"
+    )
+
+    print(
+        "Total trades:",
+        stats["total"]
+    )
+
+    print(
+        "Open:",
+        stats["open"]
+    )
+
+    print(
+        "Closed:",
+        stats["closed"]
+    )
+
+    print(
+        "Wins:",
+        stats["wins"]
+    )
+
+    print(
+        "Losses:",
+        stats["losses"]
+    )
+
+    print(
+        "Win rate:",
+        f"{stats['win_rate']:.2f}%"
+    )
+
+    print(
+        "Net R:",
+        f"{stats['net_r']:+.2f}R"
+    )
+
+    print(
+        "Expectancy:",
+        f"{stats['expectancy']:+.3f}R"
+    )
+
+    if stats["profit_factor"] == float("inf"):
+
+        print(
+            "Profit Factor: ∞"
+        )
+
+    else:
+
+        print(
+
+            "Profit Factor:",
+            f"{stats['profit_factor']:.2f}"
+
+        )
+
+    print(
+
+        "BUY:",
+        f"{stats['buy_wins']}W / "
+        f"{stats['buy_losses']}L "
+        f"({stats['buy_rate']:.2f}%)"
+
+    )
+
+    print(
+
+        "SELL:",
+        f"{stats['sell_wins']}W / "
+        f"{stats['sell_losses']}L "
+        f"({stats['sell_rate']:.2f}%)"
+
+    )
+
     # ========================================================
-    # PRINT SIGNALS
+    # PRINT NEW SIGNALS
     # ========================================================
 
     if new_signals:
@@ -3057,11 +3896,11 @@ def main():
         print("")
 
         print(
-            "CONFIRMED SIGNALS"
+            "NEW CONFIRMED SIGNALS"
         )
 
         print(
-            "------------------"
+            "----------------------"
         )
 
         for signal in new_signals:
@@ -3129,7 +3968,9 @@ def main():
 
         results,
 
-        new_signals
+        new_signals,
+
+        stats
 
     )
 
