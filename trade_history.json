@@ -1,4 +1,35 @@
 {
   "version": 1,
-  "trades": {}
+  "trades": {
+    "UNI|SELL|2026-09-04T04:50:00+00:00|2026-09-04T03:05:00+00:00|ASCENDING BREAKDOWN|471|477": {
+      "direction": "SELL",
+      "name": "UNI",
+      "symbol": "pf_uniusd",
+      "entry": 6.197,
+      "sl": 6.513506999999999,
+      "tp": 6.177,
+      "sl_percent": 5.107422946587039,
+      "tp_percent": 0.322736808132975,
+      "rr": 0.06318975567681138,
+      "signal_time": "2026-09-04T04:50:00+00:00",
+      "swing_time": "2026-09-04T03:05:00+00:00",
+      "divergence": "REGULAR BEARISH",
+      "trendline": "ASCENDING BREAKDOWN",
+      "rsi": 27.792739042490055,
+      "div_age_minutes": 105,
+      "ut_direction": "SELL",
+      "ut_pos": -1,
+      "ut_trailing_stop": 6.311653338638471,
+      "ut_event": false,
+      "div_p1": 471,
+      "div_p2": 477,
+      "id": "UNI|SELL|2026-09-04T04:50:00+00:00|2026-09-04T03:05:00+00:00|ASCENDING BREAKDOWN|471|477",
+      "status": "OPEN",
+      "opened_at": "2026-09-04T04:50:00+00:00",
+      "closed_at": null,
+      "result_price": null,
+      "result_r": null,
+      "result_reason": null
+    }
+  }
 }
