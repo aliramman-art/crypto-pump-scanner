@@ -12,26 +12,20 @@
 # Open Signal P&L
 # P&L / R / MFE / MAE / Duration
 # Closed Signals Report
-# Fixed BUY / SELL Emojis
+# Signal Diagnostic / Rejection Reasons
 # ATR Based SL
 # R Based TP
-# SL / TP Percentages
 # Telegram
 #
-# v10.4 CHANGES:
-# - NEW STATE FILE: trade_history_v10.4.json
-# - v10.3 statistics/trades are NOT imported
-# - Only one OPEN trade allowed per symbol
-# - No duplicate signal while symbol has OPEN trade
-# - No opposite-direction hedge while symbol has OPEN trade
-# - 15M trend filter
-# - 1H trend filter
-# - BUY requires 15M + 1H bullish trend
-# - SELL requires 15M + 1H bearish trend
-# - Trend = EMA20 / EMA50 + price position
-# - Current P&L displayed in Telegram as Markdown Bold
-# - No P&L emoji
-# - Existing ATR / SL / TP / MFE / MAE logic preserved
+# v10.4
+# - NEW STATE FILE
+# - Cumulative statistics start from ZERO
+# - One OPEN trade per symbol
+# - No opposite-direction hedge
+# - 15M + 1H trend filter
+# - Current P&L Bold
+# - Signal Diagnostic
+# - Rejection reasons
 # ============================================================
 
 import os
@@ -56,64 +50,31 @@ TIMEFRAME = "5m"
 CANDLE_LIMIT = 250
 
 COINS = [
-    "BTC",
-    "ETH",
-    "SOL",
-    "XRP",
-    "ADA",
-    "DOGE",
-    "AVAX",
-    "LINK",
-    "DOT",
-    "LTC",
-    "BCH",
-    "ATOM",
-    "UNI",
-    "AAVE",
-    "FIL",
-    "ETC",
-    "NEAR",
-    "APT",
-    "ARB",
-    "OP",
-    "SUI",
-    "SEI",
-    "INJ",
-    "TIA",
-    "TRX",
-    "XLM",
-    "ALGO",
-    "VET",
-    "MATIC",
-    "HBAR",
+    "BTC", "ETH", "SOL", "XRP", "ADA",
+    "DOGE", "AVAX", "LINK", "DOT", "LTC",
+    "BCH", "ATOM", "UNI", "AAVE", "FIL",
+    "ETC", "NEAR", "APT", "ARB", "OP",
+    "SUI", "SEI", "INJ", "TIA", "TRX",
+    "XLM", "ALGO", "VET", "MATIC", "HBAR",
 ]
 
-
 # ============================================================
-# IMPORTANT:
-# NEW STATE FILE FOR v10.4
-#
-# This intentionally does NOT use v10.3 trade_history.json.
-# Therefore cumulative statistics start from ZERO.
+# NEW STATE FILE
 # ============================================================
 
 STATE_FILE = "trade_history_v10.4.json"
 
-
 # ============================================================
 # ONE OPEN TRADE PER SYMBOL
-#
-# False = no duplicate and no hedge
 # ============================================================
 
 ALLOW_MULTIPLE_OPEN_PER_SYMBOL = False
-
 
 REQUEST_TIMEOUT = 20
 
 
 # ============================================================
-# MULTI-TIMEFRAME TREND FILTER
+# MULTI-TIMEFRAME TREND
 # ============================================================
 
 TREND_FAST_EMA = 20
@@ -133,7 +94,7 @@ RSI_PERIOD = 14
 
 
 # ============================================================
-# DIVERGENCE PIVOTS
+# DIVERGENCE
 # ============================================================
 
 PIVOT_LEFT = 2
@@ -149,13 +110,11 @@ MIN_PRICE_DIFFERENCE_PERCENT = 0.10
 # ============================================================
 
 SL_ATR_PERIOD = 14
-
 SL_ATR_MULTIPLIER = 1.5
 
 SL_BUFFER_PERCENT = 0.10
 
 MIN_SL_DISTANCE_PERCENT = 0.35
-
 MAX_SL_DISTANCE_PERCENT = 2.00
 
 TP1_R_MULTIPLE = 1.5
@@ -223,14 +182,13 @@ def send_telegram(message):
     }
 
     try:
-
-        r = SESSION.post(
+        response = SESSION.post(
             url,
             json=payload,
             timeout=REQUEST_TIMEOUT
         )
 
-        return r.ok
+        return response.ok
 
     except Exception:
         return False
@@ -251,11 +209,6 @@ def default_state():
 
 
 def load_state():
-
-    # --------------------------------------------------------
-    # v10.4 deliberately uses a new state file.
-    # Old v10.3 statistics are therefore NOT loaded.
-    # --------------------------------------------------------
 
     if not os.path.exists(STATE_FILE):
         return default_state()
@@ -280,7 +233,6 @@ def load_state():
             data["trades"],
             (dict, list)
         ):
-
             data["trades"] = {}
 
         return data
@@ -332,19 +284,13 @@ def get_all_trades(state):
         {}
     )
 
-    if isinstance(
-        trades,
-        dict
-    ):
+    if isinstance(trades, dict):
 
         result = []
 
         for key, trade in trades.items():
 
-            if isinstance(
-                trade,
-                dict
-            ):
+            if isinstance(trade, dict):
 
                 if not trade.get("id"):
                     trade["id"] = key
@@ -352,16 +298,11 @@ def get_all_trades(state):
                 if not trade.get("signal_id"):
                     trade["signal_id"] = key
 
-                result.append(
-                    trade
-                )
+                result.append(trade)
 
         return result
 
-    if isinstance(
-        trades,
-        list
-    ):
+    if isinstance(trades, list):
 
         return [
             x for x in trades
@@ -373,33 +314,20 @@ def get_all_trades(state):
 
 def normalize_side(trade):
 
-    side = trade.get(
-        "side"
-    )
+    side = trade.get("side")
 
     if not side:
-
-        side = trade.get(
-            "direction"
-        )
+        side = trade.get("direction")
 
     if not side:
         return ""
 
-    side = str(
-        side
-    ).upper().strip()
+    side = str(side).upper().strip()
 
-    if side in (
-        "LONG",
-        "BUY"
-    ):
+    if side in ("LONG", "BUY"):
         return "BUY"
 
-    if side in (
-        "SHORT",
-        "SELL"
-    ):
+    if side in ("SHORT", "SELL"):
         return "SELL"
 
     return side
@@ -407,23 +335,13 @@ def normalize_side(trade):
 
 def normalize_coin(trade):
 
-    name = trade.get(
-        "name"
-    )
+    name = trade.get("name")
 
     if name:
-
-        return str(
-            name
-        ).upper()
-
-    symbol = trade.get(
-        "symbol",
-        ""
-    )
+        return str(name).upper()
 
     symbol = str(
-        symbol
+        trade.get("symbol", "")
     ).upper()
 
     if symbol.startswith("PF_"):
@@ -446,28 +364,16 @@ def parse_trade_time(value):
     if value is None:
         return None
 
-    if isinstance(
-        value,
-        (int, float)
-    ):
+    if isinstance(value, (int, float)):
+        return int(value)
 
-        return int(
-            value
-        )
-
-    value = str(
-        value
-    ).strip()
+    value = str(value).strip()
 
     if not value:
         return None
 
     try:
-
-        return int(
-            float(value)
-        )
-
+        return int(float(value))
     except Exception:
         pass
 
@@ -478,12 +384,9 @@ def parse_trade_time(value):
         if iso.endswith("Z"):
             iso = iso[:-1] + "+00:00"
 
-        dt = datetime.fromisoformat(
-            iso
-        )
+        dt = datetime.fromisoformat(iso)
 
         if dt.tzinfo is None:
-
             dt = dt.replace(
                 tzinfo=timezone.utc
             )
@@ -499,106 +402,57 @@ def parse_trade_time(value):
 
 def get_trade_tp1(trade):
 
-    value = trade.get(
-        "tp1"
-    )
+    value = trade.get("tp1")
 
     if value is None:
-
-        value = trade.get(
-            "tp"
-        )
-
-    if value is None:
-        return None
+        value = trade.get("tp")
 
     try:
-
         return float(value)
-
     except Exception:
-
         return None
 
 
 def get_trade_tp2(trade):
 
-    value = trade.get(
-        "tp2"
-    )
-
-    if value is None:
-        return None
-
     try:
-
-        return float(value)
-
+        return float(trade.get("tp2"))
     except Exception:
-
         return None
 
 
 def get_trade_tp3(trade):
 
-    value = trade.get(
-        "tp3"
-    )
-
-    if value is None:
-        return None
-
     try:
-
-        return float(value)
-
+        return float(trade.get("tp3"))
     except Exception:
-
         return None
 
 
 def get_trade_entry(trade):
 
     try:
-
-        return float(
-            trade.get(
-                "entry"
-            )
-        )
-
+        return float(trade.get("entry"))
     except Exception:
-
         return None
 
 
 def get_trade_sl(trade):
 
     try:
-
-        return float(
-            trade.get(
-                "sl"
-            )
-        )
-
+        return float(trade.get("sl"))
     except Exception:
-
         return None
 
 
 def get_trade_id(trade):
 
-    value = trade.get(
-        "signal_id"
-    )
+    value = trade.get("signal_id")
 
     if value:
         return str(value)
 
-    value = trade.get(
-        "id"
-    )
+    value = trade.get("id")
 
     if value:
         return str(value)
@@ -608,23 +462,15 @@ def get_trade_id(trade):
 
 def rebuild_trade_container(state):
 
-    trades = state.get(
-        "trades",
-        {}
-    )
+    trades = state.get("trades", {})
 
-    if isinstance(
-        trades,
-        dict
-    ):
+    if isinstance(trades, dict):
 
         rebuilt = {}
 
         for trade in get_all_trades(state):
 
-            trade_id = get_trade_id(
-                trade
-            )
+            trade_id = get_trade_id(trade)
 
             if not trade_id:
 
@@ -639,20 +485,13 @@ def rebuild_trade_container(state):
                 trade["id"] = trade_id
                 trade["signal_id"] = trade_id
 
-            rebuilt[
-                trade_id
-            ] = trade
+            rebuilt[trade_id] = trade
 
         state["trades"] = rebuilt
 
-    elif isinstance(
-        trades,
-        list
-    ):
+    elif isinstance(trades, list):
 
-        state["trades"] = get_all_trades(
-            state
-        )
+        state["trades"] = get_all_trades(state)
 
     else:
 
@@ -683,7 +522,7 @@ def make_signal_id(
 
 
 # ============================================================
-# KRAKEN FUTURES INSTRUMENTS
+# MARKET MAP
 # ============================================================
 
 def load_market_map():
@@ -692,14 +531,14 @@ def load_market_map():
 
     try:
 
-        r = SESSION.get(
+        response = SESSION.get(
             INSTRUMENTS_URL,
             timeout=REQUEST_TIMEOUT
         )
 
-        r.raise_for_status()
+        response.raise_for_status()
 
-        data = r.json()
+        data = response.json()
 
         instruments = data.get(
             "instruments",
@@ -711,31 +550,19 @@ def load_market_map():
         for item in instruments:
 
             symbol = str(
-                item.get(
-                    "symbol",
-                    ""
-                )
+                item.get("symbol", "")
             ).upper()
 
             base = str(
-                item.get(
-                    "base",
-                    ""
-                )
+                item.get("base", "")
             ).upper()
 
             quote = str(
-                item.get(
-                    "quote",
-                    ""
-                )
+                item.get("quote", "")
             ).upper()
 
             instrument_type = str(
-                item.get(
-                    "type",
-                    ""
-                )
+                item.get("type", "")
             ).lower()
 
             tradeable = item.get(
@@ -760,6 +587,12 @@ def load_market_map():
             if quote != "USD":
                 continue
 
+            if base == "XBT":
+                base = "BTC"
+
+            if base not in COINS:
+                continue
+
             score = 0
 
             if symbol.startswith("PF_"):
@@ -771,28 +604,17 @@ def load_market_map():
             if instrument_type == "futures_inverse":
                 score += 50
 
-            normalized_base = base
-
-            if normalized_base == "XBT":
-                normalized_base = "BTC"
-
-            if normalized_base not in COINS:
-                continue
-
             candidate = (
                 score,
                 symbol
             )
 
             if (
-                normalized_base not in result
-                or candidate[0]
-                > result[normalized_base][0]
+                base not in result
+                or candidate[0] > result[base][0]
             ):
 
-                result[
-                    normalized_base
-                ] = candidate
+                result[base] = candidate
 
         MARKET_MAP = {
             coin: value[1]
@@ -810,9 +632,7 @@ def load_market_map():
 
 def get_market_symbol(coin):
 
-    coin = str(
-        coin
-    ).upper()
+    coin = str(coin).upper()
 
     if coin == "XBT":
         coin = "BTC"
@@ -820,9 +640,7 @@ def get_market_symbol(coin):
     if coin not in MARKET_MAP:
         load_market_map()
 
-    symbol = MARKET_MAP.get(
-        coin
-    )
+    symbol = MARKET_MAP.get(coin)
 
     if not symbol:
 
@@ -842,9 +660,7 @@ def get_candles(
     timeframe="5m"
 ):
 
-    futures_symbol = get_market_symbol(
-        symbol
-    )
+    futures_symbol = get_market_symbol(symbol)
 
     url = (
         f"{BASE_URL}/trade/"
@@ -852,25 +668,21 @@ def get_candles(
         f"{timeframe}"
     )
 
-    params = {
-        "count": CANDLE_LIMIT
-    }
-
-    r = SESSION.get(
+    response = SESSION.get(
         url,
-        params=params,
+        params={"count": CANDLE_LIMIT},
         timeout=REQUEST_TIMEOUT
     )
 
-    if not r.ok:
+    if not response.ok:
 
         raise RuntimeError(
-            f"HTTP {r.status_code} | "
+            f"HTTP {response.status_code} | "
             f"{futures_symbol} | "
-            f"{r.text[:250]}"
+            f"{response.text[:250]}"
         )
 
-    data = r.json()
+    data = response.json()
 
     candles = data.get(
         "candles",
@@ -886,57 +698,32 @@ def get_candles(
 
     rows = []
 
-    for c in candles:
+    for candle in candles:
 
         try:
 
-            if isinstance(
-                c,
-                dict
-            ):
+            if isinstance(candle, dict):
 
-                timestamp = c.get(
-                    "time"
-                )
+                timestamp = candle.get("time")
+                open_price = candle.get("open")
+                high_price = candle.get("high")
+                low_price = candle.get("low")
+                close_price = candle.get("close")
+                volume = candle.get("volume", 0)
 
-                open_price = c.get(
-                    "open"
-                )
+            elif isinstance(candle, (list, tuple)):
 
-                high_price = c.get(
-                    "high"
-                )
-
-                low_price = c.get(
-                    "low"
-                )
-
-                close_price = c.get(
-                    "close"
-                )
-
-                volume = c.get(
-                    "volume",
-                    0
-                )
-
-            elif isinstance(
-                c,
-                (list, tuple)
-            ):
-
-                if len(c) < 6:
+                if len(candle) < 6:
                     continue
 
-                timestamp = c[0]
-                open_price = c[1]
-                high_price = c[2]
-                low_price = c[3]
-                close_price = c[4]
-                volume = c[5]
+                timestamp = candle[0]
+                open_price = candle[1]
+                high_price = candle[2]
+                low_price = candle[3]
+                close_price = candle[4]
+                volume = candle[5]
 
             else:
-
                 continue
 
             if timestamp is None:
@@ -952,7 +739,6 @@ def get_candles(
             })
 
         except Exception:
-
             continue
 
     if not rows:
@@ -962,9 +748,7 @@ def get_candles(
             f"{futures_symbol} {timeframe}"
         )
 
-    df = pd.DataFrame(
-        rows
-    )
+    df = pd.DataFrame(rows)
 
     df = df.drop_duplicates(
         subset=["time"]
@@ -972,17 +756,7 @@ def get_candles(
 
     df = df.sort_values(
         "time"
-    ).reset_index(
-        drop=True
-    )
-
-    # ========================================================
-    # REMOVE CURRENT INCOMPLETE CANDLE
-    # ========================================================
-
-    now_ms = int(
-        time.time() * 1000
-    )
+    ).reset_index(drop=True)
 
     timeframe_minutes = {
         "5m": 5,
@@ -1001,16 +775,17 @@ def get_candles(
         * 1000
     )
 
+    now_ms = int(
+        time.time() * 1000
+    )
+
     if len(df) > 0:
 
         last_time = int(
             df.iloc[-1]["time"]
         )
 
-        if (
-            last_time + candle_ms
-            > now_ms
-        ):
+        if last_time + candle_ms > now_ms:
 
             df = df.iloc[:-1].copy()
 
@@ -1040,7 +815,7 @@ def calculate_ema(
 
 
 # ============================================================
-# MULTI-TIMEFRAME TREND
+# TREND
 # ============================================================
 
 def determine_trend(df):
@@ -1079,22 +854,18 @@ def determine_trend(df):
         current_close > current_fast
         and current_fast > current_slow
     ):
-
         return "BULLISH"
 
     if (
         current_close < current_fast
         and current_fast < current_slow
     ):
-
         return "BEARISH"
 
     return "NEUTRAL"
 
 
-def get_multi_timeframe_trend(
-    symbol
-):
+def get_multi_timeframe_trend(symbol):
 
     trend_data = {}
 
@@ -1105,48 +876,12 @@ def get_multi_timeframe_trend(
             timeframe
         )
 
-        trend = determine_trend(
-            df
-        )
-
-        trend_data[
-            timeframe
-        ] = {
-            "trend": trend,
+        trend_data[timeframe] = {
+            "trend": determine_trend(df),
             "df": df,
         }
 
     return trend_data
-
-
-def trend_allows_signal(
-    side,
-    trend_data
-):
-
-    trend_15m = trend_data[
-        "15m"
-    ]["trend"]
-
-    trend_1h = trend_data[
-        "1h"
-    ]["trend"]
-
-    if side == "BUY":
-
-        return (
-            trend_15m == "BULLISH"
-            and trend_1h == "BULLISH"
-        )
-
-    if side == "SELL":
-
-        return (
-            trend_15m == "BEARISH"
-            and trend_1h == "BEARISH"
-        )
-
-    return False
 
 
 # ============================================================
@@ -1160,13 +895,8 @@ def calculate_rsi(
 
     delta = series.diff()
 
-    gain = delta.clip(
-        lower=0
-    )
-
-    loss = -delta.clip(
-        upper=0
-    )
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
 
     avg_gain = gain.ewm(
         alpha=1 / period,
@@ -1218,11 +948,9 @@ def pivot_lows(
 
         if values[i] == np.min(window):
 
-            if (
-                np.sum(
-                    window == values[i]
-                ) == 1
-            ):
+            if np.sum(
+                window == values[i]
+            ) == 1:
 
                 result[i] = True
 
@@ -1253,11 +981,9 @@ def pivot_highs(
 
         if values[i] == np.max(window):
 
-            if (
-                np.sum(
-                    window == values[i]
-                ) == 1
-            ):
+            if np.sum(
+                window == values[i]
+            ) == 1:
 
                 result[i] = True
 
@@ -1279,9 +1005,7 @@ def find_bullish_divergence(df):
         PIVOT_RIGHT
     )
 
-    indexes = np.where(
-        pivots
-    )[0]
+    indexes = np.where(pivots)[0]
 
     if len(indexes) < 2:
         return None
@@ -1315,17 +1039,13 @@ def find_bullish_divergence(df):
     )
 
     price_change = (
-        (
-            price_latest
-            - price_previous
-        )
+        (price_latest - price_previous)
         / price_previous
         * 100
     )
 
     rsi_change = (
-        rsi_latest
-        - rsi_previous
+        rsi_latest - rsi_previous
     )
 
     if (
@@ -1366,9 +1086,7 @@ def find_bearish_divergence(df):
         PIVOT_RIGHT
     )
 
-    indexes = np.where(
-        pivots
-    )[0]
+    indexes = np.where(pivots)[0]
 
     if len(indexes) < 2:
         return None
@@ -1402,17 +1120,13 @@ def find_bearish_divergence(df):
     )
 
     price_change = (
-        (
-            price_latest
-            - price_previous
-        )
+        (price_latest - price_previous)
         / price_previous
         * 100
     )
 
     rsi_change = (
-        rsi_latest
-        - rsi_previous
+        rsi_latest - rsi_previous
     )
 
     if (
@@ -1439,7 +1153,7 @@ def find_bearish_divergence(df):
 
 
 # ============================================================
-# TRENDLINE BREAK
+# TRENDLINE
 # ============================================================
 
 def descending_trendline_break(df):
@@ -1452,9 +1166,7 @@ def descending_trendline_break(df):
         PIVOT_RIGHT
     )
 
-    indexes = np.where(
-        pivots
-    )[0]
+    indexes = np.where(pivots)[0]
 
     if len(indexes) < 2:
         return False
@@ -1465,33 +1177,23 @@ def descending_trendline_break(df):
     if p2 - p1 > MAX_PIVOT_GAP:
         return False
 
-    y1 = float(
-        highs.iloc[p1]
-    )
-
-    y2 = float(
-        highs.iloc[p2]
-    )
+    y1 = float(highs.iloc[p1])
+    y2 = float(highs.iloc[p2])
 
     if y2 >= y1:
         return False
 
-    x1 = p1
-    x2 = p2
-
     slope = (
         y2 - y1
     ) / (
-        x2 - x1
+        p2 - p1
     )
 
     current_x = len(df) - 1
 
     trendline = (
         y1
-        + slope * (
-            current_x - x1
-        )
+        + slope * (current_x - p1)
     )
 
     current_close = float(
@@ -1518,9 +1220,7 @@ def ascending_trendline_break(df):
         PIVOT_RIGHT
     )
 
-    indexes = np.where(
-        pivots
-    )[0]
+    indexes = np.where(pivots)[0]
 
     if len(indexes) < 2:
         return False
@@ -1531,33 +1231,23 @@ def ascending_trendline_break(df):
     if p2 - p1 > MAX_PIVOT_GAP:
         return False
 
-    y1 = float(
-        lows.iloc[p1]
-    )
-
-    y2 = float(
-        lows.iloc[p2]
-    )
+    y1 = float(lows.iloc[p1])
+    y2 = float(lows.iloc[p2])
 
     if y2 <= y1:
         return False
 
-    x1 = p1
-    x2 = p2
-
     slope = (
         y2 - y1
     ) / (
-        x2 - x1
+        p2 - p1
     )
 
     current_x = len(df) - 1
 
     trendline = (
         y1
-        + slope * (
-            current_x - x1
-        )
+        + slope * (current_x - p1)
     )
 
     current_close = float(
@@ -1587,28 +1277,21 @@ def calculate_atr(
     low = df["low"]
     close = df["close"]
 
-    previous_close = close.shift(
-        1
-    )
+    previous_close = close.shift(1)
 
     tr1 = high - low
-
     tr2 = (
-        high
-        - previous_close
+        high - previous_close
     ).abs()
 
     tr3 = (
-        low
-        - previous_close
+        low - previous_close
     ).abs()
 
     tr = pd.concat(
         [tr1, tr2, tr3],
         axis=1
-    ).max(
-        axis=1
-    )
+    ).max(axis=1)
 
     return tr.ewm(
         alpha=1 / period,
@@ -1633,10 +1316,7 @@ def calculate_ut_bot(
         atr_period
     )
 
-    loss = (
-        key_value
-        * atr
-    )
+    loss = key_value * atr
 
     trailing_stop = np.zeros(
         len(df)
@@ -1653,20 +1333,12 @@ def calculate_ut_bot(
         - loss.iloc[0]
     )
 
-    for i in range(
-        1,
-        len(df)
-    ):
+    for i in range(1, len(df)):
 
-        prev_stop = trailing_stop[
-            i - 1
-        ]
+        prev_stop = trailing_stop[i - 1]
 
         current_close = close.iloc[i]
-
-        previous_close = close.iloc[
-            i - 1
-        ]
+        previous_close = close.iloc[i - 1]
 
         current_loss = loss.iloc[i]
 
@@ -1693,15 +1365,13 @@ def calculate_ut_bot(
         elif current_close > prev_stop:
 
             trailing_stop[i] = (
-                current_close
-                - current_loss
+                current_close - current_loss
             )
 
         else:
 
             trailing_stop[i] = (
-                current_close
-                + current_loss
+                current_close + current_loss
             )
 
     return pd.Series(
@@ -1719,20 +1389,16 @@ def nearest_resistance(
     price
 ):
 
-    highs = df["high"].values
-
     candidates = [
         float(x)
-        for x in highs
+        for x in df["high"].values
         if x > price
     ]
 
     if not candidates:
         return None
 
-    return min(
-        candidates
-    )
+    return min(candidates)
 
 
 def nearest_support(
@@ -1740,24 +1406,20 @@ def nearest_support(
     price
 ):
 
-    lows = df["low"].values
-
     candidates = [
         float(x)
-        for x in lows
+        for x in df["low"].values
         if x < price
     ]
 
     if not candidates:
         return None
 
-    return max(
-        candidates
-    )
+    return max(candidates)
 
 
 # ============================================================
-# BUILD SL / TP
+# SL / TP
 # ============================================================
 
 def build_sl_tp(
@@ -1774,52 +1436,43 @@ def build_sl_tp(
         return None
 
     atr_distance = (
-        atr
-        * SL_ATR_MULTIPLIER
+        atr * SL_ATR_MULTIPLIER
     )
 
     if side == "BUY":
 
         if swing_level is None:
-
             swing_distance = 0
-
         else:
 
             swing_sl = (
                 swing_level
                 * (
                     1
-                    - SL_BUFFER_PERCENT
-                    / 100
+                    - SL_BUFFER_PERCENT / 100
                 )
             )
 
             swing_distance = (
-                entry
-                - swing_sl
+                entry - swing_sl
             )
 
     else:
 
         if swing_level is None:
-
             swing_distance = 0
-
         else:
 
             swing_sl = (
                 swing_level
                 * (
                     1
-                    + SL_BUFFER_PERCENT
-                    / 100
+                    + SL_BUFFER_PERCENT / 100
                 )
             )
 
             swing_distance = (
-                swing_sl
-                - entry
+                swing_sl - entry
             )
 
     minimum_distance = (
@@ -1841,61 +1494,44 @@ def build_sl_tp(
     )
 
     if risk_percent > MAX_SL_DISTANCE_PERCENT:
-
         return None
 
     if side == "BUY":
 
-        sl = (
-            entry
-            - risk_distance
-        )
-
-    else:
-
-        sl = (
-            entry
-            + risk_distance
-        )
-
-    if side == "BUY":
+        sl = entry - risk_distance
 
         tp1 = (
             entry
-            + risk_distance
-            * TP1_R_MULTIPLE
+            + risk_distance * TP1_R_MULTIPLE
         )
 
         tp2 = (
             entry
-            + risk_distance
-            * TP2_R_MULTIPLE
+            + risk_distance * TP2_R_MULTIPLE
         )
 
         tp3 = (
             entry
-            + risk_distance
-            * TP3_R_MULTIPLE
+            + risk_distance * TP3_R_MULTIPLE
         )
 
     else:
 
+        sl = entry + risk_distance
+
         tp1 = (
             entry
-            - risk_distance
-            * TP1_R_MULTIPLE
+            - risk_distance * TP1_R_MULTIPLE
         )
 
         tp2 = (
             entry
-            - risk_distance
-            * TP2_R_MULTIPLE
+            - risk_distance * TP2_R_MULTIPLE
         )
 
         tp3 = (
             entry
-            - risk_distance
-            * TP3_R_MULTIPLE
+            - risk_distance * TP3_R_MULTIPLE
         )
 
     return {
@@ -1909,31 +1545,8 @@ def build_sl_tp(
 
 
 # ============================================================
-# PERCENT FROM ENTRY
+# PERCENT HELPERS
 # ============================================================
-
-def price_percent_from_entry(
-    entry,
-    price
-):
-
-    if (
-        entry is None
-        or price is None
-        or entry == 0
-    ):
-
-        return 0
-
-    return (
-        (
-            float(price)
-            - float(entry)
-        )
-        / float(entry)
-        * 100
-    )
-
 
 def level_percent(
     side,
@@ -1946,927 +1559,29 @@ def level_percent(
         or level is None
         or entry == 0
     ):
-
         return 0
 
     if side == "BUY":
 
         return (
-            (
-                level
-                - entry
-            )
+            (level - entry)
             / entry
             * 100
         )
 
     return (
-        (
-            entry
-            - level
-        )
+        (entry - level)
         / entry
         * 100
     )
 
 
-# ============================================================
-# CHECK OPEN SYMBOL
-# ============================================================
-
-def has_open_trade_for_symbol(
-    state,
-    symbol
-):
-
-    symbol = str(
-        symbol
-    ).upper()
-
-    for trade in get_all_trades(state):
-
-        status = str(
-            trade.get(
-                "status",
-                ""
-            )
-        ).upper()
-
-        if status != "OPEN":
-            continue
-
-        trade_symbol = normalize_coin(
-            trade
-        )
-
-        if trade_symbol == symbol:
-            return True
-
-    return False
-
-
-# ============================================================
-# SIGNAL REGISTRATION
-# ============================================================
-
-def register_signal(
-    state,
-    signal
-):
-
-    symbol = str(
-        signal["symbol"]
-    ).upper()
-
-    trades = get_all_trades(
-        state
-    )
-
-    # --------------------------------------------------------
-    # HARD BLOCK:
-    # Any OPEN trade on this symbol blocks BOTH BUY and SELL.
-    # This prevents duplicate signals and hedge.
-    # --------------------------------------------------------
-
-    if not ALLOW_MULTIPLE_OPEN_PER_SYMBOL:
-
-        for trade in trades:
-
-            trade_symbol = normalize_coin(
-                trade
-            )
-
-            trade_status = str(
-                trade.get(
-                    "status",
-                    ""
-                )
-            ).upper()
-
-            if (
-                trade_symbol == symbol
-                and trade_status == "OPEN"
-            ):
-
-                return False
-
-    signal_id = signal.get(
-        "signal_id"
-    )
-
-    if not signal_id:
-        return False
-
-    for trade in trades:
-
-        existing_id = get_trade_id(
-            trade
-        )
-
-        if existing_id == signal_id:
-
-            return False
-
-    trade = dict(
-        signal
-    )
-
-    trade["status"] = "OPEN"
-
-    trade["id"] = signal_id
-    trade["signal_id"] = signal_id
-
-    trade["direction"] = signal["side"]
-    trade["name"] = signal["symbol"]
-
-    if isinstance(
-        state.get("trades"),
-        dict
-    ):
-
-        state["trades"][
-            signal_id
-        ] = trade
-
-    elif isinstance(
-        state.get("trades"),
-        list
-    ):
-
-        state["trades"].append(
-            trade
-        )
-
-    else:
-
-        state["trades"] = {
-            signal_id: trade
-        }
-
-    return True
-
-
-# ============================================================
-# EVALUATE OPEN TRADES
-# ============================================================
-
-def evaluate_open_trades(
-    state,
-    data_cache
-):
-
-    changed = False
-
-    trades = get_all_trades(
-        state
-    )
-
-    for trade in trades:
-
-        status = str(
-            trade.get(
-                "status",
-                ""
-            )
-        ).upper()
-
-        if status != "OPEN":
-            continue
-
-        coin = normalize_coin(
-            trade
-        )
-
-        if not coin:
-            continue
-
-        df = data_cache.get(
-            coin
-        )
-
-        if df is None or df.empty:
-            continue
-
-        side = normalize_side(
-            trade
-        )
-
-        if side not in (
-            "BUY",
-            "SELL"
-        ):
-
-            continue
-
-        entry = get_trade_entry(
-            trade
-        )
-
-        sl = get_trade_sl(
-            trade
-        )
-
-        if entry is None or sl is None:
-            continue
-
-        tp1 = get_trade_tp1(
-            trade
-        )
-
-        tp2 = get_trade_tp2(
-            trade
-        )
-
-        tp3 = get_trade_tp3(
-            trade
-        )
-
-        signal_time = parse_trade_time(
-            trade.get(
-                "signal_time"
-            )
-        )
-
-        if signal_time is None:
-
-            signal_time = parse_trade_time(
-                trade.get(
-                    "signal_time_iso"
-                )
-            )
-
-        if signal_time is None:
-            continue
-
-        after_signal = df[
-            df["time"] > signal_time
-        ]
-
-        if after_signal.empty:
-            continue
-
-        exit_reason = None
-        exit_price = None
-        exit_time = None
-
-        # ====================================================
-        # BUY
-        # ====================================================
-
-        if side == "BUY":
-
-            for _, row in after_signal.iterrows():
-
-                candle_high = float(
-                    row["high"]
-                )
-
-                candle_low = float(
-                    row["low"]
-                )
-
-                candle_time = int(
-                    row["time"]
-                )
-
-                if candle_low <= sl:
-
-                    exit_reason = "SL"
-                    exit_price = sl
-                    exit_time = candle_time
-
-                    break
-
-                if (
-                    tp1 is not None
-                    and candle_high >= tp1
-                ):
-
-                    exit_reason = "TP1"
-                    exit_price = tp1
-                    exit_time = candle_time
-
-                    break
-
-                if (
-                    tp2 is not None
-                    and candle_high >= tp2
-                ):
-
-                    exit_reason = "TP2"
-                    exit_price = tp2
-                    exit_time = candle_time
-
-                    break
-
-                if (
-                    tp3 is not None
-                    and candle_high >= tp3
-                ):
-
-                    exit_reason = "TP3"
-                    exit_price = tp3
-                    exit_time = candle_time
-
-                    break
-
-        # ====================================================
-        # SELL
-        # ====================================================
-
-        elif side == "SELL":
-
-            for _, row in after_signal.iterrows():
-
-                candle_high = float(
-                    row["high"]
-                )
-
-                candle_low = float(
-                    row["low"]
-                )
-
-                candle_time = int(
-                    row["time"]
-                )
-
-                if candle_high >= sl:
-
-                    exit_reason = "SL"
-                    exit_price = sl
-                    exit_time = candle_time
-
-                    break
-
-                if (
-                    tp1 is not None
-                    and candle_low <= tp1
-                ):
-
-                    exit_reason = "TP1"
-                    exit_price = tp1
-                    exit_time = candle_time
-
-                    break
-
-                if (
-                    tp2 is not None
-                    and candle_low <= tp2
-                ):
-
-                    exit_reason = "TP2"
-                    exit_price = tp2
-                    exit_time = candle_time
-
-                    break
-
-                if (
-                    tp3 is not None
-                    and candle_low <= tp3
-                ):
-
-                    exit_reason = "TP3"
-                    exit_price = tp3
-                    exit_time = candle_time
-
-                    break
-
-        # ====================================================
-        # CLOSE TRADE
-        # ====================================================
-
-        if exit_reason is not None:
-
-            if side == "BUY":
-
-                pnl_percent = (
-                    (
-                        exit_price
-                        - entry
-                    )
-                    / entry
-                    * 100
-                )
-
-            else:
-
-                pnl_percent = (
-                    (
-                        entry
-                        - exit_price
-                    )
-                    / entry
-                    * 100
-                )
-
-            risk = abs(
-                entry - sl
-            )
-
-            if risk > 0:
-
-                if side == "BUY":
-
-                    r_multiple = (
-                        exit_price
-                        - entry
-                    ) / risk
-
-                else:
-
-                    r_multiple = (
-                        entry
-                        - exit_price
-                    ) / risk
-
-            else:
-
-                r_multiple = 0
-
-            trade["status"] = "CLOSED"
-
-            trade["exit_reason"] = (
-                exit_reason
-            )
-
-            trade["result_reason"] = (
-                exit_reason
-            )
-
-            trade["exit_price"] = (
-                exit_price
-            )
-
-            trade["result_price"] = (
-                exit_price
-            )
-
-            trade["exit_time"] = (
-                exit_time
-            )
-
-            trade["closed_at"] = (
-                datetime.fromtimestamp(
-                    exit_time / 1000,
-                    tz=timezone.utc
-                ).isoformat()
-            )
-
-            trade["pnl_percent"] = (
-                pnl_percent
-            )
-
-            trade["r_multiple"] = (
-                r_multiple
-            )
-
-            trade["result_r"] = (
-                r_multiple
-            )
-
-            duration_minutes = max(
-                0,
-                (
-                    exit_time
-                    - signal_time
-                ) / 60000
-            )
-
-            trade["duration_minutes"] = (
-                duration_minutes
-            )
-
-            changed = True
-
-    return changed
-
-
-# ============================================================
-# GET NEWLY CLOSED TRADES
-# ============================================================
-
-def get_newly_closed_trades(
-    state,
-    previous_closed_ids
-):
-
-    result = []
-
-    for trade in get_all_trades(state):
-
-        status = str(
-            trade.get(
-                "status",
-                ""
-            )
-        ).upper()
-
-        if status != "CLOSED":
-            continue
-
-        trade_id = get_trade_id(
-            trade
-        )
-
-        if not trade_id:
-            continue
-
-        if trade_id not in previous_closed_ids:
-
-            result.append(
-                trade
-            )
-
-    return result
-
-
-# ============================================================
-# OPEN PERFORMANCE
-# ============================================================
-
-def calculate_open_performance(
-    state,
-    data_cache
-):
-
-    result = []
-
-    trades = get_all_trades(
-        state
-    )
-
-    for trade in trades:
-
-        status = str(
-            trade.get(
-                "status",
-                ""
-            )
-        ).upper()
-
-        if status != "OPEN":
-            continue
-
-        coin = normalize_coin(
-            trade
-        )
-
-        if not coin:
-            continue
-
-        df = data_cache.get(
-            coin
-        )
-
-        if df is None or df.empty:
-            continue
-
-        entry = get_trade_entry(
-            trade
-        )
-
-        sl = get_trade_sl(
-            trade
-        )
-
-        side = normalize_side(
-            trade
-        )
-
-        if (
-            entry is None
-            or sl is None
-            or side not in (
-                "BUY",
-                "SELL"
-            )
-        ):
-
-            continue
-
-        current_price = float(
-            df["close"].iloc[-1]
-        )
-
-        # ====================================================
-        # CURRENT PNL
-        # ====================================================
-
-        if side == "BUY":
-
-            pnl_percent = (
-                (
-                    current_price
-                    - entry
-                )
-                / entry
-                * 100
-            )
-
-        else:
-
-            pnl_percent = (
-                (
-                    entry
-                    - current_price
-                )
-                / entry
-                * 100
-            )
-
-        # ====================================================
-        # CURRENT R
-        # ====================================================
-
-        risk = abs(
-            entry - sl
-        )
-
-        if risk > 0:
-
-            if side == "BUY":
-
-                current_r = (
-                    current_price
-                    - entry
-                ) / risk
-
-            else:
-
-                current_r = (
-                    entry
-                    - current_price
-                ) / risk
-
-        else:
-
-            current_r = 0
-
-        # ====================================================
-        # MFE / MAE
-        # ====================================================
-
-        signal_time = parse_trade_time(
-            trade.get(
-                "signal_time"
-            )
-        )
-
-        if signal_time is None:
-
-            signal_time = parse_trade_time(
-                trade.get(
-                    "signal_time_iso"
-                )
-            )
-
-        if signal_time is None:
-
-            mfe = 0
-            mae = 0
-            after_signal = pd.DataFrame()
-
-        else:
-
-            after_signal = df[
-                df["time"] > signal_time
-            ]
-
-            if after_signal.empty:
-
-                mfe = 0
-                mae = 0
-
-            else:
-
-                if side == "BUY":
-
-                    best_price = float(
-                        after_signal[
-                            "high"
-                        ].max()
-                    )
-
-                    worst_price = float(
-                        after_signal[
-                            "low"
-                        ].min()
-                    )
-
-                    mfe = (
-                        best_price
-                        - entry
-                    ) / entry * 100
-
-                    mae = (
-                        worst_price
-                        - entry
-                    ) / entry * 100
-
-                else:
-
-                    best_price = float(
-                        after_signal[
-                            "low"
-                        ].min()
-                    )
-
-                    worst_price = float(
-                        after_signal[
-                            "high"
-                        ].max()
-                    )
-
-                    mfe = (
-                        entry
-                        - best_price
-                    ) / entry * 100
-
-                    mae = (
-                        entry
-                        - worst_price
-                    ) / entry * 100
-
-        # ====================================================
-        # DURATION
-        # ====================================================
-
-        if signal_time is None:
-
-            duration_minutes = 0
-
-        else:
-
-            if after_signal.empty:
-
-                last_time = int(
-                    df["time"].iloc[-1]
-                )
-
-            else:
-
-                last_time = int(
-                    after_signal[
-                        "time"
-                    ].iloc[-1]
-                )
-
-            duration_minutes = max(
-                0,
-                (
-                    last_time
-                    - signal_time
-                ) / 60000
-            )
-
-        result.append({
-            "symbol": coin,
-            "side": side,
-            "entry": entry,
-            "sl": sl,
-            "tp1": get_trade_tp1(trade),
-            "tp2": get_trade_tp2(trade),
-            "tp3": get_trade_tp3(trade),
-            "current_price": current_price,
-            "pnl_percent": pnl_percent,
-            "current_r": current_r,
-            "mfe": mfe,
-            "mae": mae,
-            "duration_minutes": duration_minutes,
-        })
-
-    return result
-
-
-# ============================================================
-# STATISTICS
-# ============================================================
-
-def calculate_statistics(
-    state
-):
-
-    trades = get_all_trades(
-        state
-    )
-
-    total = len(
-        trades
-    )
-
-    open_trades = [
-        x for x in trades
-        if str(
-            x.get(
-                "status",
-                ""
-            )
-        ).upper() == "OPEN"
-    ]
-
-    closed_trades = [
-        x for x in trades
-        if str(
-            x.get(
-                "status",
-                ""
-            )
-        ).upper() == "CLOSED"
-    ]
-
-    wins = [
-        x for x in closed_trades
-        if float(
-            x.get(
-                "pnl_percent",
-                0
-            )
-        ) > 0
-    ]
-
-    losses = [
-        x for x in closed_trades
-        if float(
-            x.get(
-                "pnl_percent",
-                0
-            )
-        ) <= 0
-    ]
-
-    total_pnl = sum(
-        float(
-            x.get(
-                "pnl_percent",
-                0
-            )
-        )
-        for x in closed_trades
-    )
-
-    win_rate = (
-        len(wins)
-        / len(closed_trades)
-        * 100
-        if closed_trades
-        else 0
-    )
-
-    avg_win = (
-        np.mean([
-            float(
-                x.get(
-                    "pnl_percent",
-                    0
-                )
-            )
-            for x in wins
-        ])
-        if wins
-        else 0
-    )
-
-    avg_loss = (
-        np.mean([
-            float(
-                x.get(
-                    "pnl_percent",
-                    0
-                )
-            )
-            for x in losses
-        ])
-        if losses
-        else 0
-    )
-
-    return {
-        "total": total,
-        "open": len(open_trades),
-        "closed": len(closed_trades),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": win_rate,
-        "total_pnl": total_pnl,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
-    }
-
-
-# ============================================================
-# FORMAT PRICE
-# ============================================================
-
-def format_price(
-    price
-):
+def format_price(price):
 
     if price is None:
         return "-"
 
-    price = float(
-        price
-    )
+    price = float(price)
 
     if price >= 1000:
         return f"{price:,.2f}"
@@ -2884,112 +1599,146 @@ def format_price(
 
 
 # ============================================================
-# DIRECTION EMOJI
+# OPEN TRADE CHECK
 # ============================================================
 
-def direction_emoji(side):
+def has_open_trade_for_symbol(
+    state,
+    symbol
+):
 
-    side = str(
-        side
+    symbol = str(symbol).upper()
+
+    for trade in get_all_trades(state):
+
+        status = str(
+            trade.get("status", "")
+        ).upper()
+
+        if status != "OPEN":
+            continue
+
+        if normalize_coin(trade) == symbol:
+            return True
+
+    return False
+
+
+# ============================================================
+# REGISTER SIGNAL
+# ============================================================
+
+def register_signal(
+    state,
+    signal
+):
+
+    symbol = str(
+        signal["symbol"]
     ).upper()
 
-    if side == "BUY":
-        return "🟢"
+    trades = get_all_trades(state)
 
-    if side == "SELL":
-        return "🔴"
+    if not ALLOW_MULTIPLE_OPEN_PER_SYMBOL:
 
-    return "⚪"
+        for trade in trades:
 
+            if (
+                normalize_coin(trade) == symbol
+                and str(
+                    trade.get(
+                        "status",
+                        ""
+                    )
+                ).upper() == "OPEN"
+            ):
 
-def result_emoji(reason):
+                return False
 
-    reason = str(
-        reason or ""
-    ).upper()
+    signal_id = signal.get(
+        "signal_id"
+    )
 
-    if reason.startswith("TP"):
-        return "✅"
+    if not signal_id:
+        return False
 
-    if reason == "SL":
-        return "❌"
+    for trade in trades:
 
-    return "⚪"
+        if get_trade_id(trade) == signal_id:
+            return False
+
+    trade = dict(signal)
+
+    trade["status"] = "OPEN"
+    trade["id"] = signal_id
+    trade["signal_id"] = signal_id
+    trade["direction"] = signal["side"]
+    trade["name"] = signal["symbol"]
+
+    if isinstance(
+        state.get("trades"),
+        dict
+    ):
+
+        state["trades"][signal_id] = trade
+
+    elif isinstance(
+        state.get("trades"),
+        list
+    ):
+
+        state["trades"].append(trade)
+
+    else:
+
+        state["trades"] = {
+            signal_id: trade
+        }
+
+    return True
 
 
 # ============================================================
 # ANALYZE COIN
+#
+# IMPORTANT:
+# This function now returns diagnostic information.
 # ============================================================
 
-def analyze_coin(
-    symbol
-):
-
-    # ========================================================
-    # MAIN 5M DATA
-    # ========================================================
+def analyze_coin(symbol):
 
     df = get_candles(
         symbol,
         "5m"
     )
 
-    # ========================================================
-    # MULTI-TIMEFRAME TREND DATA
-    # ========================================================
-
     trend_data = get_multi_timeframe_trend(
         symbol
     )
 
-    trend_15m = trend_data[
-        "15m"
-    ]["trend"]
-
-    trend_1h = trend_data[
-        "1h"
-    ]["trend"]
-
-    # ========================================================
-    # RSI
-    # ========================================================
+    trend_15m = trend_data["15m"]["trend"]
+    trend_1h = trend_data["1h"]["trend"]
 
     df["rsi"] = calculate_rsi(
         df["close"],
         RSI_PERIOD
     )
 
-    # ========================================================
-    # ATR(14) FOR SL
-    # ========================================================
-
     df["atr_sl"] = calculate_atr(
         df,
         SL_ATR_PERIOD
     )
-
-    # ========================================================
-    # ATR(10) FOR UT BOT
-    # ========================================================
 
     df["atr"] = calculate_atr(
         df,
         UT_ATR_PERIOD
     )
 
-    # ========================================================
-    # UT BOT
-    # ========================================================
-
     df["ut_stop"] = calculate_ut_bot(
         df,
         UT_KEY_VALUE,
         UT_ATR_PERIOD
     )
-
-    # ========================================================
-    # DIVERGENCE
-    # ========================================================
 
     bullish_divergence = (
         find_bullish_divergence(df)
@@ -2998,10 +1747,6 @@ def analyze_coin(
     bearish_divergence = (
         find_bearish_divergence(df)
     )
-
-    # ========================================================
-    # TRENDLINE
-    # ========================================================
 
     bullish_break = (
         descending_trendline_break(df)
@@ -3031,212 +1776,268 @@ def analyze_coin(
         df["time"].iloc[-1]
     )
 
+    ut_buy = current_close > current_ut
+    ut_sell = current_close < current_ut
+
+    diagnostic = {
+        "symbol": symbol,
+        "bullish_divergence": bullish_divergence is not None,
+        "bearish_divergence": bearish_divergence is not None,
+        "bullish_break": bullish_break,
+        "bearish_break": bearish_break,
+        "ut_buy": ut_buy,
+        "ut_sell": ut_sell,
+        "trend_15m": trend_15m,
+        "trend_1h": trend_1h,
+        "current_rsi": current_rsi,
+        "rejections": [],
+        "candidate_sides": [],
+    }
+
     signal = None
 
     # ========================================================
-    # BUY
-    #
-    # Requirements:
-    # 1. Bullish RSI divergence
-    # 2. UT or trendline bullish confirmation
-    # 3. 15M bullish
-    # 4. 1H bullish
+    # BUY DIAGNOSTIC
+    # ========================================================
+
+    if bullish_divergence is not None:
+
+        diagnostic["candidate_sides"].append(
+            "BUY"
+        )
+
+        buy_reasons = []
+
+        confirmation_buy = (
+            bullish_break or ut_buy
+        )
+
+        if not confirmation_buy:
+
+            buy_reasons.append(
+                "No bullish UT/Trendline confirmation"
+            )
+
+        if trend_15m != "BULLISH":
+
+            buy_reasons.append(
+                f"15M trend is {trend_15m}"
+            )
+
+        if trend_1h != "BULLISH":
+
+            buy_reasons.append(
+                f"1H trend is {trend_1h}"
+            )
+
+        if not buy_reasons:
+
+            support = nearest_support(
+                df,
+                current_close
+            )
+
+            sl_tp = build_sl_tp(
+                "BUY",
+                current_close,
+                current_atr_sl,
+                support
+            )
+
+            if sl_tp is None:
+
+                buy_reasons.append(
+                    "SL distance exceeds MAX_SL_DISTANCE"
+                )
+
+            else:
+
+                signal = {
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "direction": "BUY",
+                    "name": symbol,
+                    "entry": current_close,
+                    "sl": sl_tp["sl"],
+                    "tp1": sl_tp["tp1"],
+                    "tp2": sl_tp["tp2"],
+                    "tp3": sl_tp["tp3"],
+                    "tp": sl_tp["tp1"],
+                    "sl_percent": level_percent(
+                        "BUY",
+                        current_close,
+                        sl_tp["sl"]
+                    ),
+                    "tp1_percent": level_percent(
+                        "BUY",
+                        current_close,
+                        sl_tp["tp1"]
+                    ),
+                    "tp2_percent": level_percent(
+                        "BUY",
+                        current_close,
+                        sl_tp["tp2"]
+                    ),
+                    "tp3_percent": level_percent(
+                        "BUY",
+                        current_close,
+                        sl_tp["tp3"]
+                    ),
+                    "risk_percent": sl_tp[
+                        "risk_percent"
+                    ],
+                    "atr": current_atr_sl,
+                    "atr_multiplier": SL_ATR_MULTIPLIER,
+                    "signal_time": signal_time,
+                    "signal_time_iso": datetime.fromtimestamp(
+                        signal_time / 1000,
+                        tz=timezone.utc
+                    ).isoformat(),
+                    "trend_15m": trend_15m,
+                    "trend_1h": trend_1h,
+                    "reason": (
+                        "Bullish RSI Divergence + "
+                        "UT/Trendline + 15M/1H Bullish"
+                    ),
+                }
+
+        for reason in buy_reasons:
+
+            diagnostic["rejections"].append(
+                f"BUY: {reason}"
+            )
+
+    # ========================================================
+    # SELL DIAGNOSTIC
+    # ========================================================
+
+    if bearish_divergence is not None:
+
+        diagnostic["candidate_sides"].append(
+            "SELL"
+        )
+
+        sell_reasons = []
+
+        confirmation_sell = (
+            bearish_break or ut_sell
+        )
+
+        if not confirmation_sell:
+
+            sell_reasons.append(
+                "No bearish UT/Trendline confirmation"
+            )
+
+        if trend_15m != "BEARISH":
+
+            sell_reasons.append(
+                f"15M trend is {trend_15m}"
+            )
+
+        if trend_1h != "BEARISH":
+
+            sell_reasons.append(
+                f"1H trend is {trend_1h}"
+            )
+
+        if not sell_reasons:
+
+            resistance = nearest_resistance(
+                df,
+                current_close
+            )
+
+            sl_tp = build_sl_tp(
+                "SELL",
+                current_close,
+                current_atr_sl,
+                resistance
+            )
+
+            if sl_tp is None:
+
+                sell_reasons.append(
+                    "SL distance exceeds MAX_SL_DISTANCE"
+                )
+
+            else:
+
+                signal = {
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "direction": "SELL",
+                    "name": symbol,
+                    "entry": current_close,
+                    "sl": sl_tp["sl"],
+                    "tp1": sl_tp["tp1"],
+                    "tp2": sl_tp["tp2"],
+                    "tp3": sl_tp["tp3"],
+                    "tp": sl_tp["tp1"],
+                    "sl_percent": level_percent(
+                        "SELL",
+                        current_close,
+                        sl_tp["sl"]
+                    ),
+                    "tp1_percent": level_percent(
+                        "SELL",
+                        current_close,
+                        sl_tp["tp1"]
+                    ),
+                    "tp2_percent": level_percent(
+                        "SELL",
+                        current_close,
+                        sl_tp["tp2"]
+                    ),
+                    "tp3_percent": level_percent(
+                        "SELL",
+                        current_close,
+                        sl_tp["tp3"]
+                    ),
+                    "risk_percent": sl_tp[
+                        "risk_percent"
+                    ],
+                    "atr": current_atr_sl,
+                    "atr_multiplier": SL_ATR_MULTIPLIER,
+                    "signal_time": signal_time,
+                    "signal_time_iso": datetime.fromtimestamp(
+                        signal_time / 1000,
+                        tz=timezone.utc
+                    ).isoformat(),
+                    "trend_15m": trend_15m,
+                    "trend_1h": trend_1h,
+                    "reason": (
+                        "Bearish RSI Divergence + "
+                        "UT/Trendline + 15M/1H Bearish"
+                    ),
+                }
+
+        for reason in sell_reasons:
+
+            diagnostic["rejections"].append(
+                f"SELL: {reason}"
+            )
+
+    # ========================================================
+    # NO DIVERGENCE
     # ========================================================
 
     if (
-        bullish_divergence is not None
-        and (
-            bullish_break
-            or current_close > current_ut
-        )
-        and trend_15m == "BULLISH"
-        and trend_1h == "BULLISH"
+        bullish_divergence is None
+        and bearish_divergence is None
     ):
 
-        support = nearest_support(
-            df,
-            current_close
+        diagnostic["rejections"].append(
+            "No RSI divergence detected"
         )
-
-        sl_tp = build_sl_tp(
-            side="BUY",
-            entry=current_close,
-            atr=current_atr_sl,
-            swing_level=support
-        )
-
-        if sl_tp is None:
-
-            return {
-                "symbol": symbol,
-                "df": df,
-                "signal": None,
-                "trend_data": trend_data,
-                "market_symbol": get_market_symbol(
-                    symbol
-                ),
-            }
-
-        sl = sl_tp["sl"]
-        tp1 = sl_tp["tp1"]
-        tp2 = sl_tp["tp2"]
-        tp3 = sl_tp["tp3"]
-
-        signal = {
-            "symbol": symbol,
-            "side": "BUY",
-            "direction": "BUY",
-            "name": symbol,
-            "entry": current_close,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
-            "tp": tp1,
-            "sl_percent": level_percent(
-                "BUY",
-                current_close,
-                sl
-            ),
-            "tp1_percent": level_percent(
-                "BUY",
-                current_close,
-                tp1
-            ),
-            "tp2_percent": level_percent(
-                "BUY",
-                current_close,
-                tp2
-            ),
-            "tp3_percent": level_percent(
-                "BUY",
-                current_close,
-                tp3
-            ),
-            "risk_percent": sl_tp[
-                "risk_percent"
-            ],
-            "atr": current_atr_sl,
-            "atr_multiplier": SL_ATR_MULTIPLIER,
-            "signal_time": signal_time,
-            "signal_time_iso": datetime.fromtimestamp(
-                signal_time / 1000,
-                tz=timezone.utc
-            ).isoformat(),
-            "trend_15m": trend_15m,
-            "trend_1h": trend_1h,
-            "reason": (
-                "Bullish RSI Divergence + "
-                "UT/Trendline + 15M/1H Bullish"
-            ),
-        }
-
-    # ========================================================
-    # SELL
-    #
-    # Requirements:
-    # 1. Bearish RSI divergence
-    # 2. UT or trendline bearish confirmation
-    # 3. 15M bearish
-    # 4. 1H bearish
-    # ========================================================
-
-    elif (
-        bearish_divergence is not None
-        and (
-            bearish_break
-            or current_close < current_ut
-        )
-        and trend_15m == "BEARISH"
-        and trend_1h == "BEARISH"
-    ):
-
-        resistance = nearest_resistance(
-            df,
-            current_close
-        )
-
-        sl_tp = build_sl_tp(
-            side="SELL",
-            entry=current_close,
-            atr=current_atr_sl,
-            swing_level=resistance
-        )
-
-        if sl_tp is None:
-
-            return {
-                "symbol": symbol,
-                "df": df,
-                "signal": None,
-                "trend_data": trend_data,
-                "market_symbol": get_market_symbol(
-                    symbol
-                ),
-            }
-
-        sl = sl_tp["sl"]
-        tp1 = sl_tp["tp1"]
-        tp2 = sl_tp["tp2"]
-        tp3 = sl_tp["tp3"]
-
-        signal = {
-            "symbol": symbol,
-            "side": "SELL",
-            "direction": "SELL",
-            "name": symbol,
-            "entry": current_close,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "tp3": tp3,
-            "tp": tp1,
-            "sl_percent": level_percent(
-                "SELL",
-                current_close,
-                sl
-            ),
-            "tp1_percent": level_percent(
-                "SELL",
-                current_close,
-                tp1
-            ),
-            "tp2_percent": level_percent(
-                "SELL",
-                current_close,
-                tp2
-            ),
-            "tp3_percent": level_percent(
-                "SELL",
-                current_close,
-                tp3
-            ),
-            "risk_percent": sl_tp[
-                "risk_percent"
-            ],
-            "atr": current_atr_sl,
-            "atr_multiplier": SL_ATR_MULTIPLIER,
-            "signal_time": signal_time,
-            "signal_time_iso": datetime.fromtimestamp(
-                signal_time / 1000,
-                tz=timezone.utc
-            ).isoformat(),
-            "trend_15m": trend_15m,
-            "trend_1h": trend_1h,
-            "reason": (
-                "Bearish RSI Divergence + "
-                "UT/Trendline + 15M/1H Bearish"
-            ),
-        }
 
     return {
         "symbol": symbol,
         "df": df,
         "signal": signal,
         "trend_data": trend_data,
-        "market_symbol": get_market_symbol(
-            symbol
-        ),
+        "market_symbol": get_market_symbol(symbol),
+        "diagnostic": diagnostic,
     }
 
 
@@ -3244,66 +2045,28 @@ def analyze_coin(
 # FORMAT SIGNAL
 # ============================================================
 
-def format_signal(
-    signal
-):
+def format_signal(signal):
 
     side = str(
         signal["side"]
     ).upper()
 
-    emoji = direction_emoji(
-        side
+    icon = (
+        "🟢"
+        if side == "BUY"
+        else "🔴"
     )
 
-    entry = float(
-        signal["entry"]
-    )
-
-    sl = float(
-        signal["sl"]
-    )
-
-    tp1 = float(
-        signal["tp1"]
-    )
-
-    tp2 = float(
-        signal["tp2"]
-    )
-
-    tp3 = float(
-        signal["tp3"]
-    )
-
-    sl_percent = level_percent(
-        side,
-        entry,
-        sl
-    )
-
-    tp1_percent = level_percent(
-        side,
-        entry,
-        tp1
-    )
-
-    tp2_percent = level_percent(
-        side,
-        entry,
-        tp2
-    )
-
-    tp3_percent = level_percent(
-        side,
-        entry,
-        tp3
-    )
+    entry = signal["entry"]
+    sl = signal["sl"]
+    tp1 = signal["tp1"]
+    tp2 = signal["tp2"]
+    tp3 = signal["tp3"]
 
     text = []
 
     text.append(
-        f"{emoji} {signal['symbol']}/USDT - {side}"
+        f"{icon} {signal['symbol']}/USDT - {side}"
     )
 
     text.append(
@@ -3311,23 +2074,27 @@ def format_signal(
     )
 
     text.append(
-        f"Stop Loss: {format_price(sl)} ({sl_percent:+.2f}%)"
+        f"Stop Loss: {format_price(sl)} "
+        f"({level_percent(side, entry, sl):+.2f}%)"
     )
 
     text.append(
-        f"Target 1: {format_price(tp1)} ({tp1_percent:+.2f}%)"
+        f"Target 1: {format_price(tp1)} "
+        f"({level_percent(side, entry, tp1):+.2f}%)"
     )
 
     text.append(
-        f"Target 2: {format_price(tp2)} ({tp2_percent:+.2f}%)"
+        f"Target 2: {format_price(tp2)} "
+        f"({level_percent(side, entry, tp2):+.2f}%)"
     )
 
     text.append(
-        f"Target 3: {format_price(tp3)} ({tp3_percent:+.2f}%)"
+        f"Target 3: {format_price(tp3)} "
+        f"({level_percent(side, entry, tp3):+.2f}%)"
     )
 
     text.append(
-        f"Risk: {abs(sl_percent):.2f}%"
+        f"Risk: {abs(level_percent(side, entry, sl)):.2f}%"
     )
 
     text.append(
@@ -3348,163 +2115,601 @@ def format_signal(
         f"Reason: {signal['reason']}"
     )
 
-    return "\n".join(
-        text
-    )
+    return "\n".join(text)
 
 
 # ============================================================
-# FORMAT CLOSED SIGNAL
+# CLOSED SIGNAL
 # ============================================================
 
-def format_closed_signal(
-    trade
-):
+def format_closed_signal(trade):
 
-    side = normalize_side(
-        trade
+    side = normalize_side(trade)
+    coin = normalize_coin(trade)
+
+    icon = (
+        "🟢"
+        if side == "BUY"
+        else "🔴"
     )
 
-    coin = normalize_coin(
-        trade
+    reason = (
+        trade.get("result_reason")
+        or trade.get("exit_reason")
+        or "UNKNOWN"
     )
 
-    direction_icon = direction_emoji(
-        side
+    result_icon = (
+        "✅"
+        if str(reason).upper().startswith("TP")
+        else "❌"
+        if str(reason).upper() == "SL"
+        else "⚪"
     )
 
-    reason = trade.get(
-        "result_reason"
-    )
-
-    if not reason:
-
-        reason = trade.get(
-            "exit_reason"
-        )
-
-    result_icon = result_emoji(
-        reason
-    )
-
-    entry = get_trade_entry(
-        trade
-    )
+    entry = get_trade_entry(trade)
 
     exit_price = trade.get(
-        "result_price"
+        "result_price",
+        trade.get("exit_price")
     )
 
-    if exit_price is None:
-
-        exit_price = trade.get(
-            "exit_price"
-        )
-
     try:
-
-        exit_price = float(
-            exit_price
-        )
-
+        exit_price = float(exit_price)
     except Exception:
-
         exit_price = None
 
-    try:
+    pnl = float(
+        trade.get("pnl_percent", 0)
+    )
 
-        pnl = float(
+    r_multiple = float(
+        trade.get(
+            "result_r",
             trade.get(
-                "pnl_percent",
+                "r_multiple",
                 0
             )
         )
-
-    except Exception:
-
-        pnl = 0
-
-    try:
-
-        r_multiple = float(
-            trade.get(
-                "result_r",
-                trade.get(
-                    "r_multiple",
-                    0
-                )
-            )
-        )
-
-    except Exception:
-
-        r_multiple = 0
-
-    duration = trade.get(
-        "duration_minutes"
     )
 
-    if duration is None:
+    duration = trade.get(
+        "duration_minutes",
+        0
+    )
 
-        signal_time = parse_trade_time(
-            trade.get(
-                "signal_time"
-            )
-        )
+    return "\n".join([
+        f"{icon} {coin} {side} | "
+        f"{result_icon} {reason}",
+        f"Entry: {format_price(entry)}",
+        f"Exit: {format_price(exit_price)}",
+        f"P&L: {pnl:+.2f}%",
+        f"R: {r_multiple:+.2f}R",
+        f"Duration: {float(duration):.0f} min",
+    ])
 
-        exit_time = parse_trade_time(
-            trade.get(
-                "exit_time"
-            )
-        )
+
+# ============================================================
+# OPEN PERFORMANCE
+# ============================================================
+
+def calculate_open_performance(
+    state,
+    data_cache
+):
+
+    result = []
+
+    for trade in get_all_trades(state):
+
+        if str(
+            trade.get("status", "")
+        ).upper() != "OPEN":
+            continue
+
+        coin = normalize_coin(trade)
+
+        df = data_cache.get(coin)
+
+        if df is None or df.empty:
+            continue
+
+        entry = get_trade_entry(trade)
+        sl = get_trade_sl(trade)
+        side = normalize_side(trade)
 
         if (
-            signal_time is not None
-            and exit_time is not None
+            entry is None
+            or sl is None
+            or side not in ("BUY", "SELL")
         ):
+            continue
+
+        current_price = float(
+            df["close"].iloc[-1]
+        )
+
+        if side == "BUY":
+
+            pnl = (
+                current_price - entry
+            ) / entry * 100
+
+        else:
+
+            pnl = (
+                entry - current_price
+            ) / entry * 100
+
+        risk = abs(entry - sl)
+
+        if risk > 0:
+
+            if side == "BUY":
+
+                current_r = (
+                    current_price - entry
+                ) / risk
+
+            else:
+
+                current_r = (
+                    entry - current_price
+                ) / risk
+
+        else:
+            current_r = 0
+
+        signal_time = parse_trade_time(
+            trade.get("signal_time")
+        )
+
+        if signal_time is None:
+
+            signal_time = parse_trade_time(
+                trade.get("signal_time_iso")
+            )
+
+        if signal_time is None:
+
+            mfe = 0
+            mae = 0
+            duration = 0
+
+        else:
+
+            after_signal = df[
+                df["time"] > signal_time
+            ]
+
+            if after_signal.empty:
+
+                mfe = 0
+                mae = 0
+
+            elif side == "BUY":
+
+                best = float(
+                    after_signal["high"].max()
+                )
+
+                worst = float(
+                    after_signal["low"].min()
+                )
+
+                mfe = (
+                    best - entry
+                ) / entry * 100
+
+                mae = (
+                    worst - entry
+                ) / entry * 100
+
+            else:
+
+                best = float(
+                    after_signal["low"].min()
+                )
+
+                worst = float(
+                    after_signal["high"].max()
+                )
+
+                mfe = (
+                    entry - best
+                ) / entry * 100
+
+                mae = (
+                    entry - worst
+                ) / entry * 100
+
+            last_time = int(
+                df["time"].iloc[-1]
+            )
 
             duration = max(
                 0,
                 (
-                    exit_time
-                    - signal_time
+                    last_time - signal_time
                 ) / 60000
             )
 
+        result.append({
+            "symbol": coin,
+            "side": side,
+            "entry": entry,
+            "sl": sl,
+            "tp1": get_trade_tp1(trade),
+            "tp2": get_trade_tp2(trade),
+            "tp3": get_trade_tp3(trade),
+            "current_price": current_price,
+            "pnl_percent": pnl,
+            "current_r": current_r,
+            "mfe": mfe,
+            "mae": mae,
+            "duration_minutes": duration,
+        })
+
+    return result
+
+
+# ============================================================
+# EVALUATE OPEN TRADES
+# ============================================================
+
+def evaluate_open_trades(
+    state,
+    data_cache
+):
+
+    changed = False
+
+    for trade in get_all_trades(state):
+
+        if str(
+            trade.get("status", "")
+        ).upper() != "OPEN":
+            continue
+
+        coin = normalize_coin(trade)
+        df = data_cache.get(coin)
+
+        if df is None or df.empty:
+            continue
+
+        side = normalize_side(trade)
+
+        entry = get_trade_entry(trade)
+        sl = get_trade_sl(trade)
+
+        if (
+            entry is None
+            or sl is None
+            or side not in ("BUY", "SELL")
+        ):
+            continue
+
+        tp1 = get_trade_tp1(trade)
+        tp2 = get_trade_tp2(trade)
+        tp3 = get_trade_tp3(trade)
+
+        signal_time = parse_trade_time(
+            trade.get("signal_time")
+        )
+
+        if signal_time is None:
+            signal_time = parse_trade_time(
+                trade.get("signal_time_iso")
+            )
+
+        if signal_time is None:
+            continue
+
+        after_signal = df[
+            df["time"] > signal_time
+        ]
+
+        if after_signal.empty:
+            continue
+
+        exit_reason = None
+        exit_price = None
+        exit_time = None
+
+        for _, row in after_signal.iterrows():
+
+            high = float(row["high"])
+            low = float(row["low"])
+            candle_time = int(row["time"])
+
+            if side == "BUY":
+
+                if low <= sl:
+
+                    exit_reason = "SL"
+                    exit_price = sl
+                    exit_time = candle_time
+                    break
+
+                if tp1 is not None and high >= tp1:
+
+                    exit_reason = "TP1"
+                    exit_price = tp1
+                    exit_time = candle_time
+                    break
+
+                if tp2 is not None and high >= tp2:
+
+                    exit_reason = "TP2"
+                    exit_price = tp2
+                    exit_time = candle_time
+                    break
+
+                if tp3 is not None and high >= tp3:
+
+                    exit_reason = "TP3"
+                    exit_price = tp3
+                    exit_time = candle_time
+                    break
+
+            else:
+
+                if high >= sl:
+
+                    exit_reason = "SL"
+                    exit_price = sl
+                    exit_time = candle_time
+                    break
+
+                if tp1 is not None and low <= tp1:
+
+                    exit_reason = "TP1"
+                    exit_price = tp1
+                    exit_time = candle_time
+                    break
+
+                if tp2 is not None and low <= tp2:
+
+                    exit_reason = "TP2"
+                    exit_price = tp2
+                    exit_time = candle_time
+                    break
+
+                if tp3 is not None and low <= tp3:
+
+                    exit_reason = "TP3"
+                    exit_price = tp3
+                    exit_time = candle_time
+                    break
+
+        if exit_reason is None:
+            continue
+
+        if side == "BUY":
+
+            pnl = (
+                exit_price - entry
+            ) / entry * 100
+
+            r_multiple = (
+                exit_price - entry
+            ) / abs(entry - sl)
+
         else:
 
-            duration = 0
+            pnl = (
+                entry - exit_price
+            ) / entry * 100
 
-    text = []
+            r_multiple = (
+                entry - exit_price
+            ) / abs(entry - sl)
 
-    text.append(
-        f"{direction_icon} {coin} {side} | "
-        f"{result_icon} {reason or 'UNKNOWN'}"
+        duration = max(
+            0,
+            (
+                exit_time - signal_time
+            ) / 60000
+        )
+
+        trade["status"] = "CLOSED"
+        trade["exit_reason"] = exit_reason
+        trade["result_reason"] = exit_reason
+        trade["exit_price"] = exit_price
+        trade["result_price"] = exit_price
+        trade["exit_time"] = exit_time
+        trade["pnl_percent"] = pnl
+        trade["r_multiple"] = r_multiple
+        trade["result_r"] = r_multiple
+        trade["duration_minutes"] = duration
+
+        trade["closed_at"] = datetime.fromtimestamp(
+            exit_time / 1000,
+            tz=timezone.utc
+        ).isoformat()
+
+        changed = True
+
+    return changed
+
+
+# ============================================================
+# NEWLY CLOSED
+# ============================================================
+
+def get_newly_closed_trades(
+    state,
+    previous_closed_ids
+):
+
+    result = []
+
+    for trade in get_all_trades(state):
+
+        if str(
+            trade.get("status", "")
+        ).upper() != "CLOSED":
+            continue
+
+        trade_id = get_trade_id(trade)
+
+        if (
+            trade_id
+            and trade_id not in previous_closed_ids
+        ):
+
+            result.append(trade)
+
+    return result
+
+
+# ============================================================
+# STATISTICS
+# ============================================================
+
+def calculate_statistics(state):
+
+    trades = get_all_trades(state)
+
+    open_trades = [
+        x for x in trades
+        if str(
+            x.get("status", "")
+        ).upper() == "OPEN"
+    ]
+
+    closed_trades = [
+        x for x in trades
+        if str(
+            x.get("status", "")
+        ).upper() == "CLOSED"
+    ]
+
+    wins = [
+        x for x in closed_trades
+        if float(
+            x.get("pnl_percent", 0)
+        ) > 0
+    ]
+
+    losses = [
+        x for x in closed_trades
+        if float(
+            x.get("pnl_percent", 0)
+        ) <= 0
+    ]
+
+    total_pnl = sum(
+        float(
+            x.get("pnl_percent", 0)
+        )
+        for x in closed_trades
     )
 
-    text.append(
-        f"Entry: {format_price(entry)}"
+    win_rate = (
+        len(wins)
+        / len(closed_trades)
+        * 100
+        if closed_trades
+        else 0
     )
 
-    text.append(
-        f"Exit: {format_price(exit_price)}"
+    avg_win = (
+        float(np.mean([
+            float(
+                x.get("pnl_percent", 0)
+            )
+            for x in wins
+        ]))
+        if wins
+        else 0
     )
 
-    text.append(
-        f"P&L: {pnl:+.2f}%"
+    avg_loss = (
+        float(np.mean([
+            float(
+                x.get("pnl_percent", 0)
+            )
+            for x in losses
+        ]))
+        if losses
+        else 0
     )
 
-    text.append(
-        f"R: {r_multiple:+.2f}R"
-    )
+    return {
+        "total": len(trades),
+        "open": len(open_trades),
+        "closed": len(closed_trades),
+        "wins": len(wins),
+        "losses": len(losses),
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+    }
 
-    text.append(
-        f"Duration: {float(duration):.0f} min"
-    )
 
-    return "\n".join(
-        text
-    )
+# ============================================================
+# DIAGNOSTIC STATISTICS
+# ============================================================
+
+def calculate_diagnostics(results):
+
+    stats = {
+        "bullish_divergence": 0,
+        "bearish_divergence": 0,
+        "bullish_break": 0,
+        "bearish_break": 0,
+        "ut_buy": 0,
+        "ut_sell": 0,
+        "setup_candidates": 0,
+    }
+
+    for result in results:
+
+        diagnostic = result.get(
+            "diagnostic",
+            {}
+        )
+
+        if diagnostic.get(
+            "bullish_divergence"
+        ):
+            stats["bullish_divergence"] += 1
+
+        if diagnostic.get(
+            "bearish_divergence"
+        ):
+            stats["bearish_divergence"] += 1
+
+        if diagnostic.get(
+            "bullish_break"
+        ):
+            stats["bullish_break"] += 1
+
+        if diagnostic.get(
+            "bearish_break"
+        ):
+            stats["bearish_break"] += 1
+
+        if diagnostic.get(
+            "ut_buy"
+        ):
+            stats["ut_buy"] += 1
+
+        if diagnostic.get(
+            "ut_sell"
+        ):
+            stats["ut_sell"] += 1
+
+        stats["setup_candidates"] += len(
+            diagnostic.get(
+                "candidate_sides",
+                []
+            )
+        )
+
+    return stats
 
 
 # ============================================================
@@ -3517,15 +2722,18 @@ def format_report(
     errors,
     open_performance,
     closed_this_run,
-    blocked_symbols=None
+    blocked_symbols=None,
+    registered_signals=None
 ):
 
     if blocked_symbols is None:
         blocked_symbols = []
 
-    stats = calculate_statistics(
-        state
-    )
+    if registered_signals is None:
+        registered_signals = []
+
+    stats = calculate_statistics(state)
+    diagnostic = calculate_diagnostics(results)
 
     lines = []
 
@@ -3553,80 +2761,198 @@ def format_report(
         f"⚠️ DATA ERROR: {len(errors)}"
     )
 
+    # ========================================================
+    # CUMULATIVE
+    # ========================================================
+
+    lines.append("")
+    lines.append("📊 CUMULATIVE PERFORMANCE")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+
     lines.append(
-        "━━━━━━━━━━━━━━━━━━"
+        f"Total Trades: {stats['total']}"
+    )
+
+    lines.append(
+        f"Open: {stats['open']}"
+    )
+
+    lines.append(
+        f"Closed: {stats['closed']}"
+    )
+
+    lines.append(
+        f"Wins: {stats['wins']}"
+    )
+
+    lines.append(
+        f"Losses: {stats['losses']}"
+    )
+
+    lines.append(
+        f"Win Rate: {stats['win_rate']:.2f}%"
+    )
+
+    lines.append(
+        f"Closed P&L: {stats['total_pnl']:.2f}%"
+    )
+
+    lines.append(
+        f"Avg Win: {stats['avg_win']:.2f}%"
+    )
+
+    lines.append(
+        f"Avg Loss: {stats['avg_loss']:.2f}%"
     )
 
     # ========================================================
-    # CUMULATIVE PERFORMANCE
+    # SIGNAL DIAGNOSTIC
     # ========================================================
 
+    lines.append("")
+    lines.append("📊 SIGNAL DIAGNOSTIC")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+
     lines.append(
-        "📊 CUMULATIVE PERFORMANCE"
+        f"RSI Bullish Divergence: "
+        f"{diagnostic['bullish_divergence']}"
     )
 
     lines.append(
-        "━━━━━━━━━━━━━━━━━━"
+        f"RSI Bearish Divergence: "
+        f"{diagnostic['bearish_divergence']}"
     )
 
     lines.append(
-        f"📈 Total Trades: {stats['total']}"
+        f"Trendline Breakout: "
+        f"{diagnostic['bullish_break']}"
     )
 
     lines.append(
-        f"🟡 Open: {stats['open']}"
+        f"Trendline Breakdown: "
+        f"{diagnostic['bearish_break']}"
     )
 
     lines.append(
-        f"⚫ Closed: {stats['closed']}"
+        f"UT Bot BUY: "
+        f"{diagnostic['ut_buy']}"
     )
 
     lines.append(
-        f"🟢 Wins: {stats['wins']}"
+        f"UT Bot SELL: "
+        f"{diagnostic['ut_sell']}"
     )
 
     lines.append(
-        f"🔴 Losses: {stats['losses']}"
+        f"SETUP CANDIDATES: "
+        f"{diagnostic['setup_candidates']}"
     )
 
     lines.append(
-        f"🎯 Win Rate: {stats['win_rate']:.2f}%"
+        f"FINAL SIGNALS: "
+        f"{len(registered_signals)}"
     )
 
-    lines.append(
-        f"💰 Closed P&L: {stats['total_pnl']:.2f}%"
-    )
+    # ========================================================
+    # REJECTED CANDIDATES
+    # ========================================================
 
-    lines.append(
-        f"📈 Avg Win: {stats['avg_win']:.2f}%"
-    )
+    rejected = []
 
-    lines.append(
-        f"📉 Avg Loss: {stats['avg_loss']:.2f}%"
-    )
+    for result in results:
+
+        diag = result.get(
+            "diagnostic",
+            {}
+        )
+
+        reasons = diag.get(
+            "rejections",
+            []
+        )
+
+        if reasons:
+
+            rejected.append(
+                (
+                    result["symbol"],
+                    reasons
+                )
+            )
+
+    if rejected:
+
+        lines.append("")
+        lines.append("🔎 REJECTED SETUPS")
+        lines.append("━━━━━━━━━━━━━━━━━━")
+
+        for symbol, reasons in rejected:
+
+            diag = next(
+                (
+                    x.get("diagnostic", {})
+                    for x in results
+                    if x["symbol"] == symbol
+                ),
+                {}
+            )
+
+            candidate_sides = diag.get(
+                "candidate_sides",
+                []
+            )
+
+            if candidate_sides:
+
+                lines.append(
+                    f"{symbol} "
+                    f"[{', '.join(candidate_sides)}]"
+                )
+
+            else:
+
+                lines.append(
+                    f"{symbol}"
+                )
+
+            for reason in reasons:
+
+                lines.append(
+                    f"  ❌ {reason}"
+                )
+
+    # ========================================================
+    # BLOCKED
+    # ========================================================
+
+    if blocked_symbols:
+
+        lines.append("")
+        lines.append("🔒 SYMBOL LOCK")
+        lines.append("━━━━━━━━━━━━━━━━━━")
+
+        for symbol in sorted(
+            set(blocked_symbols)
+        ):
+
+            lines.append(
+                f"{symbol}: OPEN trade already exists"
+            )
 
     # ========================================================
     # CLOSED SIGNALS
     # ========================================================
 
     lines.append("")
-
-    lines.append(
-        "🏁 CLOSED SIGNALS"
-    )
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
+    lines.append("🏁 CLOSED SIGNALS")
+    lines.append("━━━━━━━━━━━━━━━━━━")
 
     if closed_this_run:
 
         for trade in closed_this_run:
 
             lines.append(
-                format_closed_signal(
-                    trade
-                )
+                format_closed_signal(trade)
             )
 
             lines.append(
@@ -3643,32 +2969,16 @@ def format_report(
     # NEW SIGNALS
     # ========================================================
 
-    new_signals = [
-        x["signal"]
-        for x in results
-        if x.get("signal") is not None
-        and x["signal"]["symbol"]
-        not in blocked_symbols
-    ]
-
     lines.append("")
+    lines.append("🚨 NEW SIGNALS")
+    lines.append("━━━━━━━━━━━━━━━━━━")
 
-    lines.append(
-        "🚨 NEW SIGNALS"
-    )
+    if registered_signals:
 
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    if new_signals:
-
-        for signal in new_signals:
+        for signal in registered_signals:
 
             lines.append(
-                format_signal(
-                    signal
-                )
+                format_signal(signal)
             )
 
             lines.append(
@@ -3682,55 +2992,30 @@ def format_report(
         )
 
     # ========================================================
-    # OPEN SIGNAL PERFORMANCE
+    # OPEN PERFORMANCE
     # ========================================================
 
     lines.append("")
-
-    lines.append(
-        "📌 OPEN SIGNAL P&L"
-    )
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
+    lines.append("📌 OPEN SIGNAL P&L")
+    lines.append("━━━━━━━━━━━━━━━━━━")
 
     if open_performance:
 
         for item in open_performance:
 
-            direction_icon = direction_emoji(
-                item["side"]
+            icon = (
+                "🟢"
+                if item["side"] == "BUY"
+                else "🔴"
             )
 
             side = item["side"]
             entry = item["entry"]
             sl = item["sl"]
-
-            pnl = item[
-                "pnl_percent"
-            ]
-
-            current_r = item[
-                "current_r"
-            ]
-
-            mfe = item[
-                "mfe"
-            ]
-
-            mae = item[
-                "mae"
-            ]
-
-            sl_percent = level_percent(
-                side,
-                entry,
-                sl
-            )
+            pnl = item["pnl_percent"]
 
             lines.append(
-                f"{direction_icon} "
+                f"{icon} "
                 f"{item['symbol']} {side}"
             )
 
@@ -3739,58 +3024,41 @@ def format_report(
             )
 
             lines.append(
-                f"Current: {format_price(item['current_price'])}"
+                f"Current: "
+                f"{format_price(item['current_price'])}"
             )
 
             lines.append(
                 f"SL: {format_price(sl)} "
-                f"({sl_percent:+.2f}%)"
+                f"({level_percent(side, entry, sl):+.2f}%)"
             )
 
             if item.get("tp1") is not None:
 
-                tp1_percent = level_percent(
-                    side,
-                    entry,
-                    item["tp1"]
-                )
-
                 lines.append(
-                    f"TP1: {format_price(item['tp1'])} "
-                    f"({tp1_percent:+.2f}%)"
+                    f"TP1: "
+                    f"{format_price(item['tp1'])} "
+                    f"({level_percent(side, entry, item['tp1']):+.2f}%)"
                 )
 
             if item.get("tp2") is not None:
 
-                tp2_percent = level_percent(
-                    side,
-                    entry,
-                    item["tp2"]
-                )
-
                 lines.append(
-                    f"TP2: {format_price(item['tp2'])} "
-                    f"({tp2_percent:+.2f}%)"
+                    f"TP2: "
+                    f"{format_price(item['tp2'])} "
+                    f"({level_percent(side, entry, item['tp2']):+.2f}%)"
                 )
 
             if item.get("tp3") is not None:
 
-                tp3_percent = level_percent(
-                    side,
-                    entry,
-                    item["tp3"]
-                )
-
                 lines.append(
-                    f"TP3: {format_price(item['tp3'])} "
-                    f"({tp3_percent:+.2f}%)"
+                    f"TP3: "
+                    f"{format_price(item['tp3'])} "
+                    f"({level_percent(side, entry, item['tp3']):+.2f}%)"
                 )
 
             # =================================================
-            # CURRENT P&L
-            #
-            # Bold in Telegram.
-            # No emoji.
+            # BOLD CURRENT P&L
             # =================================================
 
             lines.append(
@@ -3798,19 +3066,23 @@ def format_report(
             )
 
             lines.append(
-                f"Current R: {current_r:+.2f}R"
+                f"Current R: "
+                f"{item['current_r']:+.2f}R"
             )
 
             lines.append(
-                f"MFE: {mfe:+.2f}%"
+                f"MFE: "
+                f"{item['mfe']:+.2f}%"
             )
 
             lines.append(
-                f"MAE: {mae:+.2f}%"
+                f"MAE: "
+                f"{item['mae']:+.2f}%"
             )
 
             lines.append(
-                f"Duration: {item['duration_minutes']:.0f} min"
+                f"Duration: "
+                f"{item['duration_minutes']:.0f} min"
             )
 
             lines.append(
@@ -3830,24 +3102,52 @@ def format_report(
     if errors:
 
         lines.append("")
-
-        lines.append(
-            "⚠️ ERRORS"
-        )
-
-        lines.append(
-            "━━━━━━━━━━━━━━━━━━"
-        )
+        lines.append("⚠️ ERRORS")
+        lines.append("━━━━━━━━━━━━━━━━━━")
 
         for symbol, error in errors.items():
 
             lines.append(
-                f"• {symbol}: {error}"
+                f"{symbol}: {error}"
             )
 
-    return "\n".join(
-        lines
-    )
+    # ========================================================
+    # NO SIGNAL SUMMARY
+    # ========================================================
+
+    if not registered_signals:
+
+        lines.append("")
+        lines.append("📌 NO SIGNAL SUMMARY")
+        lines.append("━━━━━━━━━━━━━━━━━━")
+
+        if diagnostic["setup_candidates"] == 0:
+
+            lines.append(
+                "❌ No RSI divergence candidate."
+            )
+
+        elif diagnostic["bullish_divergence"] > 0:
+
+            lines.append(
+                "BUY candidates exist, "
+                "but one or more filters rejected them."
+            )
+
+        elif diagnostic["bearish_divergence"] > 0:
+
+            lines.append(
+                "SELL candidates exist, "
+                "but one or more filters rejected them."
+            )
+
+        if diagnostic["setup_candidates"] > 0:
+
+            lines.append(
+                "Check REJECTED SETUPS above."
+            )
+
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -3877,83 +3177,57 @@ def main():
         return
 
     # ========================================================
-    # LOAD v10.4 STATE
-    #
-    # This is a NEW state file.
-    # Therefore old v10.3 statistics are not included.
+    # LOAD FRESH v10.4 STATE
     # ========================================================
 
     state = load_state()
 
-    rebuild_trade_container(
-        state
-    )
+    rebuild_trade_container(state)
 
     # ========================================================
-    # REMEMBER PREVIOUS CLOSED IDS
+    # PREVIOUS CLOSED IDS
     # ========================================================
 
     previous_closed_ids = set()
 
     for trade in get_all_trades(state):
 
-        status = str(
-            trade.get(
-                "status",
-                ""
-            )
-        ).upper()
+        if str(
+            trade.get("status", "")
+        ).upper() == "CLOSED":
 
-        if status == "CLOSED":
-
-            trade_id = get_trade_id(
-                trade
-            )
+            trade_id = get_trade_id(trade)
 
             if trade_id:
-
-                previous_closed_ids.add(
-                    trade_id
-                )
+                previous_closed_ids.add(trade_id)
 
     results = []
-
     errors = {}
-
     data_cache = {}
-
     blocked_symbols = []
 
     # ========================================================
-    # FIRST PASS
+    # SCAN ALL COINS
     # ========================================================
 
     for symbol in COINS:
 
         try:
 
-            result = analyze_coin(
-                symbol
-            )
+            result = analyze_coin(symbol)
 
-            results.append(
-                result
-            )
+            results.append(result)
 
-            data_cache[symbol] = (
-                result["df"]
-            )
+            data_cache[symbol] = result["df"]
 
         except Exception as e:
 
             errors[symbol] = str(e)
 
-        time.sleep(
-            0.05
-        )
+        time.sleep(0.05)
 
     # ========================================================
-    # CLOSE OLD OPEN TRADES FIRST
+    # CLOSE OLD OPEN TRADES
     # ========================================================
 
     changed = evaluate_open_trades(
@@ -3962,10 +3236,7 @@ def main():
     )
 
     if changed:
-
-        save_state(
-            state
-        )
+        save_state(state)
 
     # ========================================================
     # REGISTER NEW SIGNALS
@@ -3975,9 +3246,7 @@ def main():
 
     for result in results:
 
-        signal = result.get(
-            "signal"
-        )
+        signal = result.get("signal")
 
         if signal is None:
             continue
@@ -3985,13 +3254,7 @@ def main():
         symbol = signal["symbol"]
 
         # ----------------------------------------------------
-        # HARD SYMBOL LOCK
-        #
-        # If symbol already has an OPEN trade:
-        # BUY = blocked
-        # SELL = blocked
-        #
-        # This prevents both duplicate and hedge.
+        # SYMBOL LOCK
         # ----------------------------------------------------
 
         if (
@@ -4002,8 +3265,13 @@ def main():
             )
         ):
 
-            blocked_symbols.append(
-                symbol
+            blocked_symbols.append(symbol)
+
+            result["diagnostic"].setdefault(
+                "rejections",
+                []
+            ).append(
+                "BLOCKED: Symbol already has OPEN trade"
             )
 
             continue
@@ -4015,36 +3283,21 @@ def main():
             signal["entry"]
         )
 
-        signal["signal_id"] = (
-            signal_id
-        )
-
-        signal["id"] = (
-            signal_id
-        )
-
-        trade = dict(
-            signal
-        )
-
-        trade["status"] = "OPEN"
+        signal["signal_id"] = signal_id
+        signal["id"] = signal_id
 
         if register_signal(
             state,
-            trade
+            signal
         ):
 
-            new_registered.append(
-                signal
-            )
+            new_registered.append(signal)
 
     # ========================================================
     # SAVE
     # ========================================================
 
-    save_state(
-        state
-    )
+    save_state(state)
 
     # ========================================================
     # SECOND EVALUATION
@@ -4056,13 +3309,10 @@ def main():
     )
 
     if changed:
-
-        save_state(
-            state
-        )
+        save_state(state)
 
     # ========================================================
-    # FIND CLOSED SIGNALS FROM THIS RUN
+    # CLOSED THIS RUN
     # ========================================================
 
     closed_this_run = (
@@ -4093,22 +3343,18 @@ def main():
         errors,
         open_performance,
         closed_this_run,
-        blocked_symbols
+        blocked_symbols,
+        new_registered
     )
 
     print()
-
-    print(
-        report
-    )
+    print(report)
 
     # ========================================================
     # TELEGRAM
     # ========================================================
 
-    send_telegram(
-        report
-    )
+    send_telegram(report)
 
 
 # ============================================================
@@ -4116,5 +3362,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
