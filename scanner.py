@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO DIVERGENCE SCANNER v10.2
+# CRYPTO DIVERGENCE SCANNER v10.3
 # ============================================================
 # Kraken Futures
 # Closed 5m Candles
@@ -12,20 +12,25 @@
 # P&L / R / MFE / MAE / Duration
 # Closed Signals Report
 # Fixed BUY / SELL Emojis
+# ATR Based SL
+# R Based TP
+# SL / TP Percentages
 # Telegram
 #
-# FIXES v10.2:
-# - Supports trade_history.json dict OR list format
-# - Supports old/new trade field names
-# - Supports ISO or millisecond signal_time
-# - Preserves existing trade-history dict structure
-# - Open P&L / R / MFE / MAE / Duration fixed
-# - Existing trade IDs preserved
-# - Closed signals displayed
+# v10.3 CHANGES:
+# - ATR(14) based Stop Loss
+# - SL uses max(Swing + Buffer, ATR x 1.5, minimum 0.35%)
+# - Maximum SL distance 2.0%
+# - TP1 = 1.5R
+# - TP2 = 2.5R
+# - TP3 = 3.5R
+# - SL / TP percentages displayed
+# - Open signal SL / TP percentages displayed
 # - BUY always uses 🟢
 # - SELL always uses 🔴
 # - TP result uses ✅
 # - SL result uses ❌
+# - Old trade_history.json formats preserved
 # ============================================================
 
 import os
@@ -88,10 +93,18 @@ ALLOW_MULTIPLE_OPEN_PER_SYMBOL = False
 
 REQUEST_TIMEOUT = 20
 
+
+# ============================================================
 # RSI
+# ============================================================
+
 RSI_PERIOD = 14
 
-# Divergence pivots
+
+# ============================================================
+# DIVERGENCE PIVOTS
+# ============================================================
+
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
 MAX_PIVOT_GAP = 60
@@ -99,15 +112,44 @@ MAX_PIVOT_GAP = 60
 MIN_RSI_DIFFERENCE = 2.0
 MIN_PRICE_DIFFERENCE_PERCENT = 0.10
 
-# SL / TP
-SL_BUFFER_PERCENT = 0.10
-MIN_TP_DISTANCE_PERCENT = 0.30
 
-# UT Bot
+# ============================================================
+# SL / TP
+# ============================================================
+
+# ATR used specifically for SL calculation
+SL_ATR_PERIOD = 14
+
+# Main ATR multiplier
+SL_ATR_MULTIPLIER = 1.5
+
+# Extra buffer around swing
+SL_BUFFER_PERCENT = 0.10
+
+# Minimum SL distance from entry
+MIN_SL_DISTANCE_PERCENT = 0.35
+
+# Maximum SL distance from entry
+MAX_SL_DISTANCE_PERCENT = 2.00
+
+# Risk / Reward targets
+TP1_R_MULTIPLE = 1.5
+TP2_R_MULTIPLE = 2.5
+TP3_R_MULTIPLE = 3.5
+
+
+# ============================================================
+# UT BOT
+# ============================================================
+
 UT_KEY_VALUE = 3.0
 UT_ATR_PERIOD = 10
 
-# Telegram
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
     ""
@@ -121,7 +163,7 @@ TELEGRAM_CHAT_ID = os.getenv(
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "CryptoDivergenceScanner/10.2",
+    "User-Agent": "CryptoDivergenceScanner/10.3",
     "Accept": "application/json",
 })
 
@@ -1536,6 +1578,251 @@ def nearest_support(
 
 
 # ============================================================
+# BUILD SL / TP
+# ============================================================
+
+def build_sl_tp(
+    side,
+    entry,
+    atr,
+    swing_level
+):
+
+    if entry <= 0:
+        return None
+
+    if atr is None or atr <= 0:
+        return None
+
+    # --------------------------------------------------------
+    # ATR based risk
+    # --------------------------------------------------------
+
+    atr_distance = (
+        atr
+        * SL_ATR_MULTIPLIER
+    )
+
+    # --------------------------------------------------------
+    # Swing based risk
+    # --------------------------------------------------------
+
+    if side == "BUY":
+
+        if swing_level is None:
+
+            swing_distance = 0
+
+        else:
+
+            swing_sl = (
+                swing_level
+                * (
+                    1
+                    - SL_BUFFER_PERCENT
+                    / 100
+                )
+            )
+
+            swing_distance = (
+                entry
+                - swing_sl
+            )
+
+    else:
+
+        if swing_level is None:
+
+            swing_distance = 0
+
+        else:
+
+            swing_sl = (
+                swing_level
+                * (
+                    1
+                    + SL_BUFFER_PERCENT
+                    / 100
+                )
+            )
+
+            swing_distance = (
+                swing_sl
+                - entry
+            )
+
+    # --------------------------------------------------------
+    # Minimum percentage risk
+    # --------------------------------------------------------
+
+    minimum_distance = (
+        entry
+        * MIN_SL_DISTANCE_PERCENT
+        / 100
+    )
+
+    # --------------------------------------------------------
+    # Final risk distance
+    # --------------------------------------------------------
+
+    risk_distance = max(
+        atr_distance,
+        swing_distance,
+        minimum_distance
+    )
+
+    # --------------------------------------------------------
+    # Maximum SL filter
+    #
+    # If required SL is above 2%, do not issue signal.
+    # This prevents huge stops on extremely volatile coins.
+    # --------------------------------------------------------
+
+    risk_percent = (
+        risk_distance
+        / entry
+        * 100
+    )
+
+    if risk_percent > MAX_SL_DISTANCE_PERCENT:
+
+        return None
+
+    # --------------------------------------------------------
+    # SL
+    # --------------------------------------------------------
+
+    if side == "BUY":
+
+        sl = (
+            entry
+            - risk_distance
+        )
+
+    else:
+
+        sl = (
+            entry
+            + risk_distance
+        )
+
+    # --------------------------------------------------------
+    # TP based on R
+    # --------------------------------------------------------
+
+    if side == "BUY":
+
+        tp1 = (
+            entry
+            + risk_distance
+            * TP1_R_MULTIPLE
+        )
+
+        tp2 = (
+            entry
+            + risk_distance
+            * TP2_R_MULTIPLE
+        )
+
+        tp3 = (
+            entry
+            + risk_distance
+            * TP3_R_MULTIPLE
+        )
+
+    else:
+
+        tp1 = (
+            entry
+            - risk_distance
+            * TP1_R_MULTIPLE
+        )
+
+        tp2 = (
+            entry
+            - risk_distance
+            * TP2_R_MULTIPLE
+        )
+
+        tp3 = (
+            entry
+            - risk_distance
+            * TP3_R_MULTIPLE
+        )
+
+    return {
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+        "risk_distance": risk_distance,
+        "risk_percent": risk_percent,
+    }
+
+
+# ============================================================
+# PERCENT FROM ENTRY
+# ============================================================
+
+def price_percent_from_entry(
+    entry,
+    price
+):
+
+    if (
+        entry is None
+        or price is None
+        or entry == 0
+    ):
+
+        return 0
+
+    return (
+        (
+            float(price)
+            - float(entry)
+        )
+        / float(entry)
+        * 100
+    )
+
+
+def level_percent(
+    side,
+    entry,
+    level
+):
+
+    if (
+        entry is None
+        or level is None
+        or entry == 0
+    ):
+
+        return 0
+
+    if side == "BUY":
+
+        return (
+            (
+                level
+                - entry
+            )
+            / entry
+            * 100
+        )
+
+    return (
+        (
+            entry
+            - level
+        )
+        / entry
+        * 100
+    )
+
+
+# ============================================================
 # SIGNAL REGISTRATION
 # ============================================================
 
@@ -1752,8 +2039,8 @@ def evaluate_open_trades(
                 )
 
                 # Conservative:
-                # SL wins if both SL and TP
-                # are touched in same candle.
+                # SL wins if both SL and TP are touched
+                # in the same candle.
 
                 if candle_low <= sl:
 
@@ -1950,7 +2237,6 @@ def evaluate_open_trades(
                 r_multiple
             )
 
-            # Duration
             duration_minutes = max(
                 0,
                 (
@@ -2462,7 +2748,13 @@ def analyze_coin(
         RSI_PERIOD
     )
 
-    # ATR
+    # ATR(14) specifically for SL
+    df["atr_sl"] = calculate_atr(
+        df,
+        SL_ATR_PERIOD
+    )
+
+    # ATR(10) for UT Bot
     df["atr"] = calculate_atr(
         df,
         UT_ATR_PERIOD
@@ -2499,8 +2791,8 @@ def analyze_coin(
         df["rsi"].iloc[-1]
     )
 
-    current_atr = float(
-        df["atr"].iloc[-1]
+    current_atr_sl = float(
+        df["atr_sl"].iloc[-1]
     )
 
     current_ut = float(
@@ -2530,60 +2822,29 @@ def analyze_coin(
             current_close
         )
 
-        if support is None:
-
-            support = (
-                current_close
-                - current_atr
-            )
-
-        sl = (
-            support
-            * (
-                1
-                - SL_BUFFER_PERCENT
-                / 100
-            )
+        sl_tp = build_sl_tp(
+            side="BUY",
+            entry=current_close,
+            atr=current_atr_sl,
+            swing_level=support
         )
 
-        resistance = nearest_resistance(
-            df,
-            current_close
-        )
+        # If required SL > 2%, reject signal.
+        if sl_tp is None:
 
-        if resistance is None:
+            return {
+                "symbol": symbol,
+                "df": df,
+                "signal": None,
+                "market_symbol": get_market_symbol(
+                    symbol
+                ),
+            }
 
-            resistance = (
-                current_close
-                + current_atr * 2
-            )
-
-        tp1 = resistance
-
-        if (
-            tp1 - current_close
-        ) / current_close * 100 < MIN_TP_DISTANCE_PERCENT:
-
-            tp1 = (
-                current_close
-                + current_atr
-            )
-
-        tp2 = (
-            current_close
-            + (
-                tp1
-                - current_close
-            ) * 2
-        )
-
-        tp3 = (
-            current_close
-            + (
-                tp1
-                - current_close
-            ) * 3
-        )
+        sl = sl_tp["sl"]
+        tp1 = sl_tp["tp1"]
+        tp2 = sl_tp["tp2"]
+        tp3 = sl_tp["tp3"]
 
         signal = {
             "symbol": symbol,
@@ -2596,6 +2857,31 @@ def analyze_coin(
             "tp2": tp2,
             "tp3": tp3,
             "tp": tp1,
+            "sl_percent": level_percent(
+                "BUY",
+                current_close,
+                sl
+            ),
+            "tp1_percent": level_percent(
+                "BUY",
+                current_close,
+                tp1
+            ),
+            "tp2_percent": level_percent(
+                "BUY",
+                current_close,
+                tp2
+            ),
+            "tp3_percent": level_percent(
+                "BUY",
+                current_close,
+                tp3
+            ),
+            "risk_percent": sl_tp[
+                "risk_percent"
+            ],
+            "atr": current_atr_sl,
+            "atr_multiplier": SL_ATR_MULTIPLIER,
             "signal_time": signal_time,
             "signal_time_iso": datetime.fromtimestamp(
                 signal_time / 1000,
@@ -2623,60 +2909,29 @@ def analyze_coin(
             current_close
         )
 
-        if resistance is None:
-
-            resistance = (
-                current_close
-                + current_atr
-            )
-
-        sl = (
-            resistance
-            * (
-                1
-                + SL_BUFFER_PERCENT
-                / 100
-            )
+        sl_tp = build_sl_tp(
+            side="SELL",
+            entry=current_close,
+            atr=current_atr_sl,
+            swing_level=resistance
         )
 
-        support = nearest_support(
-            df,
-            current_close
-        )
+        # If required SL > 2%, reject signal.
+        if sl_tp is None:
 
-        if support is None:
+            return {
+                "symbol": symbol,
+                "df": df,
+                "signal": None,
+                "market_symbol": get_market_symbol(
+                    symbol
+                ),
+            }
 
-            support = (
-                current_close
-                - current_atr * 2
-            )
-
-        tp1 = support
-
-        if (
-            current_close - tp1
-        ) / current_close * 100 < MIN_TP_DISTANCE_PERCENT:
-
-            tp1 = (
-                current_close
-                - current_atr
-            )
-
-        tp2 = (
-            current_close
-            - (
-                current_close
-                - tp1
-            ) * 2
-        )
-
-        tp3 = (
-            current_close
-            - (
-                current_close
-                - tp1
-            ) * 3
-        )
+        sl = sl_tp["sl"]
+        tp1 = sl_tp["tp1"]
+        tp2 = sl_tp["tp2"]
+        tp3 = sl_tp["tp3"]
 
         signal = {
             "symbol": symbol,
@@ -2689,6 +2944,31 @@ def analyze_coin(
             "tp2": tp2,
             "tp3": tp3,
             "tp": tp1,
+            "sl_percent": level_percent(
+                "SELL",
+                current_close,
+                sl
+            ),
+            "tp1_percent": level_percent(
+                "SELL",
+                current_close,
+                tp1
+            ),
+            "tp2_percent": level_percent(
+                "SELL",
+                current_close,
+                tp2
+            ),
+            "tp3_percent": level_percent(
+                "SELL",
+                current_close,
+                tp3
+            ),
+            "risk_percent": sl_tp[
+                "risk_percent"
+            ],
+            "atr": current_atr_sl,
+            "atr_multiplier": SL_ATR_MULTIPLIER,
             "signal_time": signal_time,
             "signal_time_iso": datetime.fromtimestamp(
                 signal_time / 1000,
@@ -2725,6 +3005,50 @@ def format_signal(
         side
     )
 
+    entry = float(
+        signal["entry"]
+    )
+
+    sl = float(
+        signal["sl"]
+    )
+
+    tp1 = float(
+        signal["tp1"]
+    )
+
+    tp2 = float(
+        signal["tp2"]
+    )
+
+    tp3 = float(
+        signal["tp3"]
+    )
+
+    sl_percent = level_percent(
+        side,
+        entry,
+        sl
+    )
+
+    tp1_percent = level_percent(
+        side,
+        entry,
+        tp1
+    )
+
+    tp2_percent = level_percent(
+        side,
+        entry,
+        tp2
+    )
+
+    tp3_percent = level_percent(
+        side,
+        entry,
+        tp3
+    )
+
     text = []
 
     text.append(
@@ -2732,23 +3056,33 @@ def format_signal(
     )
 
     text.append(
-        f"Entry: {format_price(signal['entry'])}"
+        f"Entry: {format_price(entry)}"
     )
 
     text.append(
-        f"Stop Loss: {format_price(signal['sl'])}"
+        f"Stop Loss: {format_price(sl)} ({sl_percent:+.2f}%)"
     )
 
     text.append(
-        f"Target 1: {format_price(signal['tp1'])}"
+        f"Target 1: {format_price(tp1)} ({tp1_percent:+.2f}%)"
     )
 
     text.append(
-        f"Target 2: {format_price(signal['tp2'])}"
+        f"Target 2: {format_price(tp2)} ({tp2_percent:+.2f}%)"
     )
 
     text.append(
-        f"Target 3: {format_price(signal['tp3'])}"
+        f"Target 3: {format_price(tp3)} ({tp3_percent:+.2f}%)"
+    )
+
+    text.append(
+        f"Risk: {abs(sl_percent):.2f}%"
+    )
+
+    text.append(
+        f"RR: 1:{TP1_R_MULTIPLE:.1f} / "
+        f"1:{TP2_R_MULTIPLE:.1f} / "
+        f"1:{TP3_R_MULTIPLE:.1f}"
     )
 
     text.append(
@@ -2885,7 +3219,8 @@ def format_closed_signal(
     text = []
 
     text.append(
-        f"{direction_icon} {coin} {side}"
+        f"{direction_icon} {coin} {side} | "
+        f"{result_icon} {reason or 'UNKNOWN'}"
     )
 
     text.append(
@@ -2894,10 +3229,6 @@ def format_closed_signal(
 
     text.append(
         f"Exit: {format_price(exit_price)}"
-    )
-
-    text.append(
-        f"Result: {result_icon} {reason or 'UNKNOWN'}"
     )
 
     text.append(
@@ -2936,7 +3267,7 @@ def format_report(
     lines = []
 
     lines.append(
-        "📡 CRYPTO DIVERGENCE SCANNER v10.2"
+        "📡 CRYPTO DIVERGENCE SCANNER v10.3"
     )
 
     lines.append(
@@ -3104,12 +3435,15 @@ def format_report(
         for item in open_performance:
 
             # IMPORTANT:
-            # Emoji is based ONLY on direction.
-            # It is NOT based on current P&L.
+            # Emoji depends ONLY on direction.
 
             direction_icon = direction_emoji(
                 item["side"]
             )
+
+            side = item["side"]
+            entry = item["entry"]
+            sl = item["sl"]
 
             pnl = item[
                 "pnl_percent"
@@ -3127,12 +3461,19 @@ def format_report(
                 "mae"
             ]
 
-            lines.append(
-                f"{direction_icon} {item['symbol']} {item['side']}"
+            sl_percent = level_percent(
+                side,
+                entry,
+                sl
             )
 
             lines.append(
-                f"Entry: {format_price(item['entry'])}"
+                f"{direction_icon} "
+                f"{item['symbol']} {side}"
+            )
+
+            lines.append(
+                f"Entry: {format_price(entry)}"
             )
 
             lines.append(
@@ -3140,13 +3481,47 @@ def format_report(
             )
 
             lines.append(
-                f"SL: {format_price(item['sl'])}"
+                f"SL: {format_price(sl)} "
+                f"({sl_percent:+.2f}%)"
             )
 
             if item.get("tp1") is not None:
 
+                tp1_percent = level_percent(
+                    side,
+                    entry,
+                    item["tp1"]
+                )
+
                 lines.append(
-                    f"TP1: {format_price(item['tp1'])}"
+                    f"TP1: {format_price(item['tp1'])} "
+                    f"({tp1_percent:+.2f}%)"
+                )
+
+            if item.get("tp2") is not None:
+
+                tp2_percent = level_percent(
+                    side,
+                    entry,
+                    item["tp2"]
+                )
+
+                lines.append(
+                    f"TP2: {format_price(item['tp2'])} "
+                    f"({tp2_percent:+.2f}%)"
+                )
+
+            if item.get("tp3") is not None:
+
+                tp3_percent = level_percent(
+                    side,
+                    entry,
+                    item["tp3"]
+                )
+
+                lines.append(
+                    f"TP3: {format_price(item['tp3'])} "
+                    f"({tp3_percent:+.2f}%)"
                 )
 
             lines.append(
@@ -3243,7 +3618,8 @@ def main():
     )
 
     # --------------------------------------------------------
-    # Remember which trades were already closed.
+    # Remember trades that were already CLOSED before
+    # this execution.
     # --------------------------------------------------------
 
     previous_closed_ids = set()
