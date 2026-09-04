@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO DIVERGENCE SCANNER v10.0
+# CRYPTO DIVERGENCE SCANNER v10.1
 # ============================================================
 # Kraken Futures
 # Closed 5m Candles
@@ -11,6 +11,14 @@
 # Open Signal P&L
 # P&L / R / MFE / MAE / Duration
 # Telegram
+#
+# FIXES v10.1:
+# - Supports trade_history.json dict OR list format
+# - Supports old/new trade field names
+# - Supports ISO or millisecond signal_time
+# - Preserves existing trade-history dict structure
+# - Open P&L / R / MFE / MAE / Duration fixed
+# - Existing trade IDs preserved
 # ============================================================
 
 import os
@@ -97,8 +105,9 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
 SESSION = requests.Session()
+
 SESSION.headers.update({
-    "User-Agent": "CryptoDivergenceScanner/10.0",
+    "User-Agent": "CryptoDivergenceScanner/10.1",
     "Accept": "application/json",
 })
 
@@ -115,6 +124,7 @@ MARKET_MAP = {}
 # ============================================================
 
 def send_telegram(message):
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
 
@@ -130,6 +140,7 @@ def send_telegram(message):
     }
 
     try:
+
         r = SESSION.post(
             url,
             json=payload,
@@ -147,8 +158,11 @@ def send_telegram(message):
 # ============================================================
 
 def default_state():
+
     return {
-        "trades": []
+        "version": 1,
+        "trades": {},
+        "last_run": None,
     }
 
 
@@ -158,24 +172,56 @@ def load_state():
         return default_state()
 
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             data = json.load(f)
 
         if not isinstance(data, dict):
             return default_state()
 
         if "trades" not in data:
-            data["trades"] = []
+            data["trades"] = {}
+
+        # ----------------------------------------------------
+        # Normalize trades container.
+        #
+        # We keep the original dict format when possible.
+        # ----------------------------------------------------
+
+        if not isinstance(
+            data["trades"],
+            (dict, list)
+        ):
+
+            data["trades"] = {}
 
         return data
 
-    except Exception:
+    except Exception as e:
+
+        print(
+            f"WARNING: Could not load state: {e}"
+        )
+
         return default_state()
 
 
 def save_state(state):
 
     temp_file = STATE_FILE + ".tmp"
+
+    # --------------------------------------------------------
+    # Update last run.
+    # --------------------------------------------------------
+
+    state["last_run"] = datetime.now(
+        timezone.utc
+    ).isoformat()
 
     with open(
         temp_file,
@@ -190,7 +236,361 @@ def save_state(state):
             indent=2
         )
 
-    os.replace(temp_file, STATE_FILE)
+    os.replace(
+        temp_file,
+        STATE_FILE
+    )
+
+
+# ============================================================
+# TRADE HELPERS
+# ============================================================
+
+def get_all_trades(state):
+
+    """
+    Return trades as a list regardless of whether
+    trade_history.json stores them as dict or list.
+    """
+
+    trades = state.get(
+        "trades",
+        {}
+    )
+
+    if isinstance(
+        trades,
+        dict
+    ):
+
+        result = []
+
+        for key, trade in trades.items():
+
+            if isinstance(
+                trade,
+                dict
+            ):
+
+                # Preserve key as ID if missing.
+                if not trade.get("id"):
+                    trade["id"] = key
+
+                if not trade.get("signal_id"):
+                    trade["signal_id"] = key
+
+                result.append(
+                    trade
+                )
+
+        return result
+
+    if isinstance(
+        trades,
+        list
+    ):
+
+        return [
+            x for x in trades
+            if isinstance(x, dict)
+        ]
+
+    return []
+
+
+def normalize_side(trade):
+
+    side = trade.get(
+        "side"
+    )
+
+    if not side:
+        side = trade.get(
+            "direction"
+        )
+
+    if not side:
+        return ""
+
+    side = str(
+        side
+    ).upper().strip()
+
+    if side in (
+        "LONG",
+        "BUY"
+    ):
+        return "BUY"
+
+    if side in (
+        "SHORT",
+        "SELL"
+    ):
+        return "SELL"
+
+    return side
+
+
+def normalize_coin(trade):
+
+    # Preferred field.
+    name = trade.get(
+        "name"
+    )
+
+    if name:
+
+        return str(
+            name
+        ).upper()
+
+    symbol = trade.get(
+        "symbol",
+        ""
+    )
+
+    symbol = str(
+        symbol
+    ).upper()
+
+    # Examples:
+    # PF_UNIUSD
+    # PF_ADAUSD
+    # PI_XBTUSD
+
+    if symbol.startswith("PF_"):
+        symbol = symbol[3:]
+
+    if symbol.startswith("PI_"):
+        symbol = symbol[3:]
+
+    if symbol.endswith("USD"):
+        symbol = symbol[:-3]
+
+    if symbol == "XBT":
+        symbol = "BTC"
+
+    return symbol
+
+
+def parse_trade_time(value):
+
+    """
+    Convert trade signal_time to milliseconds.
+
+    Supports:
+    - integer milliseconds
+    - float milliseconds
+    - ISO 8601 string
+    - ISO string ending with Z
+    """
+
+    if value is None:
+        return None
+
+    # Numeric timestamp.
+    if isinstance(
+        value,
+        (int, float)
+    ):
+
+        return int(
+            value
+        )
+
+    value = str(
+        value
+    ).strip()
+
+    if not value:
+        return None
+
+    # Numeric string.
+    try:
+
+        return int(
+            float(value)
+        )
+
+    except Exception:
+        pass
+
+    # ISO timestamp.
+    try:
+
+        iso = value
+
+        if iso.endswith("Z"):
+            iso = iso[:-1] + "+00:00"
+
+        dt = datetime.fromisoformat(
+            iso
+        )
+
+        if dt.tzinfo is None:
+
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return int(
+            dt.timestamp() * 1000
+        )
+
+    except Exception:
+
+        return None
+
+
+def get_trade_tp1(trade):
+
+    value = trade.get(
+        "tp1"
+    )
+
+    if value is None:
+        value = trade.get(
+            "tp"
+        )
+
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def get_trade_tp2(trade):
+
+    value = trade.get(
+        "tp2"
+    )
+
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def get_trade_tp3(trade):
+
+    value = trade.get(
+        "tp3"
+    )
+
+    if value is None:
+        return None
+
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def get_trade_entry(trade):
+
+    try:
+        return float(
+            trade.get(
+                "entry"
+            )
+        )
+    except Exception:
+        return None
+
+
+def get_trade_sl(trade):
+
+    try:
+        return float(
+            trade.get(
+                "sl"
+            )
+        )
+    except Exception:
+        return None
+
+
+def get_trade_id(trade):
+
+    value = trade.get(
+        "signal_id"
+    )
+
+    if value:
+        return str(value)
+
+    value = trade.get(
+        "id"
+    )
+
+    if value:
+        return str(value)
+
+    return None
+
+
+def rebuild_trade_container(state):
+
+    """
+    Preserve dict format when the state uses dict.
+    Convert list to list when the state originally uses list.
+    """
+
+    trades = state.get(
+        "trades",
+        {}
+    )
+
+    if isinstance(
+        trades,
+        dict
+    ):
+
+        rebuilt = {}
+
+        for trade in get_all_trades(state):
+
+            trade_id = get_trade_id(
+                trade
+            )
+
+            if not trade_id:
+
+                trade_id = hashlib.sha256(
+                    json.dumps(
+                        trade,
+                        sort_keys=True,
+                        default=str
+                    ).encode()
+                ).hexdigest()[:16]
+
+                trade["id"] = trade_id
+                trade["signal_id"] = trade_id
+
+            rebuilt[
+                trade_id
+            ] = trade
+
+        state["trades"] = rebuilt
+
+    elif isinstance(
+        trades,
+        list
+    ):
+
+        state["trades"] = get_all_trades(
+            state
+        )
+
+    else:
+
+        state["trades"] = {}
 
 
 # ============================================================
@@ -245,19 +645,31 @@ def load_market_map():
         for item in instruments:
 
             symbol = str(
-                item.get("symbol", "")
+                item.get(
+                    "symbol",
+                    ""
+                )
             ).upper()
 
             base = str(
-                item.get("base", "")
+                item.get(
+                    "base",
+                    ""
+                )
             ).upper()
 
             quote = str(
-                item.get("quote", "")
+                item.get(
+                    "quote",
+                    ""
+                )
             ).upper()
 
             instrument_type = str(
-                item.get("type", "")
+                item.get(
+                    "type",
+                    ""
+                )
             ).lower()
 
             tradeable = item.get(
@@ -279,11 +691,9 @@ def load_market_map():
             if expired:
                 continue
 
-            # We need USD crypto futures.
             if quote != "USD":
                 continue
 
-            # Prefer perpetual/flexible contracts.
             score = 0
 
             if symbol.startswith("PF_"):
@@ -295,7 +705,6 @@ def load_market_map():
             if instrument_type == "futures_inverse":
                 score += 50
 
-            # XBT is Kraken's BTC symbol.
             normalized_base = base
 
             if normalized_base == "XBT":
@@ -314,7 +723,10 @@ def load_market_map():
                 or candidate[0]
                 > result[normalized_base][0]
             ):
-                result[normalized_base] = candidate
+
+                result[
+                    normalized_base
+                ] = candidate
 
         MARKET_MAP = {
             coin: value[1]
@@ -332,14 +744,22 @@ def load_market_map():
 
 def get_market_symbol(coin):
 
-    coin = coin.upper()
+    coin = str(
+        coin
+    ).upper()
+
+    if coin == "XBT":
+        coin = "BTC"
 
     if coin not in MARKET_MAP:
         load_market_map()
 
-    symbol = MARKET_MAP.get(coin)
+    symbol = MARKET_MAP.get(
+        coin
+    )
 
     if not symbol:
+
         raise RuntimeError(
             f"No active USD Futures market found for {coin}"
         )
@@ -353,7 +773,9 @@ def get_market_symbol(coin):
 
 def get_candles(symbol):
 
-    futures_symbol = get_market_symbol(symbol)
+    futures_symbol = get_market_symbol(
+        symbol
+    )
 
     url = (
         f"{BASE_URL}/trade/"
@@ -372,6 +794,7 @@ def get_candles(symbol):
     )
 
     if not r.ok:
+
         raise RuntimeError(
             f"HTTP {r.status_code} | "
             f"{futures_symbol} | "
@@ -386,6 +809,7 @@ def get_candles(symbol):
     )
 
     if not candles:
+
         raise RuntimeError(
             f"No candles returned for {futures_symbol}"
         )
@@ -396,18 +820,41 @@ def get_candles(symbol):
 
         try:
 
-            if isinstance(c, dict):
+            if isinstance(
+                c,
+                dict
+            ):
 
-                timestamp = c.get("time")
-                open_price = c.get("open")
-                high_price = c.get("high")
-                low_price = c.get("low")
-                close_price = c.get("close")
-                volume = c.get("volume", 0)
+                timestamp = c.get(
+                    "time"
+                )
 
-            elif isinstance(c, (list, tuple)):
+                open_price = c.get(
+                    "open"
+                )
 
-                # Defensive support for alternate API formats.
+                high_price = c.get(
+                    "high"
+                )
+
+                low_price = c.get(
+                    "low"
+                )
+
+                close_price = c.get(
+                    "close"
+                )
+
+                volume = c.get(
+                    "volume",
+                    0
+                )
+
+            elif isinstance(
+                c,
+                (list, tuple)
+            ):
+
                 if len(c) < 6:
                     continue
 
@@ -419,6 +866,7 @@ def get_candles(symbol):
                 volume = c[5]
 
             else:
+
                 continue
 
             if timestamp is None:
@@ -437,11 +885,14 @@ def get_candles(symbol):
             continue
 
     if not rows:
+
         raise RuntimeError(
             f"Could not parse candles for {futures_symbol}"
         )
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(
+        rows
+    )
 
     df = df.drop_duplicates(
         subset=["time"]
@@ -449,7 +900,9 @@ def get_candles(symbol):
 
     df = df.sort_values(
         "time"
-    ).reset_index(drop=True)
+    ).reset_index(
+        drop=True
+    )
 
     # ========================================================
     # REMOVE CURRENT INCOMPLETE 5M CANDLE
@@ -467,11 +920,15 @@ def get_candles(symbol):
             df.iloc[-1]["time"]
         )
 
-        if last_time + candle_ms > now_ms:
+        if (
+            last_time + candle_ms
+            > now_ms
+        ):
 
             df = df.iloc[:-1].copy()
 
     if len(df) < 50:
+
         raise RuntimeError(
             f"Not enough closed candles for {symbol}"
         )
@@ -658,10 +1115,6 @@ def find_bullish_divergence(df):
         - rsi_previous
     )
 
-    # Bullish:
-    # price makes lower low
-    # RSI makes higher low
-
     if (
         price_latest < price_previous
         and rsi_latest > rsi_previous
@@ -748,10 +1201,6 @@ def find_bearish_divergence(df):
         rsi_latest
         - rsi_previous
     )
-
-    # Bearish:
-    # price makes higher high
-    # RSI makes lower high
 
     if (
         price_latest > price_previous
@@ -925,7 +1374,9 @@ def calculate_atr(
     low = df["low"]
     close = df["close"]
 
-    previous_close = close.shift(1)
+    previous_close = close.shift(
+        1
+    )
 
     tr1 = high - low
 
@@ -942,7 +1393,9 @@ def calculate_atr(
     tr = pd.concat(
         [tr1, tr2, tr3],
         axis=1
-    ).max(axis=1)
+    ).max(
+        axis=1
+    )
 
     return tr.ewm(
         alpha=1 / period,
@@ -977,6 +1430,7 @@ def calculate_ut_bot(
     )
 
     if len(df) == 0:
+
         return pd.Series(
             dtype=float
         )
@@ -996,7 +1450,11 @@ def calculate_ut_bot(
         ]
 
         current_close = close.iloc[i]
-        previous_close = close.iloc[i - 1]
+
+        previous_close = close.iloc[
+            i - 1
+        ]
+
         current_loss = loss.iloc[i]
 
         if (
@@ -1059,7 +1517,9 @@ def nearest_resistance(
     if not candidates:
         return None
 
-    return min(candidates)
+    return min(
+        candidates
+    )
 
 
 def nearest_support(
@@ -1078,7 +1538,9 @@ def nearest_support(
     if not candidates:
         return None
 
-    return max(candidates)
+    return max(
+        candidates
+    )
 
 
 # ============================================================
@@ -1092,32 +1554,106 @@ def register_signal(
 
     symbol = signal["symbol"]
 
+    trades = get_all_trades(
+        state
+    )
+
+    # --------------------------------------------------------
+    # Check existing open trade for symbol.
+    # --------------------------------------------------------
+
     if not ALLOW_MULTIPLE_OPEN_PER_SYMBOL:
 
-        for trade in state["trades"]:
+        for trade in trades:
+
+            trade_symbol = normalize_coin(
+                trade
+            )
+
+            trade_status = str(
+                trade.get(
+                    "status",
+                    ""
+                )
+            ).upper()
 
             if (
-                trade.get("symbol")
-                == symbol
-                and trade.get("status")
-                == "OPEN"
+                trade_symbol == symbol
+                and trade_status == "OPEN"
             ):
 
                 return False
 
-    signal_id = signal["signal_id"]
+    signal_id = signal.get(
+        "signal_id"
+    )
 
-    for trade in state["trades"]:
+    if not signal_id:
+        return False
 
-        if trade.get(
-            "signal_id"
-        ) == signal_id:
+    # --------------------------------------------------------
+    # Duplicate ID check.
+    # --------------------------------------------------------
+
+    for trade in trades:
+
+        existing_id = get_trade_id(
+            trade
+        )
+
+        if existing_id == signal_id:
 
             return False
 
-    state["trades"].append(
+    # --------------------------------------------------------
+    # Store trade.
+    # --------------------------------------------------------
+
+    trade = dict(
         signal
     )
+
+    trade["status"] = "OPEN"
+
+    # New schema fields.
+    trade["id"] = signal_id
+    trade["signal_id"] = signal_id
+
+    # Compatibility fields.
+    trade["direction"] = signal["side"]
+    trade["name"] = signal["symbol"]
+
+    # --------------------------------------------------------
+    # Dict format.
+    # --------------------------------------------------------
+
+    if isinstance(
+        state.get("trades"),
+        dict
+    ):
+
+        state["trades"][
+            signal_id
+        ] = trade
+
+    # --------------------------------------------------------
+    # List format.
+    # --------------------------------------------------------
+
+    elif isinstance(
+        state.get("trades"),
+        list
+    ):
+
+        state["trades"].append(
+            trade
+        )
+
+    else:
+
+        state["trades"] = {
+            signal_id: trade
+        }
 
     return True
 
@@ -1133,51 +1669,100 @@ def evaluate_open_trades(
 
     changed = False
 
-    for trade in state["trades"]:
+    trades = get_all_trades(
+        state
+    )
 
-        if trade.get(
-            "status"
-        ) != "OPEN":
+    for trade in trades:
 
+        status = str(
+            trade.get(
+                "status",
+                ""
+            )
+        ).upper()
+
+        if status != "OPEN":
             continue
 
-        symbol = trade["symbol"]
+        # ----------------------------------------------------
+        # Resolve symbol.
+        # ----------------------------------------------------
+
+        coin = normalize_coin(
+            trade
+        )
+
+        if not coin:
+            continue
 
         df = data_cache.get(
-            symbol
+            coin
         )
 
         if df is None or df.empty:
             continue
 
-        side = trade["side"]
+        # ----------------------------------------------------
+        # Resolve side.
+        # ----------------------------------------------------
 
-        entry = float(
-            trade["entry"]
+        side = normalize_side(
+            trade
         )
 
-        sl = float(
-            trade["sl"]
+        if side not in (
+            "BUY",
+            "SELL"
+        ):
+
+            continue
+
+        entry = get_trade_entry(
+            trade
         )
 
-        tp1 = trade.get(
-            "tp1"
+        sl = get_trade_sl(
+            trade
         )
 
-        tp2 = trade.get(
-            "tp2"
+        if entry is None or sl is None:
+            continue
+
+        tp1 = get_trade_tp1(
+            trade
         )
 
-        tp3 = trade.get(
-            "tp3"
+        tp2 = get_trade_tp2(
+            trade
         )
 
-        highs = df["high"]
-        lows = df["low"]
-
-        signal_time = int(
-            trade["signal_time"]
+        tp3 = get_trade_tp3(
+            trade
         )
+
+        # ----------------------------------------------------
+        # Signal time.
+        # ----------------------------------------------------
+
+        signal_time = parse_trade_time(
+            trade.get(
+                "signal_time"
+            )
+        )
+
+        if signal_time is None:
+
+            signal_time = parse_trade_time(
+                trade.get(
+                    "signal_time_iso"
+                )
+            )
+
+        if signal_time is None:
+
+            # Cannot evaluate safely.
+            continue
 
         after_signal = df[
             df["time"] > signal_time
@@ -1188,6 +1773,7 @@ def evaluate_open_trades(
 
         exit_reason = None
         exit_price = None
+        exit_time = None
 
         # ====================================================
         # LONG
@@ -1205,38 +1791,53 @@ def evaluate_open_trades(
                     row["low"]
                 )
 
-                # SL first for conservative evaluation.
+                candle_time = int(
+                    row["time"]
+                )
+
+                # Conservative:
+                # if both SL and TP are touched
+                # in same candle, SL wins.
+
                 if candle_low <= sl:
 
                     exit_reason = "SL"
                     exit_price = sl
+                    exit_time = candle_time
+
                     break
 
                 if (
                     tp1 is not None
-                    and candle_high >= float(tp1)
+                    and candle_high >= tp1
                 ):
 
                     exit_reason = "TP1"
-                    exit_price = float(tp1)
+                    exit_price = tp1
+                    exit_time = candle_time
+
                     break
 
                 if (
                     tp2 is not None
-                    and candle_high >= float(tp2)
+                    and candle_high >= tp2
                 ):
 
                     exit_reason = "TP2"
-                    exit_price = float(tp2)
+                    exit_price = tp2
+                    exit_time = candle_time
+
                     break
 
                 if (
                     tp3 is not None
-                    and candle_high >= float(tp3)
+                    and candle_high >= tp3
                 ):
 
                     exit_reason = "TP3"
-                    exit_price = float(tp3)
+                    exit_price = tp3
+                    exit_time = candle_time
+
                     break
 
         # ====================================================
@@ -1255,39 +1856,54 @@ def evaluate_open_trades(
                     row["low"]
                 )
 
-                # SL first for conservative evaluation.
+                candle_time = int(
+                    row["time"]
+                )
+
                 if candle_high >= sl:
 
                     exit_reason = "SL"
                     exit_price = sl
+                    exit_time = candle_time
+
                     break
 
                 if (
                     tp1 is not None
-                    and candle_low <= float(tp1)
+                    and candle_low <= tp1
                 ):
 
                     exit_reason = "TP1"
-                    exit_price = float(tp1)
+                    exit_price = tp1
+                    exit_time = candle_time
+
                     break
 
                 if (
                     tp2 is not None
-                    and candle_low <= float(tp2)
+                    and candle_low <= tp2
                 ):
 
                     exit_reason = "TP2"
-                    exit_price = float(tp2)
+                    exit_price = tp2
+                    exit_time = candle_time
+
                     break
 
                 if (
                     tp3 is not None
-                    and candle_low <= float(tp3)
+                    and candle_low <= tp3
                 ):
 
                     exit_reason = "TP3"
-                    exit_price = float(tp3)
+                    exit_price = tp3
+                    exit_time = candle_time
+
                     break
+
+        # ====================================================
+        # CLOSE TRADE
+        # ====================================================
 
         if exit_reason is not None:
 
@@ -1334,6 +1950,7 @@ def evaluate_open_trades(
                     ) / risk
 
             else:
+
                 r_multiple = 0
 
             trade["status"] = "CLOSED"
@@ -1342,12 +1959,27 @@ def evaluate_open_trades(
                 exit_reason
             )
 
+            trade["result_reason"] = (
+                exit_reason
+            )
+
             trade["exit_price"] = (
                 exit_price
             )
 
-            trade["exit_time"] = int(
-                after_signal.iloc[0]["time"]
+            trade["result_price"] = (
+                exit_price
+            )
+
+            trade["exit_time"] = (
+                exit_time
+            )
+
+            trade["closed_at"] = (
+                datetime.fromtimestamp(
+                    exit_time / 1000,
+                    tz=timezone.utc
+                ).isoformat()
             )
 
             trade["pnl_percent"] = (
@@ -1355,6 +1987,10 @@ def evaluate_open_trades(
             )
 
             trade["r_multiple"] = (
+                r_multiple
+            )
+
+            trade["result_r"] = (
                 r_multiple
             )
 
@@ -1374,32 +2010,55 @@ def calculate_open_performance(
 
     result = []
 
-    for trade in state["trades"]:
+    trades = get_all_trades(
+        state
+    )
 
-        if trade.get(
-            "status"
-        ) != "OPEN":
+    for trade in trades:
 
+        status = str(
+            trade.get(
+                "status",
+                ""
+            )
+        ).upper()
+
+        if status != "OPEN":
             continue
 
-        symbol = trade["symbol"]
+        coin = normalize_coin(
+            trade
+        )
+
+        if not coin:
+            continue
 
         df = data_cache.get(
-            symbol
+            coin
         )
 
         if df is None or df.empty:
             continue
 
-        entry = float(
-            trade["entry"]
+        entry = get_trade_entry(
+            trade
         )
 
-        sl = float(
-            trade["sl"]
+        sl = get_trade_sl(
+            trade
         )
 
-        side = trade["side"]
+        side = normalize_side(
+            trade
+        )
+
+        if (
+            entry is None
+            or sl is None
+            or side not in ("BUY", "SELL")
+        ):
+
+            continue
 
         current_price = float(
             df["close"].iloc[-1]
@@ -1456,105 +2115,134 @@ def calculate_open_performance(
                 ) / risk
 
         else:
+
             current_r = 0
 
         # ====================================================
         # MFE / MAE
         # ====================================================
 
-        signal_time = int(
-            trade["signal_time"]
+        signal_time = parse_trade_time(
+            trade.get(
+                "signal_time"
+            )
         )
 
-        after_signal = df[
-            df["time"] > signal_time
-        ]
+        if signal_time is None:
 
-        if after_signal.empty:
+            signal_time = parse_trade_time(
+                trade.get(
+                    "signal_time_iso"
+                )
+            )
+
+        if signal_time is None:
 
             mfe = 0
             mae = 0
+            after_signal = pd.DataFrame()
 
         else:
 
-            if side == "BUY":
+            after_signal = df[
+                df["time"] > signal_time
+            ]
 
-                best_price = float(
-                    after_signal["high"].max()
-                )
+            if after_signal.empty:
 
-                worst_price = float(
-                    after_signal["low"].min()
-                )
-
-                mfe = (
-                    best_price
-                    - entry
-                ) / entry * 100
-
-                mae = (
-                    worst_price
-                    - entry
-                ) / entry * 100
+                mfe = 0
+                mae = 0
 
             else:
 
-                best_price = float(
-                    after_signal["low"].min()
-                )
+                if side == "BUY":
 
-                worst_price = float(
-                    after_signal["high"].max()
-                )
+                    best_price = float(
+                        after_signal[
+                            "high"
+                        ].max()
+                    )
 
-                mfe = (
-                    entry
-                    - best_price
-                ) / entry * 100
+                    worst_price = float(
+                        after_signal[
+                            "low"
+                        ].min()
+                    )
 
-                mae = (
-                    entry
-                    - worst_price
-                ) / entry * 100
+                    mfe = (
+                        best_price
+                        - entry
+                    ) / entry * 100
+
+                    mae = (
+                        worst_price
+                        - entry
+                    ) / entry * 100
+
+                else:
+
+                    best_price = float(
+                        after_signal[
+                            "low"
+                        ].min()
+                    )
+
+                    worst_price = float(
+                        after_signal[
+                            "high"
+                        ].max()
+                    )
+
+                    mfe = (
+                        entry
+                        - best_price
+                    ) / entry * 100
+
+                    mae = (
+                        entry
+                        - worst_price
+                    ) / entry * 100
 
         # ====================================================
         # DURATION
         # ====================================================
 
-        duration_minutes = 0
+        if signal_time is None:
 
-        if after_signal.empty:
-
-            last_time = (
-                int(df["time"].iloc[-1])
-            )
+            duration_minutes = 0
 
         else:
 
-            last_time = (
-                int(
+            if after_signal.empty:
+
+                last_time = int(
+                    df["time"].iloc[-1]
+                )
+
+            else:
+
+                last_time = int(
                     after_signal[
                         "time"
                     ].iloc[-1]
                 )
+
+            duration_minutes = max(
+                0,
+                (
+                    last_time
+                    - signal_time
+                ) / 60000
             )
 
-        duration_minutes = max(
-            0,
-            (
-                last_time
-                - signal_time
-            ) / 60000
-        )
-
         result.append({
-            "symbol": symbol,
+            "symbol": coin,
             "side": side,
             "entry": entry,
             "sl": sl,
-            "tp1": trade.get("tp1"),
-            "tp2": trade.get("tp2"),
-            "tp3": trade.get("tp3"),
+            "tp1": get_trade_tp1(trade),
+            "tp2": get_trade_tp2(trade),
+            "tp3": get_trade_tp3(trade),
             "current_price": current_price,
             "pnl_percent": pnl_percent,
             "current_r": current_r,
@@ -1574,21 +2262,32 @@ def calculate_statistics(
     state
 ):
 
-    trades = state.get(
-        "trades",
-        []
+    trades = get_all_trades(
+        state
     )
 
-    total = len(trades)
+    total = len(
+        trades
+    )
 
     open_trades = [
         x for x in trades
-        if x.get("status") == "OPEN"
+        if str(
+            x.get(
+                "status",
+                ""
+            )
+        ).upper() == "OPEN"
     ]
 
     closed_trades = [
         x for x in trades
-        if x.get("status") == "CLOSED"
+        if str(
+            x.get(
+                "status",
+                ""
+            )
+        ).upper() == "CLOSED"
     ]
 
     wins = [
@@ -1681,7 +2380,9 @@ def format_price(
     if price is None:
         return "-"
 
-    price = float(price)
+    price = float(
+        price
+    )
 
     if price >= 1000:
         return f"{price:,.2f}"
@@ -1785,6 +2486,7 @@ def analyze_coin(
         )
 
         if support is None:
+
             support = (
                 current_close
                 - current_atr
@@ -1805,6 +2507,7 @@ def analyze_coin(
         )
 
         if resistance is None:
+
             resistance = (
                 current_close
                 + current_atr * 2
@@ -1840,17 +2543,22 @@ def analyze_coin(
         signal = {
             "symbol": symbol,
             "side": "BUY",
+            "direction": "BUY",
+            "name": symbol,
             "entry": current_close,
             "sl": sl,
             "tp1": tp1,
             "tp2": tp2,
             "tp3": tp3,
+            "tp": tp1,
             "signal_time": signal_time,
             "signal_time_iso": datetime.fromtimestamp(
                 signal_time / 1000,
                 tz=timezone.utc
             ).isoformat(),
-            "reason": "Bullish RSI Divergence + UT/Trendline",
+            "reason": (
+                "Bullish RSI Divergence + UT/Trendline"
+            ),
         }
 
     # ========================================================
@@ -1871,6 +2579,7 @@ def analyze_coin(
         )
 
         if resistance is None:
+
             resistance = (
                 current_close
                 + current_atr
@@ -1891,6 +2600,7 @@ def analyze_coin(
         )
 
         if support is None:
+
             support = (
                 current_close
                 - current_atr * 2
@@ -1926,24 +2636,31 @@ def analyze_coin(
         signal = {
             "symbol": symbol,
             "side": "SELL",
+            "direction": "SELL",
+            "name": symbol,
             "entry": current_close,
             "sl": sl,
             "tp1": tp1,
             "tp2": tp2,
             "tp3": tp3,
+            "tp": tp1,
             "signal_time": signal_time,
             "signal_time_iso": datetime.fromtimestamp(
                 signal_time / 1000,
                 tz=timezone.utc
             ).isoformat(),
-            "reason": "Bearish RSI Divergence + UT/Trendline",
+            "reason": (
+                "Bearish RSI Divergence + UT/Trendline"
+            ),
         }
 
     return {
         "symbol": symbol,
         "df": df,
         "signal": signal,
-        "market_symbol": get_market_symbol(symbol),
+        "market_symbol": get_market_symbol(
+            symbol
+        ),
     }
 
 
@@ -1993,7 +2710,9 @@ def format_signal(
         f"Reason: {signal['reason']}"
     )
 
-    return "\n".join(text)
+    return "\n".join(
+        text
+    )
 
 
 # ============================================================
@@ -2014,7 +2733,7 @@ def format_report(
     lines = []
 
     lines.append(
-        "📡 CRYPTO DIVERGENCE SCANNER v10.0"
+        "📡 CRYPTO DIVERGENCE SCANNER v10.1"
     )
 
     lines.append(
@@ -2097,9 +2816,7 @@ def format_report(
 
     if new_signals:
 
-        lines.append(
-            ""
-        )
+        lines.append("")
 
         lines.append(
             "🚨 NEW SIGNALS"
@@ -2112,7 +2829,9 @@ def format_report(
         for signal in new_signals:
 
             lines.append(
-                format_signal(signal)
+                format_signal(
+                    signal
+                )
             )
 
             lines.append(
@@ -2121,9 +2840,7 @@ def format_report(
 
     else:
 
-        lines.append(
-            ""
-        )
+        lines.append("")
 
         lines.append(
             "🚨 NEW SIGNALS"
@@ -2141,9 +2858,7 @@ def format_report(
     # OPEN SIGNAL PERFORMANCE
     # ========================================================
 
-    lines.append(
-        ""
-    )
+    lines.append("")
 
     lines.append(
         "📌 OPEN SIGNAL P&L"
@@ -2158,8 +2873,13 @@ def format_report(
         for item in open_performance:
 
             pnl = item["pnl_percent"]
-            current_r = item["current_r"]
+
+            current_r = item[
+                "current_r"
+            ]
+
             mfe = item["mfe"]
+
             mae = item["mae"]
 
             pnl_icon = (
@@ -2183,6 +2903,12 @@ def format_report(
             lines.append(
                 f"SL: {format_price(item['sl'])}"
             )
+
+            if item.get("tp1") is not None:
+
+                lines.append(
+                    f"TP1: {format_price(item['tp1'])}"
+                )
 
             lines.append(
                 f"Current P&L: {pnl:+.2f}%"
@@ -2220,9 +2946,7 @@ def format_report(
 
     if errors:
 
-        lines.append(
-            ""
-        )
+        lines.append("")
 
         lines.append(
             "⚠️ ERRORS"
@@ -2238,7 +2962,9 @@ def format_report(
                 f"• {symbol}: {error}"
             )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -2269,7 +2995,16 @@ def main():
 
     state = load_state()
 
+    # --------------------------------------------------------
+    # Normalize old/new state safely.
+    # --------------------------------------------------------
+
+    rebuild_trade_container(
+        state
+    )
+
     results = []
+
     errors = {}
 
     data_cache = {}
@@ -2298,7 +3033,9 @@ def main():
 
             errors[symbol] = str(e)
 
-        time.sleep(0.05)
+        time.sleep(
+            0.05
+        )
 
     # ========================================================
     # CLOSE OLD OPEN TRADES
@@ -2310,7 +3047,10 @@ def main():
     )
 
     if changed:
-        save_state(state)
+
+        save_state(
+            state
+        )
 
     # ========================================================
     # REGISTER NEW SIGNALS
@@ -2338,8 +3078,13 @@ def main():
             signal_id
         )
 
-        # Store as OPEN trade.
-        trade = dict(signal)
+        signal["id"] = (
+            signal_id
+        )
+
+        trade = dict(
+            signal
+        )
 
         trade["status"] = "OPEN"
 
@@ -2356,7 +3101,9 @@ def main():
     # SAVE
     # ========================================================
 
-    save_state(state)
+    save_state(
+        state
+    )
 
     # ========================================================
     # SECOND EVALUATION
@@ -2368,7 +3115,10 @@ def main():
     )
 
     if changed:
-        save_state(state)
+
+        save_state(
+            state
+        )
 
     # ========================================================
     # OPEN PERFORMANCE
@@ -2393,7 +3143,10 @@ def main():
     )
 
     print()
-    print(report)
+
+    print(
+        report
+    )
 
     # ========================================================
     # TELEGRAM
@@ -2409,4 +3162,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
