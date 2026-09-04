@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO DIVERGENCE SCANNER v10.4
+# CRYPTO DIVERGENCE SCANNER v10.5
 # ============================================================
 # Kraken Futures
 # Closed 5m Candles
@@ -12,20 +12,23 @@
 # Open Signal P&L
 # P&L / R / MFE / MAE / Duration
 # Closed Signals Report
-# Signal Diagnostic / Rejection Reasons
+# Signal Diagnostic / Candidate Classification
 # ATR Based SL
 # R Based TP
 # Telegram
 #
-# v10.4
-# - NEW STATE FILE
-# - Cumulative statistics start from ZERO
+# v10.5 CHANGES:
+# - Clear SETUP CANDIDATES section
+# - Candidate = RSI Divergence + UT/Trendline confirmation
+# - Candidates separated from NO SETUP coins
+# - Rejected candidates show exact rejection reason
+# - Fixed UT/Trendline diagnostic consistency
+# - Trendline confirmation explicitly displayed
+# - 15M / 1H filter rejection displayed separately
+# - SL rejection displayed separately
 # - One OPEN trade per symbol
 # - No opposite-direction hedge
-# - 15M + 1H trend filter
-# - Current P&L Bold
-# - Signal Diagnostic
-# - Rejection reasons
+# - Current P&L remains Markdown Bold
 # ============================================================
 
 import os
@@ -58,17 +61,24 @@ COINS = [
     "XLM", "ALGO", "VET", "MATIC", "HBAR",
 ]
 
+
 # ============================================================
-# NEW STATE FILE
+# STATE
 # ============================================================
 
 STATE_FILE = "trade_history_v10.4.json"
+
 
 # ============================================================
 # ONE OPEN TRADE PER SYMBOL
 # ============================================================
 
 ALLOW_MULTIPLE_OPEN_PER_SYMBOL = False
+
+
+# ============================================================
+# NETWORK
+# ============================================================
 
 REQUEST_TIMEOUT = 20
 
@@ -99,6 +109,7 @@ RSI_PERIOD = 14
 
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
+
 MAX_PIVOT_GAP = 60
 
 MIN_RSI_DIFFERENCE = 2.0
@@ -148,7 +159,7 @@ TELEGRAM_CHAT_ID = os.getenv(
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "CryptoDivergenceScanner/10.4",
+    "User-Agent": "CryptoDivergenceScanner/10.5",
     "Accept": "application/json",
 })
 
@@ -182,6 +193,7 @@ def send_telegram(message):
     }
 
     try:
+
         response = SESSION.post(
             url,
             json=payload,
@@ -191,6 +203,7 @@ def send_telegram(message):
         return response.ok
 
     except Exception:
+
         return False
 
 
@@ -202,7 +215,7 @@ def default_state():
 
     return {
         "version": 2,
-        "scanner_version": "10.4",
+        "scanner_version": "10.5",
         "trades": {},
         "last_run": None,
     }
@@ -373,8 +386,11 @@ def parse_trade_time(value):
         return None
 
     try:
+
         return int(float(value))
+
     except Exception:
+
         pass
 
     try:
@@ -408,40 +424,63 @@ def get_trade_tp1(trade):
         value = trade.get("tp")
 
     try:
+
         return float(value)
+
     except Exception:
+
         return None
 
 
 def get_trade_tp2(trade):
 
     try:
-        return float(trade.get("tp2"))
+
+        return float(
+            trade.get("tp2")
+        )
+
     except Exception:
+
         return None
 
 
 def get_trade_tp3(trade):
 
     try:
-        return float(trade.get("tp3"))
+
+        return float(
+            trade.get("tp3")
+        )
+
     except Exception:
+
         return None
 
 
 def get_trade_entry(trade):
 
     try:
-        return float(trade.get("entry"))
+
+        return float(
+            trade.get("entry")
+        )
+
     except Exception:
+
         return None
 
 
 def get_trade_sl(trade):
 
     try:
-        return float(trade.get("sl"))
+
+        return float(
+            trade.get("sl")
+        )
+
     except Exception:
+
         return None
 
 
@@ -462,7 +501,10 @@ def get_trade_id(trade):
 
 def rebuild_trade_container(state):
 
-    trades = state.get("trades", {})
+    trades = state.get(
+        "trades",
+        {}
+    )
 
     if isinstance(trades, dict):
 
@@ -724,6 +766,7 @@ def get_candles(
                 volume = candle[5]
 
             else:
+
                 continue
 
             if timestamp is None:
@@ -739,6 +782,7 @@ def get_candles(
             })
 
         except Exception:
+
             continue
 
     if not rows:
@@ -854,12 +898,14 @@ def determine_trend(df):
         current_close > current_fast
         and current_fast > current_slow
     ):
+
         return "BULLISH"
 
     if (
         current_close < current_fast
         and current_fast < current_slow
     ):
+
         return "BEARISH"
 
     return "NEUTRAL"
@@ -896,6 +942,7 @@ def calculate_rsi(
     delta = series.diff()
 
     gain = delta.clip(lower=0)
+
     loss = -delta.clip(upper=0)
 
     avg_gain = gain.ewm(
@@ -997,6 +1044,7 @@ def pivot_highs(
 def find_bullish_divergence(df):
 
     lows = df["low"]
+
     rsi = df["rsi"]
 
     pivots = pivot_lows(
@@ -1078,6 +1126,7 @@ def find_bullish_divergence(df):
 def find_bearish_divergence(df):
 
     highs = df["high"]
+
     rsi = df["rsi"]
 
     pivots = pivot_highs(
@@ -1153,7 +1202,7 @@ def find_bearish_divergence(df):
 
 
 # ============================================================
-# TRENDLINE
+# TRENDLINE BREAKOUT
 # ============================================================
 
 def descending_trendline_break(df):
@@ -1172,13 +1221,19 @@ def descending_trendline_break(df):
         return False
 
     p2 = indexes[-1]
+
     p1 = indexes[-2]
 
     if p2 - p1 > MAX_PIVOT_GAP:
         return False
 
-    y1 = float(highs.iloc[p1])
-    y2 = float(highs.iloc[p2])
+    y1 = float(
+        highs.iloc[p1]
+    )
+
+    y2 = float(
+        highs.iloc[p2]
+    )
 
     if y2 >= y1:
         return False
@@ -1193,7 +1248,9 @@ def descending_trendline_break(df):
 
     trendline = (
         y1
-        + slope * (current_x - p1)
+        + slope * (
+            current_x - p1
+        )
     )
 
     current_close = float(
@@ -1209,6 +1266,10 @@ def descending_trendline_break(df):
         and current_close > trendline
     )
 
+
+# ============================================================
+# TRENDLINE BREAKDOWN
+# ============================================================
 
 def ascending_trendline_break(df):
 
@@ -1226,13 +1287,19 @@ def ascending_trendline_break(df):
         return False
 
     p2 = indexes[-1]
+
     p1 = indexes[-2]
 
     if p2 - p1 > MAX_PIVOT_GAP:
         return False
 
-    y1 = float(lows.iloc[p1])
-    y2 = float(lows.iloc[p2])
+    y1 = float(
+        lows.iloc[p1]
+    )
+
+    y2 = float(
+        lows.iloc[p2]
+    )
 
     if y2 <= y1:
         return False
@@ -1247,7 +1314,9 @@ def ascending_trendline_break(df):
 
     trendline = (
         y1
-        + slope * (current_x - p1)
+        + slope * (
+            current_x - p1
+        )
     )
 
     current_close = float(
@@ -1274,12 +1343,15 @@ def calculate_atr(
 ):
 
     high = df["high"]
+
     low = df["low"]
+
     close = df["close"]
 
     previous_close = close.shift(1)
 
     tr1 = high - low
+
     tr2 = (
         high - previous_close
     ).abs()
@@ -1316,7 +1388,9 @@ def calculate_ut_bot(
         atr_period
     )
 
-    loss = key_value * atr
+    loss = (
+        key_value * atr
+    )
 
     trailing_stop = np.zeros(
         len(df)
@@ -1333,14 +1407,26 @@ def calculate_ut_bot(
         - loss.iloc[0]
     )
 
-    for i in range(1, len(df)):
+    for i in range(
+        1,
+        len(df)
+    ):
 
-        prev_stop = trailing_stop[i - 1]
+        prev_stop = (
+            trailing_stop[i - 1]
+        )
 
-        current_close = close.iloc[i]
-        previous_close = close.iloc[i - 1]
+        current_close = (
+            close.iloc[i]
+        )
 
-        current_loss = loss.iloc[i]
+        previous_close = (
+            close.iloc[i - 1]
+        )
+
+        current_loss = (
+            loss.iloc[i]
+        )
 
         if (
             current_close > prev_stop
@@ -1365,13 +1451,15 @@ def calculate_ut_bot(
         elif current_close > prev_stop:
 
             trailing_stop[i] = (
-                current_close - current_loss
+                current_close
+                - current_loss
             )
 
         else:
 
             trailing_stop[i] = (
-                current_close + current_loss
+                current_close
+                + current_loss
             )
 
     return pd.Series(
@@ -1442,7 +1530,9 @@ def build_sl_tp(
     if side == "BUY":
 
         if swing_level is None:
+
             swing_distance = 0
+
         else:
 
             swing_sl = (
@@ -1460,7 +1550,9 @@ def build_sl_tp(
     else:
 
         if swing_level is None:
+
             swing_distance = 0
+
         else:
 
             swing_sl = (
@@ -1494,44 +1586,57 @@ def build_sl_tp(
     )
 
     if risk_percent > MAX_SL_DISTANCE_PERCENT:
+
         return None
 
     if side == "BUY":
 
-        sl = entry - risk_distance
+        sl = (
+            entry
+            - risk_distance
+        )
 
         tp1 = (
             entry
-            + risk_distance * TP1_R_MULTIPLE
+            + risk_distance
+            * TP1_R_MULTIPLE
         )
 
         tp2 = (
             entry
-            + risk_distance * TP2_R_MULTIPLE
+            + risk_distance
+            * TP2_R_MULTIPLE
         )
 
         tp3 = (
             entry
-            + risk_distance * TP3_R_MULTIPLE
+            + risk_distance
+            * TP3_R_MULTIPLE
         )
 
     else:
 
-        sl = entry + risk_distance
+        sl = (
+            entry
+            + risk_distance
+        )
 
         tp1 = (
             entry
-            - risk_distance * TP1_R_MULTIPLE
+            - risk_distance
+            * TP1_R_MULTIPLE
         )
 
         tp2 = (
             entry
-            - risk_distance * TP2_R_MULTIPLE
+            - risk_distance
+            * TP2_R_MULTIPLE
         )
 
         tp3 = (
             entry
-            - risk_distance * TP3_R_MULTIPLE
+            - risk_distance
+            * TP3_R_MULTIPLE
         )
 
     return {
@@ -1545,7 +1650,7 @@ def build_sl_tp(
 
 
 # ============================================================
-# PERCENT HELPERS
+# PERCENT
 # ============================================================
 
 def level_percent(
@@ -1559,6 +1664,7 @@ def level_percent(
         or level is None
         or entry == 0
     ):
+
         return 0
 
     if side == "BUY":
@@ -1607,18 +1713,20 @@ def has_open_trade_for_symbol(
     symbol
 ):
 
-    symbol = str(symbol).upper()
+    symbol = str(
+        symbol
+    ).upper()
 
     for trade in get_all_trades(state):
 
-        status = str(
+        if str(
             trade.get("status", "")
-        ).upper()
+        ).upper() != "OPEN":
 
-        if status != "OPEN":
             continue
 
         if normalize_coin(trade) == symbol:
+
             return True
 
     return False
@@ -1644,13 +1752,15 @@ def register_signal(
         for trade in trades:
 
             if (
-                normalize_coin(trade) == symbol
+                normalize_coin(trade)
+                == symbol
                 and str(
                     trade.get(
                         "status",
                         ""
                     )
-                ).upper() == "OPEN"
+                ).upper()
+                == "OPEN"
             ):
 
                 return False
@@ -1664,15 +1774,23 @@ def register_signal(
 
     for trade in trades:
 
-        if get_trade_id(trade) == signal_id:
+        if (
+            get_trade_id(trade)
+            == signal_id
+        ):
+
             return False
 
     trade = dict(signal)
 
     trade["status"] = "OPEN"
+
     trade["id"] = signal_id
+
     trade["signal_id"] = signal_id
+
     trade["direction"] = signal["side"]
+
     trade["name"] = signal["symbol"]
 
     if isinstance(
@@ -1680,14 +1798,18 @@ def register_signal(
         dict
     ):
 
-        state["trades"][signal_id] = trade
+        state["trades"][
+            signal_id
+        ] = trade
 
     elif isinstance(
         state.get("trades"),
         list
     ):
 
-        state["trades"].append(trade)
+        state["trades"].append(
+            trade
+        )
 
     else:
 
@@ -1700,9 +1822,6 @@ def register_signal(
 
 # ============================================================
 # ANALYZE COIN
-#
-# IMPORTANT:
-# This function now returns diagnostic information.
 # ============================================================
 
 def analyze_coin(symbol):
@@ -1716,8 +1835,13 @@ def analyze_coin(symbol):
         symbol
     )
 
-    trend_15m = trend_data["15m"]["trend"]
-    trend_1h = trend_data["1h"]["trend"]
+    trend_15m = (
+        trend_data["15m"]["trend"]
+    )
+
+    trend_1h = (
+        trend_data["1h"]["trend"]
+    )
 
     df["rsi"] = calculate_rsi(
         df["close"],
@@ -1776,61 +1900,177 @@ def analyze_coin(symbol):
         df["time"].iloc[-1]
     )
 
-    ut_buy = current_close > current_ut
-    ut_sell = current_close < current_ut
+    # ========================================================
+    # UT CONDITIONS
+    # ========================================================
+
+    ut_buy = (
+        current_close > current_ut
+    )
+
+    ut_sell = (
+        current_close < current_ut
+    )
+
+    # ========================================================
+    # CONFIRMATION CONDITIONS
+    #
+    # IMPORTANT:
+    # Trendline OR UT
+    # ========================================================
+
+    bullish_confirmation = (
+        bullish_break
+        or ut_buy
+    )
+
+    bearish_confirmation = (
+        bearish_break
+        or ut_sell
+    )
+
+    # ========================================================
+    # TREND CONDITIONS
+    # ========================================================
+
+    buy_trend_ok = (
+        trend_15m == "BULLISH"
+        and trend_1h == "BULLISH"
+    )
+
+    sell_trend_ok = (
+        trend_15m == "BEARISH"
+        and trend_1h == "BEARISH"
+    )
+
+    # ========================================================
+    # DIAGNOSTIC
+    # ========================================================
 
     diagnostic = {
+
         "symbol": symbol,
-        "bullish_divergence": bullish_divergence is not None,
-        "bearish_divergence": bearish_divergence is not None,
-        "bullish_break": bullish_break,
-        "bearish_break": bearish_break,
-        "ut_buy": ut_buy,
-        "ut_sell": ut_sell,
-        "trend_15m": trend_15m,
-        "trend_1h": trend_1h,
-        "current_rsi": current_rsi,
-        "rejections": [],
-        "candidate_sides": [],
+
+        "bullish_divergence":
+            bullish_divergence is not None,
+
+        "bearish_divergence":
+            bearish_divergence is not None,
+
+        "bullish_break":
+            bullish_break,
+
+        "bearish_break":
+            bearish_break,
+
+        "ut_buy":
+            ut_buy,
+
+        "ut_sell":
+            ut_sell,
+
+        "bullish_confirmation":
+            bullish_confirmation,
+
+        "bearish_confirmation":
+            bearish_confirmation,
+
+        "buy_trend_ok":
+            buy_trend_ok,
+
+        "sell_trend_ok":
+            sell_trend_ok,
+
+        "trend_15m":
+            trend_15m,
+
+        "trend_1h":
+            trend_1h,
+
+        "current_rsi":
+            current_rsi,
+
+        "candidate_sides":
+            [],
+
+        "candidate_details":
+            [],
+
+        "rejections":
+            [],
+
+        "is_setup_candidate":
+            False,
+
     }
 
     signal = None
 
     # ========================================================
-    # BUY DIAGNOSTIC
+    # BUY CANDIDATE
+    #
+    # Candidate:
+    # RSI Bullish Divergence
+    # +
+    # Bullish UT OR Bullish Trendline Break
     # ========================================================
 
-    if bullish_divergence is not None:
+    if (
+        bullish_divergence is not None
+        and bullish_confirmation
+    ):
 
-        diagnostic["candidate_sides"].append(
-            "BUY"
-        )
+        diagnostic[
+            "candidate_sides"
+        ].append("BUY")
 
-        buy_reasons = []
+        diagnostic[
+            "is_setup_candidate"
+        ] = True
 
-        confirmation_buy = (
-            bullish_break or ut_buy
-        )
+        candidate_info = {
+            "side": "BUY",
+            "divergence": True,
+            "ut": ut_buy,
+            "trendline": bullish_break,
+            "trend_15m": trend_15m,
+            "trend_1h": trend_1h,
+            "trend_ok": buy_trend_ok,
+            "sl_ok": None,
+            "final_ready": False,
+        }
 
-        if not confirmation_buy:
+        # ----------------------------------------------------
+        # TREND FILTER
+        # ----------------------------------------------------
 
-            buy_reasons.append(
-                "No bullish UT/Trendline confirmation"
-            )
+        if not buy_trend_ok:
 
-        if trend_15m != "BULLISH":
+            candidate_info[
+                "rejection"
+            ] = "TREND_FILTER"
 
-            buy_reasons.append(
-                f"15M trend is {trend_15m}"
-            )
+            if trend_15m != "BULLISH":
 
-        if trend_1h != "BULLISH":
+                diagnostic[
+                    "rejections"
+                ].append(
+                    f"BUY: 15M trend is {trend_15m}"
+                )
 
-            buy_reasons.append(
-                f"1H trend is {trend_1h}"
-            )
+            if trend_1h != "BULLISH":
 
-        if not buy_reasons:
+                diagnostic[
+                    "rejections"
+                ].append(
+                    f"BUY: 1H trend is {trend_1h}"
+                )
+
+        else:
+
+            # ------------------------------------------------
+            # SL / TP
+            # ------------------------------------------------
 
             support = nearest_support(
                 df,
@@ -1846,102 +2086,186 @@ def analyze_coin(symbol):
 
             if sl_tp is None:
 
-                buy_reasons.append(
-                    "SL distance exceeds MAX_SL_DISTANCE"
+                candidate_info[
+                    "sl_ok"
+                ] = False
+
+                candidate_info[
+                    "rejection"
+                ] = "SL"
+
+                diagnostic[
+                    "rejections"
+                ].append(
+                    "BUY: SL distance exceeds "
+                    "MAX_SL_DISTANCE"
                 )
 
             else:
+
+                candidate_info[
+                    "sl_ok"
+                ] = True
+
+                candidate_info[
+                    "final_ready"
+                ] = True
 
                 signal = {
                     "symbol": symbol,
                     "side": "BUY",
                     "direction": "BUY",
                     "name": symbol,
-                    "entry": current_close,
-                    "sl": sl_tp["sl"],
-                    "tp1": sl_tp["tp1"],
-                    "tp2": sl_tp["tp2"],
-                    "tp3": sl_tp["tp3"],
-                    "tp": sl_tp["tp1"],
-                    "sl_percent": level_percent(
-                        "BUY",
+
+                    "entry":
                         current_close,
-                        sl_tp["sl"]
-                    ),
-                    "tp1_percent": level_percent(
-                        "BUY",
-                        current_close,
-                        sl_tp["tp1"]
-                    ),
-                    "tp2_percent": level_percent(
-                        "BUY",
-                        current_close,
-                        sl_tp["tp2"]
-                    ),
-                    "tp3_percent": level_percent(
-                        "BUY",
-                        current_close,
-                        sl_tp["tp3"]
-                    ),
-                    "risk_percent": sl_tp[
-                        "risk_percent"
-                    ],
-                    "atr": current_atr_sl,
-                    "atr_multiplier": SL_ATR_MULTIPLIER,
-                    "signal_time": signal_time,
-                    "signal_time_iso": datetime.fromtimestamp(
-                        signal_time / 1000,
-                        tz=timezone.utc
-                    ).isoformat(),
-                    "trend_15m": trend_15m,
-                    "trend_1h": trend_1h,
-                    "reason": (
-                        "Bullish RSI Divergence + "
-                        "UT/Trendline + 15M/1H Bullish"
-                    ),
+
+                    "sl":
+                        sl_tp["sl"],
+
+                    "tp1":
+                        sl_tp["tp1"],
+
+                    "tp2":
+                        sl_tp["tp2"],
+
+                    "tp3":
+                        sl_tp["tp3"],
+
+                    "tp":
+                        sl_tp["tp1"],
+
+                    "sl_percent":
+                        level_percent(
+                            "BUY",
+                            current_close,
+                            sl_tp["sl"]
+                        ),
+
+                    "tp1_percent":
+                        level_percent(
+                            "BUY",
+                            current_close,
+                            sl_tp["tp1"]
+                        ),
+
+                    "tp2_percent":
+                        level_percent(
+                            "BUY",
+                            current_close,
+                            sl_tp["tp2"]
+                        ),
+
+                    "tp3_percent":
+                        level_percent(
+                            "BUY",
+                            current_close,
+                            sl_tp["tp3"]
+                        ),
+
+                    "risk_percent":
+                        sl_tp["risk_percent"],
+
+                    "atr":
+                        current_atr_sl,
+
+                    "atr_multiplier":
+                        SL_ATR_MULTIPLIER,
+
+                    "signal_time":
+                        signal_time,
+
+                    "signal_time_iso":
+                        datetime.fromtimestamp(
+                            signal_time / 1000,
+                            tz=timezone.utc
+                        ).isoformat(),
+
+                    "trend_15m":
+                        trend_15m,
+
+                    "trend_1h":
+                        trend_1h,
+
+                    "reason":
+                        (
+                            "Bullish RSI Divergence + "
+                            "UT/Trendline + "
+                            "15M/1H Bullish"
+                        ),
                 }
 
-        for reason in buy_reasons:
-
-            diagnostic["rejections"].append(
-                f"BUY: {reason}"
-            )
-
-    # ========================================================
-    # SELL DIAGNOSTIC
-    # ========================================================
-
-    if bearish_divergence is not None:
-
-        diagnostic["candidate_sides"].append(
-            "SELL"
+        diagnostic[
+            "candidate_details"
+        ].append(
+            candidate_info
         )
 
-        sell_reasons = []
+    # ========================================================
+    # SELL CANDIDATE
+    #
+    # Candidate:
+    # RSI Bearish Divergence
+    # +
+    # Bearish UT OR Bearish Trendline Breakdown
+    # ========================================================
 
-        confirmation_sell = (
-            bearish_break or ut_sell
-        )
+    if (
+        bearish_divergence is not None
+        and bearish_confirmation
+    ):
 
-        if not confirmation_sell:
+        diagnostic[
+            "candidate_sides"
+        ].append("SELL")
 
-            sell_reasons.append(
-                "No bearish UT/Trendline confirmation"
-            )
+        diagnostic[
+            "is_setup_candidate"
+        ] = True
 
-        if trend_15m != "BEARISH":
+        candidate_info = {
+            "side": "SELL",
+            "divergence": True,
+            "ut": ut_sell,
+            "trendline": bearish_break,
+            "trend_15m": trend_15m,
+            "trend_1h": trend_1h,
+            "trend_ok": sell_trend_ok,
+            "sl_ok": None,
+            "final_ready": False,
+        }
 
-            sell_reasons.append(
-                f"15M trend is {trend_15m}"
-            )
+        # ----------------------------------------------------
+        # TREND FILTER
+        # ----------------------------------------------------
 
-        if trend_1h != "BEARISH":
+        if not sell_trend_ok:
 
-            sell_reasons.append(
-                f"1H trend is {trend_1h}"
-            )
+            candidate_info[
+                "rejection"
+            ] = "TREND_FILTER"
 
-        if not sell_reasons:
+            if trend_15m != "BEARISH":
+
+                diagnostic[
+                    "rejections"
+                ].append(
+                    f"SELL: 15M trend is {trend_15m}"
+                )
+
+            if trend_1h != "BEARISH":
+
+                diagnostic[
+                    "rejections"
+                ].append(
+                    f"SELL: 1H trend is {trend_1h}"
+                )
+
+        else:
+
+            # ------------------------------------------------
+            # SL / TP
+            # ------------------------------------------------
 
             resistance = nearest_resistance(
                 df,
@@ -1957,66 +2281,159 @@ def analyze_coin(symbol):
 
             if sl_tp is None:
 
-                sell_reasons.append(
-                    "SL distance exceeds MAX_SL_DISTANCE"
+                candidate_info[
+                    "sl_ok"
+                ] = False
+
+                candidate_info[
+                    "rejection"
+                ] = "SL"
+
+                diagnostic[
+                    "rejections"
+                ].append(
+                    "SELL: SL distance exceeds "
+                    "MAX_SL_DISTANCE"
                 )
 
             else:
 
-                signal = {
-                    "symbol": symbol,
-                    "side": "SELL",
-                    "direction": "SELL",
-                    "name": symbol,
-                    "entry": current_close,
-                    "sl": sl_tp["sl"],
-                    "tp1": sl_tp["tp1"],
-                    "tp2": sl_tp["tp2"],
-                    "tp3": sl_tp["tp3"],
-                    "tp": sl_tp["tp1"],
-                    "sl_percent": level_percent(
-                        "SELL",
-                        current_close,
-                        sl_tp["sl"]
-                    ),
-                    "tp1_percent": level_percent(
-                        "SELL",
-                        current_close,
-                        sl_tp["tp1"]
-                    ),
-                    "tp2_percent": level_percent(
-                        "SELL",
-                        current_close,
-                        sl_tp["tp2"]
-                    ),
-                    "tp3_percent": level_percent(
-                        "SELL",
-                        current_close,
-                        sl_tp["tp3"]
-                    ),
-                    "risk_percent": sl_tp[
-                        "risk_percent"
-                    ],
-                    "atr": current_atr_sl,
-                    "atr_multiplier": SL_ATR_MULTIPLIER,
-                    "signal_time": signal_time,
-                    "signal_time_iso": datetime.fromtimestamp(
-                        signal_time / 1000,
-                        tz=timezone.utc
-                    ).isoformat(),
-                    "trend_15m": trend_15m,
-                    "trend_1h": trend_1h,
-                    "reason": (
-                        "Bearish RSI Divergence + "
-                        "UT/Trendline + 15M/1H Bearish"
-                    ),
-                }
+                candidate_info[
+                    "sl_ok"
+                ] = True
 
-        for reason in sell_reasons:
+                candidate_info[
+                    "final_ready"
+                ] = True
 
-            diagnostic["rejections"].append(
-                f"SELL: {reason}"
-            )
+                # ------------------------------------------------
+                # PRESERVE ORIGINAL BEHAVIOR:
+                # If BUY signal already exists, BUY remains selected.
+                # This prevents simultaneous opposite signals.
+                # ------------------------------------------------
+
+                if signal is None:
+
+                    signal = {
+                        "symbol": symbol,
+                        "side": "SELL",
+                        "direction": "SELL",
+                        "name": symbol,
+
+                        "entry":
+                            current_close,
+
+                        "sl":
+                            sl_tp["sl"],
+
+                        "tp1":
+                            sl_tp["tp1"],
+
+                        "tp2":
+                            sl_tp["tp2"],
+
+                        "tp3":
+                            sl_tp["tp3"],
+
+                        "tp":
+                            sl_tp["tp1"],
+
+                        "sl_percent":
+                            level_percent(
+                                "SELL",
+                                current_close,
+                                sl_tp["sl"]
+                            ),
+
+                        "tp1_percent":
+                            level_percent(
+                                "SELL",
+                                current_close,
+                                sl_tp["tp1"]
+                            ),
+
+                        "tp2_percent":
+                            level_percent(
+                                "SELL",
+                                current_close,
+                                sl_tp["tp2"]
+                            ),
+
+                        "tp3_percent":
+                            level_percent(
+                                "SELL",
+                                current_close,
+                                sl_tp["tp3"]
+                            ),
+
+                        "risk_percent":
+                            sl_tp["risk_percent"],
+
+                        "atr":
+                            current_atr_sl,
+
+                        "atr_multiplier":
+                            SL_ATR_MULTIPLIER,
+
+                        "signal_time":
+                            signal_time,
+
+                        "signal_time_iso":
+                            datetime.fromtimestamp(
+                                signal_time / 1000,
+                                tz=timezone.utc
+                            ).isoformat(),
+
+                        "trend_15m":
+                            trend_15m,
+
+                        "trend_1h":
+                            trend_1h,
+
+                        "reason":
+                            (
+                                "Bearish RSI Divergence + "
+                                "UT/Trendline + "
+                                "15M/1H Bearish"
+                            ),
+                    }
+
+        diagnostic[
+            "candidate_details"
+        ].append(
+            candidate_info
+        )
+
+    # ========================================================
+    # DIVERGENCE BUT NO CONFIRMATION
+    #
+    # Not a full setup candidate.
+    # It is a "NEAR SETUP".
+    # ========================================================
+
+    if (
+        bullish_divergence is not None
+        and not bullish_confirmation
+    ):
+
+        diagnostic[
+            "rejections"
+        ].append(
+            "NEAR BUY: RSI divergence present "
+            "but no bullish UT/Trendline confirmation"
+        )
+
+    if (
+        bearish_divergence is not None
+        and not bearish_confirmation
+    ):
+
+        diagnostic[
+            "rejections"
+        ].append(
+            "NEAR SELL: RSI divergence present "
+            "but no bearish UT/Trendline confirmation"
+        )
 
     # ========================================================
     # NO DIVERGENCE
@@ -2027,7 +2444,9 @@ def analyze_coin(symbol):
         and bearish_divergence is None
     ):
 
-        diagnostic["rejections"].append(
+        diagnostic[
+            "rejections"
+        ].append(
             "No RSI divergence detected"
         )
 
@@ -2036,7 +2455,8 @@ def analyze_coin(symbol):
         "df": df,
         "signal": signal,
         "trend_data": trend_data,
-        "market_symbol": get_market_symbol(symbol),
+        "market_symbol":
+            get_market_symbol(symbol),
         "diagnostic": diagnostic,
     }
 
@@ -2059,6 +2479,7 @@ def format_signal(signal):
 
     entry = signal["entry"]
     sl = signal["sl"]
+
     tp1 = signal["tp1"]
     tp2 = signal["tp2"]
     tp3 = signal["tp3"]
@@ -2066,53 +2487,65 @@ def format_signal(signal):
     text = []
 
     text.append(
-        f"{icon} {signal['symbol']}/USDT - {side}"
+        f"{icon} "
+        f"{signal['symbol']}/USDT - "
+        f"{side}"
     )
 
     text.append(
-        f"Entry: {format_price(entry)}"
+        f"Entry: "
+        f"{format_price(entry)}"
     )
 
     text.append(
-        f"Stop Loss: {format_price(sl)} "
+        f"Stop Loss: "
+        f"{format_price(sl)} "
         f"({level_percent(side, entry, sl):+.2f}%)"
     )
 
     text.append(
-        f"Target 1: {format_price(tp1)} "
+        f"Target 1: "
+        f"{format_price(tp1)} "
         f"({level_percent(side, entry, tp1):+.2f}%)"
     )
 
     text.append(
-        f"Target 2: {format_price(tp2)} "
+        f"Target 2: "
+        f"{format_price(tp2)} "
         f"({level_percent(side, entry, tp2):+.2f}%)"
     )
 
     text.append(
-        f"Target 3: {format_price(tp3)} "
+        f"Target 3: "
+        f"{format_price(tp3)} "
         f"({level_percent(side, entry, tp3):+.2f}%)"
     )
 
     text.append(
-        f"Risk: {abs(level_percent(side, entry, sl)):.2f}%"
+        f"Risk: "
+        f"{abs(level_percent(side, entry, sl)):.2f}%"
     )
 
     text.append(
-        f"RR: 1:{TP1_R_MULTIPLE:.1f} / "
+        f"RR: "
+        f"1:{TP1_R_MULTIPLE:.1f} / "
         f"1:{TP2_R_MULTIPLE:.1f} / "
         f"1:{TP3_R_MULTIPLE:.1f}"
     )
 
     text.append(
-        f"15M Trend: {signal.get('trend_15m', 'N/A')}"
+        f"15M Trend: "
+        f"{signal.get('trend_15m', 'N/A')}"
     )
 
     text.append(
-        f"1H Trend: {signal.get('trend_1h', 'N/A')}"
+        f"1H Trend: "
+        f"{signal.get('trend_1h', 'N/A')}"
     )
 
     text.append(
-        f"Reason: {signal['reason']}"
+        f"Reason: "
+        f"{signal['reason']}"
     )
 
     return "\n".join(text)
@@ -2125,6 +2558,7 @@ def format_signal(signal):
 def format_closed_signal(trade):
 
     side = normalize_side(trade)
+
     coin = normalize_coin(trade)
 
     icon = (
@@ -2139,15 +2573,21 @@ def format_closed_signal(trade):
         or "UNKNOWN"
     )
 
+    reason_upper = str(
+        reason
+    ).upper()
+
     result_icon = (
         "✅"
-        if str(reason).upper().startswith("TP")
+        if reason_upper.startswith("TP")
         else "❌"
-        if str(reason).upper() == "SL"
+        if reason_upper == "SL"
         else "⚪"
     )
 
-    entry = get_trade_entry(trade)
+    entry = get_trade_entry(
+        trade
+    )
 
     exit_price = trade.get(
         "result_price",
@@ -2155,23 +2595,43 @@ def format_closed_signal(trade):
     )
 
     try:
-        exit_price = float(exit_price)
+
+        exit_price = float(
+            exit_price
+        )
+
     except Exception:
+
         exit_price = None
 
-    pnl = float(
-        trade.get("pnl_percent", 0)
-    )
+    try:
 
-    r_multiple = float(
-        trade.get(
-            "result_r",
+        pnl = float(
             trade.get(
-                "r_multiple",
+                "pnl_percent",
                 0
             )
         )
-    )
+
+    except Exception:
+
+        pnl = 0
+
+    try:
+
+        r_multiple = float(
+            trade.get(
+                "result_r",
+                trade.get(
+                    "r_multiple",
+                    0
+                )
+            )
+        )
+
+    except Exception:
+
+        r_multiple = 0
 
     duration = trade.get(
         "duration_minutes",
@@ -2179,8 +2639,12 @@ def format_closed_signal(trade):
     )
 
     return "\n".join([
-        f"{icon} {coin} {side} | "
-        f"{result_icon} {reason}",
+        (
+            f"{icon} "
+            f"{coin} {side} | "
+            f"{result_icon} "
+            f"{reason}"
+        ),
         f"Entry: {format_price(entry)}",
         f"Exit: {format_price(exit_price)}",
         f"P&L: {pnl:+.2f}%",
@@ -2203,26 +2667,46 @@ def calculate_open_performance(
     for trade in get_all_trades(state):
 
         if str(
-            trade.get("status", "")
+            trade.get(
+                "status",
+                ""
+            )
         ).upper() != "OPEN":
+
             continue
 
-        coin = normalize_coin(trade)
+        coin = normalize_coin(
+            trade
+        )
 
-        df = data_cache.get(coin)
+        df = data_cache.get(
+            coin
+        )
 
         if df is None or df.empty:
             continue
 
-        entry = get_trade_entry(trade)
-        sl = get_trade_sl(trade)
-        side = normalize_side(trade)
+        entry = get_trade_entry(
+            trade
+        )
+
+        sl = get_trade_sl(
+            trade
+        )
+
+        side = normalize_side(
+            trade
+        )
 
         if (
             entry is None
             or sl is None
-            or side not in ("BUY", "SELL")
+            or side not in (
+                "BUY",
+                "SELL"
+            )
         ):
+
             continue
 
         current_price = float(
@@ -2241,7 +2725,9 @@ def calculate_open_performance(
                 entry - current_price
             ) / entry * 100
 
-        risk = abs(entry - sl)
+        risk = abs(
+            entry - sl
+        )
 
         if risk > 0:
 
@@ -2258,16 +2744,21 @@ def calculate_open_performance(
                 ) / risk
 
         else:
+
             current_r = 0
 
         signal_time = parse_trade_time(
-            trade.get("signal_time")
+            trade.get(
+                "signal_time"
+            )
         )
 
         if signal_time is None:
 
             signal_time = parse_trade_time(
-                trade.get("signal_time_iso")
+                trade.get(
+                    "signal_time_iso"
+                )
             )
 
         if signal_time is None:
@@ -2335,19 +2826,41 @@ def calculate_open_performance(
             )
 
         result.append({
+
             "symbol": coin,
+
             "side": side,
+
             "entry": entry,
+
             "sl": sl,
-            "tp1": get_trade_tp1(trade),
-            "tp2": get_trade_tp2(trade),
-            "tp3": get_trade_tp3(trade),
-            "current_price": current_price,
-            "pnl_percent": pnl,
-            "current_r": current_r,
-            "mfe": mfe,
-            "mae": mae,
-            "duration_minutes": duration,
+
+            "tp1":
+                get_trade_tp1(trade),
+
+            "tp2":
+                get_trade_tp2(trade),
+
+            "tp3":
+                get_trade_tp3(trade),
+
+            "current_price":
+                current_price,
+
+            "pnl_percent":
+                pnl,
+
+            "current_r":
+                current_r,
+
+            "mfe":
+                mfe,
+
+            "mae":
+                mae,
+
+            "duration_minutes":
+                duration,
         })
 
     return result
@@ -2367,39 +2880,72 @@ def evaluate_open_trades(
     for trade in get_all_trades(state):
 
         if str(
-            trade.get("status", "")
+            trade.get(
+                "status",
+                ""
+            )
         ).upper() != "OPEN":
+
             continue
 
-        coin = normalize_coin(trade)
-        df = data_cache.get(coin)
+        coin = normalize_coin(
+            trade
+        )
+
+        df = data_cache.get(
+            coin
+        )
 
         if df is None or df.empty:
             continue
 
-        side = normalize_side(trade)
+        side = normalize_side(
+            trade
+        )
 
-        entry = get_trade_entry(trade)
-        sl = get_trade_sl(trade)
+        entry = get_trade_entry(
+            trade
+        )
+
+        sl = get_trade_sl(
+            trade
+        )
 
         if (
             entry is None
             or sl is None
-            or side not in ("BUY", "SELL")
+            or side not in (
+                "BUY",
+                "SELL"
+            )
         ):
+
             continue
 
-        tp1 = get_trade_tp1(trade)
-        tp2 = get_trade_tp2(trade)
-        tp3 = get_trade_tp3(trade)
+        tp1 = get_trade_tp1(
+            trade
+        )
+
+        tp2 = get_trade_tp2(
+            trade
+        )
+
+        tp3 = get_trade_tp3(
+            trade
+        )
 
         signal_time = parse_trade_time(
-            trade.get("signal_time")
+            trade.get(
+                "signal_time"
+            )
         )
 
         if signal_time is None:
+
             signal_time = parse_trade_time(
-                trade.get("signal_time_iso")
+                trade.get(
+                    "signal_time_iso"
+                )
             )
 
         if signal_time is None:
@@ -2418,9 +2964,17 @@ def evaluate_open_trades(
 
         for _, row in after_signal.iterrows():
 
-            high = float(row["high"])
-            low = float(row["low"])
-            candle_time = int(row["time"])
+            high = float(
+                row["high"]
+            )
+
+            low = float(
+                row["low"]
+            )
+
+            candle_time = int(
+                row["time"]
+            )
 
             if side == "BUY":
 
@@ -2431,21 +2985,30 @@ def evaluate_open_trades(
                     exit_time = candle_time
                     break
 
-                if tp1 is not None and high >= tp1:
+                if (
+                    tp1 is not None
+                    and high >= tp1
+                ):
 
                     exit_reason = "TP1"
                     exit_price = tp1
                     exit_time = candle_time
                     break
 
-                if tp2 is not None and high >= tp2:
+                if (
+                    tp2 is not None
+                    and high >= tp2
+                ):
 
                     exit_reason = "TP2"
                     exit_price = tp2
                     exit_time = candle_time
                     break
 
-                if tp3 is not None and high >= tp3:
+                if (
+                    tp3 is not None
+                    and high >= tp3
+                ):
 
                     exit_reason = "TP3"
                     exit_price = tp3
@@ -2461,21 +3024,30 @@ def evaluate_open_trades(
                     exit_time = candle_time
                     break
 
-                if tp1 is not None and low <= tp1:
+                if (
+                    tp1 is not None
+                    and low <= tp1
+                ):
 
                     exit_reason = "TP1"
                     exit_price = tp1
                     exit_time = candle_time
                     break
 
-                if tp2 is not None and low <= tp2:
+                if (
+                    tp2 is not None
+                    and low <= tp2
+                ):
 
                     exit_reason = "TP2"
                     exit_price = tp2
                     exit_time = candle_time
                     break
 
-                if tp3 is not None and low <= tp3:
+                if (
+                    tp3 is not None
+                    and low <= tp3
+                ):
 
                     exit_reason = "TP3"
                     exit_price = tp3
@@ -2493,7 +3065,9 @@ def evaluate_open_trades(
 
             r_multiple = (
                 exit_price - entry
-            ) / abs(entry - sl)
+            ) / abs(
+                entry - sl
+            )
 
         else:
 
@@ -2503,7 +3077,9 @@ def evaluate_open_trades(
 
             r_multiple = (
                 entry - exit_price
-            ) / abs(entry - sl)
+            ) / abs(
+                entry - sl
+            )
 
         duration = max(
             0,
@@ -2513,20 +3089,49 @@ def evaluate_open_trades(
         )
 
         trade["status"] = "CLOSED"
-        trade["exit_reason"] = exit_reason
-        trade["result_reason"] = exit_reason
-        trade["exit_price"] = exit_price
-        trade["result_price"] = exit_price
-        trade["exit_time"] = exit_time
-        trade["pnl_percent"] = pnl
-        trade["r_multiple"] = r_multiple
-        trade["result_r"] = r_multiple
-        trade["duration_minutes"] = duration
 
-        trade["closed_at"] = datetime.fromtimestamp(
-            exit_time / 1000,
-            tz=timezone.utc
-        ).isoformat()
+        trade["exit_reason"] = (
+            exit_reason
+        )
+
+        trade["result_reason"] = (
+            exit_reason
+        )
+
+        trade["exit_price"] = (
+            exit_price
+        )
+
+        trade["result_price"] = (
+            exit_price
+        )
+
+        trade["exit_time"] = (
+            exit_time
+        )
+
+        trade["pnl_percent"] = (
+            pnl
+        )
+
+        trade["r_multiple"] = (
+            r_multiple
+        )
+
+        trade["result_r"] = (
+            r_multiple
+        )
+
+        trade["duration_minutes"] = (
+            duration
+        )
+
+        trade["closed_at"] = (
+            datetime.fromtimestamp(
+                exit_time / 1000,
+                tz=timezone.utc
+            ).isoformat()
+        )
 
         changed = True
 
@@ -2547,18 +3152,27 @@ def get_newly_closed_trades(
     for trade in get_all_trades(state):
 
         if str(
-            trade.get("status", "")
+            trade.get(
+                "status",
+                ""
+            )
         ).upper() != "CLOSED":
+
             continue
 
-        trade_id = get_trade_id(trade)
+        trade_id = get_trade_id(
+            trade
+        )
 
         if (
             trade_id
-            and trade_id not in previous_closed_ids
+            and trade_id
+            not in previous_closed_ids
         ):
 
-            result.append(trade)
+            result.append(
+                trade
+            )
 
     return result
 
@@ -2569,39 +3183,56 @@ def get_newly_closed_trades(
 
 def calculate_statistics(state):
 
-    trades = get_all_trades(state)
+    trades = get_all_trades(
+        state
+    )
 
     open_trades = [
         x for x in trades
         if str(
-            x.get("status", "")
+            x.get(
+                "status",
+                ""
+            )
         ).upper() == "OPEN"
     ]
 
     closed_trades = [
         x for x in trades
         if str(
-            x.get("status", "")
+            x.get(
+                "status",
+                ""
+            )
         ).upper() == "CLOSED"
     ]
 
     wins = [
         x for x in closed_trades
         if float(
-            x.get("pnl_percent", 0)
+            x.get(
+                "pnl_percent",
+                0
+            )
         ) > 0
     ]
 
     losses = [
         x for x in closed_trades
         if float(
-            x.get("pnl_percent", 0)
+            x.get(
+                "pnl_percent",
+                0
+            )
         ) <= 0
     ]
 
     total_pnl = sum(
         float(
-            x.get("pnl_percent", 0)
+            x.get(
+                "pnl_percent",
+                0
+            )
         )
         for x in closed_trades
     )
@@ -2615,37 +3246,65 @@ def calculate_statistics(state):
     )
 
     avg_win = (
-        float(np.mean([
-            float(
-                x.get("pnl_percent", 0)
-            )
-            for x in wins
-        ]))
+        float(
+            np.mean([
+                float(
+                    x.get(
+                        "pnl_percent",
+                        0
+                    )
+                )
+                for x in wins
+            ])
+        )
         if wins
         else 0
     )
 
     avg_loss = (
-        float(np.mean([
-            float(
-                x.get("pnl_percent", 0)
-            )
-            for x in losses
-        ]))
+        float(
+            np.mean([
+                float(
+                    x.get(
+                        "pnl_percent",
+                        0
+                    )
+                )
+                for x in losses
+            ])
+        )
         if losses
         else 0
     )
 
     return {
-        "total": len(trades),
-        "open": len(open_trades),
-        "closed": len(closed_trades),
-        "wins": len(wins),
-        "losses": len(losses),
-        "win_rate": win_rate,
-        "total_pnl": total_pnl,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
+
+        "total":
+            len(trades),
+
+        "open":
+            len(open_trades),
+
+        "closed":
+            len(closed_trades),
+
+        "wins":
+            len(wins),
+
+        "losses":
+            len(losses),
+
+        "win_rate":
+            win_rate,
+
+        "total_pnl":
+            total_pnl,
+
+        "avg_win":
+            avg_win,
+
+        "avg_loss":
+            avg_loss,
     }
 
 
@@ -2653,16 +3312,44 @@ def calculate_statistics(state):
 # DIAGNOSTIC STATISTICS
 # ============================================================
 
-def calculate_diagnostics(results):
+def calculate_diagnostics(
+    results
+):
 
     stats = {
-        "bullish_divergence": 0,
-        "bearish_divergence": 0,
-        "bullish_break": 0,
-        "bearish_break": 0,
-        "ut_buy": 0,
-        "ut_sell": 0,
-        "setup_candidates": 0,
+
+        "bullish_divergence":
+            0,
+
+        "bearish_divergence":
+            0,
+
+        "bullish_break":
+            0,
+
+        "bearish_break":
+            0,
+
+        "ut_buy":
+            0,
+
+        "ut_sell":
+            0,
+
+        "buy_candidates":
+            0,
+
+        "sell_candidates":
+            0,
+
+        "setup_candidates":
+            0,
+
+        "buy_trend_ready":
+            0,
+
+        "sell_trend_ready":
+            0,
     }
 
     for result in results:
@@ -2675,41 +3362,290 @@ def calculate_diagnostics(results):
         if diagnostic.get(
             "bullish_divergence"
         ):
-            stats["bullish_divergence"] += 1
+
+            stats[
+                "bullish_divergence"
+            ] += 1
 
         if diagnostic.get(
             "bearish_divergence"
         ):
-            stats["bearish_divergence"] += 1
+
+            stats[
+                "bearish_divergence"
+            ] += 1
 
         if diagnostic.get(
             "bullish_break"
         ):
-            stats["bullish_break"] += 1
+
+            stats[
+                "bullish_break"
+            ] += 1
 
         if diagnostic.get(
             "bearish_break"
         ):
-            stats["bearish_break"] += 1
+
+            stats[
+                "bearish_break"
+            ] += 1
 
         if diagnostic.get(
             "ut_buy"
         ):
-            stats["ut_buy"] += 1
+
+            stats[
+                "ut_buy"
+            ] += 1
 
         if diagnostic.get(
             "ut_sell"
         ):
-            stats["ut_sell"] += 1
 
-        stats["setup_candidates"] += len(
+            stats[
+                "ut_sell"
+            ] += 1
+
+        candidate_sides = (
             diagnostic.get(
                 "candidate_sides",
                 []
             )
         )
 
+        if "BUY" in candidate_sides:
+
+            stats[
+                "buy_candidates"
+            ] += 1
+
+        if "SELL" in candidate_sides:
+
+            stats[
+                "sell_candidates"
+            ] += 1
+
+        stats[
+            "setup_candidates"
+        ] += len(
+            candidate_sides
+        )
+
+        if diagnostic.get(
+            "buy_trend_ok"
+        ):
+
+            stats[
+                "buy_trend_ready"
+            ] += 1
+
+        if diagnostic.get(
+            "sell_trend_ok"
+        ):
+
+            stats[
+                "sell_trend_ready"
+            ] += 1
+
     return stats
+
+
+# ============================================================
+# FORMAT CANDIDATE
+# ============================================================
+
+def format_candidate(
+    result
+):
+
+    symbol = result["symbol"]
+
+    diagnostic = result.get(
+        "diagnostic",
+        {}
+    )
+
+    lines = []
+
+    for candidate in diagnostic.get(
+        "candidate_details",
+        []
+    ):
+
+        side = candidate["side"]
+
+        icon = (
+            "🟢"
+            if side == "BUY"
+            else "🔴"
+        )
+
+        lines.append(
+            f"{icon} *{symbol} {side}*"
+        )
+
+        lines.append(
+            "RSI Divergence: ✅"
+        )
+
+        if candidate["trendline"]:
+
+            if side == "BUY":
+
+                lines.append(
+                    "Trendline Breakout: ✅"
+                )
+
+            else:
+
+                lines.append(
+                    "Trendline Breakdown: ✅"
+                )
+
+        else:
+
+            if side == "BUY":
+
+                lines.append(
+                    "Trendline Breakout: ❌"
+                )
+
+            else:
+
+                lines.append(
+                    "Trendline Breakdown: ❌"
+                )
+
+        if candidate["ut"]:
+
+            lines.append(
+                "UT Bot Confirmation: ✅"
+            )
+
+        else:
+
+            lines.append(
+                "UT Bot Confirmation: ❌"
+            )
+
+        lines.append(
+            f"15M Trend: "
+            f"{candidate['trend_15m']}"
+            f" "
+            f"{'✅' if candidate['trend_15m'] == ('BULLISH' if side == 'BUY' else 'BEARISH') else '❌'}"
+        )
+
+        lines.append(
+            f"1H Trend: "
+            f"{candidate['trend_1h']}"
+            f" "
+            f"{'✅' if candidate['trend_1h'] == ('BULLISH' if side == 'BUY' else 'BEARISH') else '❌'}"
+        )
+
+        if candidate["final_ready"]:
+
+            lines.append(
+                "STATUS: 🟢 READY FOR SIGNAL"
+            )
+
+        elif candidate["rejection"] == "SL":
+
+            lines.append(
+                "STATUS: ❌ REJECTED BY SL"
+            )
+
+        else:
+
+            lines.append(
+                "STATUS: ❌ REJECTED BY TREND FILTER"
+            )
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# FORMAT NO SETUP
+# ============================================================
+
+def format_no_setup(
+    result
+):
+
+    symbol = result["symbol"]
+
+    diagnostic = result.get(
+        "diagnostic",
+        {}
+    )
+
+    bullish_divergence = diagnostic.get(
+        "bullish_divergence",
+        False
+    )
+
+    bearish_divergence = diagnostic.get(
+        "bearish_divergence",
+        False
+    )
+
+    bullish_confirmation = diagnostic.get(
+        "bullish_confirmation",
+        False
+    )
+
+    bearish_confirmation = diagnostic.get(
+        "bearish_confirmation",
+        False
+    )
+
+    lines = []
+
+    # --------------------------------------------------------
+    # Divergence exists but confirmation doesn't
+    # --------------------------------------------------------
+
+    if bullish_divergence:
+
+        if not bullish_confirmation:
+
+            lines.append(
+                f"{symbol} 🟡 "
+                f"NEAR BUY - "
+                f"RSI divergence without "
+                f"UT/Trendline confirmation"
+            )
+
+    if bearish_divergence:
+
+        if not bearish_confirmation:
+
+            lines.append(
+                f"{symbol} 🟡 "
+                f"NEAR SELL - "
+                f"RSI divergence without "
+                f"UT/Trendline confirmation"
+            )
+
+    # --------------------------------------------------------
+    # No divergence
+    # --------------------------------------------------------
+
+    if (
+        not bullish_divergence
+        and not bearish_divergence
+    ):
+
+        lines.append(
+            f"{symbol} ⚪ "
+            f"No RSI divergence"
+        )
+
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -2732,13 +3668,22 @@ def format_report(
     if registered_signals is None:
         registered_signals = []
 
-    stats = calculate_statistics(state)
-    diagnostic = calculate_diagnostics(results)
+    stats = calculate_statistics(
+        state
+    )
+
+    diagnostic = calculate_diagnostics(
+        results
+    )
 
     lines = []
 
+    # ========================================================
+    # HEADER
+    # ========================================================
+
     lines.append(
-        "📡 CRYPTO DIVERGENCE SCANNER v10.4"
+        "📡 CRYPTO DIVERGENCE SCANNER v10.5"
     )
 
     lines.append(
@@ -2746,63 +3691,81 @@ def format_report(
     )
 
     lines.append(
-        f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        f"🕐 "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
     )
 
     lines.append(
-        f"⏱ Timeframe: {TIMEFRAME.upper()} CLOSED"
+        f"⏱ Timeframe: "
+        f"{TIMEFRAME.upper()} CLOSED"
     )
 
     lines.append(
-        f"📊 DATA OK: {len(results)}/{len(COINS)}"
+        f"📊 DATA OK: "
+        f"{len(results)}/{len(COINS)}"
     )
 
     lines.append(
-        f"⚠️ DATA ERROR: {len(errors)}"
+        f"⚠️ DATA ERROR: "
+        f"{len(errors)}"
     )
 
     # ========================================================
-    # CUMULATIVE
+    # CUMULATIVE PERFORMANCE
     # ========================================================
 
     lines.append("")
-    lines.append("📊 CUMULATIVE PERFORMANCE")
-    lines.append("━━━━━━━━━━━━━━━━━━")
-
     lines.append(
-        f"Total Trades: {stats['total']}"
+        "📊 CUMULATIVE PERFORMANCE"
     )
 
     lines.append(
-        f"Open: {stats['open']}"
+        "━━━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
-        f"Closed: {stats['closed']}"
+        f"Total Trades: "
+        f"{stats['total']}"
     )
 
     lines.append(
-        f"Wins: {stats['wins']}"
+        f"Open: "
+        f"{stats['open']}"
     )
 
     lines.append(
-        f"Losses: {stats['losses']}"
+        f"Closed: "
+        f"{stats['closed']}"
     )
 
     lines.append(
-        f"Win Rate: {stats['win_rate']:.2f}%"
+        f"Wins: "
+        f"{stats['wins']}"
     )
 
     lines.append(
-        f"Closed P&L: {stats['total_pnl']:.2f}%"
+        f"Losses: "
+        f"{stats['losses']}"
     )
 
     lines.append(
-        f"Avg Win: {stats['avg_win']:.2f}%"
+        f"Win Rate: "
+        f"{stats['win_rate']:.2f}%"
     )
 
     lines.append(
-        f"Avg Loss: {stats['avg_loss']:.2f}%"
+        f"Closed P&L: "
+        f"{stats['total_pnl']:.2f}%"
+    )
+
+    lines.append(
+        f"Avg Win: "
+        f"{stats['avg_win']:.2f}%"
+    )
+
+    lines.append(
+        f"Avg Loss: "
+        f"{stats['avg_loss']:.2f}%"
     )
 
     # ========================================================
@@ -2810,8 +3773,13 @@ def format_report(
     # ========================================================
 
     lines.append("")
-    lines.append("📊 SIGNAL DIAGNOSTIC")
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        "📊 SIGNAL DIAGNOSTIC"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
 
     lines.append(
         f"RSI Bullish Divergence: "
@@ -2844,7 +3812,17 @@ def format_report(
     )
 
     lines.append(
-        f"SETUP CANDIDATES: "
+        f"BUY SETUPS: "
+        f"{diagnostic['buy_candidates']}"
+    )
+
+    lines.append(
+        f"SELL SETUPS: "
+        f"{diagnostic['sell_candidates']}"
+    )
+
+    lines.append(
+        f"TOTAL SETUP CANDIDATES: "
         f"{diagnostic['setup_candidates']}"
     )
 
@@ -2854,89 +3832,282 @@ def format_report(
     )
 
     # ========================================================
+    # SETUP CANDIDATES
+    # ========================================================
+
+    candidate_results = [
+        result
+        for result in results
+        if result.get(
+            "diagnostic",
+            {}
+        ).get(
+            "is_setup_candidate",
+            False
+        )
+    ]
+
+    if candidate_results:
+
+        lines.append("")
+        lines.append(
+            "🎯 SETUP CANDIDATES"
+        )
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        for result in candidate_results:
+
+            formatted = format_candidate(
+                result
+            )
+
+            if formatted:
+
+                lines.append(
+                    formatted
+                )
+
+    # ========================================================
     # REJECTED CANDIDATES
     # ========================================================
 
-    rejected = []
+    rejected_candidates = []
 
-    for result in results:
+    for result in candidate_results:
 
-        diag = result.get(
+        diagnostic_data = result.get(
             "diagnostic",
             {}
         )
 
-        reasons = diag.get(
-            "rejections",
-            []
-        )
+        if diagnostic_data.get(
+            "rejections"
+        ):
 
-        if reasons:
-
-            rejected.append(
-                (
-                    result["symbol"],
-                    reasons
-                )
+            rejected_candidates.append(
+                result
             )
 
-    if rejected:
+    if rejected_candidates:
 
         lines.append("")
-        lines.append("🔎 REJECTED SETUPS")
-        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append(
+            "❌ REJECTED CANDIDATES"
+        )
 
-        for symbol, reasons in rejected:
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
 
-            diag = next(
-                (
-                    x.get("diagnostic", {})
-                    for x in results
-                    if x["symbol"] == symbol
-                ),
+        for result in rejected_candidates:
+
+            symbol = result["symbol"]
+
+            diagnostic_data = result.get(
+                "diagnostic",
                 {}
             )
 
-            candidate_sides = diag.get(
-                "candidate_sides",
+            for candidate in diagnostic_data.get(
+                "candidate_details",
                 []
-            )
+            ):
 
-            if candidate_sides:
+                side = candidate["side"]
 
-                lines.append(
-                    f"{symbol} "
-                    f"[{', '.join(candidate_sides)}]"
+                icon = (
+                    "🟢"
+                    if side == "BUY"
+                    else "🔴"
                 )
 
-            else:
-
                 lines.append(
-                    f"{symbol}"
+                    f"{icon} {symbol} {side}"
                 )
 
-            for reason in reasons:
+                if candidate["trendline"]:
+
+                    if side == "BUY":
+
+                        lines.append(
+                            "Trendline Breakout: ✅"
+                        )
+
+                    else:
+
+                        lines.append(
+                            "Trendline Breakdown: ✅"
+                        )
+
+                else:
+
+                    lines.append(
+                        "Trendline confirmation: ❌"
+                    )
+
+                if candidate["ut"]:
+
+                    lines.append(
+                        "UT Confirmation: ✅"
+                    )
+
+                else:
+
+                    lines.append(
+                        "UT Confirmation: ❌"
+                    )
+
+                for reason in diagnostic_data.get(
+                    "rejections",
+                    []
+                ):
+
+                    prefix = (
+                        f"{side}: "
+                    )
+
+                    if reason.startswith(
+                        prefix
+                    ):
+
+                        clean_reason = (
+                            reason[
+                                len(prefix):
+                            ]
+                        )
+
+                        lines.append(
+                            f"  ❌ "
+                            f"{clean_reason}"
+                        )
 
                 lines.append(
-                    f"  ❌ {reason}"
+                    "━━━━━━━━━━━━━━━━━━"
                 )
 
     # ========================================================
-    # BLOCKED
+    # NEAR SETUPS
+    # ========================================================
+
+    near_results = []
+
+    for result in results:
+
+        diagnostic_data = result.get(
+            "diagnostic",
+            {}
+        )
+
+        if (
+            not diagnostic_data.get(
+                "is_setup_candidate",
+                False
+            )
+            and (
+                diagnostic_data.get(
+                    "bullish_divergence",
+                    False
+                )
+                or diagnostic_data.get(
+                    "bearish_divergence",
+                    False
+                )
+            )
+        ):
+
+            near_results.append(
+                result
+            )
+
+    if near_results:
+
+        lines.append("")
+        lines.append(
+            "🟡 NEAR SETUPS"
+        )
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        for result in near_results:
+
+            formatted = format_no_setup(
+                result
+            )
+
+            if formatted:
+
+                lines.append(
+                    formatted
+                )
+
+    # ========================================================
+    # NO SETUP
+    # ========================================================
+
+    no_setup_results = [
+        result
+        for result in results
+        if not result.get(
+            "diagnostic",
+            {}
+        ).get(
+            "bullish_divergence",
+            False
+        )
+        and not result.get(
+            "diagnostic",
+            {}
+        ).get(
+            "bearish_divergence",
+            False
+        )
+    ]
+
+    if no_setup_results:
+
+        lines.append("")
+        lines.append(
+            "📋 NO SETUP"
+        )
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        for result in no_setup_results:
+
+            lines.append(
+                f"{result['symbol']} ⚪ "
+                f"No RSI divergence"
+            )
+
+    # ========================================================
+    # BLOCKED SYMBOLS
     # ========================================================
 
     if blocked_symbols:
 
         lines.append("")
-        lines.append("🔒 SYMBOL LOCK")
-        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append(
+            "🔒 SYMBOL LOCK"
+        )
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
 
         for symbol in sorted(
             set(blocked_symbols)
         ):
 
             lines.append(
-                f"{symbol}: OPEN trade already exists"
+                f"{symbol}: "
+                f"OPEN trade already exists"
             )
 
     # ========================================================
@@ -2944,15 +4115,22 @@ def format_report(
     # ========================================================
 
     lines.append("")
-    lines.append("🏁 CLOSED SIGNALS")
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        "🏁 CLOSED SIGNALS"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
 
     if closed_this_run:
 
         for trade in closed_this_run:
 
             lines.append(
-                format_closed_signal(trade)
+                format_closed_signal(
+                    trade
+                )
             )
 
             lines.append(
@@ -2970,15 +4148,22 @@ def format_report(
     # ========================================================
 
     lines.append("")
-    lines.append("🚨 NEW SIGNALS")
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        "🚨 NEW SIGNALS"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
 
     if registered_signals:
 
         for signal in registered_signals:
 
             lines.append(
-                format_signal(signal)
+                format_signal(
+                    signal
+                )
             )
 
             lines.append(
@@ -2996,8 +4181,13 @@ def format_report(
     # ========================================================
 
     lines.append("")
-    lines.append("📌 OPEN SIGNAL P&L")
-    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        "📌 OPEN SIGNAL P&L"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
 
     if open_performance:
 
@@ -3010,17 +4200,22 @@ def format_report(
             )
 
             side = item["side"]
+
             entry = item["entry"]
+
             sl = item["sl"]
+
             pnl = item["pnl_percent"]
 
             lines.append(
                 f"{icon} "
-                f"{item['symbol']} {side}"
+                f"{item['symbol']} "
+                f"{side}"
             )
 
             lines.append(
-                f"Entry: {format_price(entry)}"
+                f"Entry: "
+                f"{format_price(entry)}"
             )
 
             lines.append(
@@ -3029,7 +4224,8 @@ def format_report(
             )
 
             lines.append(
-                f"SL: {format_price(sl)} "
+                f"SL: "
+                f"{format_price(sl)} "
                 f"({level_percent(side, entry, sl):+.2f}%)"
             )
 
@@ -3057,12 +4253,13 @@ def format_report(
                     f"({level_percent(side, entry, item['tp3']):+.2f}%)"
                 )
 
-            # =================================================
+            # ------------------------------------------------
             # BOLD CURRENT P&L
-            # =================================================
+            # ------------------------------------------------
 
             lines.append(
-                f"Current P&L: *{pnl:+.2f}%*"
+                f"Current P&L: "
+                f"*{pnl:+.2f}%*"
             )
 
             lines.append(
@@ -3102,13 +4299,19 @@ def format_report(
     if errors:
 
         lines.append("")
-        lines.append("⚠️ ERRORS")
-        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append(
+            "⚠️ ERRORS"
+        )
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
 
         for symbol, error in errors.items():
 
             lines.append(
-                f"{symbol}: {error}"
+                f"{symbol}: "
+                f"{error}"
             )
 
     # ========================================================
@@ -3118,33 +4321,55 @@ def format_report(
     if not registered_signals:
 
         lines.append("")
-        lines.append("📌 NO SIGNAL SUMMARY")
-        lines.append("━━━━━━━━━━━━━━━━━━")
+        lines.append(
+            "📌 NO SIGNAL SUMMARY"
+        )
 
-        if diagnostic["setup_candidates"] == 0:
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        if diagnostic[
+            "setup_candidates"
+        ] == 0:
+
+            if (
+                diagnostic[
+                    "bullish_divergence"
+                ] > 0
+                or diagnostic[
+                    "bearish_divergence"
+                ] > 0
+            ):
+
+                lines.append(
+                    "🟡 Divergence exists, "
+                    "but no complete UT/Trendline "
+                    "setup candidate."
+                )
+
+            else:
+
+                lines.append(
+                    "⚪ No RSI divergence candidate."
+                )
+
+        else:
 
             lines.append(
-                "❌ No RSI divergence candidate."
+                f"🎯 "
+                f"{diagnostic['setup_candidates']} "
+                f"setup candidate(s) found."
             )
 
-        elif diagnostic["bullish_divergence"] > 0:
-
             lines.append(
-                "BUY candidates exist, "
-                "but one or more filters rejected them."
+                "❌ Candidate(s) rejected by "
+                "one or more filters."
             )
 
-        elif diagnostic["bearish_divergence"] > 0:
-
             lines.append(
-                "SELL candidates exist, "
-                "but one or more filters rejected them."
-            )
-
-        if diagnostic["setup_candidates"] > 0:
-
-            lines.append(
-                "Check REJECTED SETUPS above."
+                "Check SETUP CANDIDATES and "
+                "REJECTED CANDIDATES above."
             )
 
     return "\n".join(lines)
@@ -3165,7 +4390,8 @@ def main():
         market_map = load_market_map()
 
         print(
-            f"Loaded {len(market_map)} markets."
+            f"Loaded "
+            f"{len(market_map)} markets."
         )
 
     except Exception as e:
@@ -3177,12 +4403,14 @@ def main():
         return
 
     # ========================================================
-    # LOAD FRESH v10.4 STATE
+    # LOAD STATE
     # ========================================================
 
     state = load_state()
 
-    rebuild_trade_container(state)
+    rebuild_trade_container(
+        state
+    )
 
     # ========================================================
     # PREVIOUS CLOSED IDS
@@ -3190,44 +4418,67 @@ def main():
 
     previous_closed_ids = set()
 
-    for trade in get_all_trades(state):
+    for trade in get_all_trades(
+        state
+    ):
 
         if str(
-            trade.get("status", "")
+            trade.get(
+                "status",
+                ""
+            )
         ).upper() == "CLOSED":
 
-            trade_id = get_trade_id(trade)
+            trade_id = get_trade_id(
+                trade
+            )
 
             if trade_id:
-                previous_closed_ids.add(trade_id)
+
+                previous_closed_ids.add(
+                    trade_id
+                )
 
     results = []
+
     errors = {}
+
     data_cache = {}
+
     blocked_symbols = []
 
     # ========================================================
-    # SCAN ALL COINS
+    # SCAN
     # ========================================================
 
     for symbol in COINS:
 
         try:
 
-            result = analyze_coin(symbol)
+            result = analyze_coin(
+                symbol
+            )
 
-            results.append(result)
+            results.append(
+                result
+            )
 
-            data_cache[symbol] = result["df"]
+            data_cache[
+                symbol
+            ] = result["df"]
 
         except Exception as e:
 
-            errors[symbol] = str(e)
+            errors[
+                symbol
+            ] = str(e)
 
-        time.sleep(0.05)
+        time.sleep(
+            0.05
+        )
 
     # ========================================================
-    # CLOSE OLD OPEN TRADES
+    # EVALUATE OLD OPEN TRADES
     # ========================================================
 
     changed = evaluate_open_trades(
@@ -3236,7 +4487,10 @@ def main():
     )
 
     if changed:
-        save_state(state)
+
+        save_state(
+            state
+        )
 
     # ========================================================
     # REGISTER NEW SIGNALS
@@ -3246,15 +4500,19 @@ def main():
 
     for result in results:
 
-        signal = result.get("signal")
+        signal = result.get(
+            "signal"
+        )
 
         if signal is None:
             continue
 
-        symbol = signal["symbol"]
+        symbol = signal[
+            "symbol"
+        ]
 
         # ----------------------------------------------------
-        # SYMBOL LOCK
+        # NO HEDGE / SYMBOL LOCK
         # ----------------------------------------------------
 
         if (
@@ -3265,9 +4523,13 @@ def main():
             )
         ):
 
-            blocked_symbols.append(symbol)
+            blocked_symbols.append(
+                symbol
+            )
 
-            result["diagnostic"].setdefault(
+            result[
+                "diagnostic"
+            ].setdefault(
                 "rejections",
                 []
             ).append(
@@ -3283,21 +4545,30 @@ def main():
             signal["entry"]
         )
 
-        signal["signal_id"] = signal_id
-        signal["id"] = signal_id
+        signal["signal_id"] = (
+            signal_id
+        )
+
+        signal["id"] = (
+            signal_id
+        )
 
         if register_signal(
             state,
             signal
         ):
 
-            new_registered.append(signal)
+            new_registered.append(
+                signal
+            )
 
     # ========================================================
     # SAVE
     # ========================================================
 
-    save_state(state)
+    save_state(
+        state
+    )
 
     # ========================================================
     # SECOND EVALUATION
@@ -3309,7 +4580,10 @@ def main():
     )
 
     if changed:
-        save_state(state)
+
+        save_state(
+            state
+        )
 
     # ========================================================
     # CLOSED THIS RUN
@@ -3348,13 +4622,18 @@ def main():
     )
 
     print()
-    print(report)
+
+    print(
+        report
+    )
 
     # ========================================================
     # TELEGRAM
     # ========================================================
 
-    send_telegram(report)
+    send_telegram(
+        report
+    )
 
 
 # ============================================================
@@ -3362,4 +4641,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
