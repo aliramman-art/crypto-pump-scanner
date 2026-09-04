@@ -75,7 +75,16 @@
       "reason": "Bearish RSI Divergence + UT/Trendline",
       "signal_id": "62de465c6cda24e3",
       "id": "62de465c6cda24e3",
-      "status": "OPEN"
+      "status": "CLOSED",
+      "exit_reason": "SL",
+      "result_reason": "SL",
+      "exit_price": 0.09173163999999999,
+      "result_price": 0.09173163999999999,
+      "exit_time": 1788503700000,
+      "closed_at": "2026-09-04T06:35:00+00:00",
+      "pnl_percent": -0.16558200480453653,
+      "r_multiple": -1.0,
+      "result_r": -1.0
     },
     "ad08ee2ee895fea6": {
       "symbol": "VET",
@@ -93,8 +102,35 @@
       "reason": "Bullish RSI Divergence + UT/Trendline",
       "signal_id": "ad08ee2ee895fea6",
       "id": "ad08ee2ee895fea6",
+      "status": "CLOSED",
+      "exit_reason": "SL",
+      "result_reason": "SL",
+      "exit_price": 0.0067332600000000005,
+      "result_price": 0.0067332600000000005,
+      "exit_time": 1788503700000,
+      "closed_at": "2026-09-04T06:35:00+00:00",
+      "pnl_percent": -0.12963512310885894,
+      "r_multiple": -1.0,
+      "result_r": -1.0
+    },
+    "fb2e0691e10c8dd0": {
+      "symbol": "ARB",
+      "side": "BUY",
+      "direction": "BUY",
+      "name": "ARB",
+      "entry": 0.1364,
+      "sl": 0.13612374,
+      "tp1": 0.13709608001529333,
+      "tp2": 0.13779216003058667,
+      "tp3": 0.13848824004588,
+      "tp": 0.13709608001529333,
+      "signal_time": 1788504300000,
+      "signal_time_iso": "2026-09-04T06:45:00+00:00",
+      "reason": "Bullish RSI Divergence + UT/Trendline",
+      "signal_id": "fb2e0691e10c8dd0",
+      "id": "fb2e0691e10c8dd0",
       "status": "OPEN"
     }
   },
-  "last_run": "2026-09-04T06:39:19.737382+00:00"
+  "last_run": "2026-09-04T06:54:27.150431+00:00"
 }
