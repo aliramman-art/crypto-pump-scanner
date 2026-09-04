@@ -3022,4 +3022,3021 @@ def analyze_coin(symbol):
         or ut_sell
     )
 
-    buy
+    buy_trend_ok = (
+        trend_15m == "BULLISH"
+        and trend_1h == "BULLISH"
+    )
+
+    sell_trend_ok = (
+        trend_15m == "BEARISH"
+        and trend_1h == "BEARISH"
+    )
+
+    candidates = []
+
+    # ========================================================
+    # BUY CANDIDATE
+    # ========================================================
+
+    if (
+        bullish_divergence is not None
+        and bullish_confirmation
+    ):
+
+        score_data = (
+            calculate_candidate_score(
+                side="BUY",
+                divergence=True,
+                ut_trigger=ut_buy,
+                trendline=bullish_break,
+                trend_15m=trend_15m,
+                trend_1h=trend_1h,
+                volume_ratio=volume_ratio,
+            )
+        )
+
+        candidates.append({
+
+            "symbol":
+                symbol,
+
+            "side":
+                "BUY",
+
+            "entry":
+                current_close,
+
+            "signal_time":
+                signal_time,
+
+            "divergence":
+                True,
+
+            "divergence_data":
+                bullish_divergence,
+
+            "ut":
+                ut_buy,
+
+            "trendline":
+                bullish_break,
+
+            "trend_15m":
+                trend_15m,
+
+            "trend_1h":
+                trend_1h,
+
+            "volume_ratio":
+                volume_ratio,
+
+            "current_rsi":
+                current_rsi,
+
+            "ut_stop":
+                current_ut,
+
+            "atr":
+                current_atr_sl,
+
+            "score":
+                score_data["score"],
+
+            "components":
+                score_data["components"],
+
+            "label":
+                score_data["label"],
+
+            "trend_ok":
+                buy_trend_ok,
+
+            "confirmation":
+                bullish_confirmation,
+
+            "direction_quality":
+                (
+                    int(ut_buy)
+                    + int(bullish_break)
+                ),
+        })
+
+    # ========================================================
+    # SELL CANDIDATE
+    # ========================================================
+
+    if (
+        bearish_divergence is not None
+        and bearish_confirmation
+    ):
+
+        score_data = (
+            calculate_candidate_score(
+                side="SELL",
+                divergence=True,
+                ut_trigger=ut_sell,
+                trendline=bearish_break,
+                trend_15m=trend_15m,
+                trend_1h=trend_1h,
+                volume_ratio=volume_ratio,
+            )
+        )
+
+        candidates.append({
+
+            "symbol":
+                symbol,
+
+            "side":
+                "SELL",
+
+            "entry":
+                current_close,
+
+            "signal_time":
+                signal_time,
+
+            "divergence":
+                True,
+
+            "divergence_data":
+                bearish_divergence,
+
+            "ut":
+                ut_sell,
+
+            "trendline":
+                bearish_break,
+
+            "trend_15m":
+                trend_15m,
+
+            "trend_1h":
+                trend_1h,
+
+            "volume_ratio":
+                volume_ratio,
+
+            "current_rsi":
+                current_rsi,
+
+            "ut_stop":
+                current_ut,
+
+            "atr":
+                current_atr_sl,
+
+            "score":
+                score_data["score"],
+
+            "components":
+                score_data["components"],
+
+            "label":
+                score_data["label"],
+
+            "trend_ok":
+                sell_trend_ok,
+
+            "confirmation":
+                bearish_confirmation,
+
+            "direction_quality":
+                (
+                    int(ut_sell)
+                    + int(bearish_break)
+                ),
+        })
+
+    diagnostic = {
+
+        "symbol":
+            symbol,
+
+        "bullish_divergence":
+            bullish_divergence is not None,
+
+        "bearish_divergence":
+            bearish_divergence is not None,
+
+        "bullish_break":
+            bullish_break,
+
+        "bearish_break":
+            bearish_break,
+
+        "ut_buy":
+            ut_buy,
+
+        "ut_sell":
+            ut_sell,
+
+        "buy_trend_ok":
+            buy_trend_ok,
+
+        "sell_trend_ok":
+            sell_trend_ok,
+
+        "trend_15m":
+            trend_15m,
+
+        "trend_1h":
+            trend_1h,
+
+        "current_rsi":
+            current_rsi,
+
+        "ut_stop":
+            current_ut,
+
+        "volume_ratio":
+            volume_ratio,
+
+        "candidate_sides":
+            [
+                x["side"]
+                for x in candidates
+            ],
+
+        "candidate_details":
+            candidates,
+
+        "setup_candidates":
+            len(candidates),
+
+        "is_setup_candidate":
+            bool(candidates),
+    }
+
+    return {
+
+        "symbol":
+            symbol,
+
+        "df":
+            df,
+
+        "candidates":
+            candidates,
+
+        "trend_data":
+            trend_data,
+
+        "market_symbol":
+            get_market_symbol(symbol),
+
+        "diagnostic":
+            diagnostic,
+    }
+
+
+# ============================================================
+# ONE GLOBAL TOP CANDIDATE
+# ============================================================
+
+def get_global_top_candidate(
+    results,
+    state=None,
+):
+
+    candidates = []
+
+    for result in results:
+
+        symbol = result[
+            "symbol"
+        ]
+
+        if (
+            state is not None
+            and not ALLOW_MULTIPLE_OPEN_PER_SYMBOL
+            and has_open_trade_for_symbol(
+                state,
+                symbol,
+            )
+        ):
+            continue
+
+        for candidate in result.get(
+            "candidates",
+            [],
+        ):
+
+            item = dict(
+                candidate
+            )
+
+            candidates.append(
+                item
+            )
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda x: (
+            x.get(
+                "score",
+                0,
+            ),
+
+            x.get(
+                "volume_ratio",
+                0,
+            ),
+
+            x.get(
+                "direction_quality",
+                0,
+            ),
+
+            int(
+                x.get(
+                    "trend_ok",
+                    False,
+                )
+            ),
+        ),
+        reverse=True,
+    )
+
+    return candidates[0]
+
+
+# ============================================================
+# BUILD GLOBAL SETUP
+# ============================================================
+
+def build_global_top_setup(
+    results,
+    state,
+):
+
+    top_candidate = (
+        get_global_top_candidate(
+            results,
+            state,
+        )
+    )
+
+    if top_candidate is None:
+
+        return {
+            "candidate": None,
+            "setup": None,
+            "reason": "NO_CANDIDATE",
+        }
+
+    symbol = (
+        top_candidate["symbol"]
+    )
+
+    result_map = {
+        x["symbol"]: x
+        for x in results
+    }
+
+    result = result_map.get(
+        symbol
+    )
+
+    if result is None:
+
+        return {
+            "candidate":
+                top_candidate,
+
+            "setup": None,
+
+            "reason":
+                "RESULT_NOT_FOUND",
+        }
+
+    df = result["df"]
+
+    setup = build_trade_setup(
+        top_candidate,
+        df,
+    )
+
+    return {
+        "candidate":
+            top_candidate,
+
+        "setup":
+            setup,
+
+        "reason":
+            (
+                setup.get(
+                    "reason",
+                    "UNKNOWN",
+                )
+                if setup
+                else "NO_SETUP"
+            ),
+    }
+
+
+# ============================================================
+# FORMAT TOP CANDIDATE
+# ============================================================
+
+def format_top_candidate(
+    candidate,
+    setup=None,
+):
+
+    if candidate is None:
+
+        return (
+            "هیچ Candidate فعالی "
+            "پیدا نشد."
+        )
+
+    symbol = candidate[
+        "symbol"
+    ]
+
+    side = candidate[
+        "side"
+    ]
+
+    icon = (
+        "🟢"
+        if side == "BUY"
+        else "🔴"
+    )
+
+    score = candidate[
+        "score"
+    ]
+
+    label = candidate[
+        "label"
+    ]
+
+    components = candidate[
+        "components"
+    ]
+
+    if setup is not None:
+
+        if setup.get(
+            "valid",
+            False,
+        ):
+
+            status = "✅ VALID SETUP"
+
+        else:
+
+            status = (
+                "❌ "
+                + str(
+                    setup.get(
+                        "reason",
+                        "INVALID",
+                    )
+                )
+            )
+
+    else:
+
+        status = "⚪ NO SETUP"
+
+    lines = [
+
+        "🏆 GLOBAL TOP CANDIDATE",
+
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"🪙 {symbol}/USDT",
+
+        f"{icon} Direction: {side}",
+
+        f"⭐ SCORE: "
+        f"{score}/{MAX_SCORE} {label}",
+
+        "",
+
+        "📊 SCORE BREAKDOWN",
+
+        f"RSI Divergence: "
+        f"+{components['divergence']} / "
+        f"{RSI_DIVERGENCE_SCORE}",
+
+        f"UT Bot Trigger: "
+        f"+{components['ut']} / "
+        f"{UT_TRIGGER_SCORE}",
+
+        f"Trendline: "
+        f"+{components['trendline']} / "
+        f"{TRENDLINE_SCORE}",
+
+        f"15M Trend: "
+        f"+{components['trend_15m']} / "
+        f"{TREND_15M_SCORE} "
+        f"({candidate['trend_15m']})",
+
+        f"1H Trend: "
+        f"+{components['trend_1h']} / "
+        f"{TREND_1H_SCORE} "
+        f"({candidate['trend_1h']})",
+
+        f"Volume: "
+        f"+{components['volume']} / "
+        f"{VOLUME_SCORE} "
+        f"({candidate['volume_ratio']:.2f}x)",
+
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"Entry Candidate: "
+        f"{format_price(candidate['entry'])}",
+
+        f"RSI: "
+        f"{candidate['current_rsi']:.2f}",
+
+        f"Trend Filter: "
+        f"{'PASS' if candidate['trend_ok'] else 'FAIL'}",
+
+        f"Confirmation: "
+        f"{'PASS' if candidate['confirmation'] else 'FAIL'}",
+
+        "━━━━━━━━━━━━━━━━━━",
+
+        "🧩 SETUP ENGINE",
+
+        f"Status: {status}",
+    ]
+
+    if setup is not None:
+
+        if setup.get(
+            "valid",
+            False,
+        ):
+
+            lines.extend([
+
+                f"Entry: "
+                f"{format_price(setup['entry'])}",
+
+                f"SL: "
+                f"{format_price(setup['sl'])} "
+                f"({setup['risk_percent']:.2f}%)",
+
+                f"TP1: "
+                f"{format_price(setup['tp1'])} "
+                f"RR 1:{setup['rr1']:.1f}",
+
+                f"TP2: "
+                f"{format_price(setup['tp2'])} "
+                f"RR 1:{setup['rr2']:.1f}",
+
+                f"TP3: "
+                f"{format_price(setup['tp3'])} "
+                f"RR 1:{setup['rr3']:.1f}",
+
+            ])
+
+        else:
+
+            lines.append(
+                f"Reason: "
+                f"{setup.get('reason', 'UNKNOWN')}"
+            )
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# PARTIAL TP HELPERS
+# ============================================================
+
+def calculate_partial_result(
+    side,
+    entry,
+    exit_price,
+    risk,
+    percent,
+):
+
+    if side == "BUY":
+
+        pnl_percent = (
+            (exit_price - entry)
+            / entry
+            * 100
+        )
+
+        r_multiple = (
+            (exit_price - entry)
+            / risk
+        )
+
+    else:
+
+        pnl_percent = (
+            (entry - exit_price)
+            / entry
+            * 100
+        )
+
+        r_multiple = (
+            (entry - exit_price)
+            / risk
+        )
+
+    weighted_pnl = (
+        pnl_percent
+        * percent
+        / 100
+    )
+
+    weighted_r = (
+        r_multiple
+        * percent
+        / 100
+    )
+
+    return (
+        weighted_pnl,
+        weighted_r,
+    )
+
+
+def close_trade(
+    trade,
+    reason,
+    price,
+    candle_time,
+):
+
+    entry = get_trade_entry(
+        trade
+    )
+
+    sl = get_trade_sl(
+        trade
+    )
+
+    side = normalize_side(
+        trade
+    )
+
+    if (
+        entry is None
+        or sl is None
+        or side not in (
+            "BUY",
+            "SELL",
+        )
+    ):
+        return False
+
+    risk = abs(
+        entry - sl
+    )
+
+    if risk <= 0:
+        return False
+
+    if side == "BUY":
+
+        pnl = (
+            (price - entry)
+            / entry
+            * 100
+        )
+
+        r_multiple = (
+            (price - entry)
+            / risk
+        )
+
+    else:
+
+        pnl = (
+            (entry - price)
+            / entry
+            * 100
+        )
+
+        r_multiple = (
+            (entry - price)
+            / risk
+        )
+
+    signal_time = parse_trade_time(
+        trade.get(
+            "signal_time"
+        )
+    )
+
+    duration = 0
+
+    if signal_time is not None:
+
+        duration = max(
+            0,
+            (
+                candle_time
+                - signal_time
+            )
+            / 60000,
+        )
+
+    trade["status"] = "CLOSED"
+
+    trade["exit_reason"] = reason
+    trade["result_reason"] = reason
+
+    trade["exit_price"] = price
+    trade["result_price"] = price
+
+    trade["exit_time"] = candle_time
+
+    trade["pnl_percent"] = (
+        float(
+            trade.get(
+                "realized_pnl_percent",
+                0,
+            )
+        )
+        + (
+            pnl
+            * float(
+                trade.get(
+                    "remaining_percent",
+                    100,
+                )
+            )
+            / 100
+        )
+    )
+
+    trade["r_multiple"] = (
+        float(
+            trade.get(
+                "realized_r",
+                0,
+            )
+        )
+        + (
+            r_multiple
+            * float(
+                trade.get(
+                    "remaining_percent",
+                    100,
+                )
+            )
+            / 100
+        )
+    )
+
+    trade["result_r"] = (
+        trade["r_multiple"]
+    )
+
+    trade["realized_pnl_percent"] = (
+        trade["pnl_percent"]
+    )
+
+    trade["realized_r"] = (
+        trade["r_multiple"]
+    )
+
+    trade["remaining_percent"] = 0
+
+    trade["duration_minutes"] = duration
+
+    trade["closed_at"] = (
+        datetime.fromtimestamp(
+            candle_time / 1000,
+            tz=timezone.utc,
+        ).isoformat()
+    )
+
+    return True
+
+
+# ============================================================
+# OPEN PERFORMANCE
+# ============================================================
+
+def calculate_open_performance(
+    state,
+    data_cache,
+):
+
+    result = []
+
+    for trade in get_all_trades(
+        state
+    ):
+
+        if str(
+            trade.get(
+                "status",
+                "",
+            )
+        ).upper() != "OPEN":
+            continue
+
+        coin = normalize_coin(
+            trade
+        )
+
+        df = data_cache.get(
+            coin
+        )
+
+        if (
+            df is None
+            or df.empty
+        ):
+            continue
+
+        entry = get_trade_entry(
+            trade
+        )
+
+        sl = get_trade_sl(
+            trade
+        )
+
+        side = normalize_side(
+            trade
+        )
+
+        if (
+            entry is None
+            or sl is None
+            or side not in (
+                "BUY",
+                "SELL",
+            )
+        ):
+            continue
+
+        current_price = float(
+            df["close"].iloc[-1]
+        )
+
+        if side == "BUY":
+
+            pnl = (
+                (
+                    current_price
+                    - entry
+                )
+                / entry
+                * 100
+            )
+
+        else:
+
+            pnl = (
+                (
+                    entry
+                    - current_price
+                )
+                / entry
+                * 100
+            )
+
+        risk = abs(
+            entry - sl
+        )
+
+        if risk > 0:
+
+            if side == "BUY":
+
+                current_r = (
+                    current_price
+                    - entry
+                ) / risk
+
+            else:
+
+                current_r = (
+                    entry
+                    - current_price
+                ) / risk
+
+        else:
+
+            current_r = 0
+
+        signal_time = parse_trade_time(
+            trade.get(
+                "signal_time"
+            )
+        )
+
+        if signal_time is None:
+
+            signal_time = (
+                parse_trade_time(
+                    trade.get(
+                        "signal_time_iso"
+                    )
+                )
+            )
+
+        if signal_time is None:
+
+            mfe = 0
+            mae = 0
+            duration = 0
+
+        else:
+
+            after_signal = df[
+                df["time"]
+                > signal_time
+            ]
+
+            if after_signal.empty:
+
+                mfe = 0
+                mae = 0
+
+            elif side == "BUY":
+
+                best = float(
+                    after_signal[
+                        "high"
+                    ].max()
+                )
+
+                worst = float(
+                    after_signal[
+                        "low"
+                    ].min()
+                )
+
+                mfe = (
+                    best - entry
+                ) / entry * 100
+
+                mae = (
+                    worst - entry
+                ) / entry * 100
+
+            else:
+
+                best = float(
+                    after_signal[
+                        "low"
+                    ].min()
+                )
+
+                worst = float(
+                    after_signal[
+                        "high"
+                    ].max()
+                )
+
+                mfe = (
+                    entry - best
+                ) / entry * 100
+
+                mae = (
+                    entry - worst
+                ) / entry * 100
+
+            last_time = int(
+                df["time"].iloc[-1]
+            )
+
+            duration = max(
+                0,
+                (
+                    last_time
+                    - signal_time
+                ) / 60000,
+            )
+
+        result.append({
+
+            "symbol":
+                coin,
+
+            "side":
+                side,
+
+            "entry":
+                entry,
+
+            "sl":
+                sl,
+
+            "tp1":
+                get_trade_tp1(trade),
+
+            "tp2":
+                get_trade_tp2(trade),
+
+            "tp3":
+                get_trade_tp3(trade),
+
+            "current_price":
+                current_price,
+
+            "pnl_percent":
+                pnl,
+
+            "current_r":
+                current_r,
+
+            "mfe":
+                mfe,
+
+            "mae":
+                mae,
+
+            "duration_minutes":
+                duration,
+
+            "score":
+                trade.get("score"),
+
+            "tp1_hit":
+                trade.get(
+                    "tp1_hit",
+                    False,
+                ),
+
+            "tp2_hit":
+                trade.get(
+                    "tp2_hit",
+                    False,
+                ),
+
+            "tp3_hit":
+                trade.get(
+                    "tp3_hit",
+                    False,
+                ),
+
+            "remaining_percent":
+                trade.get(
+                    "remaining_percent",
+                    100,
+                ),
+
+            "realized_pnl_percent":
+                trade.get(
+                    "realized_pnl_percent",
+                    0,
+                ),
+        })
+
+    return result
+
+
+# ============================================================
+# EVALUATE OPEN TRADES
+# ============================================================
+
+def evaluate_open_trades(
+    state,
+    data_cache,
+):
+
+    changed = False
+
+    for trade in get_all_trades(
+        state
+    ):
+
+        if str(
+            trade.get(
+                "status",
+                "",
+            )
+        ).upper() != "OPEN":
+            continue
+
+        coin = normalize_coin(
+            trade
+        )
+
+        df = data_cache.get(
+            coin
+        )
+
+        if (
+            df is None
+            or df.empty
+        ):
+            continue
+
+        side = normalize_side(
+            trade
+        )
+
+        entry = get_trade_entry(
+            trade
+        )
+
+        sl = get_trade_sl(
+            trade
+        )
+
+        if (
+            entry is None
+            or sl is None
+            or side not in (
+                "BUY",
+                "SELL",
+            )
+        ):
+            continue
+
+        tp1 = get_trade_tp1(
+            trade
+        )
+
+        tp2 = get_trade_tp2(
+            trade
+        )
+
+        tp3 = get_trade_tp3(
+            trade
+        )
+
+        signal_time = parse_trade_time(
+            trade.get(
+                "signal_time"
+            )
+        )
+
+        if signal_time is None:
+
+            signal_time = (
+                parse_trade_time(
+                    trade.get(
+                        "signal_time_iso"
+                    )
+                )
+            )
+
+        if signal_time is None:
+            continue
+
+        after_signal = df[
+            df["time"]
+            > signal_time
+        ]
+
+        if after_signal.empty:
+            continue
+
+        for _, row in (
+            after_signal.iterrows()
+        ):
+
+            if str(
+                trade.get(
+                    "status",
+                    "",
+                )
+            ).upper() != "OPEN":
+                break
+
+            high = float(
+                row["high"]
+            )
+
+            low = float(
+                row["low"]
+            )
+
+            candle_time = int(
+                row["time"]
+            )
+
+            risk = abs(
+                entry - sl
+            )
+
+            if risk <= 0:
+                continue
+
+            # =================================================
+            # SL
+            # =================================================
+
+            if side == "BUY":
+
+                if low <= sl:
+
+                    if close_trade(
+                        trade,
+                        "SL",
+                        sl,
+                        candle_time,
+                    ):
+                        changed = True
+
+                    break
+
+            else:
+
+                if high >= sl:
+
+                    if close_trade(
+                        trade,
+                        "SL",
+                        sl,
+                        candle_time,
+                    ):
+                        changed = True
+
+                    break
+
+            # =================================================
+            # TP1
+            # =================================================
+
+            if (
+                tp1 is not None
+                and not trade.get(
+                    "tp1_hit",
+                    False,
+                )
+            ):
+
+                tp1_hit = (
+                    high >= tp1
+                    if side == "BUY"
+                    else low <= tp1
+                )
+
+                if tp1_hit:
+
+                    weighted_pnl, weighted_r = (
+                        calculate_partial_result(
+                            side,
+                            entry,
+                            tp1,
+                            risk,
+                            TP1_CLOSE_PERCENT,
+                        )
+                    )
+
+                    trade["tp1_hit"] = True
+
+                    trade[
+                        "remaining_percent"
+                    ] = (
+                        float(
+                            trade.get(
+                                "remaining_percent",
+                                100,
+                            )
+                        )
+                        - TP1_CLOSE_PERCENT
+                    )
+
+                    trade[
+                        "realized_pnl_percent"
+                    ] = (
+                        float(
+                            trade.get(
+                                "realized_pnl_percent",
+                                0,
+                            )
+                        )
+                        + weighted_pnl
+                    )
+
+                    trade[
+                        "realized_r"
+                    ] = (
+                        float(
+                            trade.get(
+                                "realized_r",
+                                0,
+                            )
+                        )
+                        + weighted_r
+                    )
+
+                    trade["sl"] = entry
+
+                    trade[
+                        "sl_moved_to_entry"
+                    ] = True
+
+                    changed = True
+
+            # =================================================
+            # TP2
+            # =================================================
+
+            if (
+                tp2 is not None
+                and trade.get(
+                    "tp1_hit",
+                    False,
+                )
+                and not trade.get(
+                    "tp2_hit",
+                    False,
+                )
+            ):
+
+                tp2_hit = (
+                    high >= tp2
+                    if side == "BUY"
+                    else low <= tp2
+                )
+
+                if tp2_hit:
+
+                    weighted_pnl, weighted_r = (
+                        calculate_partial_result(
+                            side,
+                            entry,
+                            tp2,
+                            risk,
+                            TP2_CLOSE_PERCENT,
+                        )
+                    )
+
+                    trade["tp2_hit"] = True
+
+                    trade[
+                        "remaining_percent"
+                    ] = (
+                        float(
+                            trade.get(
+                                "remaining_percent",
+                                67,
+                            )
+                        )
+                        - TP2_CLOSE_PERCENT
+                    )
+
+                    trade[
+                        "realized_pnl_percent"
+                    ] = (
+                        float(
+                            trade.get(
+                                "realized_pnl_percent",
+                                0,
+                            )
+                        )
+                        + weighted_pnl
+                    )
+
+                    trade[
+                        "realized_r"
+                    ] = (
+                        float(
+                            trade.get(
+                                "realized_r",
+                                0,
+                            )
+                        )
+                        + weighted_r
+                    )
+
+                    if tp1 is not None:
+
+                        trade["sl"] = tp1
+
+                        trade[
+                            "sl_moved_to_tp1"
+                        ] = True
+
+                    changed = True
+
+            # =================================================
+            # TP3
+            # =================================================
+
+            if (
+                tp3 is not None
+                and trade.get(
+                    "tp2_hit",
+                    False,
+                )
+                and not trade.get(
+                    "tp3_hit",
+                    False,
+                )
+            ):
+
+                tp3_hit = (
+                    high >= tp3
+                    if side == "BUY"
+                    else low <= tp3
+                )
+
+                if tp3_hit:
+
+                    weighted_pnl, weighted_r = (
+                        calculate_partial_result(
+                            side,
+                            entry,
+                            tp3,
+                            risk,
+                            TP3_CLOSE_PERCENT,
+                        )
+                    )
+
+                    trade["tp3_hit"] = True
+
+                    trade[
+                        "remaining_percent"
+                    ] = 0
+
+                    trade[
+                        "realized_pnl_percent"
+                    ] = (
+                        float(
+                            trade.get(
+                                "realized_pnl_percent",
+                                0,
+                            )
+                        )
+                        + weighted_pnl
+                    )
+
+                    trade[
+                        "realized_r"
+                    ] = (
+                        float(
+                            trade.get(
+                                "realized_r",
+                                0,
+                            )
+                        )
+                        + weighted_r
+                    )
+
+                    trade[
+                        "status"
+                    ] = "CLOSED"
+
+                    trade[
+                        "exit_reason"
+                    ] = "TP3"
+
+                    trade[
+                        "result_reason"
+                    ] = "TP3"
+
+                    trade[
+                        "exit_price"
+                    ] = tp3
+
+                    trade[
+                        "result_price"
+                    ] = tp3
+
+                    trade[
+                        "exit_time"
+                    ] = candle_time
+
+                    trade[
+                        "pnl_percent"
+                    ] = (
+                        trade[
+                            "realized_pnl_percent"
+                        ]
+                    )
+
+                    trade[
+                        "r_multiple"
+                    ] = (
+                        trade[
+                            "realized_r"
+                        ]
+                    )
+
+                    trade[
+                        "result_r"
+                    ] = (
+                        trade[
+                            "realized_r"
+                        ]
+                    )
+
+                    duration = max(
+                        0,
+                        (
+                            candle_time
+                            - signal_time
+                        ) / 60000,
+                    )
+
+                    trade[
+                        "duration_minutes"
+                    ] = duration
+
+                    trade[
+                        "closed_at"
+                    ] = (
+                        datetime.fromtimestamp(
+                            candle_time / 1000,
+                            tz=timezone.utc,
+                        ).isoformat()
+                    )
+
+                    changed = True
+
+                    break
+
+    return changed
+
+
+# ============================================================
+# NEWLY CLOSED
+# ============================================================
+
+def get_newly_closed_trades(
+    state,
+    previous_closed_ids,
+):
+
+    result = []
+
+    for trade in get_all_trades(
+        state
+    ):
+
+        if str(
+            trade.get(
+                "status",
+                "",
+            )
+        ).upper() != "CLOSED":
+            continue
+
+        trade_id = get_trade_id(
+            trade
+        )
+
+        if (
+            trade_id
+            and trade_id
+            not in previous_closed_ids
+        ):
+
+            result.append(
+                trade
+            )
+
+    return result
+
+
+# ============================================================
+# CLOSED SIGNAL FORMAT
+# ============================================================
+
+def format_closed_signal(
+    trade
+):
+
+    side = normalize_side(
+        trade
+    )
+
+    coin = normalize_coin(
+        trade
+    )
+
+    icon = (
+        "🟢"
+        if side == "BUY"
+        else "🔴"
+    )
+
+    reason = (
+        trade.get(
+            "result_reason"
+        )
+        or trade.get(
+            "exit_reason"
+        )
+        or "UNKNOWN"
+    )
+
+    reason_upper = str(
+        reason
+    ).upper()
+
+    if reason_upper.startswith(
+        "TP"
+    ):
+
+        result_icon = "✅"
+
+    elif reason_upper == "SL":
+
+        result_icon = "❌"
+
+    else:
+
+        result_icon = "⚪"
+
+    entry = get_trade_entry(
+        trade
+    )
+
+    exit_price = trade.get(
+        "result_price",
+        trade.get(
+            "exit_price"
+        ),
+    )
+
+    try:
+
+        exit_price = float(
+            exit_price
+        )
+
+    except Exception:
+
+        exit_price = None
+
+    try:
+
+        pnl = float(
+            trade.get(
+                "pnl_percent",
+                0,
+            )
+        )
+
+    except Exception:
+
+        pnl = 0
+
+    try:
+
+        r_multiple = float(
+            trade.get(
+                "result_r",
+                trade.get(
+                    "r_multiple",
+                    0,
+                ),
+            )
+        )
+
+    except Exception:
+
+        r_multiple = 0
+
+    duration = trade.get(
+        "duration_minutes",
+        0,
+    )
+
+    score = trade.get(
+        "score"
+    )
+
+    score_text = ""
+
+    if score is not None:
+
+        try:
+
+            score_text = (
+                f" | ⭐ "
+                f"{float(score):.0f}/100"
+            )
+
+        except Exception:
+            pass
+
+    return "\n".join([
+
+        f"{icon} "
+        f"{coin} {side} | "
+        f"{result_icon} "
+        f"{reason}{score_text}",
+
+        f"Entry: "
+        f"{format_price(entry)}",
+
+        f"Exit: "
+        f"{format_price(exit_price)}",
+
+        f"P&L: "
+        f"{pnl:+.2f}%",
+
+        f"R: "
+        f"{r_multiple:+.2f}R",
+
+        f"Duration: "
+        f"{float(duration):.0f} min",
+    ])
+
+
+# ============================================================
+# STATISTICS
+# ============================================================
+
+def calculate_statistics(
+    state
+):
+
+    trades = get_all_trades(
+        state
+    )
+
+    open_trades = [
+        x
+        for x in trades
+        if str(
+            x.get(
+                "status",
+                "",
+            )
+        ).upper()
+        == "OPEN"
+    ]
+
+    closed_trades = [
+        x
+        for x in trades
+        if str(
+            x.get(
+                "status",
+                "",
+            )
+        ).upper()
+        == "CLOSED"
+    ]
+
+    wins = []
+    losses = []
+
+    for trade in closed_trades:
+
+        try:
+
+            pnl = float(
+                trade.get(
+                    "pnl_percent",
+                    0,
+                )
+            )
+
+        except Exception:
+
+            pnl = 0
+
+        if pnl > 0:
+            wins.append(trade)
+
+        else:
+            losses.append(trade)
+
+    total_pnl = sum(
+        float(
+            x.get(
+                "pnl_percent",
+                0,
+            )
+        )
+        for x in closed_trades
+    )
+
+    win_rate = (
+        len(wins)
+        / len(closed_trades)
+        * 100
+        if closed_trades
+        else 0
+    )
+
+    avg_win = (
+
+        float(
+            np.mean([
+                float(
+                    x.get(
+                        "pnl_percent",
+                        0,
+                    )
+                )
+                for x in wins
+            ])
+        )
+
+        if wins
+
+        else 0
+    )
+
+    avg_loss = (
+
+        float(
+            np.mean([
+                float(
+                    x.get(
+                        "pnl_percent",
+                        0,
+                    )
+                )
+                for x in losses
+            ])
+        )
+
+        if losses
+
+        else 0
+    )
+
+    return {
+
+        "total":
+            len(trades),
+
+        "open":
+            len(open_trades),
+
+        "closed":
+            len(closed_trades),
+
+        "wins":
+            len(wins),
+
+        "losses":
+            len(losses),
+
+        "win_rate":
+            win_rate,
+
+        "total_pnl":
+            total_pnl,
+
+        "avg_win":
+            avg_win,
+
+        "avg_loss":
+            avg_loss,
+    }
+
+
+# ============================================================
+# DIAGNOSTICS
+# ============================================================
+
+def calculate_diagnostics(
+    results
+):
+
+    stats = {
+
+        "bullish_divergence": 0,
+
+        "bearish_divergence": 0,
+
+        "bullish_break": 0,
+
+        "bearish_break": 0,
+
+        "ut_buy": 0,
+
+        "ut_sell": 0,
+
+        "buy_candidates": 0,
+
+        "sell_candidates": 0,
+
+        "setup_candidates": 0,
+
+        "visible_candidates": 0,
+
+        "ready_candidates": 0,
+
+        "buy_trend_ready": 0,
+
+        "sell_trend_ready": 0,
+    }
+
+    for result in results:
+
+        diagnostic = result.get(
+            "diagnostic",
+            {},
+        )
+
+        if diagnostic.get(
+            "bullish_divergence"
+        ):
+            stats[
+                "bullish_divergence"
+            ] += 1
+
+        if diagnostic.get(
+            "bearish_divergence"
+        ):
+            stats[
+                "bearish_divergence"
+            ] += 1
+
+        if diagnostic.get(
+            "bullish_break"
+        ):
+            stats[
+                "bullish_break"
+            ] += 1
+
+        if diagnostic.get(
+            "bearish_break"
+        ):
+            stats[
+                "bearish_break"
+            ] += 1
+
+        if diagnostic.get(
+            "ut_buy"
+        ):
+            stats[
+                "ut_buy"
+            ] += 1
+
+        if diagnostic.get(
+            "ut_sell"
+        ):
+            stats[
+                "ut_sell"
+            ] += 1
+
+        candidate_sides = (
+            diagnostic.get(
+                "candidate_sides",
+                [],
+            )
+        )
+
+        if "BUY" in candidate_sides:
+            stats[
+                "buy_candidates"
+            ] += 1
+
+        if "SELL" in candidate_sides:
+            stats[
+                "sell_candidates"
+            ] += 1
+
+        stats[
+            "setup_candidates"
+        ] += len(
+            candidate_sides
+        )
+
+        for candidate in (
+            diagnostic.get(
+                "candidate_details",
+                [],
+            )
+        ):
+
+            score = candidate.get(
+                "score",
+                0,
+            )
+
+            if (
+                score
+                >= MIN_DISPLAY_CANDIDATE_SCORE
+            ):
+
+                stats[
+                    "visible_candidates"
+                ] += 1
+
+        if diagnostic.get(
+            "buy_trend_ok"
+        ):
+
+            stats[
+                "buy_trend_ready"
+            ] += 1
+
+        if diagnostic.get(
+            "sell_trend_ok"
+        ):
+
+            stats[
+                "sell_trend_ready"
+            ] += 1
+
+    return stats
+
+
+# ============================================================
+# REPORT
+# ============================================================
+
+def format_report(
+    state,
+    results,
+    errors,
+    open_performance,
+    closed_this_run,
+    top_candidate,
+    top_setup,
+    blocked_symbols=None,
+    registered_signals=None,
+):
+
+    if blocked_symbols is None:
+        blocked_symbols = []
+
+    if registered_signals is None:
+        registered_signals = []
+
+    stats = calculate_statistics(
+        state
+    )
+
+    diagnostic = calculate_diagnostics(
+        results
+    )
+
+    lines = []
+
+    lines.append(
+        "📡 CRYPTO DIVERGENCE "
+        "SCANNER v11.1 SCORE"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    lines.append(
+        f"🕐 "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+    )
+
+    lines.append(
+        f"⏱ Timeframe: "
+        f"{TIMEFRAME.upper()} CLOSED"
+    )
+
+    lines.append(
+        f"🤖 UT Bot: "
+        f"Key {UT_KEY_VALUE:g} / "
+        f"ATR {UT_ATR_PERIOD}"
+    )
+
+    lines.append(
+        "🎯 ONE GLOBAL TOP CANDIDATE"
+    )
+
+    lines.append(
+        f"🚨 Signal Threshold: "
+        f"{MIN_SIGNAL_SCORE}+ / 100"
+    )
+
+    lines.append(
+        f"📊 DATA OK: "
+        f"{len(results)}/{len(COINS)}"
+    )
+
+    lines.append(
+        f"⚠️ DATA ERROR: "
+        f"{len(errors)}"
+    )
+
+    # ========================================================
+    # PERFORMANCE
+    # ========================================================
+
+    lines.extend([
+
+        "",
+
+        "📊 CUMULATIVE PERFORMANCE",
+
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"Total Trades: "
+        f"{stats['total']}",
+
+        f"Open: "
+        f"{stats['open']}",
+
+        f"Closed: "
+        f"{stats['closed']}",
+
+        f"Wins: "
+        f"{stats['wins']}",
+
+        f"Losses: "
+        f"{stats['losses']}",
+
+        f"Win Rate: "
+        f"{stats['win_rate']:.2f}%",
+
+        f"Closed P&L: "
+        f"{stats['total_pnl']:.2f}%",
+
+        f"Avg Win: "
+        f"{stats['avg_win']:.2f}%",
+
+        f"Avg Loss: "
+        f"{stats['avg_loss']:.2f}%",
+    ])
+
+    # ========================================================
+    # DIAGNOSTIC
+    # ========================================================
+
+    lines.extend([
+
+        "",
+
+        "📊 SIGNAL DIAGNOSTIC",
+
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"RSI Bullish Divergence: "
+        f"{diagnostic['bullish_divergence']}",
+
+        f"RSI Bearish Divergence: "
+        f"{diagnostic['bearish_divergence']}",
+
+        f"Trendline Breakout: "
+        f"{diagnostic['bullish_break']}",
+
+        f"Trendline Breakdown: "
+        f"{diagnostic['bearish_break']}",
+
+        f"UT Bot BUY CROSS: "
+        f"{diagnostic['ut_buy']}",
+
+        f"UT Bot SELL CROSS: "
+        f"{diagnostic['ut_sell']}",
+
+        f"SETUP CANDIDATES: "
+        f"{diagnostic['setup_candidates']}",
+
+        f"DISPLAYED 65+: "
+        f"{diagnostic['visible_candidates']}",
+
+        f"GLOBAL FINAL SIGNAL: "
+        f"{len(registered_signals)}",
+    ])
+
+    # ========================================================
+    # SCORE
+    # ========================================================
+
+    lines.extend([
+
+        "",
+
+        "🎯 SCORE SYSTEM",
+
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"RSI Divergence "
+        f"+{RSI_DIVERGENCE_SCORE}",
+
+        f"UT Bot Trigger "
+        f"+{UT_TRIGGER_SCORE}",
+
+        f"Trendline "
+        f"+{TRENDLINE_SCORE}",
+
+        f"15M Trend "
+        f"+{TREND_15M_SCORE}",
+
+        f"1H Trend "
+        f"+{TREND_1H_SCORE}",
+
+        f"Volume "
+        f"+{VOLUME_SCORE}",
+
+        f"TOTAL MAXIMUM: "
+        f"{MAX_SCORE}/100",
+
+        "🔥 85-100 STRONG",
+
+        "🟢 75-84 GOOD",
+
+        "🟡 65-74 WATCH",
+
+        "⚪ <65 WEAK",
+    ])
+
+    # ========================================================
+    # GLOBAL TOP CANDIDATE
+    # ========================================================
+
+    lines.extend([
+
+        "",
+
+        format_top_candidate(
+            top_candidate,
+            top_setup,
+        ),
+    ])
+
+    # ========================================================
+    # GLOBAL FINAL SIGNAL
+    # ========================================================
+
+    lines.extend([
+
+        "",
+
+        "🚨 GLOBAL FINAL SIGNAL",
+
+        "━━━━━━━━━━━━━━━━━━",
+    ])
+
+    if registered_signals:
+
+        lines.append(
+            format_signal(
+                registered_signals[0]
+            )
+        )
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        lines.append(
+            "فقط همین یک سیگنال "
+            "از کل بازار ثبت شده است."
+        )
+
+    else:
+
+        if top_candidate is None:
+
+            lines.append(
+                "هیچ Candidate فعالی "
+                "وجود ندارد."
+            )
+
+        elif top_setup is None:
+
+            lines.append(
+                "TOP CANDIDATE ستاپ "
+                "معتبر تشکیل نداد."
+            )
+
+        elif not top_setup.get(
+            "valid",
+            False,
+        ):
+
+            lines.append(
+                "TOP CANDIDATE انتخاب شد "
+                "اما SETUP نامعتبر است."
+            )
+
+            lines.append(
+                f"Reason: "
+                f"{top_setup.get('reason', 'UNKNOWN')}"
+            )
+
+        else:
+
+            lines.append(
+                "ستاپ معتبر وجود داشت "
+                "اما Signal ثبت نشد."
+            )
+
+    # ========================================================
+    # LOCK
+    # ========================================================
+
+    if blocked_symbols:
+
+        lines.extend([
+
+            "",
+
+            "🔒 SYMBOL LOCK",
+
+            "━━━━━━━━━━━━━━━━━━",
+        ])
+
+        unique_blocked = sorted(
+            set(blocked_symbols)
+        )
+
+        lines.append(
+            f"{len(unique_blocked)} "
+            f"symbol blocked due to OPEN trade"
+        )
+
+        lines.append(
+            ", ".join(
+                unique_blocked
+            )
+        )
+
+    # ========================================================
+    # CLOSED
+    # ========================================================
+
+    lines.extend([
+
+        "",
+
+        "🏁 CLOSED SIGNALS",
+
+        "━━━━━━━━━━━━━━━━━━",
+    ])
+
+    if closed_this_run:
+
+        for trade in (
+            closed_this_run
+        ):
+
+            lines.append(
+                format_closed_signal(
+                    trade
+                )
+            )
+
+            lines.append(
+                "━━━━━━━━━━━━━━━━━━"
+            )
+
+    else:
+
+        lines.append(
+            "در این اجرا معامله‌ای "
+            "بسته نشده است."
+        )
+
+    # ========================================================
+    # OPEN
+    # ========================================================
+
+    lines.extend([
+
+        "",
+
+        "📌 OPEN SIGNAL P&L",
+
+        "━━━━━━━━━━━━━━━━━━",
+    ])
+
+    if open_performance:
+
+        for item in (
+            open_performance
+        ):
+
+            icon = (
+                "🟢"
+                if item["side"]
+                == "BUY"
+                else "🔴"
+            )
+
+            side = item["side"]
+            entry = item["entry"]
+            sl = item["sl"]
+            pnl = item["pnl_percent"]
+
+            score = item.get(
+                "score"
+            )
+
+            score_text = ""
+
+            if score is not None:
+
+                try:
+
+                    score_text = (
+                        f" ⭐"
+                        f"{float(score):.0f}"
+                        f"/100"
+                    )
+
+                except Exception:
+                    pass
+
+            lines.append(
+                f"{icon} "
+                f"{item['symbol']} "
+                f"{side}{score_text}"
+            )
+
+            lines.append(
+                f"Entry: "
+                f"{format_price(entry)}"
+            )
+
+            lines.append(
+                f"Current: "
+                f"{format_price(item['current_price'])}"
+            )
+
+            lines.append(
+                f"SL: "
+                f"{format_price(sl)} "
+                f"({level_percent(side, entry, sl):+.2f}%)"
+            )
+
+            if item.get("tp1") is not None:
+
+                status = (
+                    "HIT"
+                    if item.get("tp1_hit")
+                    else "WAIT"
+                )
+
+                lines.append(
+                    f"TP1: "
+                    f"{format_price(item['tp1'])} "
+                    f"[{status}]"
+                )
+
+            if item.get("tp2") is not None:
+
+                status = (
+                    "HIT"
+                    if item.get("tp2_hit")
+                    else "WAIT"
+                )
+
+                lines.append(
+                    f"TP2: "
+                    f"{format_price(item['tp2'])} "
+                    f"[{status}]"
+                )
+
+            if item.get("tp3") is not None:
+
+                status = (
+                    "HIT"
+                    if item.get("tp3_hit")
+                    else "WAIT"
+                )
+
+                lines.append(
+                    f"TP3: "
+                    f"{format_price(item['tp3'])} "
+                    f"[{status}]"
+                )
+
+            lines.append(
+                f"Remaining: "
+                f"{item['remaining_percent']:.0f}%"
+            )
+
+            lines.append(
+                f"Realized P&L: "
+                f"{item['realized_pnl_percent']:+.2f}%"
+            )
+
+            lines.append(
+                f"Current P&L: "
+                f"{pnl:+.2f}%"
+            )
+
+            lines.append(
+                f"Current R: "
+                f"{item['current_r']:+.2f}R"
+            )
+
+            lines.append(
+                f"MFE: "
+                f"{item['mfe']:+.2f}%"
+            )
+
+            lines.append(
+                f"MAE: "
+                f"{item['mae']:+.2f}%"
+            )
+
+            lines.append(
+                f"Duration: "
+                f"{item['duration_minutes']:.0f} min"
+            )
+
+            lines.append(
+                "━━━━━━━━━━━━━━━━━━"
+            )
+
+    else:
+
+        lines.append(
+            "هیچ سیگنال بازی "
+            "وجود ندارد."
+        )
+
+    # ========================================================
+    # ERRORS
+    # ========================================================
+
+    if errors:
+
+        lines.extend([
+
+            "",
+
+            "⚠️ ERRORS",
+
+            "━━━━━━━━━━━━━━━━━━",
+        ])
+
+        for symbol, error in (
+            errors.items()
+        ):
+
+            lines.append(
+                f"{symbol}: {error}"
+            )
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    lines.extend([
+
+        "",
+
+        "📋 SCAN SUMMARY",
+
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"Symbols Scanned: "
+        f"{len(COINS)}",
+
+        f"Data OK: "
+        f"{len(results)}",
+
+        f"Data Errors: "
+        f"{len(errors)}",
+
+        f"Setup Candidates: "
+        f"{diagnostic['setup_candidates']}",
+
+        f"TOP CANDIDATE: "
+        f"{top_candidate['symbol']}"
+        if top_candidate
+        else "TOP CANDIDATE: NONE",
+
+        f"TOP SCORE: "
+        f"{top_candidate['score']}/100"
+        if top_candidate
+        else "TOP SCORE: 0/100",
+
+        (
+            f"TOP SETUP: "
+            f"{'VALID' if top_setup and top_setup.get('valid') else 'INVALID'}"
+            if top_setup
+            else "TOP SETUP: NONE"
+        ),
+
+        f"Global Final Signals: "
+        f"{len(registered_signals)}",
+
+        f"Open Trades: "
+        f"{stats['open']}",
+    ])
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# FORMAT SIGNAL
+# ============================================================
+
+def format_signal(signal):
+
+    side = str(
+        signal["side"]
+    ).upper()
+
+    icon = (
+        "🟢"
+        if side == "BUY"
+        else "🔴"
+    )
+
+    entry = signal["entry"]
+    sl = signal["sl"]
+
+    tp1 = signal["tp1"]
+    tp2 = signal["tp2"]
+    tp3 = signal["tp3"]
+
+    score = signal.get(
+        "score",
+        0,
+    )
+
+    label = signal.get(
+        "score_label",
+        score_label(score),
+    )
+
+    components = signal.get(
+        "score_components",
+        {},
+    )
+
+    return "\n".join([
+
+        f"{icon} "
+        f"{signal['symbol']}/USDT - "
+        f"{side} ⭐ {score}/100",
+
+        f"Score: {label}",
+
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"RSI Divergence: "
+        f"+{components.get('divergence', 0)}",
+
+        f"UT Bot Trigger: "
+        f"+{components.get('ut', 0)}",
+
+        f"Trendline: "
+        f"+{components.get('trendline', 0)}",
+
+        f"15M Trend: "
+        f"+{components.get('trend_15m', 0)} "
+        f"({signal.get('trend_15m', 'N/A')})",
+
+        f"1H Trend: "
+        f"+{components.get('trend_1h', 0)} "
+        f"({signal.get('trend_1h', 'N/A')})",
+
+        f"Volume: "
+        f"+{components.get('volume', 0)} "
+        f"({signal.get('volume_ratio', 0):.2f}x)",
+
+        "━━━━━━━━━━━━━━━━━━",
+
+        f"Entry: "
+        f"{format_price(entry)}",
+
+        f"Stop Loss: "
+        f"{format_price(sl)} "
+        f"({level_percent(side, entry, sl):+.2f}%)",
+
+        f"Target 1: "
+        f"{format_price(tp1)} "
+        f"({level_percent(side, entry, tp1):+.2f}%) "
+        f"[{TP1_CLOSE_PERCENT}%]",
+
+        f"Target 2: "
+        f"{format_price(tp2)} "
+        f"({level_percent(side, entry, tp2):+.2f}%) "
+        f"[{TP2_CLOSE_PERCENT}%]",
+
+        f"Target 3: "
+        f"{format_price(tp3)} "
+        f"({level_percent(side, entry, tp3):+.2f}%) "
+        f"[{TP3_CLOSE_PERCENT}%]",
+
+        f"Risk: "
+        f"{abs(level_percent(side, entry, sl)):.2f}%",
+
+        f"RR: "
+        f"1:{signal.get('rr1', TP1_R_MULTIPLE):.1f} / "
+        f"1:{signal.get('rr2', TP2_R_MULTIPLE):.1f} / "
+        f"1:{signal.get('rr3', TP3_R_MULTIPLE):.1f}",
+
+        f"Reason: "
+        f"{signal['reason']}",
+
+        "Management: "
+        "TP1→SL Entry | "
+        "TP2→SL TP1",
+    ])
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print(
+        "Loading Kraken Futures instruments..."
+    )
+
+    try:
+
+        market_map = (
+            load_market_map()
+        )
+
+        print(
+            f"Loaded "
+            f"{len(market_map)} markets."
+        )
+
+    except Exception as e:
+
+        print(
+            f"FATAL: {e}"
+        )
+
+        return
+
+    # ========================================================
+    # STATE
+    # ========================================================
+
+    state = load_state()
+
+    rebuild_trade_container(
+        state
+    )
+
+    # ========================================================
+    # PREVIOUS CLOSED IDS
+    # ========================================================
+
+    previous_closed_ids = set()
+
+    for trade in get_all_trades(
+        state
+    ):
+
+        if str(
+            trade.get(
+                "status",
+                "",
+            )
+        ).upper() == "CLOSED":
+
+            trade_id = get_trade_id(
+                trade
+            )
+
+            if trade_id:
+
+                previous_closed_ids.add(
+                    trade_id
+                )
+
+    results = []
+    errors = {}
+    data_cache = {}
+    blocked_symbols = []
+
+    # ========================================================
+    # SCAN
+    # ========================================================
+
+    for symbol in COINS:
+
+        try:
+
+            result = analyze_coin(
+                symbol
+            )
+
+            results.append(
+                result
+            )
+
+            data_cache[
+                symbol
+            ] = result["df"]
+
+        except Exception as e:
+
+            errors[
+                symbol
+            ] = str(e)
+
+        time.sleep(0.05)
+
+    # ========================================================
+    # MANAGE EXISTING TRADES FIRST
+    # ========================================================
+
+    changed = (
+        evaluate_open_trades(
+            state,
+            data_cache,
+        )
+    )
+
+    if changed:
+        save_state(
+            state
+        )
+
+    # ========================================================
+    # GLOBAL TOP CANDIDATE
+    # ========================================================
+
+    top_candidate = (
+        get_global_top_candidate(
+            results,
+            state,
+        )
+    )
+
+    # ========================================================
+    # TOP CANDIDATE → SETUP ENGINE
+    # ========================================================
+
+    top_setup = None
+
+    if top_candidate is not None:
+
+        result_map = {
+            x["symbol"]: x
+            for x in results
+        }
+
+        top_result = result_map.get(
+            top_candidate["symbol"]
+        )
+
+        if top_result is not None:
+
+            top_setup = build_trade_setup(
+                top_candidate,
+                top_result["df"],
+            )
+
+    # ========================================================
+    # GLOBAL FINAL SIGNAL
+    # ========================================================
+
+    new_registered = []
+
+    if (
+        top_setup is not None
+        and top_setup.get(
+            "valid",
+            False,
+        )
+    ):
+
+        symbol = (
+            top_setup["symbol"]
+        )
+
+        if (
+            not ALLOW_MULTIPLE_OPEN_PER_SYMBOL
+            and has_open_trade_for_symbol(
+                state,
+                symbol,
+            )
+        ):
+
+            blocked_symbols.append(
+                symbol
+            )
+
+        else:
+
+            signal = create_signal(
+                top_setup
+            )
+
+            if register_signal(
+                state,
+                signal,
+            ):
+
+                new_registered.append(
+                    signal
+                )
+
+    # ========================================================
+    # SAVE
+    # ========================================================
+
+    save_state(
+        state
+    )
+
+    # ========================================================
+    # SECOND EVALUATION
+    # ========================================================
+
+    changed = (
+        evaluate_open_trades(
+            state,
+            data_cache,
+        )
+    )
+
+    if changed:
+
+        save_state(
+            state
+        )
+
+    # ========================================================
+    # CLOSED THIS RUN
+    # ========================================================
+
+    closed_this_run = (
+        get_newly_closed_trades(
+            state,
+            previous_closed_ids,
+        )
+    )
+
+    # ========================================================
+    # OPEN PERFORMANCE
+    # ========================================================
+
+    open_performance = (
+        calculate_open_performance(
+            state,
+            data_cache,
+        )
+    )
+
+    # ========================================================
+    # REPORT
+    # ========================================================
+
+    report = format_report(
+
+        state=state,
+
+        results=results,
+
+        errors=errors,
+
+        open_performance=
+            open_performance,
+
+        closed_this_run=
+            closed_this_run,
+
+        top_candidate=
+            top_candidate,
+
+        top_setup=
+            top_setup,
+
+        blocked_symbols=
+            blocked_symbols,
+
+        registered_signals=
+            new_registered,
+    )
+
+    print()
+
+    print(
+        report
+    )
+
+    # ========================================================
+    # TELEGRAM
+    # ========================================================
+
+    telegram_ok = (
+        send_telegram(
+            report
+        )
+    )
+
+    if telegram_ok:
+
+        print(
+            "Telegram report "
+            "sent successfully."
+        )
+
+    else:
+
+        print(
+            "Telegram report FAILED."
+        )
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
