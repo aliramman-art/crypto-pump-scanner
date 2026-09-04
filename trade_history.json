@@ -192,7 +192,17 @@
       "reason": "Bullish RSI Divergence + UT/Trendline",
       "signal_id": "3369794f9acc7f86",
       "id": "3369794f9acc7f86",
-      "status": "OPEN"
+      "status": "CLOSED",
+      "exit_reason": "SL",
+      "result_reason": "SL",
+      "exit_price": 0.13604899267859413,
+      "result_price": 0.13604899267859413,
+      "exit_time": 1788506100000,
+      "closed_at": "2026-09-04T07:15:00+00:00",
+      "pnl_percent": -0.7955427456656549,
+      "r_multiple": -1.0,
+      "result_r": -1.0,
+      "duration_minutes": 5.0
     },
     "a0ed2e44c4f35f28": {
       "symbol": "VET",
@@ -220,5 +230,5 @@
       "status": "OPEN"
     }
   },
-  "last_run": "2026-09-04T07:18:55.169246+00:00"
+  "last_run": "2026-09-04T07:23:16.388452+00:00"
 }
