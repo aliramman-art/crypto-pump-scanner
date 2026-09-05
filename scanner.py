@@ -29,6 +29,11 @@
 # Telegram Alerts
 # Persistent State
 # Trade History
+# Telegram Statistics:
+#   Open Signals
+#   Closed Signals
+#   Win Rate
+#   Total Profit
 # ============================================================
 
 import os
@@ -343,6 +348,10 @@ def telegram_ut_signal(symbol, side, signal_high, signal_low):
     send_telegram(message)
 
 
+# ============================================================
+# TELEGRAM ENTRY + STATISTICS
+# ============================================================
+
 def telegram_entry(trade):
 
     side = trade["side"]
@@ -360,6 +369,20 @@ def telegram_entry(trade):
         emoji = "🔴"
         title = "CONFIRMED SHORT"
 
+    # --------------------------------------------------------
+    # LIVE STATISTICS
+    # --------------------------------------------------------
+
+    stats = calculate_stats()
+
+    open_signals = len(open_trades)
+
+    closed_signals = stats["total"]
+
+    win_rate = stats["win_rate"]
+
+    total_profit = stats["net_pnl"]
+
     message = (
         f"{emoji} {title}\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -370,11 +393,21 @@ def telegram_entry(trade):
         f"🎯 TP: {tp:.8f}\n"
         f"📊 Risk: {risk_pct:.2f}%\n"
         f"⚖️ RR: 1:{RR:.1f}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "📊 STATISTICS\n"
+        f"📈 Open Signals: {open_signals}\n"
+        f"📁 Closed Signals: {closed_signals}\n"
+        f"🎯 Win Rate: {win_rate:.2f}%\n"
+        f"💰 Total Profit: {total_profit:+.2f}%\n"
         "━━━━━━━━━━━━━━━━━━"
     )
 
     send_telegram(message)
 
+
+# ============================================================
+# TELEGRAM EXIT
+# ============================================================
 
 def telegram_exit(trade, result, exit_price):
 
@@ -401,6 +434,31 @@ def telegram_exit(trade, result, exit_price):
         emoji = "🛑"
         title = "STOP LOSS"
 
+    # --------------------------------------------------------
+    # Calculate statistics AFTER this trade is closed
+    # --------------------------------------------------------
+
+    stats = calculate_stats()
+
+    open_signals = len(open_trades) - 1
+    closed_signals = stats["total"] + 1
+
+    total_profit = (
+        stats["net_pnl"]
+        + float(pnl_pct or 0)
+    )
+
+    wins = stats["tp"]
+
+    if result == "TP":
+        wins += 1
+
+    win_rate = (
+        wins / closed_signals * 100
+        if closed_signals
+        else 0
+    )
+
     message = (
         f"{emoji} {title}\n"
         "━━━━━━━━━━━━━━━━━━\n"
@@ -410,6 +468,12 @@ def telegram_exit(trade, result, exit_price):
         f"🚪 Exit: {exit_price:.8f}\n"
         f"📈 P&L: {pnl_pct:+.2f}%\n"
         f"📊 R: {r_multiple:+.2f}R\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "📊 STATISTICS\n"
+        f"📈 Open Signals: {max(0, open_signals)}\n"
+        f"📁 Closed Signals: {closed_signals}\n"
+        f"🎯 Win Rate: {win_rate:.2f}%\n"
+        f"💰 Total Profit: {total_profit:+.2f}%\n"
         "━━━━━━━━━━━━━━━━━━"
     )
 
@@ -534,7 +598,6 @@ def calculate_atr(df, period=10):
         axis=1,
     ).max(axis=1)
 
-    # TradingView ta.atr() uses Wilder's RMA.
     atr = true_range.ewm(
         alpha=1 / period,
         adjust=False,
@@ -612,21 +675,6 @@ def calculate_ut_bot(
             else current_src
         )
 
-        # --------------------------------------------------------
-        # TradingView:
-        #
-        # xATRTrailingStop :=
-        # iff(src > prevStop and src[1] > prevStop,
-        #     max(prevStop, src-nLoss),
-        #
-        # iff(src < prevStop and src[1] < prevStop,
-        #     min(prevStop, src+nLoss),
-        #
-        # iff(src > prevStop,
-        #     src-nLoss,
-        #     src+nLoss)))
-        # --------------------------------------------------------
-
         if (
             current_src > previous_stop
             and previous_src > previous_stop
@@ -659,10 +707,6 @@ def calculate_ut_bot(
                 current_src + current_loss
             )
 
-        # --------------------------------------------------------
-        # POS
-        # --------------------------------------------------------
-
         previous_pos = (
             pos[i - 1]
             if i > 0
@@ -689,20 +733,14 @@ def calculate_ut_bot(
 
             pos[i] = previous_pos
 
-        # --------------------------------------------------------
-        # EMA(src, 1) = src
-        # --------------------------------------------------------
-
         if i > 0:
 
-            # crossover(src, trailing_stop)
             above = (
                 src.iloc[i] > trailing_stop[i]
                 and src.iloc[i - 1]
                 <= trailing_stop[i - 1]
             )
 
-            # crossover(trailing_stop, src)
             below = (
                 trailing_stop[i] > src.iloc[i]
                 and trailing_stop[i - 1]
@@ -923,7 +961,6 @@ def create_long_trade(
     if swing_low is None:
         return None
 
-    # SL must be below entry
     if swing_low >= entry:
 
         swing_low = fallback_swing_low(
@@ -938,7 +975,6 @@ def create_long_trade(
     if swing_low >= entry:
         return None
 
-    # Slightly below swing
     sl_buffer = (
         float(df.iloc[
             confirmation_index
@@ -1183,15 +1219,8 @@ def check_open_trade(
     result = None
     exit_price = None
 
-    # --------------------------------------------------------
-    # LONG
-    # --------------------------------------------------------
-
     if trade["side"] == "LONG":
 
-        # Conservative assumption:
-        # If same candle hits SL and TP,
-        # SL is considered first.
         if low <= sl:
 
             result = "SL"
@@ -1215,10 +1244,6 @@ def check_open_trade(
             (current_price - entry)
             / trade["risk"]
         )
-
-    # --------------------------------------------------------
-    # SHORT
-    # --------------------------------------------------------
 
     else:
 
@@ -1245,10 +1270,6 @@ def check_open_trade(
             (entry - current_price)
             / trade["risk"]
         )
-
-    # --------------------------------------------------------
-    # CLOSE
-    # --------------------------------------------------------
 
     if result:
 
@@ -1362,10 +1383,6 @@ def check_pending_setup(
         candle["close"]
     )
 
-    # --------------------------------------------------------
-    # LONG CONFIRMATION
-    # --------------------------------------------------------
-
     if pending["side"] == "LONG":
 
         signal_high = float(
@@ -1424,10 +1441,6 @@ def check_pending_setup(
                 )
 
                 save_state()
-
-    # --------------------------------------------------------
-    # SHORT CONFIRMATION
-    # --------------------------------------------------------
 
     else:
 
@@ -1508,10 +1521,6 @@ def process_ut_signal(
         candle["timestamp"]
     )
 
-    # --------------------------------------------------------
-    # Prevent processing same closed candle twice
-    # --------------------------------------------------------
-
     if (
         last_processed_candle.get(symbol)
         == candle_time
@@ -1523,16 +1532,8 @@ def process_ut_signal(
         symbol
     ] = candle_time
 
-    # --------------------------------------------------------
-    # Don't create another setup while trade is open
-    # --------------------------------------------------------
-
     if symbol in open_trades:
         return
-
-    # --------------------------------------------------------
-    # Existing pending setup
-    # --------------------------------------------------------
 
     if symbol in pending_setups:
 
@@ -1542,10 +1543,6 @@ def process_ut_signal(
         )
 
         return
-
-    # --------------------------------------------------------
-    # UT BUY
-    # --------------------------------------------------------
 
     if bool(candle["ut_buy"]):
 
@@ -1596,10 +1593,6 @@ def process_ut_signal(
         save_state()
 
         return
-
-    # --------------------------------------------------------
-    # UT SELL
-    # --------------------------------------------------------
 
     if bool(candle["ut_sell"]):
 
@@ -1894,10 +1887,6 @@ def calculate_stats():
         if losses
         else 0
     )
-
-    # --------------------------------------------------------
-    # Streaks
-    # --------------------------------------------------------
 
     max_win_streak = 0
     max_loss_streak = 0
