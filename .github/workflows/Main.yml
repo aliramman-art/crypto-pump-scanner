@@ -136,7 +136,75 @@ jobs:
           exit $EXIT_CODE
 
       # ==========================================
-      # 6. Finish
+      # 6. Save State / History
+      # ==========================================
+
+      - name: Save scanner state
+        if: always()
+        run: |
+
+          echo "======================================"
+          echo "SAVING SCANNER STATE"
+          echo "======================================"
+
+          echo ""
+          echo "Generated files:"
+
+          ls -lh \
+            utbot_state.json \
+            utbot_trade_history.json \
+            .utbot_15m_reset_done \
+            2>/dev/null || true
+
+          echo ""
+          echo "Git status before commit:"
+
+          git status --short
+
+          echo ""
+          echo "Configuring Git..."
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          echo ""
+          echo "Adding scanner state..."
+
+          git add \
+            utbot_state.json \
+            utbot_trade_history.json \
+            .utbot_15m_reset_done \
+            2>/dev/null || true
+
+          echo ""
+          echo "Checking staged changes..."
+
+          git status --short
+
+          if git diff --cached --quiet; then
+
+            echo ""
+            echo "NO STATE CHANGES TO COMMIT."
+
+          else
+
+            echo ""
+            echo "COMMITTING SCANNER STATE..."
+
+            git commit -m "Update UT Bot scanner state"
+
+            echo ""
+            echo "PUSHING STATE TO REPOSITORY..."
+
+            git push
+
+            echo ""
+            echo "STATE SAVED SUCCESSFULLY."
+
+          fi
+
+      # ==========================================
+      # 7. Finish
       # ==========================================
 
       - name: Finish
@@ -150,5 +218,11 @@ jobs:
           date -u
 
           echo ""
-          echo "Git status:"
+          echo "Final Git status:"
+
           git status --short
+
+          echo ""
+          echo "======================================"
+          echo "UT BOT SCANNER COMPLETE"
+          echo "======================================"
