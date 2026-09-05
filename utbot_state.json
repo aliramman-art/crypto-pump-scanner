@@ -1,0 +1,14 @@
+{
+  "updated_at": "2026-09-05T03:39:20.551502+00:00",
+  "pending_setups": {
+    "DOT/USD:USD": {
+      "symbol": "DOT/USD:USD",
+      "side": "SHORT",
+      "signal_index": 248,
+      "signal_time": "2026-09-05 03:30:00+00:00",
+      "signal_high": 0.8963,
+      "signal_low": 0.8943
+    }
+  },
+  "open_trades": {}
+}
