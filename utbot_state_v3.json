@@ -26,10 +26,24 @@
       "rr": 1.0,
       "status": "OPEN",
       "opened_at": "2026-09-05 06:48:40 UTC"
+    },
+    "SNX/USD:USD": {
+      "symbol": "SNX/USD:USD",
+      "side": "SHORT",
+      "signal_time": "2026-09-05 06:50:00+00:00",
+      "confirmation_time": "2026-09-05 06:58:06 UTC",
+      "entry": 0.214,
+      "sl": 0.21470293111347216,
+      "tp": 0.21329706888652783,
+      "risk_pct": 0.32847248293091874,
+      "rr": 1.0,
+      "status": "OPEN",
+      "opened_at": "2026-09-05 06:58:06 UTC"
     }
   },
   "last_processed_candle": {
     "GMT/USD:USD": "2026-09-05 06:05:00+00:00",
-    "AAVE/USD:USD": "2026-09-05 06:40:00+00:00"
+    "AAVE/USD:USD": "2026-09-05 06:40:00+00:00",
+    "SNX/USD:USD": "2026-09-05 06:50:00+00:00"
   }
 }
