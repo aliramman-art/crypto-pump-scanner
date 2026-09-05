@@ -16,5 +16,23 @@
     "result": "TP",
     "pnl_pct": 0.3927436369274213,
     "r_multiple": 1.0
+  },
+  {
+    "id": "AAVE/USD:USD_SHORT_1788581100",
+    "symbol": "AAVE/USD:USD",
+    "side": "SHORT",
+    "signal_time": "2026-09-05 03:50:00+00:00",
+    "confirmation_time": "2026-09-05 04:05:00+00:00",
+    "entry": 130.31,
+    "sl": 130.93016414674634,
+    "tp": 129.68983585325367,
+    "risk": 0.6201641467463332,
+    "risk_pct": 0.47591447068247505,
+    "status": "CLOSED",
+    "exit_time": "2026-09-05 04:45:00+00:00",
+    "exit_price": 129.68983585325367,
+    "result": "TP",
+    "pnl_pct": 0.47591447068247505,
+    "r_multiple": 1.0
   }
 ]
