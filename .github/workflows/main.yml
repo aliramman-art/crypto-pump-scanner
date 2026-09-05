@@ -133,7 +133,7 @@ jobs:
       # ============================================================
       # RUN SCANNER
       # ============================================================
-      - name: Run scanner
+            - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -147,10 +147,14 @@ jobs:
           date -u
 
           echo ""
+          echo "Python version:"
+          python --version
+
+          echo ""
           echo "Running scanner.py ..."
           echo ""
 
-          timeout 8m python -u scanner.py
+          python -u scanner.py
 
           EXIT_CODE=$?
 
