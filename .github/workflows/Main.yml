@@ -93,52 +93,7 @@ jobs:
           python -c "import requests; print(requests.__version__)"
 
       # ==========================================
-      # 5. Telegram test
-      # ==========================================
-
-      - name: Test Telegram
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-        run: |
-
-          echo "======================================"
-          echo "TELEGRAM TEST"
-          echo "======================================"
-
-          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
-            echo "ERROR: TELEGRAM_BOT_TOKEN is empty"
-            exit 1
-          fi
-
-          if [ -z "$TELEGRAM_CHAT_ID" ]; then
-            echo "ERROR: TELEGRAM_CHAT_ID is empty"
-            exit 1
-          fi
-
-          RESPONSE=$(curl -sS \
-            --max-time 20 \
-            --get \
-            --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
-            --data-urlencode "text=🧪 Crypto UT Bot Scanner - Telegram test OK" \
-            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage")
-
-          echo ""
-          echo "Telegram response:"
-          echo "$RESPONSE"
-
-          if echo "$RESPONSE" | grep -q '"ok":true'; then
-            echo ""
-            echo "TELEGRAM: OK"
-          else
-            echo ""
-            echo "TELEGRAM: FAILED"
-            exit 1
-          fi
-
-      # ==========================================
-      # 6. Run scanner
+      # 5. Run scanner
       # ==========================================
 
       - name: Run scanner
@@ -181,7 +136,7 @@ jobs:
           exit $EXIT_CODE
 
       # ==========================================
-      # 7. Finish
+      # 6. Finish
       # ==========================================
 
       - name: Finish
