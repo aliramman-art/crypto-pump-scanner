@@ -1,1 +1,20 @@
-[]
+[
+  {
+    "symbol": "GMT/USD:USD",
+    "side": "SHORT",
+    "signal_time": "2026-09-05 06:05:00+00:00",
+    "confirmation_time": "2026-09-05 06:11:50 UTC",
+    "entry": 0.007447,
+    "sl": 0.00745305798463852,
+    "tp": 0.007440942015361479,
+    "risk_pct": 0.08134798762616234,
+    "rr": 1.0,
+    "status": "CLOSED",
+    "opened_at": "2026-09-05 06:11:50 UTC",
+    "exit_price": 0.007440942015361479,
+    "result": "TP",
+    "pnl_pct": 0.08134798762616234,
+    "r_multiple": 1.0,
+    "closed_at": "2026-09-05 07:07:52 UTC"
+  }
+]
