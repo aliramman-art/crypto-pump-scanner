@@ -1,13 +1,5 @@
 {
   "pending_setups": {
-    "XAUT/USD:USD": {
-      "symbol": "XAUT/USD:USD",
-      "side": "LONG",
-      "signal_time": "2026-09-05 03:50:00+00:00",
-      "signal_high": 4429.2,
-      "signal_low": null,
-      "created_at": "2026-09-05 03:57:03 UTC"
-    },
     "XMR/USD:USD": {
       "symbol": "XMR/USD:USD",
       "side": "SHORT",
@@ -32,14 +24,6 @@
       "signal_low": null,
       "created_at": "2026-09-05 04:59:16 UTC"
     },
-    "INJ/USD:USD": {
-      "symbol": "INJ/USD:USD",
-      "side": "LONG",
-      "signal_time": "2026-09-05 04:50:00+00:00",
-      "signal_high": 4.751,
-      "signal_low": null,
-      "created_at": "2026-09-05 04:59:27 UTC"
-    },
     "SUI/USD:USD": {
       "symbol": "SUI/USD:USD",
       "side": "LONG",
@@ -55,6 +39,14 @@
       "signal_high": 354.35,
       "signal_low": null,
       "created_at": "2026-09-05 05:28:20 UTC"
+    },
+    "BTC/USD:USD": {
+      "symbol": "BTC/USD:USD",
+      "side": "LONG",
+      "signal_time": "2026-09-05 05:30:00+00:00",
+      "signal_high": 79620.0,
+      "signal_low": null,
+      "created_at": "2026-09-05 05:39:54 UTC"
     }
   },
   "open_trades": {
@@ -129,41 +121,77 @@
       "result": null,
       "pnl_pct": null,
       "r_multiple": null
+    },
+    "XAUT/USD:USD": {
+      "id": "XAUT/USD:USD_LONG_1788586500",
+      "symbol": "XAUT/USD:USD",
+      "side": "LONG",
+      "signal_time": "2026-09-05 03:50:00+00:00",
+      "confirmation_time": "2026-09-05 05:35:00+00:00",
+      "entry": 4429.9,
+      "sl": 4426.474079936509,
+      "tp": 4433.32592006349,
+      "risk": 3.4259200634905937,
+      "risk_pct": 0.07733628441930053,
+      "status": "OPEN",
+      "exit_time": null,
+      "exit_price": null,
+      "result": null,
+      "pnl_pct": null,
+      "r_multiple": null
+    },
+    "INJ/USD:USD": {
+      "id": "INJ/USD:USD_LONG_1788586500",
+      "symbol": "INJ/USD:USD",
+      "side": "LONG",
+      "signal_time": "2026-09-05 04:50:00+00:00",
+      "confirmation_time": "2026-09-05 05:35:00+00:00",
+      "entry": 4.76,
+      "sl": 4.716578475330442,
+      "tp": 4.803421524669558,
+      "risk": 0.043421524669557954,
+      "risk_pct": 0.9122169048226461,
+      "status": "OPEN",
+      "exit_time": null,
+      "exit_price": null,
+      "result": null,
+      "pnl_pct": null,
+      "r_multiple": null
     }
   },
   "last_processed_candle": {
-    "BTC/USD:USD": "2026-09-05 05:20:00+00:00",
-    "ETH/USD:USD": "2026-09-05 05:20:00+00:00",
-    "ZEC/USD:USD": "2026-09-05 05:20:00+00:00",
-    "SOL/USD:USD": "2026-09-05 05:20:00+00:00",
-    "XRP/USD:USD": "2026-09-05 05:20:00+00:00",
-    "HYPE/USD:USD": "2026-09-05 05:20:00+00:00",
-    "DASH/USD:USD": "2026-09-05 05:20:00+00:00",
-    "DOGE/USD:USD": "2026-09-05 05:20:00+00:00",
-    "ADA/USD:USD": "2026-09-05 05:20:00+00:00",
-    "UNI/USD:USD": "2026-09-05 05:20:00+00:00",
-    "XMR/USD:USD": "2026-09-05 05:20:00+00:00",
-    "XAUT/USD:USD": "2026-09-05 05:20:00+00:00",
-    "NEAR/USD:USD": "2026-09-05 05:20:00+00:00",
-    "SUI/USD:USD": "2026-09-05 05:20:00+00:00",
-    "ARB/USD:USD": "2026-09-05 05:20:00+00:00",
-    "TAO/USD:USD": "2026-09-05 05:20:00+00:00",
-    "LINK/USD:USD": "2026-09-05 05:20:00+00:00",
-    "TRUMP/USD:USD": "2026-09-05 05:20:00+00:00",
-    "DOT/USD:USD": "2026-09-05 05:20:00+00:00",
-    "PENGU/USD:USD": "2026-09-05 05:20:00+00:00",
-    "PUMP/USD:USD": "2026-09-05 05:20:00+00:00",
-    "ENA/USD:USD": "2026-09-05 05:20:00+00:00",
-    "PEPE/USD:USD": "2026-09-05 05:20:00+00:00",
-    "AVAX/USD:USD": "2026-09-05 05:20:00+00:00",
-    "CRV/USD:USD": "2026-09-05 05:20:00+00:00",
-    "INJ/USD:USD": "2026-09-05 05:20:00+00:00",
-    "FARTCOIN/USD:USD": "2026-09-05 05:20:00+00:00",
+    "BTC/USD:USD": "2026-09-05 05:30:00+00:00",
+    "ETH/USD:USD": "2026-09-05 05:30:00+00:00",
+    "ZEC/USD:USD": "2026-09-05 05:30:00+00:00",
+    "SOL/USD:USD": "2026-09-05 05:30:00+00:00",
+    "XRP/USD:USD": "2026-09-05 05:30:00+00:00",
+    "HYPE/USD:USD": "2026-09-05 05:30:00+00:00",
+    "DASH/USD:USD": "2026-09-05 05:30:00+00:00",
+    "DOGE/USD:USD": "2026-09-05 05:30:00+00:00",
+    "ADA/USD:USD": "2026-09-05 05:30:00+00:00",
+    "UNI/USD:USD": "2026-09-05 05:35:00+00:00",
+    "XMR/USD:USD": "2026-09-05 05:30:00+00:00",
+    "XAUT/USD:USD": "2026-09-05 05:35:00+00:00",
+    "NEAR/USD:USD": "2026-09-05 05:35:00+00:00",
+    "SUI/USD:USD": "2026-09-05 05:35:00+00:00",
+    "ARB/USD:USD": "2026-09-05 05:35:00+00:00",
+    "TAO/USD:USD": "2026-09-05 05:35:00+00:00",
+    "LINK/USD:USD": "2026-09-05 05:35:00+00:00",
+    "TRUMP/USD:USD": "2026-09-05 05:35:00+00:00",
+    "DOT/USD:USD": "2026-09-05 05:35:00+00:00",
+    "PENGU/USD:USD": "2026-09-05 05:35:00+00:00",
+    "PUMP/USD:USD": "2026-09-05 05:35:00+00:00",
+    "ENA/USD:USD": "2026-09-05 05:35:00+00:00",
+    "PEPE/USD:USD": "2026-09-05 05:35:00+00:00",
+    "AVAX/USD:USD": "2026-09-05 05:35:00+00:00",
+    "CRV/USD:USD": "2026-09-05 05:35:00+00:00",
+    "INJ/USD:USD": "2026-09-05 05:35:00+00:00",
+    "FARTCOIN/USD:USD": "2026-09-05 05:35:00+00:00",
     "XLM/USD:USD": "2026-09-05 04:50:00+00:00",
-    "TSLAX/USD:USD": "2026-09-05 05:20:00+00:00",
+    "TSLAX/USD:USD": "2026-09-05 05:35:00+00:00",
     "XPL/USD:USD": "2026-09-05 03:40:00+00:00",
-    "AAVE/USD:USD": "2026-09-05 05:20:00+00:00",
-    "LTC/USD:USD": "2026-09-05 05:20:00+00:00"
+    "AAVE/USD:USD": "2026-09-05 05:35:00+00:00",
+    "LTC/USD:USD": "2026-09-05 05:35:00+00:00"
   },
-  "updated_at": "2026-09-05 05:28:21 UTC"
+  "updated_at": "2026-09-05 05:40:11 UTC"
 }
