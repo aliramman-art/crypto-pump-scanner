@@ -28,12 +28,12 @@
 # GitHub Actions One-Shot Mode
 # Telegram Alerts
 # Persistent State
-# Trade History
-# Telegram Statistics:
-#   Open Signals
-#   Closed Signals
-#   Win Rate
-#   Total Profit
+# Cumulative Trade Statistics
+#
+# TELEGRAM:
+#   Only CONFIRMED signals are sent.
+#   Pending / near signals are NOT sent.
+#   Statistics are included in the same signal message.
 # ============================================================
 
 import os
@@ -66,13 +66,24 @@ RR = 1.0
 OHLCV_LIMIT = 250
 
 STATE_FILE = "utbot_state.json"
-HISTORY_FILE = "utbot_trade_history.json"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+# NEW HISTORY FILE
+# Starts statistics from ZERO while preserving old history file.
+HISTORY_FILE = "utbot_trade_history_v2.json"
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+).strip()
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+).strip()
 
 TELEGRAM_ENABLED = bool(
-    TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID
+    TELEGRAM_BOT_TOKEN
+    and TELEGRAM_CHAT_ID
 )
 
 
@@ -93,7 +104,9 @@ exchange = ccxt.krakenfutures({
 # ============================================================
 
 pending_setups = {}
+
 open_trades = {}
+
 trade_history = []
 
 last_processed_candle = {}
@@ -104,11 +117,17 @@ last_processed_candle = {}
 # ============================================================
 
 def utc_now():
-    return datetime.now(timezone.utc)
+
+    return datetime.now(
+        timezone.utc
+    )
 
 
 def utc_string():
-    return utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    return utc_now().strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
 
 
 # ============================================================
@@ -116,38 +135,74 @@ def utc_string():
 # ============================================================
 
 def safe_float(value):
+
     try:
+
         value = float(value)
 
-        if math.isnan(value) or math.isinf(value):
+        if (
+            math.isnan(value)
+            or math.isinf(value)
+        ):
             return None
 
         return value
 
     except Exception:
+
         return None
 
 
-def load_json(filename, default):
+def load_json(
+    filename,
+    default
+):
+
     try:
-        if not os.path.exists(filename):
+
+        if not os.path.exists(
+            filename
+        ):
             return default
 
-        with open(filename, "r", encoding="utf-8") as f:
+        with open(
+            filename,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             data = json.load(f)
 
         return data
 
     except Exception as e:
-        print(f"WARNING: Cannot load {filename}: {e}")
+
+        print(
+            f"WARNING: Cannot load "
+            f"{filename}: {e}"
+        )
+
         return default
 
 
-def save_json(filename, data):
-    try:
-        temp_file = filename + ".tmp"
+def save_json(
+    filename,
+    data
+):
 
-        with open(temp_file, "w", encoding="utf-8") as f:
+    try:
+
+        temp_file = (
+            filename
+            + ".tmp"
+        )
+
+        with open(
+            temp_file,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
             json.dump(
                 data,
                 f,
@@ -155,10 +210,17 @@ def save_json(filename, data):
                 indent=2,
             )
 
-        os.replace(temp_file, filename)
+        os.replace(
+            temp_file,
+            filename
+        )
 
     except Exception as e:
-        print(f"ERROR saving {filename}: {e}")
+
+        print(
+            f"ERROR saving "
+            f"{filename}: {e}"
+        )
 
 
 # ============================================================
@@ -205,10 +267,18 @@ def load_state():
 def save_state():
 
     state = {
-        "pending_setups": pending_setups,
-        "open_trades": open_trades,
-        "last_processed_candle": last_processed_candle,
-        "updated_at": utc_string(),
+
+        "pending_setups":
+            pending_setups,
+
+        "open_trades":
+            open_trades,
+
+        "last_processed_candle":
+            last_processed_candle,
+
+        "updated_at":
+            utc_string(),
     }
 
     save_json(
@@ -226,7 +296,11 @@ def load_history():
         []
     )
 
-    if not isinstance(trade_history, list):
+    if not isinstance(
+        trade_history,
+        list
+    ):
+
         trade_history = []
 
     print(
@@ -250,7 +324,11 @@ def save_history():
 def send_telegram(message):
 
     if not TELEGRAM_ENABLED:
-        print("Telegram: DISABLED")
+
+        print(
+            "Telegram: DISABLED"
+        )
+
         return False
 
     try:
@@ -264,15 +342,20 @@ def send_telegram(message):
         response = requests.post(
             url,
             data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": message,
+                "chat_id":
+                    TELEGRAM_CHAT_ID,
+
+                "text":
+                    message,
             },
             timeout=20,
         )
 
         if response.ok:
 
-            print("Telegram: message sent")
+            print(
+                "Telegram: message sent"
+            )
 
             return True
 
@@ -294,62 +377,7 @@ def send_telegram(message):
 
 
 # ============================================================
-# TELEGRAM TEST
-# ============================================================
-
-def telegram_start_message():
-
-    message = (
-        "📡 CRYPTO UT BOT SCANNER\n"
-        "━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {utc_string()}\n"
-        f"⏱ Timeframe: {TIMEFRAME} CLOSED\n"
-        f"🤖 UT Bot: Key {UT_KEY_VALUE} / ATR {UT_ATR_PERIOD}\n"
-        f"🪙 Coins: {TOP_COINS}\n"
-        "⚙️ Mode: GitHub Actions One-Shot\n"
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    send_telegram(message)
-
-
-# ============================================================
-# TELEGRAM SIGNALS
-# ============================================================
-
-def telegram_ut_signal(symbol, side, signal_high, signal_low):
-
-    if side == "LONG":
-
-        message = (
-            "🟢 UT BUY SIGNAL\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 {symbol}\n"
-            f"⏱ {TIMEFRAME} CLOSED\n"
-            f"📈 BUY HIGH: {signal_high:.8f}\n"
-            "⏳ Waiting for:\n"
-            f"CLOSE > {signal_high:.8f}\n"
-            "━━━━━━━━━━━━━━━━━━"
-        )
-
-    else:
-
-        message = (
-            "🔴 UT SELL SIGNAL\n"
-            "━━━━━━━━━━━━━━━━━━\n"
-            f"🪙 {symbol}\n"
-            f"⏱ {TIMEFRAME} CLOSED\n"
-            f"📉 SELL LOW: {signal_low:.8f}\n"
-            "⏳ Waiting for:\n"
-            f"CLOSE < {signal_low:.8f}\n"
-            "━━━━━━━━━━━━━━━━━━"
-        )
-
-    send_telegram(message)
-
-
-# ============================================================
-# TELEGRAM ENTRY + STATISTICS
+# TELEGRAM CONFIRMED ENTRY
 # ============================================================
 
 def telegram_entry(trade):
@@ -357,61 +385,108 @@ def telegram_entry(trade):
     side = trade["side"]
 
     symbol = trade["symbol"]
+
     entry = trade["entry"]
+
     sl = trade["sl"]
+
     tp = trade["tp"]
+
     risk_pct = trade["risk_pct"]
 
     if side == "LONG":
+
         emoji = "🟢"
         title = "CONFIRMED LONG"
+
     else:
+
         emoji = "🔴"
         title = "CONFIRMED SHORT"
 
     # --------------------------------------------------------
-    # LIVE STATISTICS
+    # LIVE CUMULATIVE STATISTICS
     # --------------------------------------------------------
 
     stats = calculate_stats()
 
-    open_signals = len(open_trades)
+    open_signals = len(
+        open_trades
+    )
 
-    closed_signals = stats["total"]
+    closed_signals = stats[
+        "total"
+    ]
 
-    win_rate = stats["win_rate"]
+    win_rate = stats[
+        "win_rate"
+    ]
 
-    total_profit = stats["net_pnl"]
+    total_profit = stats[
+        "net_pnl"
+    ]
 
     message = (
+
         f"{emoji} {title}\n"
+
         "━━━━━━━━━━━━━━━━━━\n"
+
         f"🪙 {symbol}\n"
-        f"⏱ {TIMEFRAME}\n"
-        f"💰 Entry: {entry:.8f}\n"
-        f"🛑 SL: {sl:.8f}\n"
-        f"🎯 TP: {tp:.8f}\n"
-        f"📊 Risk: {risk_pct:.2f}%\n"
-        f"⚖️ RR: 1:{RR:.1f}\n"
+
+        f"⏱ {TIMEFRAME} CLOSED\n"
+
+        f"💰 Entry: "
+        f"{entry:.8f}\n"
+
+        f"🛑 SL: "
+        f"{sl:.8f}\n"
+
+        f"🎯 TP: "
+        f"{tp:.8f}\n"
+
+        f"📊 Risk: "
+        f"{risk_pct:.2f}%\n"
+
+        f"⚖️ RR: "
+        f"1:{RR:.1f}\n"
+
         "━━━━━━━━━━━━━━━━━━\n"
+
         "📊 STATISTICS\n"
-        f"📈 Open Signals: {open_signals}\n"
-        f"📁 Closed Signals: {closed_signals}\n"
-        f"🎯 Win Rate: {win_rate:.2f}%\n"
-        f"💰 Total Profit: {total_profit:+.2f}%\n"
+
+        f"📈 Open Signals: "
+        f"{open_signals}\n"
+
+        f"📁 Closed Signals: "
+        f"{closed_signals}\n"
+
+        f"🎯 Win Rate: "
+        f"{win_rate:.2f}%\n"
+
+        f"💰 Total Profit: "
+        f"{total_profit:+.2f}%\n"
+
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    send_telegram(message)
+    send_telegram(
+        message
+    )
 
 
 # ============================================================
 # TELEGRAM EXIT
 # ============================================================
 
-def telegram_exit(trade, result, exit_price):
+def telegram_exit(
+    trade,
+    result,
+    exit_price
+):
 
     symbol = trade["symbol"]
+
     side = trade["side"]
 
     pnl_pct = trade.get(
@@ -435,49 +510,72 @@ def telegram_exit(trade, result, exit_price):
         title = "STOP LOSS"
 
     # --------------------------------------------------------
-    # Calculate statistics AFTER this trade is closed
+    # Statistics are calculated from FINAL state.
+    # No manual +1 / -1 arithmetic.
     # --------------------------------------------------------
 
     stats = calculate_stats()
 
-    open_signals = len(open_trades) - 1
-    closed_signals = stats["total"] + 1
-
-    total_profit = (
-        stats["net_pnl"]
-        + float(pnl_pct or 0)
+    open_signals = len(
+        open_trades
     )
 
-    wins = stats["tp"]
+    closed_signals = stats[
+        "total"
+    ]
 
-    if result == "TP":
-        wins += 1
+    win_rate = stats[
+        "win_rate"
+    ]
 
-    win_rate = (
-        wins / closed_signals * 100
-        if closed_signals
-        else 0
-    )
+    total_profit = stats[
+        "net_pnl"
+    ]
 
     message = (
+
         f"{emoji} {title}\n"
+
         "━━━━━━━━━━━━━━━━━━\n"
+
         f"🪙 {symbol}\n"
+
         f"📌 {side}\n"
-        f"💰 Entry: {trade['entry']:.8f}\n"
-        f"🚪 Exit: {exit_price:.8f}\n"
-        f"📈 P&L: {pnl_pct:+.2f}%\n"
-        f"📊 R: {r_multiple:+.2f}R\n"
+
+        f"💰 Entry: "
+        f"{trade['entry']:.8f}\n"
+
+        f"🚪 Exit: "
+        f"{exit_price:.8f}\n"
+
+        f"📈 P&L: "
+        f"{pnl_pct:+.2f}%\n"
+
+        f"📊 R: "
+        f"{r_multiple:+.2f}R\n"
+
         "━━━━━━━━━━━━━━━━━━\n"
+
         "📊 STATISTICS\n"
-        f"📈 Open Signals: {max(0, open_signals)}\n"
-        f"📁 Closed Signals: {closed_signals}\n"
-        f"🎯 Win Rate: {win_rate:.2f}%\n"
-        f"💰 Total Profit: {total_profit:+.2f}%\n"
+
+        f"📈 Open Signals: "
+        f"{open_signals}\n"
+
+        f"📁 Closed Signals: "
+        f"{closed_signals}\n"
+
+        f"🎯 Win Rate: "
+        f"{win_rate:.2f}%\n"
+
+        f"💰 Total Profit: "
+        f"{total_profit:+.2f}%\n"
+
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    send_telegram(message)
+    send_telegram(
+        message
+    )
 
 
 # ============================================================
@@ -495,6 +593,7 @@ def fetch_ohlcv(symbol):
         )
 
         if not candles:
+
             return None
 
         df = pd.DataFrame(
@@ -532,26 +631,37 @@ def fetch_ohlcv(symbol):
             drop=True
         )
 
-        # --------------------------------------------------------
+        # ----------------------------------------------------
         # REMOVE CURRENT UNFINISHED 5M CANDLE
-        # --------------------------------------------------------
+        # ----------------------------------------------------
 
         now_ms = exchange.milliseconds()
 
-        timeframe_ms = 5 * 60 * 1000
+        timeframe_ms = (
+            5 * 60 * 1000
+        )
 
         if len(df) > 0:
 
             last_ts = int(
-                df.iloc[-1]["timestamp"].timestamp()
+                df.iloc[-1][
+                    "timestamp"
+                ].timestamp()
                 * 1000
             )
 
-            if last_ts + timeframe_ms > now_ms:
+            if (
+                last_ts
+                + timeframe_ms
+                > now_ms
+            ):
 
-                df = df.iloc[:-1].copy()
+                df = df.iloc[
+                    :-1
+                ].copy()
 
         if len(df) < 50:
+
             return None
 
         return df.reset_index(
@@ -561,7 +671,8 @@ def fetch_ohlcv(symbol):
     except Exception as e:
 
         print(
-            f"OHLCV ERROR {symbol}: {e}"
+            f"OHLCV ERROR "
+            f"{symbol}: {e}"
         )
 
         return None
@@ -571,13 +682,20 @@ def fetch_ohlcv(symbol):
 # ATR - WILDER / TRADINGVIEW STYLE
 # ============================================================
 
-def calculate_atr(df, period=10):
+def calculate_atr(
+    df,
+    period=10
+):
 
     high = df["high"]
+
     low = df["low"]
+
     close = df["close"]
 
-    previous_close = close.shift(1)
+    previous_close = (
+        close.shift(1)
+    )
 
     tr1 = high - low
 
@@ -596,7 +714,9 @@ def calculate_atr(df, period=10):
             tr3,
         ],
         axis=1,
-    ).max(axis=1)
+    ).max(
+        axis=1
+    )
 
     atr = true_range.ewm(
         alpha=1 / period,
@@ -651,80 +771,121 @@ def calculate_ut_bot(
         dtype=bool,
     )
 
-    for i in range(len(df)):
+    for i in range(
+        len(df)
+    ):
 
         current_src = float(
             src.iloc[i]
         )
 
         current_loss = (
-            float(n_loss.iloc[i])
-            if pd.notna(n_loss.iloc[i])
+
+            float(
+                n_loss.iloc[i]
+            )
+
+            if pd.notna(
+                n_loss.iloc[i]
+            )
+
             else 0.0
         )
 
         previous_stop = (
+
             trailing_stop[i - 1]
+
             if i > 0
+
             else 0.0
         )
 
         previous_src = (
-            float(src.iloc[i - 1])
+
+            float(
+                src.iloc[i - 1]
+            )
+
             if i > 0
+
             else current_src
         )
 
         if (
-            current_src > previous_stop
-            and previous_src > previous_stop
+            current_src
+            > previous_stop
+            and
+            previous_src
+            > previous_stop
         ):
 
             trailing_stop[i] = max(
                 previous_stop,
-                current_src - current_loss,
+                current_src
+                - current_loss,
             )
 
         elif (
-            current_src < previous_stop
-            and previous_src < previous_stop
+            current_src
+            < previous_stop
+            and
+            previous_src
+            < previous_stop
         ):
 
             trailing_stop[i] = min(
                 previous_stop,
-                current_src + current_loss,
+                current_src
+                + current_loss,
             )
 
-        elif current_src > previous_stop:
+        elif (
+            current_src
+            > previous_stop
+        ):
 
             trailing_stop[i] = (
-                current_src - current_loss
+                current_src
+                - current_loss
             )
 
         else:
 
             trailing_stop[i] = (
-                current_src + current_loss
+                current_src
+                + current_loss
             )
 
         previous_pos = (
+
             pos[i - 1]
+
             if i > 0
+
             else 0
         )
 
         if (
             i > 0
-            and previous_src < previous_stop
-            and current_src > previous_stop
+            and
+            previous_src
+            < previous_stop
+            and
+            current_src
+            > previous_stop
         ):
 
             pos[i] = 1
 
         elif (
             i > 0
-            and previous_src > previous_stop
-            and current_src < previous_stop
+            and
+            previous_src
+            > previous_stop
+            and
+            current_src
+            < previous_stop
         ):
 
             pos[i] = -1
@@ -736,31 +897,53 @@ def calculate_ut_bot(
         if i > 0:
 
             above = (
-                src.iloc[i] > trailing_stop[i]
-                and src.iloc[i - 1]
+
+                src.iloc[i]
+                > trailing_stop[i]
+
+                and
+
+                src.iloc[i - 1]
                 <= trailing_stop[i - 1]
             )
 
             below = (
-                trailing_stop[i] > src.iloc[i]
-                and trailing_stop[i - 1]
+
+                trailing_stop[i]
+                > src.iloc[i]
+
+                and
+
+                trailing_stop[i - 1]
                 <= src.iloc[i - 1]
             )
 
             buy[i] = (
-                current_src > trailing_stop[i]
+
+                current_src
+                > trailing_stop[i]
+
                 and above
             )
 
             sell[i] = (
-                current_src < trailing_stop[i]
+
+                current_src
+                < trailing_stop[i]
+
                 and below
             )
 
     df["atr"] = atr
-    df["ut_stop"] = trailing_stop
+
+    df["ut_stop"] = (
+        trailing_stop
+    )
+
     df["ut_pos"] = pos
+
     df["ut_buy"] = buy
+
     df["ut_sell"] = sell
 
     return df
@@ -778,6 +961,7 @@ def latest_swing_low(
 ):
 
     if before_index <= right:
+
         return None
 
     last_valid = (
@@ -803,9 +987,17 @@ def latest_swing_low(
         ]["low"]
 
         if (
-            low < float(left_lows.min())
+            low
+            < float(
+                left_lows.min()
+            )
+
             and
-            low <= float(right_lows.min())
+
+            low
+            <= float(
+                right_lows.min()
+            )
         ):
 
             return low
@@ -821,6 +1013,7 @@ def latest_swing_high(
 ):
 
     if before_index <= right:
+
         return None
 
     last_valid = (
@@ -846,9 +1039,17 @@ def latest_swing_high(
         ]["high"]
 
         if (
-            high > float(left_highs.max())
+            high
+            > float(
+                left_highs.max()
+            )
+
             and
-            high >= float(right_highs.max())
+
+            high
+            >= float(
+                right_highs.max()
+            )
         ):
 
             return high
@@ -876,6 +1077,7 @@ def fallback_swing_low(
     ]
 
     if len(section) == 0:
+
         return None
 
     return float(
@@ -899,6 +1101,7 @@ def fallback_swing_high(
     ]
 
     if len(section) == 0:
+
         return None
 
     return float(
@@ -915,15 +1118,19 @@ def fmt_price(price):
     price = float(price)
 
     if price >= 1000:
+
         return f"{price:.2f}"
 
     if price >= 100:
+
         return f"{price:.3f}"
 
     if price >= 1:
+
         return f"{price:.5f}"
 
     if price >= 0.01:
+
         return f"{price:.6f}"
 
     return f"{price:.8f}"
@@ -953,47 +1160,67 @@ def create_long_trade(
 
     if swing_low is None:
 
-        swing_low = fallback_swing_low(
-            df,
-            confirmation_index,
+        swing_low = (
+            fallback_swing_low(
+                df,
+                confirmation_index,
+            )
         )
 
     if swing_low is None:
+
         return None
 
     if swing_low >= entry:
 
-        swing_low = fallback_swing_low(
-            df,
-            confirmation_index,
-            lookback=20,
+        swing_low = (
+            fallback_swing_low(
+                df,
+                confirmation_index,
+                lookback=20,
+            )
         )
 
     if swing_low is None:
+
         return None
 
     if swing_low >= entry:
+
         return None
 
     sl_buffer = (
-        float(df.iloc[
-            confirmation_index
-        ]["atr"])
+
+        float(
+            df.iloc[
+                confirmation_index
+            ]["atr"]
+        )
         * 0.05
     )
 
-    if not np.isfinite(sl_buffer):
+    if not np.isfinite(
+        sl_buffer
+    ):
+
         sl_buffer = 0.0
 
-    sl = swing_low - sl_buffer
+    sl = (
+        swing_low
+        - sl_buffer
+    )
 
-    risk = entry - sl
+    risk = (
+        entry - sl
+    )
 
     if risk <= 0:
+
         return None
 
-    tp = entry + (
-        risk * RR
+    tp = (
+        entry
+        + risk * RR
     )
 
     risk_pct = (
@@ -1011,42 +1238,56 @@ def create_long_trade(
             f"{int(candle['timestamp'].timestamp())}"
         ),
 
-        "symbol": symbol,
+        "symbol":
+            symbol,
 
-        "side": "LONG",
+        "side":
+            "LONG",
 
-        "signal_time": pending[
-            "signal_time"
-        ],
+        "signal_time":
+            pending[
+                "signal_time"
+            ],
 
-        "confirmation_time": str(
-            candle["timestamp"]
-        ),
+        "confirmation_time":
+            str(
+                candle["timestamp"]
+            ),
 
-        "entry": safe_float(entry),
+        "entry":
+            safe_float(entry),
 
-        "sl": safe_float(sl),
+        "sl":
+            safe_float(sl),
 
-        "tp": safe_float(tp),
+        "tp":
+            safe_float(tp),
 
-        "risk": safe_float(risk),
+        "risk":
+            safe_float(risk),
 
-        "risk_pct": safe_float(
-            risk_pct
-        ),
+        "risk_pct":
+            safe_float(
+                risk_pct
+            ),
 
-        "status": "OPEN",
+        "status":
+            "OPEN",
 
-        "exit_time": None,
+        "exit_time":
+            None,
 
-        "exit_price": None,
+        "exit_price":
+            None,
 
-        "result": None,
+        "result":
+            None,
 
-        "pnl_pct": None,
+        "pnl_pct":
+            None,
 
-        "r_multiple": None,
-
+        "r_multiple":
+            None,
     }
 
     return trade
@@ -1076,47 +1317,67 @@ def create_short_trade(
 
     if swing_high is None:
 
-        swing_high = fallback_swing_high(
-            df,
-            confirmation_index,
+        swing_high = (
+            fallback_swing_high(
+                df,
+                confirmation_index,
+            )
         )
 
     if swing_high is None:
+
         return None
 
     if swing_high <= entry:
 
-        swing_high = fallback_swing_high(
-            df,
-            confirmation_index,
-            lookback=20,
+        swing_high = (
+            fallback_swing_high(
+                df,
+                confirmation_index,
+                lookback=20,
+            )
         )
 
     if swing_high is None:
+
         return None
 
     if swing_high <= entry:
+
         return None
 
     sl_buffer = (
-        float(df.iloc[
-            confirmation_index
-        ]["atr"])
+
+        float(
+            df.iloc[
+                confirmation_index
+            ]["atr"]
+        )
         * 0.05
     )
 
-    if not np.isfinite(sl_buffer):
+    if not np.isfinite(
+        sl_buffer
+    ):
+
         sl_buffer = 0.0
 
-    sl = swing_high + sl_buffer
+    sl = (
+        swing_high
+        + sl_buffer
+    )
 
-    risk = sl - entry
+    risk = (
+        sl - entry
+    )
 
     if risk <= 0:
+
         return None
 
-    tp = entry - (
-        risk * RR
+    tp = (
+        entry
+        - risk * RR
     )
 
     risk_pct = (
@@ -1134,42 +1395,56 @@ def create_short_trade(
             f"{int(candle['timestamp'].timestamp())}"
         ),
 
-        "symbol": symbol,
+        "symbol":
+            symbol,
 
-        "side": "SHORT",
+        "side":
+            "SHORT",
 
-        "signal_time": pending[
-            "signal_time"
-        ],
+        "signal_time":
+            pending[
+                "signal_time"
+            ],
 
-        "confirmation_time": str(
-            candle["timestamp"]
-        ),
+        "confirmation_time":
+            str(
+                candle["timestamp"]
+            ),
 
-        "entry": safe_float(entry),
+        "entry":
+            safe_float(entry),
 
-        "sl": safe_float(sl),
+        "sl":
+            safe_float(sl),
 
-        "tp": safe_float(tp),
+        "tp":
+            safe_float(tp),
 
-        "risk": safe_float(risk),
+        "risk":
+            safe_float(risk),
 
-        "risk_pct": safe_float(
-            risk_pct
-        ),
+        "risk_pct":
+            safe_float(
+                risk_pct
+            ),
 
-        "status": "OPEN",
+        "status":
+            "OPEN",
 
-        "exit_time": None,
+        "exit_time":
+            None,
 
-        "exit_price": None,
+        "exit_price":
+            None,
 
-        "result": None,
+        "result":
+            None,
 
-        "pnl_pct": None,
+        "pnl_pct":
+            None,
 
-        "r_multiple": None,
-
+        "r_multiple":
+            None,
     }
 
     return trade
@@ -1185,13 +1460,17 @@ def check_open_trade(
 ):
 
     if symbol not in open_trades:
+
         return
 
     trade = open_trades[
         symbol
     ]
 
-    if trade.get("status") != "OPEN":
+    if trade.get(
+        "status"
+    ) != "OPEN":
+
         return
 
     candle = df.iloc[-1]
@@ -1217,6 +1496,7 @@ def check_open_trade(
     )
 
     result = None
+
     exit_price = None
 
     if trade["side"] == "LONG":
@@ -1224,11 +1504,13 @@ def check_open_trade(
         if low <= sl:
 
             result = "SL"
+
             exit_price = sl
 
         elif high >= tp:
 
             result = "TP"
+
             exit_price = tp
 
         current_price = float(
@@ -1236,12 +1518,20 @@ def check_open_trade(
         )
 
         pnl_pct = (
-            (current_price - entry)
+
+            (
+                current_price
+                - entry
+            )
             / entry
         ) * 100
 
         r_multiple = (
-            (current_price - entry)
+
+            (
+                current_price
+                - entry
+            )
             / trade["risk"]
         )
 
@@ -1250,11 +1540,13 @@ def check_open_trade(
         if high >= sl:
 
             result = "SL"
+
             exit_price = sl
 
         elif low <= tp:
 
             result = "TP"
+
             exit_price = tp
 
         current_price = float(
@@ -1262,12 +1554,20 @@ def check_open_trade(
         )
 
         pnl_pct = (
-            (entry - current_price)
+
+            (
+                entry
+                - current_price
+            )
             / entry
         ) * 100
 
         r_multiple = (
-            (entry - current_price)
+
+            (
+                entry
+                - current_price
+            )
             / trade["risk"]
         )
 
@@ -1276,24 +1576,40 @@ def check_open_trade(
         if trade["side"] == "LONG":
 
             final_pnl = (
-                (exit_price - entry)
+
+                (
+                    exit_price
+                    - entry
+                )
                 / entry
             ) * 100
 
             final_r = (
-                (exit_price - entry)
+
+                (
+                    exit_price
+                    - entry
+                )
                 / trade["risk"]
             )
 
         else:
 
             final_pnl = (
-                (entry - exit_price)
+
+                (
+                    entry
+                    - exit_price
+                )
                 / entry
             ) * 100
 
             final_r = (
-                (entry - exit_price)
+
+                (
+                    entry
+                    - exit_price
+                )
                 / trade["risk"]
             )
 
@@ -1317,9 +1633,33 @@ def check_open_trade(
 
         trade["status"] = "CLOSED"
 
+        # ----------------------------------------------------
+        # Add to cumulative history FIRST
+        # ----------------------------------------------------
+
         trade_history.append(
             trade.copy()
         )
+
+        # ----------------------------------------------------
+        # Remove from open trades BEFORE statistics
+        # ----------------------------------------------------
+
+        del open_trades[
+            symbol
+        ]
+
+        # ----------------------------------------------------
+        # Save final state BEFORE Telegram
+        # ----------------------------------------------------
+
+        save_history()
+
+        save_state()
+
+        # ----------------------------------------------------
+        # Telegram statistics now reflect REAL state
+        # ----------------------------------------------------
 
         telegram_exit(
             trade,
@@ -1328,28 +1668,25 @@ def check_open_trade(
         )
 
         print(
-            f"\n{'🎯' if result == 'TP' else '🛑'} "
+            f"\n"
+            f"{'🎯' if result == 'TP' else '🛑'} "
             f"{result}: {symbol}"
         )
 
         print(
-            f"Exit: {fmt_price(exit_price)}"
+            f"Exit: "
+            f"{fmt_price(exit_price)}"
         )
 
         print(
-            f"P&L: {final_pnl:+.2f}%"
+            f"P&L: "
+            f"{final_pnl:+.2f}%"
         )
 
         print(
-            f"R: {final_r:+.2f}R"
+            f"R: "
+            f"{final_r:+.2f}R"
         )
-
-        del open_trades[
-            symbol
-        ]
-
-        save_history()
-        save_state()
 
 
 # ============================================================
@@ -1362,9 +1699,11 @@ def check_pending_setup(
 ):
 
     if symbol not in pending_setups:
+
         return
 
     if symbol in open_trades:
+
         return
 
     pending = pending_setups[
@@ -1383,10 +1722,16 @@ def check_pending_setup(
         candle["close"]
     )
 
+    # --------------------------------------------------------
+    # LONG CONFIRMATION
+    # --------------------------------------------------------
+
     if pending["side"] == "LONG":
 
         signal_high = float(
-            pending["signal_high"]
+            pending[
+                "signal_high"
+            ]
         )
 
         if close > signal_high:
@@ -1436,16 +1781,23 @@ def check_pending_setup(
                     f"{trade['risk_pct']:.2f}%"
                 )
 
+                # ONLY confirmed signal goes to Telegram
                 telegram_entry(
                     trade
                 )
 
                 save_state()
 
+    # --------------------------------------------------------
+    # SHORT CONFIRMATION
+    # --------------------------------------------------------
+
     else:
 
         signal_low = float(
-            pending["signal_low"]
+            pending[
+                "signal_low"
+            ]
         )
 
         if close < signal_low:
@@ -1495,6 +1847,7 @@ def check_pending_setup(
                     f"{trade['risk_pct']:.2f}%"
                 )
 
+                # ONLY confirmed signal goes to Telegram
                 telegram_entry(
                     trade
                 )
@@ -1504,6 +1857,10 @@ def check_pending_setup(
 
 # ============================================================
 # PROCESS NEW UT SIGNAL
+#
+# IMPORTANT:
+# UT BUY / UT SELL are stored internally only.
+# NO TELEGRAM MESSAGE is sent here.
 # ============================================================
 
 def process_ut_signal(
@@ -1522,7 +1879,9 @@ def process_ut_signal(
     )
 
     if (
-        last_processed_candle.get(symbol)
+        last_processed_candle.get(
+            symbol
+        )
         == candle_time
     ):
 
@@ -1533,7 +1892,12 @@ def process_ut_signal(
     ] = candle_time
 
     if symbol in open_trades:
+
         return
+
+    # --------------------------------------------------------
+    # Check existing pending setup
+    # --------------------------------------------------------
 
     if symbol in pending_setups:
 
@@ -1544,7 +1908,15 @@ def process_ut_signal(
 
         return
 
-    if bool(candle["ut_buy"]):
+    # --------------------------------------------------------
+    # NEW UT BUY
+    # Store internally only.
+    # No Telegram message.
+    # --------------------------------------------------------
+
+    if bool(
+        candle["ut_buy"]
+    ):
 
         signal_high = float(
             candle["high"]
@@ -1554,19 +1926,25 @@ def process_ut_signal(
             symbol
         ] = {
 
-            "symbol": symbol,
+            "symbol":
+                symbol,
 
-            "side": "LONG",
+            "side":
+                "LONG",
 
-            "signal_time": candle_time,
+            "signal_time":
+                candle_time,
 
-            "signal_high": safe_float(
-                signal_high
-            ),
+            "signal_high":
+                safe_float(
+                    signal_high
+                ),
 
-            "signal_low": None,
+            "signal_low":
+                None,
 
-            "created_at": utc_string(),
+            "created_at":
+                utc_string(),
         }
 
         print(
@@ -1579,22 +1957,23 @@ def process_ut_signal(
         )
 
         print(
-            "⏳ Waiting for "
-            f"CLOSE > {fmt_price(signal_high)}"
-        )
-
-        telegram_ut_signal(
-            symbol,
-            "LONG",
-            signal_high,
-            0,
+            "⏳ Pending setup "
+            "stored internally"
         )
 
         save_state()
 
         return
 
-    if bool(candle["ut_sell"]):
+    # --------------------------------------------------------
+    # NEW UT SELL
+    # Store internally only.
+    # No Telegram message.
+    # --------------------------------------------------------
+
+    if bool(
+        candle["ut_sell"]
+    ):
 
         signal_low = float(
             candle["low"]
@@ -1604,19 +1983,25 @@ def process_ut_signal(
             symbol
         ] = {
 
-            "symbol": symbol,
+            "symbol":
+                symbol,
 
-            "side": "SHORT",
+            "side":
+                "SHORT",
 
-            "signal_time": candle_time,
+            "signal_time":
+                candle_time,
 
-            "signal_high": None,
+            "signal_high":
+                None,
 
-            "signal_low": safe_float(
-                signal_low
-            ),
+            "signal_low":
+                safe_float(
+                    signal_low
+                ),
 
-            "created_at": utc_string(),
+            "created_at":
+                utc_string(),
         }
 
         print(
@@ -1629,15 +2014,8 @@ def process_ut_signal(
         )
 
         print(
-            "⏳ Waiting for "
-            f"CLOSE < {fmt_price(signal_low)}"
-        )
-
-        telegram_ut_signal(
-            symbol,
-            "SHORT",
-            0,
-            signal_low,
+            "⏳ Pending setup "
+            "stored internally"
         )
 
         save_state()
@@ -1672,17 +2050,20 @@ def get_top_symbols():
                 "active",
                 True
             ):
+
                 continue
 
             if not market.get(
                 "swap",
                 False
             ):
+
                 continue
 
             if market.get(
                 "quote"
             ) != "USD":
+
                 continue
 
             candidates.append(
@@ -1690,16 +2071,19 @@ def get_top_symbols():
             )
 
         except Exception:
+
             continue
 
     print(
-        f"\nLoading TOP {TOP_COINS} "
+        f"\nLoading TOP "
+        f"{TOP_COINS} "
         "Futures symbols..."
     )
 
     print(
         f"Checking volume for "
-        f"{len(candidates)} futures symbols..."
+        f"{len(candidates)} "
+        "futures symbols..."
     )
 
     try:
@@ -1709,7 +2093,8 @@ def get_top_symbols():
     except Exception as e:
 
         print(
-            f"fetch_tickers error: {e}"
+            f"fetch_tickers error: "
+            f"{e}"
         )
 
         return candidates[
@@ -1725,6 +2110,7 @@ def get_top_symbols():
         )
 
         if not ticker:
+
             continue
 
         try:
@@ -1749,11 +2135,14 @@ def get_top_symbols():
                 ):
 
                     quote_volume = (
-                        float(base_volume)
+                        float(
+                            base_volume
+                        )
                         * float(last)
                     )
 
             if quote_volume is None:
+
                 continue
 
             quote_volume = float(
@@ -1761,6 +2150,7 @@ def get_top_symbols():
             )
 
             if quote_volume <= 0:
+
                 continue
 
             volume_data.append(
@@ -1771,6 +2161,7 @@ def get_top_symbols():
             )
 
         except Exception:
+
             continue
 
     volume_data.sort(
@@ -1786,7 +2177,8 @@ def get_top_symbols():
     ]
 
     print(
-        f"\nLoaded {len(symbols)} symbols:"
+        f"\nLoaded "
+        f"{len(symbols)} symbols:"
     )
 
     for symbol in symbols:
@@ -1811,40 +2203,73 @@ def calculate_stats():
     tp_count = sum(
         1
         for t in trade_history
-        if t.get("result") == "TP"
+        if t.get(
+            "result"
+        ) == "TP"
     )
 
     sl_count = sum(
         1
         for t in trade_history
-        if t.get("result") == "SL"
+        if t.get(
+            "result"
+        ) == "SL"
     )
 
     wins = [
-        float(t.get("pnl_pct", 0))
+
+        float(
+            t.get(
+                "pnl_pct",
+                0
+            )
+        )
+
         for t in trade_history
-        if t.get("result") == "TP"
+
+        if t.get(
+            "result"
+        ) == "TP"
     ]
 
     losses = [
-        float(t.get("pnl_pct", 0))
+
+        float(
+            t.get(
+                "pnl_pct",
+                0
+            )
+        )
+
         for t in trade_history
-        if t.get("result") == "SL"
+
+        if t.get(
+            "result"
+        ) == "SL"
     ]
 
     net_pnl = sum(
-        float(t.get("pnl_pct", 0))
+
+        float(
+            t.get(
+                "pnl_pct",
+                0
+            )
+        )
+
         for t in trade_history
     )
 
     gross_profit = sum(
-        x for x in wins
+        x
+        for x in wins
         if x > 0
     )
 
     gross_loss = abs(
         sum(
-            x for x in losses
+            x
+            for x in losses
             if x < 0
         )
     )
@@ -1859,39 +2284,62 @@ def calculate_stats():
     else:
 
         profit_factor = (
+
             float("inf")
+
             if gross_profit > 0
+
             else 0
         )
 
     win_rate = (
-        tp_count / total * 100
+
+        tp_count
+        / total
+        * 100
+
         if total
+
         else 0
     )
 
     loss_rate = (
-        sl_count / total * 100
+
+        sl_count
+        / total
+        * 100
+
         if total
+
         else 0
     )
 
     avg_tp = (
-        sum(wins) / len(wins)
+
+        sum(wins)
+        / len(wins)
+
         if wins
+
         else 0
     )
 
     avg_sl = (
-        sum(losses) / len(losses)
+
+        sum(losses)
+        / len(losses)
+
         if losses
+
         else 0
     )
 
     max_win_streak = 0
+
     max_loss_streak = 0
 
     current_win = 0
+
     current_loss = 0
 
     for trade in trade_history:
@@ -1901,6 +2349,7 @@ def calculate_stats():
         ) == "TP":
 
             current_win += 1
+
             current_loss = 0
 
         elif trade.get(
@@ -1908,6 +2357,7 @@ def calculate_stats():
         ) == "SL":
 
             current_loss += 1
+
             current_win = 0
 
         max_win_streak = max(
@@ -1922,31 +2372,44 @@ def calculate_stats():
 
     return {
 
-        "total": total,
+        "total":
+            total,
 
-        "tp": tp_count,
+        "tp":
+            tp_count,
 
-        "sl": sl_count,
+        "sl":
+            sl_count,
 
-        "win_rate": win_rate,
+        "win_rate":
+            win_rate,
 
-        "loss_rate": loss_rate,
+        "loss_rate":
+            loss_rate,
 
-        "gross_profit": gross_profit,
+        "gross_profit":
+            gross_profit,
 
-        "gross_loss": gross_loss,
+        "gross_loss":
+            gross_loss,
 
-        "net_pnl": net_pnl,
+        "net_pnl":
+            net_pnl,
 
-        "profit_factor": profit_factor,
+        "profit_factor":
+            profit_factor,
 
-        "avg_tp": avg_tp,
+        "avg_tp":
+            avg_tp,
 
-        "avg_sl": avg_sl,
+        "avg_sl":
+            avg_sl,
 
-        "max_win_streak": max_win_streak,
+        "max_win_streak":
+            max_win_streak,
 
-        "max_loss_streak": max_loss_streak,
+        "max_loss_streak":
+            max_loss_streak,
     }
 
 
@@ -1976,7 +2439,8 @@ def print_dashboard():
     )
 
     print(
-        f"⏱ Timeframe : {TIMEFRAME} CLOSED"
+        f"⏱ Timeframe : "
+        f"{TIMEFRAME} CLOSED"
     )
 
     print(
@@ -1990,15 +2454,18 @@ def print_dashboard():
     )
 
     print(
-        f"Trades      : {stats['total']}"
+        f"Trades      : "
+        f"{stats['total']}"
     )
 
     print(
-        f"TP          : {stats['tp']}"
+        f"TP          : "
+        f"{stats['tp']}"
     )
 
     print(
-        f"SL          : {stats['sl']}"
+        f"SL          : "
+        f"{stats['sl']}"
     )
 
     print(
@@ -2039,7 +2506,8 @@ def print_dashboard():
         pf_text = f"{pf:.2f}"
 
     print(
-        f"Profit Factor: {pf_text}"
+        f"Profit Factor: "
+        f"{pf_text}"
     )
 
     print(
@@ -2116,6 +2584,7 @@ def print_open_trades_status():
             )
 
             if current is None:
+
                 continue
 
             current = float(
@@ -2133,30 +2602,42 @@ def print_open_trades_status():
             if trade["side"] == "LONG":
 
                 pnl_pct = (
-                    (current - entry)
+
+                    (
+                        current
+                        - entry
+                    )
                     / entry
                 ) * 100
 
                 r = (
-                    current - entry
+                    current
+                    - entry
                 ) / risk
 
             else:
 
                 pnl_pct = (
-                    (entry - current)
+
+                    (
+                        entry
+                        - current
+                    )
                     / entry
                 ) * 100
 
                 r = (
-                    entry - current
+                    entry
+                    - current
                 ) / risk
 
             print(
                 f"{symbol} | "
                 f"{trade['side']} | "
-                f"Price {fmt_price(current)} | "
-                f"P&L {pnl_pct:+.2f}% | "
+                f"Price "
+                f"{fmt_price(current)} | "
+                f"P&L "
+                f"{pnl_pct:+.2f}% | "
                 f"{r:+.2f}R"
             )
 
@@ -2164,7 +2645,8 @@ def print_open_trades_status():
 
             print(
                 f"{symbol}: "
-                f"status error: {e}"
+                f"status error: "
+                f"{e}"
             )
 
 
@@ -2255,13 +2737,17 @@ def run_scan():
     # --------------------------------------------------------
 
     load_state()
+
+    # --------------------------------------------------------
+    # Load NEW cumulative history
+    # --------------------------------------------------------
+
     load_history()
 
     # --------------------------------------------------------
-    # Telegram startup
+    # IMPORTANT:
+    # No Telegram startup message.
     # --------------------------------------------------------
-
-    telegram_start_message()
 
     # --------------------------------------------------------
     # Symbols
@@ -2292,7 +2778,8 @@ def run_scan():
     ):
 
         print(
-            f"\n[{number:02d}/{len(symbols):02d}] "
+            f"\n[{number:02d}/"
+            f"{len(symbols):02d}] "
             f"Scanning {symbol}"
         )
 
@@ -2333,7 +2820,8 @@ def run_scan():
 
             if (
                 symbol not in open_trades
-                and symbol in pending_setups
+                and
+                symbol in pending_setups
             ):
 
                 check_pending_setup(
@@ -2353,8 +2841,8 @@ def run_scan():
         except Exception as e:
 
             print(
-                f"ERROR scanning {symbol}: "
-                f"{e}"
+                f"ERROR scanning "
+                f"{symbol}: {e}"
             )
 
             traceback.print_exc()
@@ -2364,6 +2852,7 @@ def run_scan():
     # --------------------------------------------------------
 
     save_state()
+
     save_history()
 
     # --------------------------------------------------------
@@ -2381,7 +2870,8 @@ def run_scan():
     # --------------------------------------------------------
 
     print(
-        "\n======================================"
+        "\n"
+        "======================================"
     )
 
     print(
