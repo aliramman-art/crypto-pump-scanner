@@ -1,149 +1,188 @@
 name: Crypto UT Bot Scanner
 
 on:
+  workflow_dispatch:
+
   schedule:
     - cron: "*/5 * * * *"
 
-  workflow_dispatch:
-
 permissions:
   contents: write
-
-concurrency:
-  group: crypto-utbot-scanner
-  cancel-in-progress: false
 
 jobs:
   scan:
     runs-on: ubuntu-latest
 
-    # کمی بیشتر از 5 دقیقه برای نصب و اسکن 30 ارز
-    timeout-minutes: 10
-
     steps:
 
-      # =========================================================
-      # 1. دریافت آخرین نسخه کد
-      # =========================================================
+      # =====================================================
+      # CHECKOUT
+      # =====================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # =========================================================
-      # 2. نصب Python
-      # =========================================================
+      # =====================================================
+      # PYTHON
+      # =====================================================
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      # =========================================================
-      # 3. نصب کتابخانه‌ها
-      # =========================================================
+      # =====================================================
+      # INSTALL DEPENDENCIES
+      # =====================================================
+
       - name: Install dependencies
         run: |
-          echo "========================================"
-          echo "Installing Python dependencies..."
-          echo "========================================"
-
-          python --version
-          python -m pip --version
-
           python -m pip install --upgrade pip
+          pip install ccxt pandas numpy requests
 
-          echo "Installing requirements.txt..."
-          python -m pip install -r requirements.txt
+      # =====================================================
+      # CHECK FILES
+      # =====================================================
 
-          echo "========================================"
-          echo "Installed packages:"
-          python -m pip list
-          echo "========================================"
-
-      # =========================================================
-      # 4. بررسی وجود فایل‌های اصلی
-      # =========================================================
       - name: Check scanner files
         run: |
-          echo "========================================"
+          echo "======================================"
           echo "Repository files"
-          echo "========================================"
-
+          echo "======================================"
           ls -la
 
-          echo "----------------------------------------"
+          echo ""
+          echo "======================================"
+          echo "Python version"
+          echo "======================================"
+          python --version
+
+          echo ""
+          echo "======================================"
+          echo "Scanner file"
+          echo "======================================"
 
           if [ ! -f scanner.py ]; then
             echo "ERROR: scanner.py not found!"
             exit 1
           fi
 
-          if [ ! -f requirements.txt ]; then
-            echo "ERROR: requirements.txt not found!"
-            exit 1
-          fi
+          echo "scanner.py found."
 
-          echo "scanner.py       : OK"
-          echo "requirements.txt : OK"
+      # =====================================================
+      # CHECK TELEGRAM SECRETS
+      # =====================================================
 
-      # =========================================================
-      # 5. اجرای Scanner
-      # =========================================================
-      - name: Run UT Bot scanner
+      - name: Check Telegram configuration
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          echo "========================================"
-          echo "Starting Crypto UT Bot Scanner"
-          echo "========================================"
+          echo "======================================"
+          echo "Telegram configuration check"
+          echo "======================================"
 
-          python scanner.py
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "ERROR: TELEGRAM_BOT_TOKEN is EMPTY"
+            exit 1
+          fi
 
-          echo "========================================"
-          echo "Scanner finished"
-          echo "========================================"
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "ERROR: TELEGRAM_CHAT_ID is EMPTY"
+            exit 1
+          fi
 
-      # =========================================================
-      # 6. نمایش State و Trade History
-      # =========================================================
-      - name: Check scanner output
+          echo "TELEGRAM_BOT_TOKEN: OK"
+          echo "TELEGRAM_CHAT_ID: OK"
+
+      # =====================================================
+      # TELEGRAM CONNECTION TEST
+      # =====================================================
+
+      - name: Test Telegram
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          echo "========================================"
-          echo "Scanner output files"
-          echo "========================================"
+          echo "======================================"
+          echo "Testing Telegram connection"
+          echo "======================================"
+
+          RESPONSE=$(curl -sS \
+            --get \
+            --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+            --data-urlencode "text=🧪 UT Bot Scanner - GitHub Actions connection test" \
+            "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage")
+
+          echo "Telegram response:"
+          echo "$RESPONSE"
+
+          if echo "$RESPONSE" | grep -q '"ok":true'; then
+            echo "Telegram connection: SUCCESS"
+          else
+            echo "Telegram connection: FAILED"
+            exit 1
+          fi
+
+      # =====================================================
+      # RUN SCANNER
+      # =====================================================
+
+      - name: Run scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          echo "======================================"
+          echo "Starting Crypto UT Bot Scanner"
+          echo "======================================"
+
+          python -u scanner.py
+
+      # =====================================================
+      # SHOW STATE / HISTORY
+      # =====================================================
+
+      - name: Show scanner state
+        if: always()
+        run: |
+          echo "======================================"
+          echo "Scanner state"
+          echo "======================================"
 
           if [ -f utbot_state.json ]; then
-            echo "utbot_state.json : FOUND"
-            ls -lh utbot_state.json
+            echo "--- utbot_state.json ---"
+            cat utbot_state.json
           else
-            echo "utbot_state.json : NOT FOUND"
+            echo "utbot_state.json not found"
           fi
+
+          echo ""
+          echo "--- trade history ---"
 
           if [ -f utbot_trade_history.json ]; then
-            echo "utbot_trade_history.json : FOUND"
-            ls -lh utbot_trade_history.json
+            cat utbot_trade_history.json
           else
-            echo "utbot_trade_history.json : NOT FOUND"
+            echo "utbot_trade_history.json not found"
           fi
 
-      # =========================================================
-      # 7. ذخیره State و Trade History در GitHub
-      # =========================================================
-      - name: Save scanner state and trade history
-        run: |
-          echo "========================================"
-          echo "Saving scanner state..."
-          echo "========================================"
+      # =====================================================
+      # SAVE STATE TO GITHUB
+      # =====================================================
 
+      - name: Commit scanner state
+        if: always()
+        run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add -A
+          git add utbot_state.json utbot_trade_history.json 2>/dev/null || true
 
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No state changes to commit."
           else
-            git commit -m "Update UT Bot scanner state and trade history"
+            git commit -m "Update UT Bot scanner state"
             git push
           fi
