@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO UT BOT SCANNER v3.0
+# CRYPTO UT BOT SCANNER v3.1
 # Kraken Futures | Closed 5m Candles
 #
 # FEATURES
@@ -14,6 +14,7 @@
 # - Statistics reset ONCE using new state/history files
 # - Then statistics remain cumulative
 # - Correct Open / Closed signal counting
+# - TP / SL percentage shown beside price in parentheses
 # ============================================================
 
 import os
@@ -43,27 +44,20 @@ OHLCV_LIMIT = 250
 
 
 # ============================================================
-# IMPORTANT RESET
+# NEW STATE / HISTORY FILES
 # ============================================================
 #
-# These are NEW files.
+# Old files are intentionally ignored.
 #
-# Old:
-#   utbot_state.json
-#   utbot_trade_history.json
-#   utbot_trade_history_v2.json
-#
-# are NOT used.
-#
-# Therefore the first execution starts with:
+# First execution:
 #
 # Open Signals   = 0
 # Closed Signals = 0
 # Win Rate       = 0%
 # Total Profit   = 0%
 #
-# After that, the new files are reused and statistics
-# become cumulative.
+# After first execution:
+# statistics continue cumulatively.
 #
 # ============================================================
 
@@ -744,12 +738,8 @@ def get_ut_signal(df):
 
         return None
 
-    # --------------------------------------------------------
-    # IMPORTANT:
     # Last candle may still be forming.
-    #
-    # We use the previous candle.
-    # --------------------------------------------------------
+    # Use previous closed candle.
 
     idx = len(df) - 2
 
@@ -773,7 +763,8 @@ def get_ut_signal(df):
 
         return {
 
-            "side": "LONG",
+            "side":
+                "LONG",
 
             "candle_time":
                 candle_time,
@@ -791,7 +782,8 @@ def get_ut_signal(df):
 
         return {
 
-            "side": "SHORT",
+            "side":
+                "SHORT",
 
             "candle_time":
                 candle_time,
@@ -830,6 +822,10 @@ def create_trade(
 
         return None
 
+    # ========================================================
+    # LONG
+    # ========================================================
+
     if signal["side"] == "LONG":
 
         sl = (
@@ -845,6 +841,10 @@ def create_trade(
             entry
             + risk * RR
         )
+
+    # ========================================================
+    # SHORT
+    # ========================================================
 
     else:
 
@@ -862,10 +862,21 @@ def create_trade(
             - risk * RR
         )
 
-    risk_pct = (
-        abs(risk)
+    # ========================================================
+    # PERCENTAGES
+    # ========================================================
+
+    sl_pct = (
+        abs(sl - entry)
         / entry
     ) * 100
+
+    tp_pct = (
+        abs(tp - entry)
+        / entry
+    ) * 100
+
+    risk_pct = sl_pct
 
     trade = {
 
@@ -889,6 +900,12 @@ def create_trade(
 
         "tp":
             tp,
+
+        "sl_pct":
+            sl_pct,
+
+        "tp_pct":
+            tp_pct,
 
         "risk_pct":
             risk_pct,
@@ -941,13 +958,12 @@ def telegram_entry(trade):
         f"<b>{fmt(trade['entry'])}</b>\n"
 
         f"🛑 SL: "
-        f"<b>{fmt(trade['sl'])}</b>\n"
+        f"<b>{fmt(trade['sl'])} "
+        f"(-{trade['sl_pct']:.2f}%)</b>\n"
 
         f"💰 TP: "
-        f"<b>{fmt(trade['tp'])}</b>\n"
-
-        f"📐 Risk: "
-        f"<b>{trade['risk_pct']:.2f}%</b>\n"
+        f"<b>{fmt(trade['tp'])} "
+        f"(+{trade['tp_pct']:.2f}%)</b>\n"
 
         f"⚖️ RR: "
         f"<b>1:{RR:g}</b>\n"
@@ -1132,7 +1148,7 @@ def check_open_trade(
         return
 
     # ========================================================
-    # CALCULATE PNL
+    # PNL
     # ========================================================
 
     if side == "LONG":
@@ -1178,7 +1194,7 @@ def check_open_trade(
         r_multiple = 0.0
 
     # ========================================================
-    # FINALIZE TRADE
+    # FINALIZE
     # ========================================================
 
     trade["exit_price"] = (
@@ -1206,19 +1222,15 @@ def check_open_trade(
     )
 
     # ========================================================
-    # VERY IMPORTANT
+    # IMPORTANT ORDER
     # ========================================================
     #
-    # 1. Add trade to history
-    # 2. Remove from open trades
-    # 3. Save files
-    # 4. THEN calculate Telegram statistics
+    # 1. Add to history
+    # 2. Remove from open
+    # 3. Save
+    # 4. Telegram
     #
-    # This prevents:
-    #
-    # Closed Signals: 2
-    #
-    # when only one trade actually exists.
+    # Therefore statistics are always correct.
     #
     # ========================================================
 
@@ -1273,7 +1285,7 @@ def confirm_signal(
         return
 
     # --------------------------------------------------------
-    # Add to open trades FIRST
+    # Add trade to open trades
     # --------------------------------------------------------
 
     open_trades[
@@ -1281,7 +1293,7 @@ def confirm_signal(
     ] = trade
 
     # --------------------------------------------------------
-    # Remove any internal pending state
+    # Remove internal pending state
     # --------------------------------------------------------
 
     pending_setups.pop(
@@ -1290,13 +1302,13 @@ def confirm_signal(
     )
 
     # --------------------------------------------------------
-    # Save state
+    # Save
     # --------------------------------------------------------
 
     save_state()
 
     # --------------------------------------------------------
-    # ONLY CONFIRMED SIGNAL
+    # Telegram ONLY for confirmed signal
     # --------------------------------------------------------
 
     telegram_entry(
@@ -1307,7 +1319,11 @@ def confirm_signal(
         f"🚨 CONFIRMED | "
         f"{symbol} | "
         f"{trade['side']} | "
-        f"Entry {trade['entry']}"
+        f"Entry {trade['entry']} | "
+        f"SL {trade['sl']} "
+        f"(-{trade['sl_pct']:.2f}%) | "
+        f"TP {trade['tp']} "
+        f"(+{trade['tp_pct']:.2f}%)"
     )
 
 
@@ -1331,7 +1347,7 @@ def process_signal(
     )
 
     # --------------------------------------------------------
-    # Prevent duplicate processing
+    # Prevent duplicate signal
     # --------------------------------------------------------
 
     if (
@@ -1357,10 +1373,6 @@ def process_signal(
 
     # --------------------------------------------------------
     # CONFIRMED SIGNAL
-    #
-    # No Telegram pending
-    # No Telegram near
-    # No startup Telegram
     # --------------------------------------------------------
 
     confirm_signal(
@@ -1487,12 +1499,13 @@ def print_dashboard():
     stats = get_statistics()
 
     print()
+
     print(
         "=" * 65
     )
 
     print(
-        "📡 CRYPTO UT BOT SCANNER v3.0"
+        "📡 CRYPTO UT BOT SCANNER v3.1"
     )
 
     print(
@@ -1567,8 +1580,10 @@ def print_dashboard():
                 f"  {symbol} | "
                 f"{trade['side']} | "
                 f"Entry {fmt(trade['entry'])} | "
-                f"SL {fmt(trade['sl'])} | "
-                f"TP {fmt(trade['tp'])}"
+                f"SL {fmt(trade['sl'])} "
+                f"(-{trade['sl_pct']:.2f}%) | "
+                f"TP {fmt(trade['tp'])} "
+                f"(+{trade['tp_pct']:.2f}%)"
             )
 
     else:
@@ -1599,7 +1614,7 @@ def run_scan():
     )
 
     # ========================================================
-    # LOAD NEW STATE / HISTORY
+    # LOAD
     # ========================================================
 
     load_state()
@@ -1672,7 +1687,7 @@ def run_scan():
     analysis_error = 0
 
     # ========================================================
-    # SCAN ALL COINS
+    # SCAN
     # ========================================================
 
     for symbol in symbols:
@@ -1700,7 +1715,7 @@ def run_scan():
             )
 
             # ------------------------------------------------
-            # Current market price
+            # CURRENT PRICE
             # ------------------------------------------------
 
             current_price = safe_float(
@@ -1710,7 +1725,7 @@ def run_scan():
             )
 
             # ------------------------------------------------
-            # FIRST CHECK EXISTING TRADE
+            # EXISTING TRADE
             # ------------------------------------------------
 
             check_open_trade(
@@ -1719,7 +1734,7 @@ def run_scan():
             )
 
             # ------------------------------------------------
-            # THEN CHECK NEW SIGNAL
+            # NEW SIGNAL
             # ------------------------------------------------
 
             signal = (
