@@ -47,7 +47,7 @@ jobs:
 
 
       # ============================================================
-      # SHOW CURRENT STATE FILES
+      # SHOW FILES
       # ============================================================
       - name: Check scanner files
         run: |
@@ -59,7 +59,7 @@ jobs:
           ls -la
 
           echo "=========================================="
-          echo "Scanner state files:"
+          echo "State files:"
           echo "=========================================="
 
           ls -la \
@@ -70,7 +70,7 @@ jobs:
 
 
       # ============================================================
-      # RUN SCANNER
+      # RUN ONE COMPLETE SCAN
       # ============================================================
       - name: Run scanner
         env:
@@ -102,7 +102,7 @@ jobs:
             2>/dev/null || true
 
           echo "=========================================="
-          echo "Staged changes:"
+          echo "Changes to commit:"
           echo "=========================================="
 
           git diff --cached --stat
