@@ -13,9 +13,23 @@
       "rr": 1.0,
       "status": "OPEN",
       "opened_at": "2026-09-05 06:11:50 UTC"
+    },
+    "AAVE/USD:USD": {
+      "symbol": "AAVE/USD:USD",
+      "side": "LONG",
+      "signal_time": "2026-09-05 06:40:00+00:00",
+      "confirmation_time": "2026-09-05 06:48:40 UTC",
+      "entry": 130.06,
+      "sl": 129.46756027714548,
+      "tp": 130.65243972285452,
+      "risk_pct": 0.4555126271371073,
+      "rr": 1.0,
+      "status": "OPEN",
+      "opened_at": "2026-09-05 06:48:40 UTC"
     }
   },
   "last_processed_candle": {
-    "GMT/USD:USD": "2026-09-05 06:05:00+00:00"
+    "GMT/USD:USD": "2026-09-05 06:05:00+00:00",
+    "AAVE/USD:USD": "2026-09-05 06:40:00+00:00"
   }
 }
