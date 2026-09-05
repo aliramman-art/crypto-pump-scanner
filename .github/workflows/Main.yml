@@ -11,47 +11,57 @@ permissions:
 
 jobs:
   scan:
-    runs-on: ubuntu-latest
 
-    timeout-minutes: 10
+    runs-on: ubuntu-latest
 
     steps:
 
-      # ============================================================
-      # CHECKOUT
-      # ============================================================
+      # ==========================================
+      # 1. Checkout
+      # ==========================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
-      # ============================================================
-      # PYTHON
-      # ============================================================
+      # ==========================================
+      # 2. Python
+      # ==========================================
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ============================================================
-      # INSTALL
-      # ============================================================
+      # ==========================================
+      # 3. Install packages
+      # ==========================================
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install ccxt pandas numpy requests
 
-      # ============================================================
-      # CHECK FILES
-      # ============================================================
+      # ==========================================
+      # 4. Check files
+      # ==========================================
+
       - name: Check files
         run: |
           echo "======================================"
-          echo "CHECKING FILES"
+          echo "CHECKING PROJECT"
           echo "======================================"
 
+          echo ""
+          echo "Current directory:"
           pwd
+
+          echo ""
+          echo "Files:"
           ls -la
+
+          echo ""
+          echo "Workflows:"
+          ls -la .github/workflows || true
 
           echo ""
 
@@ -60,95 +70,100 @@ jobs:
             exit 1
           fi
 
-          echo "scanner.py FOUND"
+          echo "OK: scanner.py FOUND"
 
           echo ""
           echo "Python:"
           python --version
 
           echo ""
-          echo "Installed packages:"
-          pip show ccxt pandas numpy requests
+          echo "CCXT:"
+          python -c "import ccxt; print(ccxt.__version__)"
 
-      # ============================================================
-      # TELEGRAM CHECK
-      # ============================================================
+          echo ""
+          echo "Pandas:"
+          python -c "import pandas; print(pandas.__version__)"
+
+          echo ""
+          echo "NumPy:"
+          python -c "import numpy; print(numpy.__version__)"
+
+          echo ""
+          echo "Requests:"
+          python -c "import requests; print(requests.__version__)"
+
+      # ==========================================
+      # 5. Telegram test
+      # ==========================================
+
       - name: Test Telegram
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
         run: |
+
           echo "======================================"
           echo "TELEGRAM TEST"
           echo "======================================"
+
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "ERROR: TELEGRAM_BOT_TOKEN is empty"
+            exit 1
+          fi
+
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "ERROR: TELEGRAM_CHAT_ID is empty"
+            exit 1
+          fi
 
           RESPONSE=$(curl -sS \
             --max-time 20 \
             --get \
             --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
-            --data-urlencode "text=🧪 UT Bot Scanner - GitHub Actions connection test" \
+            --data-urlencode "text=🧪 Crypto UT Bot Scanner - Telegram test OK" \
             "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage")
 
+          echo ""
+          echo "Telegram response:"
           echo "$RESPONSE"
 
           if echo "$RESPONSE" | grep -q '"ok":true'; then
-            echo "Telegram: OK"
+            echo ""
+            echo "TELEGRAM: OK"
           else
-            echo "Telegram: FAILED"
+            echo ""
+            echo "TELEGRAM: FAILED"
             exit 1
           fi
 
-      # ============================================================
-      # SHOW STATE
-      # ============================================================
-      - name: Show previous state
-        run: |
-          echo "======================================"
-          echo "PREVIOUS STATE"
-          echo "======================================"
+      # ==========================================
+      # 6. Run scanner
+      # ==========================================
 
-          if [ -f utbot_state.json ]; then
-            cat utbot_state.json
-          else
-            echo "No utbot_state.json"
-          fi
-
-          echo ""
-
-          if [ -f utbot_trade_history.json ]; then
-            cat utbot_trade_history.json
-          else
-            echo "No utbot_trade_history.json"
-          fi
-
-          echo ""
-
-          if [ -f .utbot_15m_reset_done ]; then
-            echo "15M RESET MARKER: EXISTS"
-          else
-            echo "15M RESET MARKER: NOT FOUND"
-          fi
-
-      # ============================================================
-      # RUN SCANNER
-      # ============================================================
-            - name: Run scanner
+      - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           PYTHONUNBUFFERED: "1"
 
         run: |
+
           echo "======================================"
           echo "STARTING SCANNER"
           echo "======================================"
 
+          echo ""
+          echo "UTC time:"
           date -u
 
           echo ""
-          echo "Python version:"
+          echo "Python:"
           python --version
+
+          echo ""
+          echo "Scanner file:"
+          ls -lh scanner.py
 
           echo ""
           echo "Running scanner.py ..."
@@ -165,71 +180,20 @@ jobs:
 
           exit $EXIT_CODE
 
-      # ============================================================
-      # SHOW FINAL STATE
-      # ============================================================
-      - name: Show final state
+      # ==========================================
+      # 7. Finish
+      # ==========================================
+
+      - name: Finish
         if: always()
         run: |
+
           echo "======================================"
-          echo "FINAL STATE"
-          echo "======================================"
-
-          echo ""
-          echo "utbot_state.json"
-          echo "--------------------------------------"
-
-          if [ -f utbot_state.json ]; then
-            cat utbot_state.json
-          else
-            echo "NOT FOUND"
-          fi
-
-          echo ""
-          echo "utbot_trade_history.json"
-          echo "--------------------------------------"
-
-          if [ -f utbot_trade_history.json ]; then
-            cat utbot_trade_history.json
-          else
-            echo "NOT FOUND"
-          fi
-
-          echo ""
-          echo ".utbot_15m_reset_done"
-          echo "--------------------------------------"
-
-          if [ -f .utbot_15m_reset_done ]; then
-            cat .utbot_15m_reset_done
-          else
-            echo "NOT FOUND"
-          fi
-
-      # ============================================================
-      # COMMIT STATE
-      # ============================================================
-      - name: Commit scanner state
-        if: always()
-        run: |
-          echo "======================================"
-          echo "SAVING STATE"
+          echo "WORKFLOW FINISHED"
           echo "======================================"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add utbot_state.json 2>/dev/null || true
-          git add utbot_trade_history.json 2>/dev/null || true
-          git add .utbot_15m_reset_done 2>/dev/null || true
+          date -u
 
           echo ""
           echo "Git status:"
           git status --short
-
-          if git diff --cached --quiet; then
-            echo "No state changes."
-          else
-            git commit -m "Update 15M UT Bot scanner state"
-            git push
-            echo "State saved successfully."
-          fi
