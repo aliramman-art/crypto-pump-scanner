@@ -9,252 +9,91 @@ on:
 permissions:
   contents: write
 
-# ============================================================
-# جلوگیری از اجرای همزمان چند اسکن
-# ============================================================
-
 concurrency:
-  group: crypto-ut-bot-scanner
+  group: ut-bot-scanner
   cancel-in-progress: false
 
 jobs:
-
   scan:
-
     runs-on: ubuntu-latest
 
     steps:
 
-      # ======================================================
-      # 1. CHECKOUT
-      # ======================================================
-
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # ======================================================
-      # 2. PYTHON
-      # ======================================================
 
+      # ============================================================
+      # PYTHON
+      # ============================================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ======================================================
-      # 3. INSTALL DEPENDENCIES
-      # ======================================================
 
+      # ============================================================
+      # INSTALL DEPENDENCIES
+      # ============================================================
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ccxt pandas numpy requests
+          pip install ccxt pandas requests
 
-      # ======================================================
-      # 4. CHECK PROJECT
-      # ======================================================
 
-      - name: Check files
+      # ============================================================
+      # SHOW CURRENT STATE FILES
+      # ============================================================
+      - name: Check scanner files
         run: |
-
-          echo "======================================"
-          echo "CHECKING PROJECT"
-          echo "======================================"
-
-          echo ""
-          echo "Current directory:"
+          echo "=========================================="
+          echo "Repository:"
           pwd
+          echo "=========================================="
 
-          echo ""
-          echo "Repository files:"
           ls -la
 
-          echo ""
-          echo "Workflow files:"
-          ls -la .github/workflows || true
+          echo "=========================================="
+          echo "Scanner state files:"
+          echo "=========================================="
 
-          echo ""
-
-          if [ ! -f scanner.py ]; then
-            echo "ERROR: scanner.py NOT FOUND"
-            exit 1
-          fi
-
-          echo "OK: scanner.py FOUND"
-
-          echo ""
-          echo "Python:"
-          python --version
-
-          echo ""
-          echo "CCXT:"
-          python -c "import ccxt; print(ccxt.__version__)"
-
-          echo ""
-          echo "Pandas:"
-          python -c "import pandas; print(pandas.__version__)"
-
-          echo ""
-          echo "NumPy:"
-          python -c "import numpy; print(numpy.__version__)"
-
-          echo ""
-          echo "Requests:"
-          python -c "import requests; print(requests.__version__)"
-
-          echo ""
-          echo "======================================"
-          echo "STATE FILES BEFORE SCAN"
-          echo "======================================"
-
-          ls -lh \
+          ls -la \
             ut_bot_state.json \
             ut_bot_trade_history.json \
             ut_bot_reset_done.txt \
             2>/dev/null || true
 
-      # ======================================================
-      # 5. RUN SCANNER
-      #
-      # scanner.py دارای LOOP بی‌نهایت است.
-      #
-      # بنابراین حدود 4 دقیقه و 30 ثانیه اجرا می‌شود
-      # و سپس Workflow به مرحله ذخیره State می‌رود.
-      #
-      # این باعث می‌شود هر اجرای 5 دقیقه‌ای GitHub Actions
-      # State و History را Commit کند.
-      # ======================================================
 
+      # ============================================================
+      # RUN SCANNER
+      # ============================================================
       - name: Run scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PYTHONUNBUFFERED: "1"
-
         run: |
+          python -u scanner.py
 
-          echo "======================================"
-          echo "STARTING CRYPTO UT BOT SCANNER"
-          echo "======================================"
 
-          echo ""
-          echo "UTC time:"
-          date -u
-
-          echo ""
-          echo "Python:"
-          python --version
-
-          echo ""
-          echo "Scanner:"
-          ls -lh scanner.py
-
-          echo ""
-          echo "Starting scanner.py ..."
-          echo ""
-
-          set +e
-
-          timeout --signal=SIGTERM --kill-after=15s 270s \
-            python -u scanner.py
-
-          EXIT_CODE=$?
-
-          echo ""
-          echo "======================================"
-          echo "SCANNER EXIT CODE: $EXIT_CODE"
-          echo "======================================"
-
-          # --------------------------------------------------
-          # timeout = 124
-          #
-          # این خروج طبیعی Workflow است چون scanner.py
-          # عمداً Loop بی‌نهایت دارد.
-          # --------------------------------------------------
-
-          if [ "$EXIT_CODE" -eq 124 ]; then
-
-            echo ""
-            echo "Scanner reached scheduled runtime limit."
-            echo "This is expected."
-
-          elif [ "$EXIT_CODE" -eq 143 ]; then
-
-            echo ""
-            echo "Scanner terminated by timeout."
-            echo "This is expected."
-
-          elif [ "$EXIT_CODE" -ne 0 ]; then
-
-            echo ""
-            echo "ERROR: scanner.py failed."
-
-            exit "$EXIT_CODE"
-
-          else
-
-            echo ""
-            echo "Scanner exited normally."
-
-          fi
-
-      # ======================================================
-      # 6. SHOW STATE
-      # ======================================================
-
-      - name: Inspect scanner state
-        if: always()
-        run: |
-
-          echo "======================================"
-          echo "SCANNER STATE AFTER RUN"
-          echo "======================================"
-
-          echo ""
-          echo "Files:"
-
-          ls -lh \
-            ut_bot_state.json \
-            ut_bot_trade_history.json \
-            ut_bot_reset_done.txt \
-            2>/dev/null || true
-
-          echo ""
-          echo "Git status:"
-
-          git status --short
-
-          echo ""
-          echo "State file preview:"
-
-          if [ -f ut_bot_state.json ]; then
-            cat ut_bot_state.json
-          else
-            echo "ut_bot_state.json not found."
-          fi
-
-      # ======================================================
-      # 7. SAVE STATE / HISTORY
-      # ======================================================
-
+      # ============================================================
+      # SAVE STATE / HISTORY
+      # ============================================================
       - name: Save scanner state
         if: always()
         run: |
-
-          echo "======================================"
-          echo "SAVING SCANNER STATE"
-          echo "======================================"
-
-          echo ""
-          echo "Configuring Git..."
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          echo ""
-          echo "Adding state files..."
+          echo "=========================================="
+          echo "Git status:"
+          echo "=========================================="
+
+          git status --short
 
           git add \
             ut_bot_state.json \
@@ -262,66 +101,26 @@ jobs:
             ut_bot_reset_done.txt \
             2>/dev/null || true
 
-          echo ""
+          echo "=========================================="
           echo "Staged changes:"
+          echo "=========================================="
 
-          git status --short
-
-          # --------------------------------------------------
-          # اگر تغییری وجود نداشت
-          # --------------------------------------------------
+          git diff --cached --stat
 
           if git diff --cached --quiet; then
-
-            echo ""
-            echo "NO STATE CHANGES TO COMMIT."
-
+            echo "No state changes to commit."
           else
-
-            echo ""
-            echo "COMMITTING SCANNER STATE..."
-
             git commit -m "Update UT Bot scanner state"
-
-            echo ""
-            echo "PUSHING STATE TO REPOSITORY..."
-
             git push
-
-            echo ""
-            echo "STATE SAVED SUCCESSFULLY."
-
           fi
 
-      # ======================================================
-      # 8. FINAL
-      # ======================================================
 
+      # ============================================================
+      # FINISH
+      # ============================================================
       - name: Finish
         if: always()
         run: |
-
-          echo "======================================"
-          echo "WORKFLOW FINISHED"
-          echo "======================================"
-
-          date -u
-
-          echo ""
-          echo "Final Git status:"
-
-          git status --short
-
-          echo ""
-          echo "Final state files:"
-
-          ls -lh \
-            ut_bot_state.json \
-            ut_bot_trade_history.json \
-            ut_bot_reset_done.txt \
-            2>/dev/null || true
-
-          echo ""
-          echo "======================================"
-          echo "CRYPTO UT BOT SCANNER COMPLETE"
-          echo "======================================"
+          echo "=========================================="
+          echo "UT Bot Scanner workflow finished."
+          echo "=========================================="
