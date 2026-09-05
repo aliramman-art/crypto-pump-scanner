@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO UT BOT SCANNER v4.0
+# CRYPTO UT BOT SCANNER v4.1
 # Kraken Futures
 # 15M CLOSED CANDLES
 # UT Bot
@@ -9,6 +9,13 @@
 # TELEGRAM ONLY CONFIRMED SIGNALS
 # PERSISTENT STATE + HISTORY
 # ONE-TIME RESET
+#
+# v4.1 FIX:
+# - Fast bulk ticker loading
+# - Kraken request timeouts
+# - Per-symbol scan logging
+# - Safe fallback for ticker discovery
+# - Prevent scanner hanging indefinitely
 # ============================================================
 
 import os
@@ -19,6 +26,7 @@ import requests
 import ccxt
 import pandas as pd
 import numpy as np
+
 from datetime import datetime, timezone
 
 
@@ -42,8 +50,25 @@ HISTORY_FILE = "utbot_trade_history.json"
 
 RESET_MARKER = ".utbot_15m_reset_done"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Request settings
+KRAKEN_TIMEOUT_MS = 30000
+TELEGRAM_TIMEOUT = 20
+
+# Safety limit for fallback ticker requests
+MAX_FALLBACK_TICKERS = 100
+
+
+# ============================================================
+# TELEGRAM ENV
+# ============================================================
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN"
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID"
+)
 
 
 # ============================================================
@@ -51,7 +76,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 # ============================================================
 
 open_trades = {}
+
 trade_history = []
+
 processed_signals = {}
 
 
@@ -61,7 +88,7 @@ processed_signals = {}
 
 exchange = ccxt.krakenfutures({
     "enableRateLimit": True,
-    "timeout": 30000
+    "timeout": KRAKEN_TIMEOUT_MS
 })
 
 
@@ -70,7 +97,10 @@ exchange = ccxt.krakenfutures({
 # ============================================================
 
 def now_utc():
-    return datetime.now(timezone.utc).strftime(
+
+    return datetime.now(
+        timezone.utc
+    ).strftime(
         "%Y-%m-%d %H:%M:%S UTC"
     )
 
@@ -79,29 +109,42 @@ def now_utc():
 # HELPERS
 # ============================================================
 
-def safe_float(value, default=0.0):
+def safe_float(
+    value,
+    default=0.0
+):
+
     try:
+
         return float(value)
+
     except Exception:
+
         return default
 
 
 def fmt(value):
+
     value = safe_float(value)
 
     if value == 0:
+
         return "0"
 
     if abs(value) >= 1000:
+
         return f"{value:,.2f}"
 
     if abs(value) >= 1:
+
         return f"{value:.4f}"
 
     if abs(value) >= 0.01:
+
         return f"{value:.6f}"
 
     if abs(value) >= 0.0001:
+
         return f"{value:.8f}"
 
     return f"{value:.10f}"
@@ -114,15 +157,23 @@ def fmt(value):
 def telegram_send(message):
 
     if not TELEGRAM_BOT_TOKEN:
-        print("❌ TELEGRAM_BOT_TOKEN is missing.")
+
+        print(
+            "❌ TELEGRAM_BOT_TOKEN is missing."
+        )
+
         return False
 
     if not TELEGRAM_CHAT_ID:
-        print("❌ TELEGRAM_CHAT_ID is missing.")
+
+        print(
+            "❌ TELEGRAM_CHAT_ID is missing."
+        )
+
         return False
 
     url = (
-        f"https://api.telegram.org/bot"
+        "https://api.telegram.org/bot"
         f"{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
@@ -138,11 +189,12 @@ def telegram_send(message):
         response = requests.post(
             url,
             json=payload,
-            timeout=20
+            timeout=TELEGRAM_TIMEOUT
         )
 
         print(
-            f"📨 Telegram HTTP: {response.status_code}"
+            f"📨 Telegram HTTP: "
+            f"{response.status_code}"
         )
 
         if response.ok:
@@ -151,11 +203,14 @@ def telegram_send(message):
 
             if data.get("ok") is True:
 
-                print("✅ Telegram message sent.")
+                print(
+                    "✅ Telegram message sent."
+                )
+
                 return True
 
             print(
-                "❌ Telegram API rejected message:",
+                "❌ Telegram API rejected:",
                 data
             )
 
@@ -182,9 +237,13 @@ def telegram_send(message):
 
 def get_statistics():
 
-    open_count = len(open_trades)
+    open_count = len(
+        open_trades
+    )
 
-    closed_count = len(trade_history)
+    closed_count = len(
+        trade_history
+    )
 
     wins = sum(
         1
@@ -201,8 +260,10 @@ def get_statistics():
     if closed_count > 0:
 
         win_rate = (
-            wins / closed_count
-        ) * 100
+            wins
+            / closed_count
+            * 100
+        )
 
     else:
 
@@ -210,7 +271,10 @@ def get_statistics():
 
     total_profit = sum(
         safe_float(
-            trade.get("pnl_pct")
+            trade.get(
+                "pnl_pct",
+                0
+            )
         )
         for trade in trade_history
     )
@@ -234,9 +298,12 @@ def load_state():
     global open_trades
     global processed_signals
 
-    if not os.path.exists(STATE_FILE):
+    if not os.path.exists(
+        STATE_FILE
+    ):
 
         open_trades = {}
+
         processed_signals = {}
 
         return
@@ -251,7 +318,10 @@ def load_state():
 
             data = json.load(f)
 
-        if isinstance(data, dict):
+        if isinstance(
+            data,
+            dict
+        ):
 
             open_trades = data.get(
                 "open_trades",
@@ -266,6 +336,7 @@ def load_state():
         else:
 
             open_trades = {}
+
             processed_signals = {}
 
     except Exception as e:
@@ -276,6 +347,7 @@ def load_state():
         )
 
         open_trades = {}
+
         processed_signals = {}
 
 
@@ -292,8 +364,13 @@ def save_state():
 
     try:
 
+        temp_file = (
+            STATE_FILE
+            + ".tmp"
+        )
+
         with open(
-            STATE_FILE,
+            temp_file,
             "w",
             encoding="utf-8"
         ) as f:
@@ -304,6 +381,11 @@ def save_state():
                 ensure_ascii=False,
                 indent=2
             )
+
+        os.replace(
+            temp_file,
+            STATE_FILE
+        )
 
     except Exception as e:
 
@@ -321,7 +403,9 @@ def load_history():
 
     global trade_history
 
-    if not os.path.exists(HISTORY_FILE):
+    if not os.path.exists(
+        HISTORY_FILE
+    ):
 
         trade_history = []
 
@@ -337,7 +421,10 @@ def load_history():
 
             data = json.load(f)
 
-        if isinstance(data, list):
+        if isinstance(
+            data,
+            list
+        ):
 
             trade_history = data
 
@@ -363,8 +450,13 @@ def save_history():
 
     try:
 
+        temp_file = (
+            HISTORY_FILE
+            + ".tmp"
+        )
+
         with open(
-            HISTORY_FILE,
+            temp_file,
             "w",
             encoding="utf-8"
         ) as f:
@@ -375,6 +467,11 @@ def save_history():
                 ensure_ascii=False,
                 indent=2
             )
+
+        os.replace(
+            temp_file,
+            HISTORY_FILE
+        )
 
     except Exception as e:
 
@@ -390,10 +487,17 @@ def save_history():
 
 def reset_once():
 
-    if os.path.exists(RESET_MARKER):
+    global open_trades
+    global trade_history
+    global processed_signals
+
+    if os.path.exists(
+        RESET_MARKER
+    ):
 
         print(
-            "♻️ Existing 15M state will be preserved."
+            "♻️ Existing 15M state "
+            "will be preserved."
         )
 
         return
@@ -403,21 +507,25 @@ def reset_once():
     )
 
     print(
-        "   Resetting old state and history..."
+        "   Resetting old state "
+        "and history..."
     )
 
-    global open_trades
-    global trade_history
-    global processed_signals
-
     open_trades = {}
+
     trade_history = []
+
     processed_signals = {}
 
     try:
 
-        if os.path.exists(STATE_FILE):
-            os.remove(STATE_FILE)
+        if os.path.exists(
+            STATE_FILE
+        ):
+
+            os.remove(
+                STATE_FILE
+            )
 
     except Exception as e:
 
@@ -428,8 +536,13 @@ def reset_once():
 
     try:
 
-        if os.path.exists(HISTORY_FILE):
-            os.remove(HISTORY_FILE)
+        if os.path.exists(
+            HISTORY_FILE
+        ):
+
+            os.remove(
+                HISTORY_FILE
+            )
 
     except Exception as e:
 
@@ -439,6 +552,7 @@ def reset_once():
         )
 
     save_state()
+
     save_history()
 
     try:
@@ -450,7 +564,8 @@ def reset_once():
         ) as f:
 
             f.write(
-                f"15M initialized: {now_utc()}\n"
+                f"15M initialized: "
+                f"{now_utc()}\n"
             )
 
     except Exception as e:
@@ -471,6 +586,13 @@ def reset_once():
 
 def fetch_ohlcv(symbol):
 
+    print(
+        f"   📡 Fetching "
+        f"{TIMEFRAME} candles..."
+    )
+
+    started = time.time()
+
     try:
 
         data = exchange.fetch_ohlcv(
@@ -479,10 +601,16 @@ def fetch_ohlcv(symbol):
             limit=OHLCV_LIMIT
         )
 
+        elapsed = (
+            time.time()
+            - started
+        )
+
         if not data:
 
             print(
-                f"⚠️ {symbol}: empty OHLCV"
+                f"   ⚠️ {symbol}: "
+                f"empty OHLCV"
             )
 
             return None
@@ -522,13 +650,29 @@ def fetch_ohlcv(symbol):
             drop=True
         )
 
+        print(
+            f"   ✅ OHLCV OK "
+            f"({len(df)} candles, "
+            f"{elapsed:.2f}s)"
+        )
+
         return df
 
     except Exception as e:
 
+        elapsed = (
+            time.time()
+            - started
+        )
+
         print(
-            f"❌ OHLCV error {symbol}: "
-            f"{repr(e)}"
+            f"   ❌ OHLCV ERROR "
+            f"{symbol} "
+            f"after {elapsed:.2f}s:"
+        )
+
+        print(
+            f"      {repr(e)}"
         )
 
         return None
@@ -544,12 +688,16 @@ def calculate_atr(
 ):
 
     high = df["high"]
+
     low = df["low"]
+
     close = df["close"]
 
     prev_close = close.shift(1)
 
-    tr1 = high - low
+    tr1 = (
+        high - low
+    )
 
     tr2 = (
         high - prev_close
@@ -590,7 +738,8 @@ def calculate_utbot(df):
     )
 
     df["nLoss"] = (
-        UT_KEY * df["ATR"]
+        UT_KEY
+        * df["ATR"]
     )
 
     close = df["close"].to_numpy(
@@ -606,11 +755,15 @@ def calculate_utbot(df):
         dtype=float
     )
 
-    for i in range(len(df)):
+    for i in range(
+        len(df)
+    ):
 
         if i == 0:
 
-            trailing_stop[i] = close[i]
+            trailing_stop[i] = (
+                close[i]
+            )
 
             continue
 
@@ -620,7 +773,8 @@ def calculate_utbot(df):
 
         if (
             close[i] > prev_stop
-            and close[i - 1] > prev_stop
+            and
+            close[i - 1] > prev_stop
         ):
 
             trailing_stop[i] = max(
@@ -630,7 +784,8 @@ def calculate_utbot(df):
 
         elif (
             close[i] < prev_stop
-            and close[i - 1] < prev_stop
+            and
+            close[i - 1] < prev_stop
         ):
 
             trailing_stop[i] = min(
@@ -638,7 +793,9 @@ def calculate_utbot(df):
                 close[i] + nloss[i]
             )
 
-        elif close[i] > prev_stop:
+        elif (
+            close[i] > prev_stop
+        ):
 
             trailing_stop[i] = (
                 close[i] - nloss[i]
@@ -650,14 +807,19 @@ def calculate_utbot(df):
                 close[i] + nloss[i]
             )
 
-    df["TrailingStop"] = trailing_stop
+    df["TrailingStop"] = (
+        trailing_stop
+    )
 
     position = np.zeros(
         len(df),
         dtype=int
     )
 
-    for i in range(1, len(df)):
+    for i in range(
+        1,
+        len(df)
+    ):
 
         if (
             close[i - 1]
@@ -681,7 +843,9 @@ def calculate_utbot(df):
 
         else:
 
-            position[i] = position[i - 1]
+            position[i] = (
+                position[i - 1]
+            )
 
     df["Position"] = position
 
@@ -704,12 +868,11 @@ def get_signal(df):
 
         return None
 
-    df = calculate_utbot(df)
+    df = calculate_utbot(
+        df
+    )
 
-    # ========================================================
-    # ONLY CLOSED CANDLES
-    # ========================================================
-
+    # Only closed candles
     current = df.iloc[-2]
 
     previous = df.iloc[-3]
@@ -753,9 +916,11 @@ def get_signal(df):
     # ========================================================
 
     long_signal = (
-        previous_close <= previous_stop
+        previous_close
+        <= previous_stop
         and
-        current_close > current_stop
+        current_close
+        > current_stop
     )
 
     # ========================================================
@@ -763,9 +928,11 @@ def get_signal(df):
     # ========================================================
 
     short_signal = (
-        previous_close >= previous_stop
+        previous_close
+        >= previous_stop
         and
-        current_close < current_stop
+        current_close
+        < current_stop
     )
 
     if long_signal:
@@ -806,13 +973,13 @@ def create_trade(
         signal["atr"]
     )
 
-    if entry <= 0 or atr <= 0:
+    if (
+        entry <= 0
+        or
+        atr <= 0
+    ):
 
         return None
-
-    # ========================================================
-    # LONG
-    # ========================================================
 
     if signal["side"] == "LONG":
 
@@ -829,10 +996,6 @@ def create_trade(
             entry
             + risk * RR
         )
-
-    # ========================================================
-    # SHORT
-    # ========================================================
 
     else:
 
@@ -867,33 +1030,20 @@ def create_trade(
     )
 
     return {
-
         "symbol": symbol,
-
         "side": signal["side"],
-
         "timeframe": TIMEFRAME,
-
         "entry": entry,
-
         "sl": sl,
-
         "tp": tp,
-
         "atr": atr,
-
         "risk_pct": sl_pct,
-
         "sl_pct": sl_pct,
-
         "tp_pct": tp_pct,
-
         "rr": RR,
-
         "signal_candle": signal[
             "candle_time"
         ],
-
         "opened_at": now_utc()
     }
 
@@ -981,13 +1131,12 @@ def telegram_exit(
 
     stats = get_statistics()
 
-    if result == "TP":
-
-        title = "🟢 TAKE PROFIT"
-
-    else:
-
-        title = "🔴 STOP LOSS"
+    title = (
+        "🟢 TAKE PROFIT"
+        if result == "TP"
+        else
+        "🔴 STOP LOSS"
+    )
 
     message = (
 
@@ -1054,13 +1203,14 @@ def check_open_trade(
 
         return
 
-    trade = open_trades[symbol]
-
     if df is None or len(df) < 2:
 
         return
 
-    # آخرین کندل بسته‌شده
+    trade = open_trades[
+        symbol
+    ]
+
     candle = df.iloc[-2]
 
     high = safe_float(
@@ -1086,47 +1236,40 @@ def check_open_trade(
     side = trade["side"]
 
     result = None
-    exit_price = None
 
-    # ========================================================
-    # LONG
-    # ========================================================
+    exit_price = None
 
     if side == "LONG":
 
         if low <= sl:
 
             result = "SL"
+
             exit_price = sl
 
         elif high >= tp:
 
             result = "TP"
-            exit_price = tp
 
-    # ========================================================
-    # SHORT
-    # ========================================================
+            exit_price = tp
 
     else:
 
         if high >= sl:
 
             result = "SL"
+
             exit_price = sl
 
         elif low <= tp:
 
             result = "TP"
+
             exit_price = tp
 
     if result is None:
 
         return
-
-    # ========================================================
-    # PNL
-    # ========================================================
 
     if side == "LONG":
 
@@ -1162,10 +1305,6 @@ def check_open_trade(
 
         r_multiple = 0.0
 
-    # ========================================================
-    # FINALIZE
-    # ========================================================
-
     trade["exit"] = exit_price
 
     trade["closed_at"] = now_utc()
@@ -1180,9 +1319,12 @@ def check_open_trade(
         trade.copy()
     )
 
-    del open_trades[symbol]
+    del open_trades[
+        symbol
+    ]
 
     save_state()
+
     save_history()
 
     telegram_exit(
@@ -1217,36 +1359,32 @@ def process_signal(
         "candle_time"
     ]
 
-    # ========================================================
-    # PREVENT SAME CANDLE DUPLICATION
-    # ========================================================
-
-    if processed_signals.get(
-        symbol
-    ) == candle_time:
+    if (
+        processed_signals.get(
+            symbol
+        )
+        ==
+        candle_time
+    ):
 
         print(
-            f"⏭️ {symbol}: "
-            f"same candle already processed."
+            f"   ⏭️ {symbol}: "
+            f"same candle already "
+            f"processed."
         )
 
         return
 
-    # علامت‌گذاری همین کندل
     processed_signals[
         symbol
     ] = candle_time
 
     save_state()
 
-    # ========================================================
-    # ONE OPEN TRADE PER SYMBOL
-    # ========================================================
-
     if symbol in open_trades:
 
         print(
-            f"⏭️ {symbol}: "
+            f"   ⏭️ {symbol}: "
             f"open trade already exists."
         )
 
@@ -1259,31 +1397,38 @@ def process_signal(
 
     if trade is None:
 
+        print(
+            f"   ⚠️ {symbol}: "
+            f"could not create trade."
+        )
+
         return
 
-    open_trades[symbol] = trade
+    open_trades[
+        symbol
+    ] = trade
 
     save_state()
 
     print(
-        f"🚨 CONFIRMED "
+        f"   🚨 CONFIRMED "
         f"{trade['side']} "
         f"{symbol}"
     )
 
     print(
-        f"   Entry = "
+        f"      Entry = "
         f"{fmt(trade['entry'])}"
     )
 
     print(
-        f"   SL = "
+        f"      SL = "
         f"{fmt(trade['sl'])} "
         f"(-{trade['sl_pct']:.2f}%)"
     )
 
     print(
-        f"   TP = "
+        f"      TP = "
         f"{fmt(trade['tp'])} "
         f"(+{trade['tp_pct']:.2f}%)"
     )
@@ -1295,89 +1440,166 @@ def process_signal(
     if not sent:
 
         print(
-            f"⚠️ Telegram failed for "
-            f"{symbol}, but trade is stored."
+            f"   ⚠️ Telegram failed "
+            f"for {symbol}, "
+            f"but trade is stored."
         )
 
 
 # ============================================================
-# TOP 30 FUTURES
+# FILTER FUTURES MARKETS
+# ============================================================
+
+def get_candidate_symbols():
+
+    print(
+        "📡 Loading Kraken Futures markets..."
+    )
+
+    started = time.time()
+
+    markets = exchange.load_markets()
+
+    elapsed = (
+        time.time()
+        - started
+    )
+
+    candidates = []
+
+    for symbol, market in markets.items():
+
+        try:
+
+            if not market.get(
+                "active",
+                True
+            ):
+
+                continue
+
+            if not market.get(
+                "linear",
+                False
+            ):
+
+                continue
+
+            if market.get(
+                "quote"
+            ) != "USD":
+
+                continue
+
+            if market.get(
+                "settle"
+            ) != "USD":
+
+                continue
+
+            candidates.append(
+                symbol
+            )
+
+        except Exception:
+
+            continue
+
+    print(
+        f"📊 Found "
+        f"{len(candidates)} "
+        f"USD linear futures "
+        f"in {elapsed:.2f}s."
+    )
+
+    return candidates
+
+
+# ============================================================
+# GET TOP 30
 # ============================================================
 
 def get_top_symbols():
 
     try:
 
-        print(
-            "📡 Loading Kraken Futures markets..."
-        )
-
-        markets = exchange.load_markets()
-
-        candidates = []
-
-        for symbol, market in markets.items():
-
-            try:
-
-                if not market.get(
-                    "active",
-                    True
-                ):
-                    continue
-
-                if not market.get(
-                    "linear",
-                    False
-                ):
-                    continue
-
-                if market.get(
-                    "quote"
-                ) != "USD":
-                    continue
-
-                if market.get(
-                    "settle"
-                ) != "USD":
-                    continue
-
-                candidates.append(
-                    symbol
-                )
-
-            except Exception:
-                continue
-
-        print(
-            f"📊 Found "
-            f"{len(candidates)} "
-            f"USD linear futures."
+        candidates = (
+            get_candidate_symbols()
         )
 
         if not candidates:
 
+            print(
+                "❌ No futures candidates."
+            )
+
             return []
 
-        # ====================================================
-        # GET TICKERS
-        # ====================================================
+        print(
+            f"📡 Loading tickers "
+            f"for {len(candidates)} "
+            f"contracts..."
+        )
+
+        started = time.time()
 
         ranked = []
 
-        for symbol in candidates:
+        # ====================================================
+        # PRIMARY METHOD:
+        # ONE BULK REQUEST
+        # ====================================================
 
-            try:
+        try:
 
-                ticker = exchange.fetch_ticker(
+            tickers = (
+                exchange.fetch_tickers()
+            )
+
+            elapsed = (
+                time.time()
+                - started
+            )
+
+            print(
+                f"✅ Bulk tickers received "
+                f"in {elapsed:.2f}s."
+            )
+
+            for symbol in candidates:
+
+                ticker = tickers.get(
                     symbol
                 )
+
+                if not ticker:
+
+                    continue
 
                 quote_volume = safe_float(
                     ticker.get(
                         "quoteVolume"
                     )
                 )
+
+                if quote_volume <= 0:
+
+                    base_volume = safe_float(
+                        ticker.get(
+                            "baseVolume"
+                        )
+                    )
+
+                    last_price = safe_float(
+                        ticker.get(
+                            "last"
+                        )
+                    )
+
+                    quote_volume = (
+                        base_volume
+                        * last_price
+                    )
 
                 if quote_volume > 0:
 
@@ -1388,13 +1610,95 @@ def get_top_symbols():
                         )
                     )
 
-            except Exception as e:
+        except Exception as e:
 
-                print(
-                    f"⚠️ Ticker error "
-                    f"{symbol}: "
-                    f"{repr(e)}"
-                )
+            print(
+                "⚠️ Bulk ticker request "
+                "failed:"
+            )
+
+            print(
+                f"   {repr(e)}"
+            )
+
+        # ====================================================
+        # FALLBACK
+        # ====================================================
+
+        if not ranked:
+
+            print(
+                "⚠️ Using fallback "
+                "ticker requests."
+            )
+
+            fallback_candidates = (
+                candidates[
+                    :MAX_FALLBACK_TICKERS
+                ]
+            )
+
+            for index, symbol in enumerate(
+                fallback_candidates,
+                start=1
+            ):
+
+                try:
+
+                    print(
+                        f"   Ticker "
+                        f"[{index}/"
+                        f"{len(fallback_candidates)}] "
+                        f"{symbol}"
+                    )
+
+                    ticker = (
+                        exchange.fetch_ticker(
+                            symbol
+                        )
+                    )
+
+                    quote_volume = safe_float(
+                        ticker.get(
+                            "quoteVolume"
+                        )
+                    )
+
+                    if quote_volume <= 0:
+
+                        base_volume = safe_float(
+                            ticker.get(
+                                "baseVolume"
+                            )
+                        )
+
+                        last_price = safe_float(
+                            ticker.get(
+                                "last"
+                            )
+                        )
+
+                        quote_volume = (
+                            base_volume
+                            * last_price
+                        )
+
+                    if quote_volume > 0:
+
+                        ranked.append(
+                            (
+                                symbol,
+                                quote_volume
+                            )
+                        )
+
+                except Exception as e:
+
+                    print(
+                        f"   ⚠️ Ticker error "
+                        f"{symbol}: "
+                        f"{repr(e)}"
+                    )
 
         ranked.sort(
             key=lambda x: x[1],
@@ -1408,8 +1712,25 @@ def get_top_symbols():
         ]
 
         print(
-            f"🎯 Top {len(top)} symbols selected."
+            f"🎯 Top {len(top)} "
+            f"symbols selected."
         )
+
+        if top:
+
+            print(
+                "🏆 Selected symbols:"
+            )
+
+            for i, symbol in enumerate(
+                top,
+                start=1
+            ):
+
+                print(
+                    f"   {i:02d}. "
+                    f"{symbol}"
+                )
 
         return top
 
@@ -1434,12 +1755,13 @@ def print_dashboard():
     stats = get_statistics()
 
     print()
+
     print(
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     )
 
     print(
-        "📡 CRYPTO UT BOT SCANNER v4.0"
+        "📡 CRYPTO UT BOT SCANNER v4.1"
     )
 
     print(
@@ -1448,7 +1770,8 @@ def print_dashboard():
 
     print(
         f"🤖 UT Bot: "
-        f"Key {UT_KEY} / ATR {UT_ATR_PERIOD}"
+        f"Key {UT_KEY} / ATR "
+        f"{UT_ATR_PERIOD}"
     )
 
     print(
@@ -1513,25 +1836,26 @@ def print_dashboard():
 
 
 # ============================================================
-# MAIN
+# MAIN SCAN
 # ============================================================
 
 def run_scan():
 
-    global open_trades
-    global trade_history
-
     print()
+
     print(
-        "🚀 Starting CRYPTO UT BOT SCANNER v4.0"
+        "🚀 Starting "
+        "CRYPTO UT BOT SCANNER v4.1"
     )
 
     print(
-        f"⏱ Timeframe = {TIMEFRAME}"
+        f"⏱ Timeframe = "
+        f"{TIMEFRAME}"
     )
 
     print(
-        f"🎯 Top Coins = {TOP_COINS}"
+        f"🎯 Top Coins = "
+        f"{TOP_COINS}"
     )
 
     print(
@@ -1541,16 +1865,17 @@ def run_scan():
     print()
 
     # ========================================================
-    # ONE-TIME RESET
+    # RESET
     # ========================================================
 
     reset_once()
 
     # ========================================================
-    # LOAD PERSISTENT DATA
+    # LOAD STATE
     # ========================================================
 
     load_state()
+
     load_history()
 
     print(
@@ -1563,8 +1888,10 @@ def run_scan():
         f"{len(trade_history)}"
     )
 
+    print()
+
     # ========================================================
-    # TOP SYMBOLS
+    # TOP 30
     # ========================================================
 
     symbols = get_top_symbols()
@@ -1579,6 +1906,19 @@ def run_scan():
 
     print()
 
+    print(
+        "======================================"
+    )
+
+    print(
+        f"🔎 STARTING "
+        f"{len(symbols)}-SYMBOL SCAN"
+    )
+
+    print(
+        "======================================"
+    )
+
     # ========================================================
     # SCAN
     # ========================================================
@@ -1588,10 +1928,22 @@ def run_scan():
         start=1
     ):
 
+        print()
+
+        print(
+            "--------------------------------------"
+        )
+
         print(
             f"[{index}/{len(symbols)}] "
             f"🔎 {symbol}"
         )
+
+        print(
+            "--------------------------------------"
+        )
+
+        started = time.time()
 
         try:
 
@@ -1608,17 +1960,22 @@ def run_scan():
             ):
 
                 print(
-                    f"⚠️ {symbol}: "
+                    f"   ⚠️ {symbol}: "
                     f"not enough candles."
                 )
 
                 continue
 
             # =================================================
-            # CHECK EXISTING TRADE
+            # EXISTING TRADE
             # =================================================
 
             if symbol in open_trades:
+
+                print(
+                    "   📂 Checking "
+                    "existing trade..."
+                )
 
                 check_open_trade(
                     symbol,
@@ -1626,7 +1983,7 @@ def run_scan():
                 )
 
             # =================================================
-            # NEW CONFIRMED SIGNAL
+            # SIGNAL
             # =================================================
 
             signal = get_signal(
@@ -1636,7 +1993,7 @@ def run_scan():
             if signal:
 
                 print(
-                    f"🚨 {symbol}: "
+                    f"   🚨 {symbol}: "
                     f"{signal['side']} "
                     f"CONFIRMED"
                 )
@@ -1649,31 +2006,43 @@ def run_scan():
             else:
 
                 print(
-                    f"⚪ {symbol}: "
+                    f"   ⚪ {symbol}: "
                     f"no confirmed signal"
                 )
 
-            time.sleep(
-                exchange.rateLimit / 1000
+            elapsed = (
+                time.time()
+                - started
+            )
+
+            print(
+                f"   ⏱ Symbol scan time: "
+                f"{elapsed:.2f}s"
             )
 
         except Exception as e:
 
             print(
-                f"❌ {symbol} ERROR:"
+                f"   ❌ {symbol} ERROR:"
             )
 
             print(
-                repr(e)
+                f"      {repr(e)}"
             )
 
             traceback.print_exc()
+
+        # Small pause between symbols
+        time.sleep(
+            0.2
+        )
 
     # ========================================================
     # SAVE
     # ========================================================
 
     save_state()
+
     save_history()
 
     # ========================================================
@@ -1682,9 +2051,19 @@ def run_scan():
 
     print_dashboard()
 
+    print()
+
+    print(
+        "======================================"
+    )
+
     print(
         f"🕐 Scan finished: "
         f"{now_utc()}"
+    )
+
+    print(
+        "======================================"
     )
 
 
@@ -1697,6 +2076,12 @@ if __name__ == "__main__":
     try:
 
         run_scan()
+
+    except KeyboardInterrupt:
+
+        print(
+            "🛑 Scanner interrupted."
+        )
 
     except Exception as e:
 
