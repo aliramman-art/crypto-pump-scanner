@@ -1,4 +1,4 @@
-name: Crypto UT Bot Scanner
+name: Crypto Price Action Scanner
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: ut-bot-scanner
+  group: price-action-scanner
   cancel-in-progress: false
 
 jobs:
@@ -38,7 +38,7 @@ jobs:
 
 
       # ============================================================
-      # INSTALL DEPENDENCIES
+      # INSTALL
       # ============================================================
       - name: Install dependencies
         run: |
@@ -52,25 +52,24 @@ jobs:
       - name: Check scanner files
         run: |
           echo "=========================================="
-          echo "Repository:"
-          pwd
+          echo "PRICE ACTION SCANNER"
           echo "=========================================="
 
+          pwd
           ls -la
 
           echo "=========================================="
-          echo "State files:"
+          echo "STATE FILES"
           echo "=========================================="
 
           ls -la \
             ut_bot_state.json \
             ut_bot_trade_history.json \
-            ut_bot_reset_done.txt \
             2>/dev/null || true
 
 
       # ============================================================
-      # RUN ONE COMPLETE SCAN
+      # RUN SCANNER
       # ============================================================
       - name: Run scanner
         env:
@@ -81,7 +80,7 @@ jobs:
 
 
       # ============================================================
-      # SAVE STATE / HISTORY
+      # SAVE STATE
       # ============================================================
       - name: Save scanner state
         if: always()
@@ -90,7 +89,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           echo "=========================================="
-          echo "Git status:"
+          echo "GIT STATUS"
           echo "=========================================="
 
           git status --short
@@ -98,11 +97,10 @@ jobs:
           git add \
             ut_bot_state.json \
             ut_bot_trade_history.json \
-            ut_bot_reset_done.txt \
             2>/dev/null || true
 
           echo "=========================================="
-          echo "Changes to commit:"
+          echo "STAGED CHANGES"
           echo "=========================================="
 
           git diff --cached --stat
@@ -110,7 +108,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No state changes to commit."
           else
-            git commit -m "Update UT Bot scanner state"
+            git commit -m "Update price action scanner state"
             git push
           fi
 
@@ -122,5 +120,5 @@ jobs:
         if: always()
         run: |
           echo "=========================================="
-          echo "UT Bot Scanner workflow finished."
+          echo "PRICE ACTION SCANNER FINISHED"
           echo "=========================================="
