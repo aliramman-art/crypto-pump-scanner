@@ -290,6 +290,23 @@
       "closed_at": "2026-09-06T20:13:40.970801+00:00",
       "duration_seconds": 1440,
       "duration": "24m"
+    },
+    {
+      "id": "CRV/USD:USD_BUY_1788724710",
+      "symbol": "CRV/USD:USD",
+      "side": "BUY",
+      "entry": 0.3808,
+      "sl": 0.3754,
+      "tp": 0.38620000000000004,
+      "score": 87,
+      "opened_at": "2026-09-06T19:58:30.817606+00:00",
+      "result": "WIN",
+      "exit": 0.3876,
+      "pnl_pct": 1.4180672268907604,
+      "r": 1.0,
+      "closed_at": "2026-09-06T20:40:03.841439+00:00",
+      "duration_seconds": 2493,
+      "duration": "41m"
     }
   ]
 }
