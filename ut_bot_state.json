@@ -1,0 +1,18 @@
+{
+  "open": {
+    "NEAR/USD:USD_SELL_1788708511": {
+      "id": "NEAR/USD:USD_SELL_1788708511",
+      "symbol": "NEAR/USD:USD",
+      "side": "SELL",
+      "entry": 2.3596,
+      "sl": 2.4445,
+      "tp": 2.2746999999999997,
+      "score": 60,
+      "opened_at": "2026-09-06T15:28:31.037629+00:00"
+    }
+  },
+  "pending": {},
+  "last_signals": {
+    "NEAR/USD:USD:SELL": "2026-09-06T15:20:00+00:00"
+  }
+}
