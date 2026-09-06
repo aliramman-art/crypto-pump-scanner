@@ -20,21 +20,21 @@
       "score": 67,
       "opened_at": "2026-09-06T15:30:43.795850+00:00"
     },
-    "INJ/USD:USD_BUY_1788709325": {
-      "id": "INJ/USD:USD_BUY_1788709325",
-      "symbol": "INJ/USD:USD",
+    "BTC/USD:USD_BUY_1788710628": {
+      "id": "BTC/USD:USD_BUY_1788710628",
+      "symbol": "BTC/USD:USD",
       "side": "BUY",
-      "entry": 5.102,
-      "sl": 5.067,
-      "tp": 5.1370000000000005,
+      "entry": 79718.0,
+      "sl": 79596.0,
+      "tp": 79840.0,
       "score": 60,
-      "opened_at": "2026-09-06T15:42:05.121362+00:00"
+      "opened_at": "2026-09-06T16:03:48.998268+00:00"
     }
   },
-  "pending": {},
   "last_signals": {
     "NEAR/USD:USD:SELL": "2026-09-06T15:20:00+00:00",
     "ARB/USD:USD:SELL": "2026-09-06T15:25:00+00:00",
-    "INJ/USD:USD:BUY": "2026-09-06T15:35:00+00:00"
+    "INJ/USD:USD:BUY": "2026-09-06T15:35:00+00:00",
+    "BTC/USD:USD:BUY": "2026-09-06T15:55:00+00:00"
   }
 }
