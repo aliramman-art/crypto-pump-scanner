@@ -19,26 +19,26 @@
 #
 # TRADE MANAGEMENT
 # - MIN SCORE = 80
-# - MAX OPEN TRADES = 3
-# - If 3 trades are open -> NO NEW SIGNAL
-# - When a trade closes -> best eligible signal replaces it
-# - Score 80 IS VALID
-# - No pending trades
+# - MAX OPEN TRADES = 1
+# - While one trade is open:
+#       NO NEW SIGNAL
+# - After trade closes:
+#       next best Score >= 80 can replace it
 #
 # TELEGRAM
 # - Jalali date
 # - Tehran time
 # - Performance
-# - Open trades
+# - Open trade
 # - Duration
-# - SL percentage
-# - TP percentage
-# - LIVE market P&L
+# - Live market P&L
+# - SL / TP percentages
 #
 # IMPORTANT
 # - Signals use CLOSED 5M candles
 # - Live P&L uses CURRENT MARKET PRICE
-# - SL/TP closing logic uses CLOSED 5M candle
+# - SL/TP closing uses CLOSED 5M candle
+# - No pending trades
 # ============================================================
 
 import os
@@ -65,16 +65,24 @@ OHLCV_LIMIT = 100
 SWING_LEFT = 2
 SWING_RIGHT = 2
 
-# 80 IS VALID
-MIN_SCORE = 80
+# ============================================================
+# IMPORTANT:
+# 80 ITSELF IS ACCEPTED
+# ============================================================
 
-# Maximum simultaneous open trades
-MAX_OPEN_TRADES = 3
+MIN_SCORE = 80
 
 RR = 1.0
 
-STATE_FILE = "ut_bot_state.json"
-HISTORY_FILE = "ut_bot_trade_history.json"
+# ============================================================
+# ONLY ONE OPEN TRADE
+# ============================================================
+
+MAX_OPEN_TRADES = 1
+
+STATE_FILE = "price_action_state.json"
+
+HISTORY_FILE = "price_action_trade_history.json"
 
 TELEGRAM_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN"
@@ -182,11 +190,23 @@ if not isinstance(state, dict):
         "last_signals": {}
     }
 
+if not isinstance(
+    history,
+    dict
+):
+
+    history = {
+        "trades": []
+    }
+
 if "open" not in state:
     state["open"] = {}
 
 if "last_signals" not in state:
     state["last_signals"] = {}
+
+if "trades" not in history:
+    history["trades"] = []
 
 # Remove legacy pending section
 state.pop(
@@ -199,7 +219,10 @@ state.pop(
 # NUMBER FORMAT
 # ============================================================
 
-def fmt_number(value, decimals=2):
+def fmt_number(
+    value,
+    decimals=2
+):
 
     if value is None:
         return "-"
@@ -243,7 +266,10 @@ def fmt_price(price):
         return f"{price:.8f}"
 
 
-def fmt_pct(value, signed=False):
+def fmt_pct(
+    value,
+    signed=False
+):
 
     if value is None:
         return "-"
@@ -267,80 +293,65 @@ def fmt_pct(value, signed=False):
 # DURATION
 # ============================================================
 
-def parse_datetime(value):
+def calculate_duration(
+    opened_at
+):
 
-    if not value:
-        return None
+    if not opened_at:
+        return "0m"
 
     try:
 
-        dt = datetime.fromisoformat(
-            value
-        )
-
-        if dt.tzinfo is None:
-
-            dt = dt.replace(
-                tzinfo=timezone.utc
+        opened = datetime.fromisoformat(
+            opened_at.replace(
+                "Z",
+                "+00:00"
             )
-
-        return dt
-
-    except Exception:
-
-        return None
-
-
-def format_duration(
-    opened_at,
-    closed_at=None
-):
-
-    start = parse_datetime(
-        opened_at
-    )
-
-    if start is None:
-        return "-"
-
-    if closed_at:
-
-        end = parse_datetime(
-            closed_at
         )
 
-    else:
-
-        end = datetime.now(
+        now = datetime.now(
             timezone.utc
         )
 
-    if end is None:
-        return "-"
-
-    seconds = int(
-        max(
-            0,
+        seconds = int(
             (
-                end - start
+                now - opened
             ).total_seconds()
         )
-    )
 
-    minutes = seconds // 60
+        if seconds < 0:
+            seconds = 0
 
-    hours = minutes // 60
+        days = seconds // 86400
 
-    minutes = minutes % 60
+        hours = (
+            seconds % 86400
+        ) // 3600
 
-    if hours > 0:
+        minutes = (
+            seconds % 3600
+        ) // 60
 
-        return (
-            f"{hours}h "
-            f"{minutes}m"
-        )
+        if days > 0:
 
-    return f"{minutes}m"
+            return (
+                f"{days}d "
+                f"{hours}h "
+                f"{minutes}m"
+            )
+
+        if hours > 0:
+
+            return (
+                f"{hours}h "
+                f"{minutes}m"
+            )
+
+        return f"{minutes}m"
+
+    except Exception:
+
+        return "0m"
 
 
 # ============================================================
@@ -360,8 +371,7 @@ def gregorian_to_jalali(
 
     j_days_in_month = [
         31, 31, 31, 31, 31, 31,
-        30, 30, 30, 30, 30, 30,
-        29
+        30, 30, 30, 30, 30, 29
     ]
 
     gy2 = gy - 1600
@@ -397,13 +407,9 @@ def gregorian_to_jalali(
 
     g_day_no += gd2
 
-    j_day_no = (
-        g_day_no - 79
-    )
+    j_day_no = g_day_no - 79
 
-    j_np = (
-        j_day_no // 12053
-    )
+    j_np = j_day_no // 12053
 
     j_day_no %= 12053
 
@@ -581,6 +587,7 @@ def get_top_symbols():
                 "active",
                 True
             ):
+
                 continue
 
             if market.get(
@@ -594,10 +601,10 @@ def get_top_symbols():
                 ""
             )
 
-            if quote not in [
+            if quote not in (
                 "USD",
                 "USDT"
-            ]:
+            ):
 
                 continue
 
@@ -668,10 +675,8 @@ def get_top_symbols():
         if not ticker:
             continue
 
-        quote_volume = (
-            ticker.get(
-                "quoteVolume"
-            )
+        quote_volume = ticker.get(
+            "quoteVolume"
         )
 
         if quote_volume is None:
@@ -693,8 +698,7 @@ def get_top_symbols():
             ):
 
                 quote_volume = (
-                    base_volume
-                    * last
+                    base_volume * last
                 )
 
         if not quote_volume:
@@ -810,6 +814,7 @@ def fetch_ohlcv(symbol):
         df = df.iloc[:-1].copy()
 
         if len(df) < 30:
+
             return None
 
         return df
@@ -1024,9 +1029,9 @@ def market_structure(df):
         df["low"].iloc[l1]
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # BOS
-    # --------------------------------------------------------
+    # ========================================================
 
     bos = None
 
@@ -1046,9 +1051,9 @@ def market_structure(df):
 
         bos = "BEARISH"
 
-    # --------------------------------------------------------
+    # ========================================================
     # CHOCH
-    # --------------------------------------------------------
+    # ========================================================
 
     choch = None
 
@@ -1149,7 +1154,10 @@ def candle_confirmation(df):
 
     name = "NONE"
 
-    # Bullish engulfing
+    # ========================================================
+    # BULLISH ENGULFING
+    # ========================================================
+
     if (
         c["close"] > c["open"]
         and
@@ -1164,7 +1172,10 @@ def candle_confirmation(df):
         strength = 15
         name = "BULLISH ENGULFING"
 
-    # Bearish engulfing
+    # ========================================================
+    # BEARISH ENGULFING
+    # ========================================================
+
     elif (
         c["close"] < c["open"]
         and
@@ -1179,7 +1190,10 @@ def candle_confirmation(df):
         strength = 15
         name = "BEARISH ENGULFING"
 
-    # Strong bullish
+    # ========================================================
+    # STRONG BULLISH
+    # ========================================================
+
     elif (
         c["close"] > c["open"]
         and
@@ -1190,7 +1204,10 @@ def candle_confirmation(df):
         strength = 12
         name = "STRONG BULLISH"
 
-    # Strong bearish
+    # ========================================================
+    # STRONG BEARISH
+    # ========================================================
+
     elif (
         c["close"] < c["open"]
         and
@@ -1201,7 +1218,10 @@ def candle_confirmation(df):
         strength = 12
         name = "STRONG BEARISH"
 
-    # Bullish rejection
+    # ========================================================
+    # BULLISH REJECTION
+    # ========================================================
+
     elif (
         lower_wick > body * 1.5
         and
@@ -1212,7 +1232,10 @@ def candle_confirmation(df):
         strength = 10
         name = "BULLISH REJECTION"
 
-    # Bearish rejection
+    # ========================================================
+    # BEARISH REJECTION
+    # ========================================================
+
     elif (
         upper_wick > body * 1.5
         and
@@ -1303,12 +1326,8 @@ def detect_pullback(
     )
 
     return {
-        "bullish": (
-            bullish_pullback
-        ),
-        "bearish": (
-            bearish_pullback
-        ),
+        "bullish": bullish_pullback,
+        "bearish": bearish_pullback,
         "distance": min(
             abs(
                 close - support
@@ -1373,6 +1392,7 @@ def analyze_symbol(
     )
 
     if not structure:
+
         return None
 
     candle = candle_confirmation(
@@ -1389,14 +1409,16 @@ def analyze_symbol(
     )
 
     score_buy = 0
+
     score_sell = 0
 
     reasons_buy = []
+
     reasons_sell = []
 
-    # --------------------------------------------------------
+    # ========================================================
     # STRUCTURE
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         structure["structure"]
@@ -1422,9 +1444,9 @@ def analyze_symbol(
             "Bearish Structure"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # BOS
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         structure["bos"]
@@ -1450,9 +1472,9 @@ def analyze_symbol(
             "BOS"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # CHOCH
-    # --------------------------------------------------------
+    # ========================================================
 
     if (
         structure["choch"]
@@ -1478,9 +1500,9 @@ def analyze_symbol(
             "CHOCH"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # PULLBACK
-    # --------------------------------------------------------
+    # ========================================================
 
     if pullback["bullish"]:
 
@@ -1498,9 +1520,9 @@ def analyze_symbol(
             "Pullback"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # CANDLE
-    # --------------------------------------------------------
+    # ========================================================
 
     if candle["bullish"]:
 
@@ -1522,9 +1544,9 @@ def analyze_symbol(
             candle["name"]
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # VOLUME
-    # --------------------------------------------------------
+    # ========================================================
 
     score_buy += vol_points
 
@@ -1545,9 +1567,9 @@ def analyze_symbol(
             volume_reason
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # FINAL SCORE
-    # --------------------------------------------------------
+    # ========================================================
 
     score_buy = min(
         score_buy,
@@ -1575,17 +1597,13 @@ def analyze_symbol(
 
         reasons = reasons_sell
 
-    # --------------------------------------------------------
-    # ENTRY
-    # --------------------------------------------------------
-
     entry = float(
         df["close"].iloc[-1]
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # STRUCTURAL SL / TP
-    # --------------------------------------------------------
+    # ========================================================
 
     if side == "BUY":
 
@@ -1594,6 +1612,7 @@ def analyze_symbol(
         ]
 
         if sl >= entry:
+
             return None
 
         risk = (
@@ -1613,6 +1632,7 @@ def analyze_symbol(
         ]
 
         if sl <= entry:
+
             return None
 
         risk = (
@@ -1626,6 +1646,7 @@ def analyze_symbol(
         )
 
     if risk <= 0:
+
         return None
 
     risk_pct = (
@@ -1639,12 +1660,6 @@ def analyze_symbol(
 
         return None
 
-    candle_time = (
-        df[
-            "timestamp"
-        ].iloc[-1]
-    )
-
     return {
         "symbol": symbol,
         "side": side,
@@ -1656,10 +1671,7 @@ def analyze_symbol(
         "structure": structure,
         "candle": candle,
         "volume_ratio": vol_ratio,
-        "reasons": reasons,
-        "candle_time": (
-            candle_time.isoformat()
-        )
+        "reasons": reasons
     }
 
 
@@ -1751,6 +1763,7 @@ def calculate_live_pnl(
 ):
 
     if current_price is None:
+
         return None
 
     try:
@@ -1768,6 +1781,7 @@ def calculate_live_pnl(
         return None
 
     if entry <= 0:
+
         return None
 
     if trade["side"] == "BUY":
@@ -1826,13 +1840,17 @@ def trade_levels_percent(
     if trade["side"] == "BUY":
 
         sl_pct = (
-            (sl - entry)
+            (
+                sl - entry
+            )
             /
             entry
         ) * 100
 
         tp_pct = (
-            (tp - entry)
+            (
+                tp - entry
+            )
             /
             entry
         ) * 100
@@ -1840,13 +1858,17 @@ def trade_levels_percent(
     else:
 
         sl_pct = (
-            (entry - sl)
+            (
+                entry - sl
+            )
             /
             entry
         ) * 100
 
         tp_pct = (
-            (entry - tp)
+            (
+                entry - tp
+            )
             /
             entry
         ) * 100
@@ -1862,13 +1884,13 @@ def update_open_trades(
     results
 ):
 
-    if not state.get("open"):
+    if not state.get(
+        "open"
+    ):
 
-        return 0
+        return
 
     remaining = {}
-
-    closed_count = 0
 
     for trade_id, trade in (
         state["open"].items()
@@ -1888,9 +1910,9 @@ def update_open_trades(
 
             continue
 
-        # ----------------------------------------------------
+        # ====================================================
         # CLOSED 5M CANDLE
-        # ----------------------------------------------------
+        # ====================================================
 
         price = result[
             "structure"
@@ -1918,9 +1940,9 @@ def update_open_trades(
 
         r = 0
 
-        # ----------------------------------------------------
+        # ====================================================
         # LONG
-        # ----------------------------------------------------
+        # ====================================================
 
         if side == "BUY":
 
@@ -1929,7 +1951,9 @@ def update_open_trades(
                 outcome = "LOSS"
 
                 pnl_pct = (
-                    (sl - entry)
+                    (
+                        sl - entry
+                    )
                     /
                     entry
                 ) * 100
@@ -1941,16 +1965,18 @@ def update_open_trades(
                 outcome = "WIN"
 
                 pnl_pct = (
-                    (tp - entry)
+                    (
+                        tp - entry
+                    )
                     /
                     entry
                 ) * 100
 
                 r = RR
 
-        # ----------------------------------------------------
+        # ====================================================
         # SHORT
-        # ----------------------------------------------------
+        # ====================================================
 
         else:
 
@@ -1959,7 +1985,9 @@ def update_open_trades(
                 outcome = "LOSS"
 
                 pnl_pct = (
-                    (entry - sl)
+                    (
+                        entry - sl
+                    )
                     /
                     entry
                 ) * 100
@@ -1971,24 +1999,20 @@ def update_open_trades(
                 outcome = "WIN"
 
                 pnl_pct = (
-                    (entry - tp)
+                    (
+                        entry - tp
+                    )
                     /
                     entry
                 ) * 100
 
                 r = RR
 
-        # ----------------------------------------------------
+        # ====================================================
         # CLOSE
-        # ----------------------------------------------------
+        # ====================================================
 
         if outcome:
-
-            closed_at = (
-                datetime.now(
-                    timezone.utc
-                ).isoformat()
-            )
 
             closed = dict(
                 trade
@@ -2007,15 +2031,16 @@ def update_open_trades(
             closed["r"] = r
 
             closed["closed_at"] = (
-                closed_at
+                datetime.now(
+                    timezone.utc
+                ).isoformat()
             )
 
             closed["duration"] = (
-                format_duration(
+                calculate_duration(
                     trade.get(
                         "opened_at"
-                    ),
-                    closed_at
+                    )
                 )
             )
 
@@ -2025,15 +2050,11 @@ def update_open_trades(
                 closed
             )
 
-            closed_count += 1
-
             print(
                 f"CLOSED "
                 f"{symbol} "
                 f"{side} "
-                f"{outcome} "
-                f"Duration="
-                f"{closed['duration']}"
+                f"{outcome}"
             )
 
         else:
@@ -2044,8 +2065,6 @@ def update_open_trades(
 
     state["open"] = remaining
 
-    return closed_count
-
 
 # ============================================================
 # CREATE SIGNAL
@@ -2055,20 +2074,34 @@ def create_signal(
     result
 ):
 
-    # --------------------------------------------------------
-    # HARD OPEN LIMIT
-    # --------------------------------------------------------
+    # ========================================================
+    # HARD LIMIT
+    # ========================================================
 
-    if (
-        len(
-            state["open"]
+    if len(
+        state.get(
+            "open",
+            {}
         )
-        >=
-        MAX_OPEN_TRADES
-    ):
+    ) >= MAX_OPEN_TRADES:
 
         print(
             "MAX OPEN TRADES REACHED"
+        )
+
+        return False
+
+    # ========================================================
+    # SCORE FILTER
+    # ========================================================
+
+    if result["score"] < MIN_SCORE:
+
+        print(
+            f"REJECTED "
+            f"{result['symbol']} "
+            f"score={result['score']} "
+            f"< {MIN_SCORE}"
         )
 
         return False
@@ -2081,32 +2114,11 @@ def create_signal(
         "side"
     ]
 
-    score = int(
-        result["score"]
-    )
-
-    # --------------------------------------------------------
-    # SCORE FILTER
-    # --------------------------------------------------------
-
-    if score < MIN_SCORE:
-
-        print(
-            f"REJECTED "
-            f"{symbol} "
-            f"Score={score} "
-            f"< {MIN_SCORE}"
-        )
-
-        return False
-
-    # --------------------------------------------------------
-    # COOLDOWN
-    # --------------------------------------------------------
-
     candle_time = (
-        result.get(
-            "candle_time",
+        result[
+            "structure"
+        ].get(
+            "last_candle_time",
             ""
         )
     )
@@ -2163,39 +2175,9 @@ def create_signal(
 
             pass
 
-    # --------------------------------------------------------
-    # PREVENT DUPLICATE OPEN POSITION
-    # --------------------------------------------------------
-
-    for trade in (
-        state["open"].values()
-    ):
-
-        if (
-            trade.get(
-                "symbol"
-            )
-            ==
-            symbol
-            and
-            trade.get(
-                "side"
-            )
-            ==
-            side
-        ):
-
-            print(
-                f"DUPLICATE OPEN "
-                f"{symbol} "
-                f"{side}"
-            )
-
-            return False
-
-    # --------------------------------------------------------
+    # ========================================================
     # CREATE TRADE
-    # --------------------------------------------------------
+    # ========================================================
 
     trade_id = (
         f"{symbol}_"
@@ -2203,28 +2185,23 @@ def create_signal(
         f"{int(time.time())}"
     )
 
-    opened_at = (
-        datetime.now(
-            timezone.utc
-        ).isoformat()
-    )
-
     trade = {
         "id": trade_id,
         "symbol": symbol,
         "side": side,
-        "entry": result[
-            "entry"
-        ],
-        "sl": result[
-            "sl"
-        ],
-        "tp": result[
-            "tp"
-        ],
-        "score": score,
-        "opened_at": opened_at,
-        "signal_candle": candle_time
+        "entry": result["entry"],
+        "sl": result["sl"],
+        "tp": result["tp"],
+        "score": result["score"],
+        "reasons": result.get(
+            "reasons",
+            []
+        ),
+        "opened_at": (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        )
     }
 
     state[
@@ -2240,106 +2217,13 @@ def create_signal(
     ] = candle_time
 
     print(
-        f"NEW TRADE "
+        f"NEW SIGNAL "
         f"{symbol} "
         f"{side} "
-        f"Score={score}"
+        f"SCORE {result['score']}"
     )
 
     return True
-
-
-# ============================================================
-# FIND BEST ELIGIBLE SIGNAL
-# ============================================================
-
-def find_best_signal(
-    candidates
-):
-
-    # --------------------------------------------------------
-    # OPEN LIMIT
-    # --------------------------------------------------------
-
-    available_slots = (
-        MAX_OPEN_TRADES
-        -
-        len(
-            state["open"]
-        )
-    )
-
-    if available_slots <= 0:
-
-        print(
-            "NO AVAILABLE TRADE SLOT"
-        )
-
-        return None
-
-    eligible = []
-
-    for candidate in candidates:
-
-        # Score 80 IS VALID
-        if (
-            candidate["score"]
-            >=
-            MIN_SCORE
-        ):
-
-            # Don't duplicate same symbol/side
-            duplicate = False
-
-            for trade in (
-                state["open"].values()
-            ):
-
-                if (
-                    trade.get(
-                        "symbol"
-                    )
-                    ==
-                    candidate[
-                        "symbol"
-                    ]
-                    and
-                    trade.get(
-                        "side"
-                    )
-                    ==
-                    candidate[
-                        "side"
-                    ]
-                ):
-
-                    duplicate = True
-                    break
-
-            if duplicate:
-                continue
-
-            eligible.append(
-                candidate
-            )
-
-    if not eligible:
-
-        return None
-
-    # Highest score first
-    eligible.sort(
-        key=lambda x: (
-            x["score"],
-            x.get(
-                "volume_ratio",
-                0
-            )
-        ),
-        reverse=True
-    )
-
-    return eligible[0]
 
 
 # ============================================================
@@ -2372,8 +2256,7 @@ def clean_symbol(symbol):
 def build_report(
     results,
     events,
-    elapsed,
-    closed_count=0
+    elapsed
 ):
 
     perf = performance()
@@ -2384,14 +2267,12 @@ def build_report(
 
     lines = []
 
-    # --------------------------------------------------------
+    # ========================================================
     # HEADER
-    # --------------------------------------------------------
+    # ========================================================
 
     lines.append(
-        "📡 "
-        "<b>CRYPTO PRICE ACTION "
-        "REPORT</b>"
+        "📡 <b>CRYPTO PRICE ACTION REPORT</b>"
     )
 
     lines.append(
@@ -2399,13 +2280,11 @@ def build_report(
     )
 
     lines.append(
-        f"⏱ <b>5m CLOSED | "
-        f"TOP {TOP_N}</b>"
+        f"⏱ <b>5m CLOSED | TOP {TOP_N}</b>"
     )
 
     lines.append(
-        "🤖 <b>PRICE ACTION | "
-        "RR 1:1</b>"
+        "🤖 <b>PRICE ACTION | RR 1:1</b>"
     )
 
     lines.append(
@@ -2422,9 +2301,9 @@ def build_report(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # PERFORMANCE
-    # --------------------------------------------------------
+    # ========================================================
 
     lines.append(
         "📊 <b>PERFORMANCE</b>"
@@ -2443,20 +2322,13 @@ def build_report(
         f"R {perf['r']:+.2f}"
     )
 
-    if closed_count:
-
-        lines.append(
-            f"🔄 Closed this run: "
-            f"{closed_count}"
-        )
-
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # NEW SIGNALS
-    # --------------------------------------------------------
+    # ========================================================
 
     lines.append(
         f"⚡ <b>THIS RUN: "
@@ -2492,20 +2364,20 @@ def build_report(
                 event["tp"]
             )
 
-            if (
-                event["side"]
-                ==
-                "BUY"
-            ):
+            if event["side"] == "BUY":
 
                 sl_pct = (
-                    (sl - entry)
+                    (
+                        sl - entry
+                    )
                     /
                     entry
                 ) * 100
 
                 tp_pct = (
-                    (tp - entry)
+                    (
+                        tp - entry
+                    )
                     /
                     entry
                 ) * 100
@@ -2513,13 +2385,17 @@ def build_report(
             else:
 
                 sl_pct = (
-                    (entry - sl)
+                    (
+                        entry - sl
+                    )
                     /
                     entry
                 ) * 100
 
                 tp_pct = (
-                    (entry - tp)
+                    (
+                        entry - tp
+                    )
                     /
                     entry
                 ) * 100
@@ -2558,12 +2434,10 @@ def build_report(
                 f"{event['score']}/100"
             )
 
-            reasons = (
-                " + ".join(
-                    event[
-                        "reasons"
-                    ][:4]
-                )
+            reasons = " + ".join(
+                event[
+                    "reasons"
+                ][:4]
             )
 
             lines.append(
@@ -2572,29 +2446,13 @@ def build_report(
 
     else:
 
-        if (
-            len(
-                state["open"]
-            )
-            >=
-            MAX_OPEN_TRADES
-        ):
+        lines.append(
+            "⚪ None"
+        )
 
-            lines.append(
-                "🔒 No new signal "
-                "(3/3 open)"
-            )
-
-        else:
-
-            lines.append(
-                f"⚪ No eligible "
-                f"signal ({MIN_SCORE}+)"
-            )
-
-    # --------------------------------------------------------
-    # OPEN TRADES
-    # --------------------------------------------------------
+    # ========================================================
+    # OPEN TRADE
+    # ========================================================
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
@@ -2628,9 +2486,9 @@ def build_report(
                 "🔴"
             )
 
-            # ------------------------------------------------
-            # CURRENT MARKET PRICE
-            # ------------------------------------------------
+            # =================================================
+            # CURRENT PRICE
+            # =================================================
 
             current_price = (
                 get_current_market_price(
@@ -2656,17 +2514,13 @@ def build_report(
 
                 else:
 
-                    current_price = (
-                        float(
-                            trade[
-                                "entry"
-                            ]
-                        )
+                    current_price = float(
+                        trade["entry"]
                     )
 
-            # ------------------------------------------------
+            # =================================================
             # LIVE PNL
-            # ------------------------------------------------
+            # =================================================
 
             live_pnl = (
                 calculate_live_pnl(
@@ -2704,7 +2558,7 @@ def build_report(
                 live_pnl_text = "-"
 
             duration = (
-                format_duration(
+                calculate_duration(
                     trade.get(
                         "opened_at"
                     )
@@ -2721,38 +2575,24 @@ def build_report(
 
             lines.append(
                 f"💰 Entry: "
-                f"{fmt_price("
-                    trade['entry']
-                )}"
+                f"{fmt_price(trade['entry'])}"
             )
 
             lines.append(
                 f"📍 Now: "
-                f"{fmt_price("
-                    current_price
-                )}"
+                f"{fmt_price(current_price)}"
             )
 
             lines.append(
                 f"🛑 SL: "
-                f"{fmt_price("
-                    trade['sl']
-                )} "
-                f"({fmt_pct("
-                    sl_pct,
-                    True
-                )})"
+                f"{fmt_price(trade['sl'])} "
+                f"({fmt_pct(sl_pct, True)})"
             )
 
             lines.append(
                 f"🎯 TP: "
-                f"{fmt_price("
-                    trade['tp']
-                )} "
-                f"({fmt_pct("
-                    tp_pct,
-                    True
-                )})"
+                f"{fmt_price(trade['tp'])} "
+                f"({fmt_pct(tp_pct, True)})"
             )
 
             lines.append(
@@ -2762,16 +2602,13 @@ def build_report(
             )
 
             lines.append(
-                f"📊 Score: "
-                f"{trade.get("
-                    "score",
-                    0
-                )}/100"
+                f"⏱ Duration: "
+                f"<b>{duration}</b>"
             )
 
             lines.append(
-                f"⏱ Duration: "
-                f"{duration}"
+                f"📊 Score: "
+                f"{trade.get('score', 0)}/100"
             )
 
     else:
@@ -2780,9 +2617,14 @@ def build_report(
             "⚪ None"
         )
 
-    # --------------------------------------------------------
+        lines.append(
+            "🔎 Waiting for "
+            f"Score ≥ {MIN_SCORE}"
+        )
+
+    # ========================================================
     # SCAN TIME
-    # --------------------------------------------------------
+    # ========================================================
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
@@ -2830,13 +2672,17 @@ def main():
     )
 
     print(
-        "MAX OPEN:",
+        "MAX OPEN TRADES:",
         MAX_OPEN_TRADES
     )
 
     print(
         "=" * 60
     )
+
+    # ========================================================
+    # TOP SYMBOLS
+    # ========================================================
 
     symbols = get_top_symbols()
 
@@ -2855,9 +2701,9 @@ def main():
 
     candidates = []
 
-    # --------------------------------------------------------
-    # SCAN
-    # --------------------------------------------------------
+    # ========================================================
+    # SCAN TOP 30
+    # ========================================================
 
     for index, symbol in enumerate(
         symbols,
@@ -2874,7 +2720,14 @@ def main():
         )
 
         if df is None:
+
             continue
+
+        candle_time = (
+            df[
+                "timestamp"
+            ].iloc[-1]
+        )
 
         analysis = analyze_symbol(
             symbol,
@@ -2882,7 +2735,14 @@ def main():
         )
 
         if not analysis:
+
             continue
+
+        analysis[
+            "structure"
+        ][
+            "last_candle_time"
+        ] = candle_time.isoformat()
 
         results[
             symbol
@@ -2892,120 +2752,114 @@ def main():
             analysis
         )
 
-    # --------------------------------------------------------
-    # UPDATE OPEN TRADES
-    #
-    # IMPORTANT:
-    # This happens BEFORE looking for
-    # replacement signals.
-    #
-    # Therefore if one trade closes,
-    # its slot becomes available immediately.
-    # --------------------------------------------------------
+    # ========================================================
+    # UPDATE EXISTING OPEN TRADE
+    # ========================================================
 
-    closed_count = (
-        update_open_trades(
-            results
-        )
+    update_open_trades(
+        results
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SORT ALL CANDIDATES
-    # --------------------------------------------------------
+    # ========================================================
 
     candidates.sort(
-        key=lambda x: (
-            x["score"],
-            x.get(
-                "volume_ratio",
-                0
-            )
-        ),
+        key=lambda x: x["score"],
         reverse=True
     )
 
-    # --------------------------------------------------------
-    # NEW SIGNALS
+    # ========================================================
+    # SHOW TOP CANDIDATES IN LOG
+    # ========================================================
+
+    print(
+        "\nTOP CANDIDATES:"
+    )
+
+    for candidate in candidates[:10]:
+
+        print(
+            candidate["symbol"],
+            candidate["side"],
+            candidate["score"]
+        )
+
+    # ========================================================
+    # NEW SIGNAL LOGIC
     #
-    # Fill available slots.
-    #
-    # Example:
-    # OPEN = 2
-    # -> maximum 1 new trade
-    #
-    # OPEN = 1
-    # -> maximum 2 new trades
-    #
-    # OPEN = 3
-    # -> no new trades
-    # --------------------------------------------------------
+    # ONLY IF THERE IS NO OPEN TRADE
+    # ========================================================
 
     events = []
 
-    available_slots = (
-        MAX_OPEN_TRADES
-        -
-        len(
-            state["open"]
+    open_count = len(
+        state.get(
+            "open",
+            {}
         )
     )
 
-    if available_slots > 0:
+    if open_count >= MAX_OPEN_TRADES:
 
-        # We can fill every free slot,
-        # but only with eligible 80+ signals.
-        #
-        # Since the scanner runs once per cycle,
-        # this allows:
-        # OPEN 0 -> up to 3 signals
-        # OPEN 1 -> up to 2 signals
-        # OPEN 2 -> up to 1 signal
-        #
-        # Each candidate is checked again
-        # by create_signal().
+        print(
+            "OPEN TRADE EXISTS."
+        )
+
+        print(
+            "NO NEW SIGNAL WILL BE CREATED."
+        )
+
+    else:
+
+        best = None
+
+        # ----------------------------------------------------
+        # Find best candidate with Score >= 80
+        # ----------------------------------------------------
 
         for candidate in candidates:
 
             if (
-                len(
-                    events
-                )
-                >=
-                available_slots
-            ):
-
-                break
-
-            if (
                 candidate["score"]
-                <
+                >=
                 MIN_SCORE
             ):
 
-                continue
+                best = candidate
 
-            created = (
-                create_signal(
-                    candidate
-                )
+                break
+
+        if best:
+
+            print(
+                "BEST QUALIFIED:",
+                best["symbol"],
+                best["side"],
+                best["score"]
+            )
+
+            created = create_signal(
+                best
             )
 
             if created:
 
                 events.append(
-                    candidate
+                    best
                 )
 
-    else:
+        else:
 
-        print(
-            "OPEN LIMIT REACHED: "
-            "NO NEW SIGNALS"
-        )
+            print(
+                f"NO SIGNAL "
+                f"WITH SCORE >= "
+                f"{MIN_SCORE}"
+            )
 
-    # --------------------------------------------------------
-    # SAVE
-    # --------------------------------------------------------
+    # ========================================================
+    # SAVE STATE
+    # ========================================================
 
     save_json(
         STATE_FILE,
@@ -3017,9 +2871,9 @@ def main():
         history
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # REPORT
-    # --------------------------------------------------------
+    # ========================================================
 
     elapsed = (
         time.time()
@@ -3030,8 +2884,7 @@ def main():
     report = build_report(
         results,
         events,
-        elapsed,
-        closed_count
+        elapsed
     )
 
     print("")
@@ -3074,11 +2927,8 @@ if __name__ == "__main__":
 
             send_telegram(
                 "🚨 "
-                "<b>PRICE ACTION "
-                "SCANNER ERROR</b>\n\n"
-                f"<code>"
-                f"{str(e)[:1000]}"
-                f"</code>"
+                "<b>PRICE ACTION SCANNER ERROR</b>\n\n"
+                f"<code>{str(e)[:1000]}</code>"
             )
 
         except Exception:
