@@ -16,14 +16,15 @@
 # - TP / RR
 # - Score 0-100
 #
-# Telegram:
-# - Persian/Jalali date
-# - Iran time
-# - Persian numbers
+# TELEGRAM
+# - Jalali date
+# - Tehran time
+# - English numbers
 # - Performance
-# - Pending
-# - Open
-# - Closed
+# - Open trades
+# - SL percentage
+# - TP percentage
+# - Live P&L percentage
 #
 # GitHub Actions:
 # scanner.py runs once per workflow
@@ -36,7 +37,9 @@ import time
 import requests
 import ccxt
 import pandas as pd
-from datetime import datetime, timezone, timedelta
+
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 
 # ============================================================
@@ -65,6 +68,8 @@ REQUEST_TIMEOUT = 20
 
 SIGNAL_COOLDOWN_CANDLES = 3
 
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
+
 
 # ============================================================
 # EXCHANGE
@@ -81,22 +86,41 @@ exchange = ccxt.krakenfutures({
 # ============================================================
 
 def load_json(path, default):
+
     try:
+
         if not os.path.exists(path):
             return default
 
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+        with open(
+            path,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
+            data = json.load(f)
+
+        return data
 
     except Exception as e:
-        print(f"JSON LOAD ERROR {path}: {e}")
+
+        print(
+            f"JSON LOAD ERROR {path}: {e}"
+        )
+
         return default
 
 
 def save_json(path, data):
+
     tmp = path + ".tmp"
 
-    with open(tmp, "w", encoding="utf-8") as f:
+    with open(
+        tmp,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
         json.dump(
             data,
             f,
@@ -104,7 +128,10 @@ def save_json(path, data):
             indent=2
         )
 
-    os.replace(tmp, path)
+    os.replace(
+        tmp,
+        path
+    )
 
 
 # ============================================================
@@ -115,7 +142,6 @@ state = load_json(
     STATE_FILE,
     {
         "open": {},
-        "pending": {},
         "last_signals": {}
     }
 )
@@ -127,55 +153,96 @@ history = load_json(
     }
 )
 
+# Compatibility with old state files
+if not isinstance(state, dict):
+    state = {
+        "open": {},
+        "last_signals": {}
+    }
+
+if "open" not in state:
+    state["open"] = {}
+
+if "last_signals" not in state:
+    state["last_signals"] = {}
+
+# Remove old pending section if it exists
+state.pop("pending", None)
+
 
 # ============================================================
-# PERSIAN NUMBERS
+# NUMBER FORMAT
 # ============================================================
 
-def fa_num(value):
+def fmt_number(value, decimals=2):
+
     if value is None:
-        return ""
+        return "-"
 
-    text = str(value)
+    try:
 
-    table = str.maketrans(
-        "0123456789.-+%",
-        "۰۱۲۳۴۵۶۷۸۹٫−+٪"
-    )
+        return f"{float(value):.{decimals}f}"
 
-    return text.translate(table)
+    except Exception:
+
+        return str(value)
 
 
 def fmt_price(price):
+
     if price is None:
         return "-"
 
+    try:
+
+        price = float(price)
+
+    except Exception:
+
+        return "-"
+
     if price >= 1000:
-        s = f"{price:.2f}"
+        return f"{price:.2f}"
 
     elif price >= 1:
-        s = f"{price:.4f}"
+        return f"{price:.4f}"
 
     elif price >= 0.01:
-        s = f"{price:.5f}"
+        return f"{price:.5f}"
 
     else:
-        s = f"{price:.8f}"
-
-    return fa_num(s)
+        return f"{price:.8f}"
 
 
-def fmt_pct(value):
-    return fa_num(
-        f"{value:+.2f}%"
-    )
+def fmt_pct(value, signed=False):
+
+    if value is None:
+        return "-"
+
+    try:
+
+        value = float(value)
+
+    except Exception:
+
+        return "-"
+
+    if signed:
+
+        return f"{value:+.2f}%"
+
+    return f"{value:.2f}%"
 
 
 # ============================================================
 # JALALI DATE
 # ============================================================
 
-def gregorian_to_jalali(gy, gm, gd):
+def gregorian_to_jalali(
+    gy,
+    gm,
+    gd
+):
 
     g_days_in_month = [
         31, 28, 31, 30, 31, 30,
@@ -184,8 +251,7 @@ def gregorian_to_jalali(gy, gm, gd):
 
     j_days_in_month = [
         31, 31, 31, 31, 31, 31,
-        30, 30, 30, 30, 30, 30,
-        29
+        30, 30, 30, 30, 30, 29
     ]
 
     gy2 = gy - 1600
@@ -200,16 +266,23 @@ def gregorian_to_jalali(gy, gm, gd):
     )
 
     for i in range(gm2):
-        g_day_no += g_days_in_month[i]
+
+        g_day_no += (
+            g_days_in_month[i]
+        )
 
     if (
         gm2 > 1
-        and gy % 4 == 0
-        and (
+        and
+        gy % 4 == 0
+        and
+        (
             gy % 100 != 0
-            or gy % 400 == 0
+            or
+            gy % 400 == 0
         )
     ):
+
         g_day_no += 1
 
     g_day_no += gd2
@@ -261,17 +334,10 @@ def gregorian_to_jalali(gy, gm, gd):
 
 def iran_now():
 
-    iran_tz = timezone(
-        timedelta(
-            hours=3,
-            minutes=30
-        )
-    )
-
     return datetime.now(
         timezone.utc
     ).astimezone(
-        iran_tz
+        TEHRAN_TZ
     )
 
 
@@ -285,7 +351,7 @@ def jalali_datetime_string():
         now.day
     )
 
-    text = (
+    return (
         f"{jy:04d}/"
         f"{jm:02d}/"
         f"{jd:02d} "
@@ -293,8 +359,6 @@ def jalali_datetime_string():
         f"{now.minute:02d}:"
         f"{now.second:02d}"
     )
-
-    return fa_num(text)
 
 
 # ============================================================
@@ -343,7 +407,10 @@ def send_telegram(text):
         )
 
         if not response.ok:
-            print(response.text)
+
+            print(
+                response.text
+            )
 
         return response.ok
 
@@ -368,6 +435,7 @@ def get_top_symbols():
     )
 
     try:
+
         markets = exchange.load_markets()
 
     except Exception as e:
@@ -401,10 +469,10 @@ def get_top_symbols():
                 ""
             )
 
-            if quote not in (
+            if quote not in [
                 "USD",
                 "USDT"
-            ):
+            ]:
                 continue
 
             base = market.get(
@@ -415,9 +483,12 @@ def get_top_symbols():
             if not base:
                 continue
 
-            candidates.append(symbol)
+            candidates.append(
+                symbol
+            )
 
         except Exception:
+
             continue
 
     print(
@@ -450,16 +521,21 @@ def get_top_symbols():
                     )
                 )
 
-                time.sleep(0.05)
+                time.sleep(
+                    0.05
+                )
 
             except Exception:
-                continue
+
+                pass
 
     ranked = []
 
     for symbol in candidates:
 
-        ticker = tickers.get(symbol)
+        ticker = tickers.get(
+            symbol
+        )
 
         if not ticker:
             continue
@@ -485,7 +561,9 @@ def get_top_symbols():
             ):
 
                 quote_volume = (
-                    base_volume * last
+                    base_volume
+                    *
+                    last
                 )
 
         if not quote_volume:
@@ -498,6 +576,7 @@ def get_top_symbols():
             )
 
         except Exception:
+
             continue
 
         ranked.append(
@@ -518,7 +597,9 @@ def get_top_symbols():
         in ranked[:TOP_N]
     ]
 
-    print("TOP symbols:")
+    print(
+        "TOP symbols:"
+    )
 
     for i, symbol in enumerate(
         result,
@@ -552,6 +633,7 @@ def fetch_ohlcv(symbol):
             or
             len(data) < 30
         ):
+
             return None
 
         df = pd.DataFrame(
@@ -566,19 +648,21 @@ def fetch_ohlcv(symbol):
             ]
         )
 
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            unit="ms",
-            utc=True
+        df["timestamp"] = (
+            pd.to_datetime(
+                df["timestamp"],
+                unit="ms",
+                utc=True
+            )
         )
 
-        for col in (
+        for col in [
             "open",
             "high",
             "low",
             "close",
             "volume"
-        ):
+        ]:
 
             df[col] = pd.to_numeric(
                 df[col],
@@ -589,10 +673,7 @@ def fetch_ohlcv(symbol):
             inplace=True
         )
 
-        if len(df) < 3:
-            return None
-
-        # آخرین کندل ممکن است هنوز باز باشد
+        # Remove currently forming candle
         df = df.iloc[:-1].copy()
 
         if len(df) < 30:
@@ -635,14 +716,14 @@ def find_swings(df):
 
         left_high = max(
             h[
-                i - SWING_LEFT:i
+                i-SWING_LEFT:i
             ]
         )
 
         right_high = max(
             h[
-                i + 1:
-                i + 1 + SWING_RIGHT
+                i+1:
+                i+1+SWING_RIGHT
             ]
         )
 
@@ -656,14 +737,14 @@ def find_swings(df):
 
         left_low = min(
             l[
-                i - SWING_LEFT:i
+                i-SWING_LEFT:i
             ]
         )
 
         right_low = min(
             l[
-                i + 1:
-                i + 1 + SWING_RIGHT
+                i+1:
+                i+1+SWING_RIGHT
             ]
         )
 
@@ -693,6 +774,7 @@ def market_structure(df):
         or
         len(swing_lows) < 2
     ):
+
         return None
 
     h1 = swing_highs[-1]
@@ -719,48 +801,41 @@ def market_structure(df):
 
     structure = "RANGE"
 
-    last_swing_high = float(
-        df["high"].iloc[h1]
-    )
-
-    previous_swing_high = float(
-        df["high"].iloc[h0]
-    )
-
-    last_swing_low = float(
-        df["low"].iloc[l1]
-    )
-
-    previous_swing_low = float(
-        df["low"].iloc[l0]
-    )
-
     if (
-        last_swing_high
+        df["high"].iloc[h1]
         >
-        previous_swing_high
+        df["high"].iloc[h0]
         and
-        last_swing_low
+        df["low"].iloc[l1]
         >
-        previous_swing_low
+        df["low"].iloc[l0]
     ):
 
         structure = "BULLISH"
 
     elif (
-        last_swing_high
+        df["high"].iloc[h1]
         <
-        previous_swing_high
+        df["high"].iloc[h0]
         and
-        last_swing_low
+        df["low"].iloc[l1]
         <
-        previous_swing_low
+        df["low"].iloc[l0]
     ):
 
         structure = "BEARISH"
 
-    resistance = last_swing_high
-    support = last_swing_low
+    resistance = float(
+        df["high"].iloc[h1]
+    )
+
+    support = float(
+        df["low"].iloc[l1]
+    )
+
+    # --------------------------------------------------------
+    # BOS
+    # --------------------------------------------------------
 
     bos = None
 
@@ -779,6 +854,10 @@ def market_structure(df):
     ):
 
         bos = "BEARISH"
+
+    # --------------------------------------------------------
+    # CHOCH
+    # --------------------------------------------------------
 
     choch = None
 
@@ -806,8 +885,12 @@ def market_structure(df):
         "support": support,
         "swing_high_index": h1,
         "swing_low_index": l1,
-        "swing_high": last_swing_high,
-        "swing_low": last_swing_low,
+        "swing_high": float(
+            df["high"].iloc[h1]
+        ),
+        "swing_low": float(
+            df["low"].iloc[l1]
+        ),
         "last_close": last_close,
         "last_high": last_high,
         "last_low": last_low
@@ -870,9 +953,11 @@ def candle_confirmation(df):
 
     bullish = False
     bearish = False
+
     strength = 0
     name = "NONE"
 
+    # Bullish engulfing
     if (
         c["close"] > c["open"]
         and
@@ -887,6 +972,7 @@ def candle_confirmation(df):
         strength = 15
         name = "BULLISH ENGULFING"
 
+    # Bearish engulfing
     elif (
         c["close"] < c["open"]
         and
@@ -901,6 +987,7 @@ def candle_confirmation(df):
         strength = 15
         name = "BEARISH ENGULFING"
 
+    # Strong bullish
     elif (
         c["close"] > c["open"]
         and
@@ -911,6 +998,7 @@ def candle_confirmation(df):
         strength = 12
         name = "STRONG BULLISH"
 
+    # Strong bearish
     elif (
         c["close"] < c["open"]
         and
@@ -921,6 +1009,7 @@ def candle_confirmation(df):
         strength = 12
         name = "STRONG BEARISH"
 
+    # Bullish rejection
     elif (
         lower_wick > body * 1.5
         and
@@ -931,6 +1020,7 @@ def candle_confirmation(df):
         strength = 10
         name = "BULLISH REJECTION"
 
+    # Bearish rejection
     elif (
         upper_wick > body * 1.5
         and
@@ -970,13 +1060,8 @@ def detect_pullback(
         df["close"].iloc[-1]
     )
 
-    support = structure[
-        "support"
-    ]
-
-    resistance = structure[
-        "resistance"
-    ]
+    support = structure["support"]
+    resistance = structure["resistance"]
 
     candle_range = (
         float(
@@ -989,6 +1074,7 @@ def detect_pullback(
     )
 
     if candle_range <= 0:
+
         candle_range = (
             close * 0.001
         )
@@ -999,7 +1085,8 @@ def detect_pullback(
 
     bullish_pullback = (
         structure["structure"]
-        == "BULLISH"
+        ==
+        "BULLISH"
         and
         abs(
             close - support
@@ -1009,7 +1096,8 @@ def detect_pullback(
 
     bearish_pullback = (
         structure["structure"]
-        == "BEARISH"
+        ==
+        "BEARISH"
         and
         abs(
             close - resistance
@@ -1042,7 +1130,9 @@ def volume_score(df):
     )
 
     avg = float(
-        df["volume"].iloc[-21:-1].mean()
+        df[
+            "volume"
+        ].iloc[-21:-1].mean()
     )
 
     if avg <= 0:
@@ -1101,9 +1191,14 @@ def analyze_symbol(
     reasons_buy = []
     reasons_sell = []
 
+    # --------------------------------------------------------
+    # STRUCTURE
+    # --------------------------------------------------------
+
     if (
         structure["structure"]
-        == "BULLISH"
+        ==
+        "BULLISH"
     ):
 
         score_buy += 25
@@ -1114,7 +1209,8 @@ def analyze_symbol(
 
     elif (
         structure["structure"]
-        == "BEARISH"
+        ==
+        "BEARISH"
     ):
 
         score_sell += 25
@@ -1123,10 +1219,11 @@ def analyze_symbol(
             "Bearish Structure"
         )
 
-    if (
-        structure["bos"]
-        == "BULLISH"
-    ):
+    # --------------------------------------------------------
+    # BOS
+    # --------------------------------------------------------
+
+    if structure["bos"] == "BULLISH":
 
         score_buy += 20
 
@@ -1134,10 +1231,7 @@ def analyze_symbol(
             "BOS"
         )
 
-    elif (
-        structure["bos"]
-        == "BEARISH"
-    ):
+    elif structure["bos"] == "BEARISH":
 
         score_sell += 20
 
@@ -1145,9 +1239,14 @@ def analyze_symbol(
             "BOS"
         )
 
+    # --------------------------------------------------------
+    # CHOCH
+    # --------------------------------------------------------
+
     if (
         structure["choch"]
-        == "BULLISH"
+        ==
+        "BULLISH"
     ):
 
         score_buy += 15
@@ -1158,7 +1257,8 @@ def analyze_symbol(
 
     elif (
         structure["choch"]
-        == "BEARISH"
+        ==
+        "BEARISH"
     ):
 
         score_sell += 15
@@ -1166,6 +1266,10 @@ def analyze_symbol(
         reasons_sell.append(
             "CHOCH"
         )
+
+    # --------------------------------------------------------
+    # PULLBACK
+    # --------------------------------------------------------
 
     if pullback["bullish"]:
 
@@ -1182,6 +1286,10 @@ def analyze_symbol(
         reasons_sell.append(
             "Pullback"
         )
+
+    # --------------------------------------------------------
+    # CANDLE
+    # --------------------------------------------------------
 
     if candle["bullish"]:
 
@@ -1203,6 +1311,10 @@ def analyze_symbol(
             candle["name"]
         )
 
+    # --------------------------------------------------------
+    # VOLUME
+    # --------------------------------------------------------
+
     score_buy += vol_points
     score_sell += vol_points
 
@@ -1219,6 +1331,10 @@ def analyze_symbol(
         reasons_sell.append(
             volume_reason
         )
+
+    # --------------------------------------------------------
+    # FINAL SCORE
+    # --------------------------------------------------------
 
     score_buy = min(
         score_buy,
@@ -1245,6 +1361,10 @@ def analyze_symbol(
     entry = float(
         df["close"].iloc[-1]
     )
+
+    # --------------------------------------------------------
+    # STRUCTURAL SL
+    # --------------------------------------------------------
 
     if side == "BUY":
 
@@ -1293,6 +1413,7 @@ def analyze_symbol(
         entry
     ) * 100
 
+    # Avoid absurdly wide SL
     if risk_pct > 8:
         return None
 
@@ -1327,19 +1448,25 @@ def performance():
     wins = sum(
         1
         for x in trades
-        if x.get("result") == "WIN"
+        if x.get("result")
+        ==
+        "WIN"
     )
 
     losses = sum(
         1
         for x in trades
-        if x.get("result") == "LOSS"
+        if x.get("result")
+        ==
+        "LOSS"
     )
 
     neutral = sum(
         1
         for x in trades
-        if x.get("result") == "NEUTRAL"
+        if x.get("result")
+        ==
+        "NEUTRAL"
     )
 
     pnl = sum(
@@ -1384,6 +1511,112 @@ def performance():
 
 
 # ============================================================
+# LIVE PNL
+# ============================================================
+
+def calculate_live_pnl(
+    trade,
+    current_price
+):
+
+    entry = float(
+        trade["entry"]
+    )
+
+    if entry <= 0:
+        return 0.0
+
+    side = trade[
+        "side"
+    ]
+
+    current_price = float(
+        current_price
+    )
+
+    if side == "BUY":
+
+        pnl = (
+            (
+                current_price
+                -
+                entry
+            )
+            /
+            entry
+        ) * 100
+
+    else:
+
+        pnl = (
+            (
+                entry
+                -
+                current_price
+            )
+            /
+            entry
+        ) * 100
+
+    return pnl
+
+
+# ============================================================
+# SL / TP PERCENTAGES
+# ============================================================
+
+def trade_levels_percent(
+    trade
+):
+
+    entry = float(
+        trade["entry"]
+    )
+
+    sl = float(
+        trade["sl"]
+    )
+
+    tp = float(
+        trade["tp"]
+    )
+
+    if entry <= 0:
+
+        return 0.0, 0.0
+
+    if trade["side"] == "BUY":
+
+        sl_pct = (
+            (sl - entry)
+            /
+            entry
+        ) * 100
+
+        tp_pct = (
+            (tp - entry)
+            /
+            entry
+        ) * 100
+
+    else:
+
+        sl_pct = (
+            (entry - sl)
+            /
+            entry
+        ) * 100
+
+        tp_pct = (
+            (entry - tp)
+            /
+            entry
+        ) * 100
+
+    return sl_pct, tp_pct
+
+
+# ============================================================
 # UPDATE OPEN TRADES
 # ============================================================
 
@@ -1392,6 +1625,7 @@ def update_open_trades(
 ):
 
     if not state.get("open"):
+
         return
 
     remaining = {}
@@ -1442,6 +1676,10 @@ def update_open_trades(
         pnl_pct = 0
         r = 0
 
+        # ----------------------------------------------------
+        # LONG
+        # ----------------------------------------------------
+
         if side == "BUY":
 
             if price <= sl:
@@ -1449,11 +1687,7 @@ def update_open_trades(
                 outcome = "LOSS"
 
                 pnl_pct = (
-                    (
-                        sl
-                        -
-                        entry
-                    )
+                    (sl - entry)
                     /
                     entry
                 ) * 100
@@ -1465,16 +1699,16 @@ def update_open_trades(
                 outcome = "WIN"
 
                 pnl_pct = (
-                    (
-                        tp
-                        -
-                        entry
-                    )
+                    (tp - entry)
                     /
                     entry
                 ) * 100
 
                 r = RR
+
+        # ----------------------------------------------------
+        # SHORT
+        # ----------------------------------------------------
 
         else:
 
@@ -1483,11 +1717,7 @@ def update_open_trades(
                 outcome = "LOSS"
 
                 pnl_pct = (
-                    (
-                        entry
-                        -
-                        sl
-                    )
+                    (entry - sl)
                     /
                     entry
                 ) * 100
@@ -1499,16 +1729,16 @@ def update_open_trades(
                 outcome = "WIN"
 
                 pnl_pct = (
-                    (
-                        entry
-                        -
-                        tp
-                    )
+                    (entry - tp)
                     /
                     entry
                 ) * 100
 
                 r = RR
+
+        # ----------------------------------------------------
+        # CLOSE
+        # ----------------------------------------------------
 
         if outcome:
 
@@ -1520,7 +1750,9 @@ def update_open_trades(
                 outcome
             )
 
-            closed["exit"] = price
+            closed["exit"] = (
+                price
+            )
 
             closed["pnl_pct"] = (
                 pnl_pct
@@ -1541,8 +1773,10 @@ def update_open_trades(
             )
 
             print(
-                f"CLOSED {symbol} "
-                f"{side} {outcome}"
+                f"CLOSED "
+                f"{symbol} "
+                f"{side} "
+                f"{outcome}"
             )
 
         else:
@@ -1571,8 +1805,9 @@ def create_signal(
     ]
 
     candle_time = (
-        result["structure"]
-        .get(
+        result[
+            "structure"
+        ].get(
             "last_candle_time",
             ""
         )
@@ -1592,12 +1827,16 @@ def create_signal(
 
         try:
 
-            previous_ts = pd.Timestamp(
-                previous
+            previous_ts = (
+                pd.Timestamp(
+                    previous
+                )
             )
 
-            current_ts = pd.Timestamp(
-                candle_time
+            current_ts = (
+                pd.Timestamp(
+                    candle_time
+                )
             )
 
             diff = (
@@ -1606,18 +1845,18 @@ def create_signal(
                 previous_ts
             ).total_seconds()
 
-            cooldown_seconds = (
+            if diff < (
                 SIGNAL_COOLDOWN_CANDLES
                 *
                 5
                 *
                 60
-            )
+            ):
 
-            if diff < cooldown_seconds:
                 return False
 
         except Exception:
+
             pass
 
     trade_id = (
@@ -1692,14 +1931,18 @@ def build_report(
 
     perf = performance()
 
-    now = jalali_datetime_string()
+    now = (
+        jalali_datetime_string()
+    )
 
     lines = []
 
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
+
     lines.append(
-        "📡 <b>"
-        "CRYPTO PRICE ACTION REPORT"
-        "</b>"
+        "📡 <b>CRYPTO PRICE ACTION REPORT</b>"
     )
 
     lines.append(
@@ -1707,76 +1950,53 @@ def build_report(
     )
 
     lines.append(
-        f"⏱ <b>۵m CLOSED | "
-        f"TOP {fa_num(TOP_N)}</b>"
+        f"⏱ <b>5m CLOSED | TOP {TOP_N}</b>"
     )
 
     lines.append(
-        "🤖 <b>"
-        "PRICE ACTION | RR ۱:۱"
-        "</b>"
+        "🤖 <b>PRICE ACTION | RR 1:1</b>"
     )
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
+
+    # --------------------------------------------------------
+    # PERFORMANCE
+    # --------------------------------------------------------
 
     lines.append(
         "📊 <b>PERFORMANCE</b>"
     )
 
-    total_text = fa_num(
-        perf["total"]
-    )
-
-    wins_text = fa_num(
-        perf["wins"]
-    )
-
-    losses_text = fa_num(
-        perf["losses"]
-    )
-
-    neutral_text = fa_num(
-        perf["neutral"]
-    )
-
     lines.append(
-        f"Trades {total_text} | "
-        f"🟢 {wins_text} | "
-        f"🔴 {losses_text} | "
-        f"⚪ {neutral_text}"
+        f"Trades {perf['total']} | "
+        f"🟢 {perf['wins']} | "
+        f"🔴 {perf['losses']} | "
+        f"⚪ {perf['neutral']}"
     )
 
-    wr_text = fa_num(
+    wr_text = (
         f"{perf['wr']:.1f}%"
-    )
-
-    pnl_text = fmt_pct(
-        perf["pnl"]
-    )
-
-    r_text = fmt_pct(
-        perf["r"]
     )
 
     lines.append(
         f"🏆 WR {wr_text} | "
-        f"P&L {pnl_text} | "
-        f"R {r_text}"
+        f"P&L {fmt_pct(perf['pnl'], True)} | "
+        f"R {fmt_pct(perf['r'], True)}"
     )
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    event_count = fa_num(
-        len(events)
-    )
+    # --------------------------------------------------------
+    # NEW SIGNALS
+    # --------------------------------------------------------
 
     lines.append(
         f"⚡ <b>THIS RUN: "
-        f"{event_count} EVENTS</b>"
+        f"{len(events)} EVENTS</b>"
     )
 
     if events:
@@ -1789,44 +2009,84 @@ def build_report(
 
             emoji = (
                 "🟢"
-                if event["side"] == "BUY"
-                else "🔴"
+                if event["side"]
+                ==
+                "BUY"
+                else
+                "🔴"
             )
+
+            entry = float(
+                event["entry"]
+            )
+
+            sl = float(
+                event["sl"]
+            )
+
+            tp = float(
+                event["tp"]
+            )
+
+            if event["side"] == "BUY":
+
+                sl_pct = (
+                    (sl - entry)
+                    /
+                    entry
+                ) * 100
+
+                tp_pct = (
+                    (tp - entry)
+                    /
+                    entry
+                ) * 100
+
+            else:
+
+                sl_pct = (
+                    (entry - sl)
+                    /
+                    entry
+                ) * 100
+
+                tp_pct = (
+                    (entry - tp)
+                    /
+                    entry
+                ) * 100
 
             lines.append("")
 
             lines.append(
-                f"{emoji} "
-                f"<b>{symbol}</b>"
+                f"{emoji} <b>{symbol}</b>"
             )
 
             lines.append(
                 f"{emoji} "
-                f"{event['side']}"
+                f"<b>{event['side']}</b>"
             )
 
             lines.append(
                 f"💰 Entry: "
-                f"{fmt_price(event['entry'])}"
+                f"{fmt_price(entry)}"
             )
 
             lines.append(
                 f"🛑 SL: "
-                f"{fmt_price(event['sl'])}"
+                f"{fmt_price(sl)} "
+                f"({fmt_pct(sl_pct, True)})"
             )
 
             lines.append(
                 f"🎯 TP: "
-                f"{fmt_price(event['tp'])}"
-            )
-
-            score_text = fa_num(
-                event["score"]
+                f"{fmt_price(tp)} "
+                f"({fmt_pct(tp_pct, True)})"
             )
 
             lines.append(
                 f"📊 Score: "
-                f"{score_text}/۱۰۰"
+                f"{event['score']}/100"
             )
 
             reasons = " + ".join(
@@ -1843,50 +2103,9 @@ def build_report(
             "⚪ None"
         )
 
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    pending = state.get(
-        "pending",
-        {}
-    )
-
-    pending_count = fa_num(
-        len(pending)
-    )
-
-    lines.append(
-        f"⏳ <b>PENDING: "
-        f"{pending_count}</b>"
-    )
-
-    if pending:
-
-        for p in pending.values():
-
-            emoji = (
-                "🟢"
-                if p["side"] == "BUY"
-                else "🔴"
-            )
-
-            score_text = fa_num(
-                p["score"]
-            )
-
-            lines.append(
-                f"{emoji} "
-                f"{clean_symbol(p['symbol'])} | "
-                f"{p['side']} | "
-                f"{score_text}/۱۰۰"
-            )
-
-    else:
-
-        lines.append(
-            "⚪ None"
-        )
+    # --------------------------------------------------------
+    # OPEN TRADES
+    # --------------------------------------------------------
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
@@ -1897,39 +2116,106 @@ def build_report(
         {}
     )
 
-    open_count = fa_num(
-        len(opens)
-    )
-
     lines.append(
         f"📂 <b>OPEN: "
-        f"{open_count}</b>"
+        f"{len(opens)}</b>"
     )
 
     if opens:
 
         for trade in opens.values():
 
+            symbol = clean_symbol(
+                trade["symbol"]
+            )
+
             emoji = (
                 "🟢"
-                if trade["side"] == "BUY"
-                else "🔴"
+                if trade["side"]
+                ==
+                "BUY"
+                else
+                "🔴"
             )
 
-            entry_text = fmt_price(
-                trade["entry"]
+            result = results.get(
+                trade["symbol"]
             )
 
-            tp_text = fmt_price(
-                trade["tp"]
+            if result:
+
+                current_price = (
+                    result[
+                        "structure"
+                    ][
+                        "last_close"
+                    ]
+                )
+
+            else:
+
+                current_price = (
+                    trade["entry"]
+                )
+
+            live_pnl = (
+                calculate_live_pnl(
+                    trade,
+                    current_price
+                )
+            )
+
+            sl_pct, tp_pct = (
+                trade_levels_percent(
+                    trade
+                )
+            )
+
+            pnl_emoji = (
+                "🟢"
+                if live_pnl >= 0
+                else
+                "🔴"
+            )
+
+            lines.append("")
+
+            lines.append(
+                f"{emoji} <b>{symbol}</b> "
+                f"| {trade['side']}"
             )
 
             lines.append(
-                f"{emoji} "
-                f"{clean_symbol(trade['symbol'])} | "
-                f"{trade['side']} | "
-                f"E {entry_text} | "
-                f"TP {tp_text}"
+                f"💰 Entry: "
+                f"{fmt_price(trade['entry'])}"
+            )
+
+            lines.append(
+                f"📍 Now: "
+                f"{fmt_price(current_price)}"
+            )
+
+            lines.append(
+                f"🛑 SL: "
+                f"{fmt_price(trade['sl'])} "
+                f"({fmt_pct(sl_pct, True)})"
+            )
+
+            lines.append(
+                f"🎯 TP: "
+                f"{fmt_price(trade['tp'])} "
+                f"({fmt_pct(tp_pct, True)})"
+            )
+
+            lines.append(
+                f"{pnl_emoji} "
+                f"<b>Live P&L: "
+                f"{fmt_pct(live_pnl, True)}</b>"
+            )
+
+            lines.append(
+                f"📊 Score: "
+                f"{trade.get('score', 0)}/100"
             )
 
     else:
@@ -1938,17 +2224,17 @@ def build_report(
             "⚪ None"
         )
 
+    # --------------------------------------------------------
+    # SCAN TIME
+    # --------------------------------------------------------
+
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    scan_text = fa_num(
-        f"{elapsed:.1f}"
-    )
-
     lines.append(
         f"⚙️ Scan: "
-        f"{scan_text}s"
+        f"{elapsed:.1f}s"
     )
 
     return "\n".join(
@@ -1983,11 +2269,6 @@ def main():
     )
 
     print(
-        "MIN SCORE:",
-        MIN_SCORE
-    )
-
-    print(
         "=" * 60
     )
 
@@ -1996,11 +2277,8 @@ def main():
     if not symbols:
 
         send_telegram(
-            "⚠️ <b>"
-            "PRICE ACTION SCANNER"
-            "</b>\n\n"
-            "دریافت لیست ارزها از "
-            "Kraken Futures ناموفق بود."
+            "⚠️ <b>PRICE ACTION SCANNER</b>\n\n"
+            "دریافت لیست ارزها از Kraken Futures ناموفق بود."
         )
 
         return
@@ -2009,9 +2287,9 @@ def main():
 
     candidates = []
 
-    # ========================================================
+    # --------------------------------------------------------
     # SCAN
-    # ========================================================
+    # --------------------------------------------------------
 
     for index, symbol in enumerate(
         symbols,
@@ -2031,7 +2309,9 @@ def main():
             continue
 
         candle_time = (
-            df["timestamp"].iloc[-1]
+            df[
+                "timestamp"
+            ].iloc[-1]
         )
 
         analysis = analyze_symbol(
@@ -2046,7 +2326,9 @@ def main():
             "structure"
         ][
             "last_candle_time"
-        ] = candle_time.isoformat()
+        ] = (
+            candle_time.isoformat()
+        )
 
         results[
             symbol
@@ -2056,26 +2338,26 @@ def main():
             analysis
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # UPDATE OPEN TRADES
-    # ========================================================
+    # --------------------------------------------------------
 
     update_open_trades(
         results
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # SORT
-    # ========================================================
+    # --------------------------------------------------------
 
     candidates.sort(
         key=lambda x: x["score"],
         reverse=True
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # BEST CANDIDATE
-    # ========================================================
+    # --------------------------------------------------------
 
     events = []
 
@@ -2090,7 +2372,11 @@ def main():
             best["score"]
         )
 
-        if best["score"] >= MIN_SCORE:
+        if (
+            best["score"]
+            >=
+            MIN_SCORE
+        ):
 
             created = create_signal(
                 best
@@ -2102,50 +2388,9 @@ def main():
                     best
                 )
 
-        else:
-
-            state["pending"] = {
-
-                best["symbol"]: {
-
-                    "symbol":
-                        best["symbol"],
-
-                    "side":
-                        best["side"],
-
-                    "score":
-                        best["score"],
-
-                    "entry":
-                        best["entry"],
-
-                    "sl":
-                        best["sl"],
-
-                    "tp":
-                        best["tp"],
-
-                    "reasons":
-                        best["reasons"]
-                }
-            }
-
-    else:
-
-        state["pending"] = {}
-
-    # ========================================================
-    # CLEAR PENDING WHEN SIGNAL CREATED
-    # ========================================================
-
-    if events:
-
-        state["pending"] = {}
-
-    # ========================================================
-    # SAVE STATE
-    # ========================================================
+    # --------------------------------------------------------
+    # SAVE
+    # --------------------------------------------------------
 
     save_json(
         STATE_FILE,
@@ -2157,9 +2402,9 @@ def main():
         history
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # REPORT
-    # ========================================================
+    # --------------------------------------------------------
 
     elapsed = (
         time.time()
@@ -2193,7 +2438,7 @@ def main():
 
 
 # ============================================================
-# ENTRY POINT
+# ENTRY
 # ============================================================
 
 if __name__ == "__main__":
@@ -2212,15 +2457,49 @@ if __name__ == "__main__":
         try:
 
             send_telegram(
-                "🚨 <b>"
-                "PRICE ACTION SCANNER ERROR"
-                "</b>\n\n"
-                f"<code>"
-                f"{str(e)[:1000]}"
-                f"</code>"
+                "🚨 <b>PRICE ACTION SCANNER ERROR</b>\n\n"
+                f"<code>{str(e)[:1000]}</code>"
             )
 
         except Exception:
+
             pass
 
         raise
+
+نمونه خروجی جدید تلگرام
+
+📡 CRYPTO PRICE ACTION REPORT
+🕐 1405/06/15 01:35:00
+⏱ 5m CLOSED | TOP 30
+🤖 PRICE ACTION | RR 1:1
+━━━━━━━━━━━━━━━━━━
+📊 PERFORMANCE
+Trades 4 | 🟢 3 | 🔴 1 | ⚪ 0
+🏆 WR 75.0% | P&L +1.84% | R +2.00
+━━━━━━━━━━━━━━━━━━
+⚡ THIS RUN: 1 EVENTS
+
+🟢 BTC/USDT
+🟢 BUY
+💰 Entry: 109250.0000
+🛑 SL: 108400.0000 (-0.78%)
+🎯 TP: 110100.0000 (+0.78%)
+📊 Score: 67/100
+🏗 Bullish Structure + BOS + Pullback + STRONG BULLISH
+
+━━━━━━━━━━━━━━━━━━
+📂 OPEN: 1
+
+🟢 BTC/USDT | BUY
+💰 Entry: 109250.0000
+📍 Now: 109610.0000
+🛑 SL: 108400.0000 (-0.78%)
+🎯 TP: 110100.0000 (+0.78%)
+🟢 Live P&L: +0.33%
+📊 Score: 67/100
+
+━━━━━━━━━━━━━━━━━━
+⚙️ Scan: 8.4s
+
+یک نکته مهم هم اصلاح شد: Live P&L بر اساس آخرین کندل بسته‌شده 5 دقیقه‌ای محاسبه می‌شود، نه قیمت لحظه‌ای تیک‌به‌تیک. چون این اسکنر اساساً روی کندل‌های بسته‌شده کار می‌کند وگرنه گزارش هر اجرا می‌توانست با قیمت داخل کندل رفتار متفاوتی داشته باشد.
