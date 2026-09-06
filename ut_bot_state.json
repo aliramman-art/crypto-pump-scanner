@@ -49,10 +49,20 @@
       "tp": 260.15,
       "score": 84,
       "opened_at": "2026-09-06T17:46:13.009438+00:00"
+    },
+    "NEAR/USD:USD_SELL_1788717339": {
+      "id": "NEAR/USD:USD_SELL_1788717339",
+      "symbol": "NEAR/USD:USD",
+      "side": "SELL",
+      "entry": 2.3728,
+      "sl": 2.4008,
+      "tp": 2.3447999999999998,
+      "score": 77,
+      "opened_at": "2026-09-06T17:55:39.501290+00:00"
     }
   },
   "last_signals": {
-    "NEAR/USD:USD:SELL": "2026-09-06T15:20:00+00:00",
+    "NEAR/USD:USD:SELL": "2026-09-06T17:50:00+00:00",
     "ARB/USD:USD:SELL": "2026-09-06T15:25:00+00:00",
     "INJ/USD:USD:BUY": "2026-09-06T15:35:00+00:00",
     "BTC/USD:USD:BUY": "2026-09-06T15:55:00+00:00",
