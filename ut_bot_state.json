@@ -30,16 +30,6 @@
       "score": 77,
       "opened_at": "2026-09-06T17:55:39.501290+00:00"
     },
-    "BNB/USD:USD_BUY_1788719069": {
-      "id": "BNB/USD:USD_BUY_1788719069",
-      "symbol": "BNB/USD:USD",
-      "side": "BUY",
-      "entry": 748.52,
-      "sl": 747.42,
-      "tp": 749.62,
-      "score": 77,
-      "opened_at": "2026-09-06T18:24:29.333484+00:00"
-    },
     "PUMP/USD:USD_BUY_1788719875": {
       "id": "PUMP/USD:USD_BUY_1788719875",
       "symbol": "PUMP/USD:USD",
@@ -60,15 +50,15 @@
       "score": 77,
       "opened_at": "2026-09-06T18:47:50.366251+00:00"
     },
-    "PEPE/USD:USD_BUY_1788721017": {
-      "id": "PEPE/USD:USD_BUY_1788721017",
-      "symbol": "PEPE/USD:USD",
-      "side": "BUY",
-      "entry": 3.5939e-06,
-      "sl": 3.5925e-06,
-      "tp": 3.5953e-06,
-      "score": 57,
-      "opened_at": "2026-09-06T18:56:57.621586+00:00"
+    "DOT/USD:USD_SELL_1788721759": {
+      "id": "DOT/USD:USD_SELL_1788721759",
+      "symbol": "DOT/USD:USD",
+      "side": "SELL",
+      "entry": 0.9564,
+      "sl": 0.9671,
+      "tp": 0.9457000000000001,
+      "score": 60,
+      "opened_at": "2026-09-06T19:09:19.731614+00:00"
     }
   },
   "last_signals": {
@@ -87,6 +77,7 @@
     "BNB/USD:USD:BUY": "2026-09-06T18:15:00+00:00",
     "PUMP/USD:USD:BUY": "2026-09-06T18:30:00+00:00",
     "FARTCOIN/USD:USD:SELL": "2026-09-06T18:40:00+00:00",
-    "PEPE/USD:USD:BUY": "2026-09-06T18:50:00+00:00"
+    "PEPE/USD:USD:BUY": "2026-09-06T18:50:00+00:00",
+    "DOT/USD:USD:SELL": "2026-09-06T19:00:00+00:00"
   }
 }
