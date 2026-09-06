@@ -9,10 +9,21 @@
       "tp": 2.2746999999999997,
       "score": 60,
       "opened_at": "2026-09-06T15:28:31.037629+00:00"
+    },
+    "ARB/USD:USD_SELL_1788708643": {
+      "id": "ARB/USD:USD_SELL_1788708643",
+      "symbol": "ARB/USD:USD",
+      "side": "SELL",
+      "entry": 0.18533,
+      "sl": 0.18821,
+      "tp": 0.18245,
+      "score": 67,
+      "opened_at": "2026-09-06T15:30:43.795850+00:00"
     }
   },
   "pending": {},
   "last_signals": {
-    "NEAR/USD:USD:SELL": "2026-09-06T15:20:00+00:00"
+    "NEAR/USD:USD:SELL": "2026-09-06T15:20:00+00:00",
+    "ARB/USD:USD:SELL": "2026-09-06T15:25:00+00:00"
   }
 }
