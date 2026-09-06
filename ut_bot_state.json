@@ -10,16 +10,6 @@
       "score": 60,
       "opened_at": "2026-09-06T15:28:31.037629+00:00"
     },
-    "CRV/USD:USD_BUY_1788714906": {
-      "id": "CRV/USD:USD_BUY_1788714906",
-      "symbol": "CRV/USD:USD",
-      "side": "BUY",
-      "entry": 0.3726,
-      "sl": 0.369,
-      "tp": 0.3762,
-      "score": 87,
-      "opened_at": "2026-09-06T17:15:06.698814+00:00"
-    },
     "TAO/USD:USD_BUY_1788716773": {
       "id": "TAO/USD:USD_BUY_1788716773",
       "symbol": "TAO/USD:USD",
@@ -59,6 +49,16 @@
       "tp": 749.62,
       "score": 77,
       "opened_at": "2026-09-06T18:24:29.333484+00:00"
+    },
+    "PUMP/USD:USD_BUY_1788719875": {
+      "id": "PUMP/USD:USD_BUY_1788719875",
+      "symbol": "PUMP/USD:USD",
+      "side": "BUY",
+      "entry": 0.003873,
+      "sl": 0.003813,
+      "tp": 0.003933000000000001,
+      "score": 81,
+      "opened_at": "2026-09-06T18:37:55.399783+00:00"
     }
   },
   "last_signals": {
@@ -74,6 +74,7 @@
     "LTC/USD:USD:SELL": "2026-09-06T17:30:00+00:00",
     "TAO/USD:USD:BUY": "2026-09-06T17:40:00+00:00",
     "ENA/USD:USD:BUY": "2026-09-06T18:00:00+00:00",
-    "BNB/USD:USD:BUY": "2026-09-06T18:15:00+00:00"
+    "BNB/USD:USD:BUY": "2026-09-06T18:15:00+00:00",
+    "PUMP/USD:USD:BUY": "2026-09-06T18:30:00+00:00"
   }
 }
