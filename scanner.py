@@ -1,8 +1,8 @@
 # ============================================================
-# CRYPTO PRICE ACTION SCANNER v2.1
+# CRYPTO PRICE ACTION SCANNER v2.2
 # ============================================================
-# Kraken Futures
-# TOP 30 HIGH-VOLUME USDT CONTRACTS
+# KRAKEN FUTURES
+# TOP 30 HIGH-VOLUME CONTRACTS
 # 5M CLOSED CANDLES
 #
 # STRATEGY:
@@ -105,9 +105,7 @@ def load_json(filename, default):
             encoding="utf-8"
         ) as f:
 
-            data = json.load(f)
-
-        return data
+            return json.load(f)
 
     except Exception as e:
 
@@ -185,7 +183,7 @@ if not isinstance(history, list):
 
 
 # ============================================================
-# BASIC HELPERS
+# HELPERS
 # ============================================================
 
 def safe_float(value, default=0.0):
@@ -265,8 +263,7 @@ def percentage_difference(a, b):
         return 0.0
 
     return (
-        (a - b)
-        / b
+        (a - b) / b
     ) * 100.0
 
 
@@ -454,56 +451,295 @@ exchange = ccxt.krakenfutures({
 
 
 # ============================================================
-# MARKETS
+# MARKET DETECTION
 # ============================================================
+
+def is_valid_futures_market(
+    market
+):
+
+    try:
+
+        if not market.get(
+            "active",
+            True
+        ):
+
+            return False
+
+        if market.get(
+            "contract"
+        ) is not True:
+
+            return False
+
+        # Kraken Futures can expose
+        # different quote/settle structures.
+        #
+        # We accept linear contracts
+        # using several CCXT fields.
+
+        linear = market.get(
+            "linear"
+        )
+
+        inverse = market.get(
+            "inverse"
+        )
+
+        if linear is True:
+
+            return True
+
+        if (
+            linear is None
+            and inverse is not True
+        ):
+
+            settle = str(
+                market.get(
+                    "settle",
+                    ""
+                )
+            ).upper()
+
+            quote = str(
+                market.get(
+                    "quote",
+                    ""
+                )
+            ).upper()
+
+            symbol = str(
+                market.get(
+                    "symbol",
+                    ""
+                )
+            ).upper()
+
+            if (
+                settle in (
+                    "USDT",
+                    "USD"
+                )
+                or quote in (
+                    "USDT",
+                    "USD"
+                )
+            ):
+
+                if (
+                    "PERP" in symbol
+                    or "SWAP" in symbol
+                    or market.get(
+                        "swap"
+                    ) is True
+                ):
+
+                    return True
+
+        return False
+
+    except Exception:
+
+        return False
+
 
 def get_top_symbols():
 
-    markets = exchange.load_markets()
+    print(
+        "[INFO] Loading Kraken Futures markets..."
+    )
+
+    try:
+
+        markets = exchange.load_markets(
+            reload=True
+        )
+
+    except Exception as e:
+
+        print(
+            "[ERROR] load_markets:",
+            e
+        )
+
+        return []
+
+    print(
+        f"[INFO] Total markets returned: "
+        f"{len(markets)}"
+    )
 
     candidates = []
 
     for symbol, market in markets.items():
 
-        try:
-
-            if not market.get(
-                "active",
-                True
-            ):
-
-                continue
-
-            if market.get(
-                "contract"
-            ) is not True:
-
-                continue
-
-            if market.get(
-                "linear"
-            ) is not True:
-
-                continue
-
-            if market.get(
-                "quote"
-            ) != "USDT":
-
-                continue
-
-            candidates.append(
-                symbol
-            )
-
-        except Exception:
+        if not is_valid_futures_market(
+            market
+        ):
 
             continue
 
+        candidates.append(
+            symbol
+        )
+
     print(
-        f"[INFO] Markets: "
+        f"[INFO] Valid futures markets: "
         f"{len(candidates)}"
     )
+
+    # --------------------------------------------------------
+    # FALLBACK:
+    # If CCXT does not expose the market flags correctly,
+    # use Kraken Futures symbols that look like contracts.
+    # --------------------------------------------------------
+
+    if not candidates:
+
+        print(
+            "[WARN] Normal market filter found 0."
+        )
+
+        print(
+            "[INFO] Trying Kraken Futures fallback..."
+        )
+
+        for symbol, market in markets.items():
+
+            try:
+
+                if not market.get(
+                    "active",
+                    True
+                ):
+
+                    continue
+
+                symbol_upper = str(
+                    symbol
+                ).upper()
+
+                market_id = str(
+                    market.get(
+                        "id",
+                        ""
+                    )
+                ).upper()
+
+                base = str(
+                    market.get(
+                        "base",
+                        ""
+                    )
+                ).upper()
+
+                quote = str(
+                    market.get(
+                        "quote",
+                        ""
+                    )
+                ).upper()
+
+                settle = str(
+                    market.get(
+                        "settle",
+                        ""
+                    )
+                ).upper()
+
+                is_contract = (
+                    market.get(
+                        "contract"
+                    ) is True
+                    or market.get(
+                        "swap"
+                    ) is True
+                    or market.get(
+                        "future"
+                    ) is True
+                )
+
+                looks_usd = (
+                    quote in (
+                        "USD",
+                        "USDT"
+                    )
+                    or settle in (
+                        "USD",
+                        "USDT"
+                    )
+                    or "/USD" in symbol_upper
+                    or "/USDT" in symbol_upper
+                    or "USD" in market_id
+                )
+
+                if (
+                    is_contract
+                    and looks_usd
+                    and base
+                ):
+
+                    candidates.append(
+                        symbol
+                    )
+
+            except Exception:
+
+                continue
+
+    # --------------------------------------------------------
+    # Remove duplicates
+    # --------------------------------------------------------
+
+    candidates = list(
+        dict.fromkeys(
+            candidates
+        )
+    )
+
+    print(
+        f"[INFO] Candidate contracts: "
+        f"{len(candidates)}"
+    )
+
+    if not candidates:
+
+        print(
+            "[ERROR] Kraken returned no usable futures contracts."
+        )
+
+        # Debug first markets
+        print(
+            "[DEBUG] Sample markets:"
+        )
+
+        for symbol, market in list(
+            markets.items()
+        )[:15]:
+
+            print(
+                symbol,
+                {
+                    "id": market.get("id"),
+                    "base": market.get("base"),
+                    "quote": market.get("quote"),
+                    "settle": market.get("settle"),
+                    "contract": market.get("contract"),
+                    "linear": market.get("linear"),
+                    "inverse": market.get("inverse"),
+                    "swap": market.get("swap"),
+                    "future": market.get("future"),
+                    "active": market.get("active")
+                }
+            )
+
+        return []
+
+    # --------------------------------------------------------
+    # Fetch tickers
+    # --------------------------------------------------------
 
     try:
 
@@ -514,6 +750,10 @@ def get_top_symbols():
         print(
             "[ERROR] fetch_tickers:",
             e
+        )
+
+        print(
+            "[INFO] Using first contracts as fallback."
         )
 
         return candidates[:TOP_N]
@@ -527,6 +767,7 @@ def get_top_symbols():
         )
 
         if not ticker:
+
             continue
 
         quote_volume = safe_float(
@@ -555,6 +796,7 @@ def get_top_symbols():
             )
 
         if quote_volume <= 0:
+
             continue
 
         volumes.append(
@@ -569,17 +811,30 @@ def get_top_symbols():
         reverse=True
     )
 
-    symbols = [
+    selected = [
         x[0]
         for x in volumes[:TOP_N]
     ]
 
+    # --------------------------------------------------------
+    # If ticker data is incomplete
+    # --------------------------------------------------------
+
+    if not selected:
+
+        print(
+            "[WARN] No ticker volumes available."
+        )
+
+        selected = candidates[:TOP_N]
+
+    print("")
     print(
-        "[INFO] TOP 30:"
+        f"[INFO] TOP {len(selected)}:"
     )
 
     for i, symbol in enumerate(
-        symbols,
+        selected,
         start=1
     ):
 
@@ -588,7 +843,7 @@ def get_top_symbols():
             f"{clean_symbol(symbol)}"
         )
 
-    return symbols
+    return selected
 
 
 # ============================================================
@@ -606,6 +861,7 @@ def fetch_ohlcv(symbol):
         )
 
         if not candles:
+
             return None
 
         df = pd.DataFrame(
@@ -620,15 +876,13 @@ def fetch_ohlcv(symbol):
             ]
         )
 
-        cols = [
+        for col in [
             "open",
             "high",
             "low",
             "close",
             "volume"
-        ]
-
-        for col in cols:
+        ]:
 
             df[col] = pd.to_numeric(
                 df[col],
@@ -636,7 +890,13 @@ def fetch_ohlcv(symbol):
             )
 
         df.dropna(
-            subset=cols,
+            subset=[
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume"
+            ],
             inplace=True
         )
 
@@ -646,11 +906,13 @@ def fetch_ohlcv(symbol):
         )
 
         if len(df) < 60:
+
             return None
 
-        # IMPORTANT:
-        # Last candle may still be open.
-        # Remove it.
+        # ----------------------------------------------------
+        # Remove currently forming candle
+        # ----------------------------------------------------
+
         df = df.iloc[:-1].copy()
 
         df.reset_index(
@@ -659,6 +921,7 @@ def fetch_ohlcv(symbol):
         )
 
         if len(df) < 50:
+
             return None
 
         return df
@@ -689,13 +952,9 @@ def calculate_atr(
 
     close = df["close"]
 
-    previous_close = (
-        close.shift(1)
-    )
+    previous_close = close.shift(1)
 
-    tr1 = (
-        high - low
-    )
+    tr1 = high - low
 
     tr2 = (
         high - previous_close
@@ -706,7 +965,11 @@ def calculate_atr(
     ).abs()
 
     tr = pd.concat(
-        [tr1, tr2, tr3],
+        [
+            tr1,
+            tr2,
+            tr3
+        ],
         axis=1
     ).max(
         axis=1
@@ -718,7 +981,7 @@ def calculate_atr(
 
 
 # ============================================================
-# CANDLE
+# CANDLE HELPERS
 # ============================================================
 
 def candle_range(row):
@@ -742,6 +1005,7 @@ def body_ratio(row):
     r = candle_range(row)
 
     if r <= 0:
+
         return 0.0
 
     return (
@@ -767,7 +1031,7 @@ def bearish(row):
 
 
 # ============================================================
-# STRUCTURE
+# MARKET STRUCTURE
 # ============================================================
 
 def detect_structure(df):
@@ -880,7 +1144,8 @@ def detect_pullback(
     direction
 ):
 
-    if len(df) < 8:
+    if len(df) < 10:
+
         return False
 
     last = df.iloc[-1]
@@ -888,14 +1153,6 @@ def detect_pullback(
     previous = df.iloc[-2]
 
     recent = df.iloc[-6:-1]
-
-    recent_high = safe_float(
-        recent["high"].max()
-    )
-
-    recent_low = safe_float(
-        recent["low"].min()
-    )
 
     last_close = safe_float(
         last["close"]
@@ -909,11 +1166,26 @@ def detect_pullback(
         previous["close"]
     )
 
+    recent_high = safe_float(
+        recent["high"].max()
+    )
+
+    recent_low = safe_float(
+        recent["low"].min()
+    )
+
+    # --------------------------------------------------------
+    # BUY
+    # --------------------------------------------------------
+
     if direction == "BUY":
 
-        pullback = (
+        touched_pullback_zone = (
             safe_float(last["low"])
             <= recent_high
+            and
+            safe_float(last["low"])
+            >= recent_low
         )
 
         recovery = (
@@ -923,15 +1195,22 @@ def detect_pullback(
         )
 
         return (
-            pullback
+            touched_pullback_zone
             and recovery
         )
 
+    # --------------------------------------------------------
+    # SELL
+    # --------------------------------------------------------
+
     if direction == "SELL":
 
-        pullback = (
+        touched_pullback_zone = (
             safe_float(last["high"])
             >= recent_low
+            and
+            safe_float(last["high"])
+            <= recent_high
         )
 
         rejection = (
@@ -941,7 +1220,7 @@ def detect_pullback(
         )
 
         return (
-            pullback
+            touched_pullback_zone
             and rejection
         )
 
@@ -1012,6 +1291,7 @@ def detect_momentum(df):
     )
 
     if ratio < BODY_MIN_RATIO:
+
         return None
 
     if bullish(last):
@@ -1171,7 +1451,7 @@ def calculate_signal(df):
         buy_score += 20
 
         buy_reasons.append(
-            "BULLISH ENGULFING"
+            "Bullish Engulfing"
         )
 
     elif engulfing == (
@@ -1181,7 +1461,7 @@ def calculate_signal(df):
         sell_score += 20
 
         sell_reasons.append(
-            "BEARISH ENGULFING"
+            "Bearish Engulfing"
         )
 
     # --------------------------------------------------------
@@ -1231,7 +1511,7 @@ def calculate_signal(df):
             )
 
     # --------------------------------------------------------
-    # FINAL
+    # FINAL BUY
     # --------------------------------------------------------
 
     if (
@@ -1241,18 +1521,26 @@ def calculate_signal(df):
 
         return {
             "side": "BUY",
+
             "score": min(
                 buy_score,
                 100
             ),
+
             "reasons": buy_reasons,
+
             "atr": safe_float(
                 df["atr"].iloc[-1]
             ),
+
             "close": safe_float(
                 df["close"].iloc[-1]
             )
         }
+
+    # --------------------------------------------------------
+    # FINAL SELL
+    # --------------------------------------------------------
 
     if (
         sell_score >= MIN_SCORE
@@ -1261,14 +1549,18 @@ def calculate_signal(df):
 
         return {
             "side": "SELL",
+
             "score": min(
                 sell_score,
                 100
             ),
+
             "reasons": sell_reasons,
+
             "atr": safe_float(
                 df["atr"].iloc[-1]
             ),
+
             "close": safe_float(
                 df["close"].iloc[-1]
             )
@@ -1288,6 +1580,7 @@ def analyze_symbol(symbol):
     )
 
     if df is None:
+
         return None
 
     df["atr"] = calculate_atr(
@@ -1305,6 +1598,7 @@ def analyze_symbol(symbol):
     )
 
     if len(df) < 30:
+
         return None
 
     structure = detect_structure(
@@ -1350,6 +1644,7 @@ def in_cooldown(
     ].get(symbol)
 
     if not previous:
+
         return False
 
     previous_timestamp = safe_float(
@@ -1359,6 +1654,7 @@ def in_cooldown(
     )
 
     if previous_timestamp <= 0:
+
         return False
 
     candle_size = (
@@ -1407,9 +1703,11 @@ def build_trade(
     )
 
     if entry <= 0:
+
         return None
 
     if atr <= 0:
+
         return None
 
     # --------------------------------------------------------
@@ -1423,8 +1721,7 @@ def build_trade(
         )
 
         atr_sl = (
-            entry
-            - atr
+            entry - atr
         )
 
         if (
@@ -1446,6 +1743,7 @@ def build_trade(
         )
 
         if risk <= 0:
+
             return None
 
         minimum_risk = (
@@ -1488,8 +1786,7 @@ def build_trade(
         )
 
         atr_sl = (
-            entry
-            + atr
+            entry + atr
         )
 
         if (
@@ -1510,6 +1807,7 @@ def build_trade(
         )
 
         if risk <= 0:
+
             return None
 
         minimum_risk = (
@@ -1641,6 +1939,7 @@ def create_signal(
     )
 
     if not signal:
+
         return None
 
     if (
@@ -1668,7 +1967,7 @@ def create_signal(
 
         return None
 
-    # Never open same symbol if already open
+    # Same symbol already open
     for trade in state[
         "open"
     ].values():
@@ -1688,6 +1987,7 @@ def create_signal(
     )
 
     if not trade:
+
         return None
 
     state[
@@ -1743,10 +2043,6 @@ def update_open_trades(
         result = results.get(
             symbol
         )
-
-        # ----------------------------------------------------
-        # SCAN FAILED
-        # ----------------------------------------------------
 
         if not result:
 
@@ -2016,8 +2312,7 @@ def current_price(symbol):
     except Exception as e:
 
         print(
-            f"[WARN] "
-            f"Current price failed "
+            f"[WARN] Current price failed "
             f"{symbol}: {e}"
         )
 
@@ -2151,18 +2446,11 @@ def open_trade_report():
 
             f"Entry: `{entry}`",
 
-            (
-                f"Stop Loss: `{sl}`"
-            ),
+            f"Stop Loss: `{sl}`",
 
-            (
-                f"Target: `{tp}`"
-            ),
+            f"Target: `{tp}`",
 
-            (
-                f"Current: "
-                f"`{round_price(current)}`"
-            ),
+            f"Current: `{round_price(current)}`",
 
             (
                 f"{emoji} Live P&L: "
@@ -2194,6 +2482,7 @@ def closed_report(
 ):
 
     if not closed:
+
         return ""
 
     lines = [
@@ -2281,15 +2570,14 @@ def signal_report(
 ):
 
     if not trade:
+
         return ""
 
-    if trade["side"] == "BUY":
-
-        emoji = "🟢"
-
-    else:
-
-        emoji = "🔴"
+    emoji = (
+        "🟢"
+        if trade["side"] == "BUY"
+        else "🔴"
+    )
 
     reasons = (
         " + ".join(
@@ -2486,7 +2774,7 @@ def main():
 
     print(
         "CRYPTO PRICE ACTION "
-        "SCANNER v2.1"
+        "SCANNER v2.2"
     )
 
     print("=" * 70)
@@ -2654,7 +2942,7 @@ def main():
         )
 
     # --------------------------------------------------------
-    # SAVE STATE
+    # SAVE
     # --------------------------------------------------------
 
     save_json(
@@ -2730,7 +3018,6 @@ if __name__ == "__main__":
 
         traceback.print_exc()
 
-        # Preserve state even if scanner crashes
         try:
 
             save_json(
