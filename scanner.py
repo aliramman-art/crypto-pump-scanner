@@ -1,8 +1,8 @@
 # ============================================================
-# CRYPTO UT BOT SCANNER v12.5
+# CRYPTO UT BOT SCANNER v12.6
 # ============================================================
 # Kraken Futures
-# 100 IMPORTANT / HIGH-VOLUME COINS
+# TOP 60 IMPORTANT / HIGH-VOLUME COINS
 # 15M CLOSED CANDLES
 #
 # GitHub Actions:
@@ -22,8 +22,8 @@
 #       Wait for later CLOSED candle CLOSE < SELL candle LOW
 #
 # SL:
-#   LONG  -> slightly below latest confirmed valid swing low
-#   SHORT -> slightly above latest confirmed valid swing high
+#   LONG  -> latest confirmed valid swing low - 0.10%
+#   SHORT -> latest confirmed valid swing high + 0.10%
 #
 # TP:
 #   1R
@@ -32,9 +32,9 @@
 #   SL / TP are FIXED after entry.
 #
 # TELEGRAM:
-#   ONE MESSAGE PER SCAN
-#   All events are collected during the scan.
-#   New signals are compacted to prevent Telegram 4096 limit.
+#   EXACTLY ONE REPORT PER RUN
+#   Compact report
+#   No REPORT TRUNCATED
 #
 # STATE:
 #   Cumulative statistics preserved
@@ -62,11 +62,12 @@ import requests
 # ============================================================
 
 TIMEFRAME = "15m"
-TOP_COINS = 100
+
+# CHANGED:
+TOP_COINS = 60
 
 UT_KEY = 3
 UT_ATR_PERIOD = 10
-
 RR = 1.0
 
 SL_BUFFER_PERCENT = 0.10
@@ -82,6 +83,8 @@ HISTORY_FILE = "ut_bot_trade_history.json"
 RESET_ON_START = False
 RESET_MARKER_FILE = "ut_bot_reset_done.txt"
 
+MAX_TELEGRAM_LENGTH = 3900
+
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
     ""
@@ -93,10 +96,6 @@ TELEGRAM_CHAT_ID = os.getenv(
 )
 
 IRAN_TZ = ZoneInfo("Asia/Tehran")
-
-# Telegram limit is around 4096 characters.
-# We stay below it to leave a safety margin.
-MAX_TELEGRAM_LENGTH = 3900
 
 
 # ============================================================
@@ -129,10 +128,11 @@ def create_default_state():
 
 
 state = create_default_state()
+
 trade_history = []
 
-# All Telegram events from the current scan.
-# They will NOT be sent separately.
+# IMPORTANT:
+# All events generated during this execution are stored here.
 RUN_EVENTS = []
 
 
@@ -158,6 +158,7 @@ def candle_time_to_iran(ms):
             ms / 1000,
             tz=timezone.utc
         ).astimezone(IRAN_TZ).isoformat()
+
     except Exception:
         return iso_now_iran()
 
@@ -172,12 +173,34 @@ def format_iran_time(value):
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=IRAN_TZ)
 
-        return dt.astimezone(IRAN_TZ).strftime(
+        return dt.astimezone(
+            IRAN_TZ
+        ).strftime(
             "%Y-%m-%d %H:%M:%S"
         )
 
     except Exception:
         return str(value)
+
+
+def short_iran_time(value):
+    if not value:
+        return "-"
+
+    try:
+        dt = datetime.fromisoformat(value)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=IRAN_TZ)
+
+        return dt.astimezone(
+            IRAN_TZ
+        ).strftime(
+            "%H:%M"
+        )
+
+    except Exception:
+        return "-"
 
 
 def parse_time(value):
@@ -236,6 +259,7 @@ def format_duration(start_time):
 # ============================================================
 
 def perform_full_reset():
+
     global state
     global trade_history
 
@@ -246,25 +270,34 @@ def perform_full_reset():
         STATE_FILE,
         HISTORY_FILE
     ]:
+
         try:
+
             if os.path.exists(filename):
                 os.remove(filename)
+
         except Exception as e:
             print(
                 f"Delete error {filename}: {e}"
             )
 
-    print("==========================================")
+    print(
+        "=========================================="
+    )
     print("FULL RESET COMPLETED")
-    print("==========================================")
+    print(
+        "=========================================="
+    )
 
 
 # ============================================================
-# STATE SAVE / LOAD
+# SAVE / LOAD STATE
 # ============================================================
 
 def save_state():
+
     try:
+
         temp_file = STATE_FILE + ".tmp"
 
         with open(
@@ -272,6 +305,7 @@ def save_state():
             "w",
             encoding="utf-8"
         ) as f:
+
             json.dump(
                 state,
                 f,
@@ -285,13 +319,16 @@ def save_state():
         )
 
     except Exception as e:
+
         print(
             f"State save error: {e}"
         )
 
 
 def save_history():
+
     try:
+
         temp_file = HISTORY_FILE + ".tmp"
 
         with open(
@@ -299,6 +336,7 @@ def save_history():
             "w",
             encoding="utf-8"
         ) as f:
+
             json.dump(
                 trade_history,
                 f,
@@ -312,29 +350,43 @@ def save_history():
         )
 
     except Exception as e:
+
         print(
             f"History save error: {e}"
         )
 
 
 def load_state():
+
     global state
 
-    if not os.path.exists(STATE_FILE):
-        print("State file not found.")
+    if not os.path.exists(
+        STATE_FILE
+    ):
+
+        print(
+            "State file not found."
+        )
+
         return
 
     try:
+
         with open(
             STATE_FILE,
             "r",
             encoding="utf-8"
         ) as f:
+
             loaded = json.load(f)
 
         default = create_default_state()
 
-        if not isinstance(loaded, dict):
+        if not isinstance(
+            loaded,
+            dict
+        ):
+
             state = default
             return
 
@@ -345,10 +397,12 @@ def load_state():
             "pending_signals",
             "processed_signals"
         ]:
+
             if isinstance(
                 loaded.get(key),
                 dict
             ):
+
                 state[key] = loaded[key]
 
         loaded_stats = loaded.get(
@@ -360,6 +414,7 @@ def load_state():
             loaded_stats,
             dict
         ):
+
             for key in [
                 "total_trades",
                 "wins",
@@ -368,49 +423,65 @@ def load_state():
                 "total_pnl",
                 "total_r"
             ]:
+
                 if key in loaded_stats:
+
                     state[
                         "statistics"
                     ][key] = loaded_stats[key]
 
-        stats = state["statistics"]
+        stats = state[
+            "statistics"
+        ]
 
-        stats["total_trades"] = int(
+        stats[
+            "total_trades"
+        ] = int(
             stats.get(
                 "total_trades",
                 0
             )
         )
 
-        stats["wins"] = int(
+        stats[
+            "wins"
+        ] = int(
             stats.get(
                 "wins",
                 0
             )
         )
 
-        stats["losses"] = int(
+        stats[
+            "losses"
+        ] = int(
             stats.get(
                 "losses",
                 0
             )
         )
 
-        stats["breakeven"] = int(
+        stats[
+            "breakeven"
+        ] = int(
             stats.get(
                 "breakeven",
                 0
             )
         )
 
-        stats["total_pnl"] = float(
+        stats[
+            "total_pnl"
+        ] = float(
             stats.get(
                 "total_pnl",
                 0
             )
         )
 
-        stats["total_r"] = float(
+        stats[
+            "total_r"
+        ] = float(
             stats.get(
                 "total_r",
                 0
@@ -422,6 +493,7 @@ def load_state():
         )
 
     except Exception as e:
+
         print(
             f"State load error: {e}"
         )
@@ -430,24 +502,40 @@ def load_state():
 
 
 def load_history():
+
     global trade_history
 
-    if not os.path.exists(HISTORY_FILE):
+    if not os.path.exists(
+        HISTORY_FILE
+    ):
+
         trade_history = []
-        print("History file not found.")
+
+        print(
+            "History file not found."
+        )
+
         return
 
     try:
+
         with open(
             HISTORY_FILE,
             "r",
             encoding="utf-8"
         ) as f:
+
             data = json.load(f)
 
-        if isinstance(data, list):
+        if isinstance(
+            data,
+            list
+        ):
+
             trade_history = data
+
         else:
+
             trade_history = []
 
         print(
@@ -455,6 +543,7 @@ def load_history():
         )
 
     except Exception as e:
+
         print(
             f"History load error: {e}"
         )
@@ -462,7 +551,12 @@ def load_history():
         trade_history = []
 
 
+# ============================================================
+# INITIALIZE
+# ============================================================
+
 def initialize():
+
     global state
     global trade_history
 
@@ -471,16 +565,19 @@ def initialize():
         perform_full_reset()
 
         try:
+
             with open(
                 RESET_MARKER_FILE,
                 "w",
                 encoding="utf-8"
             ) as f:
+
                 f.write(
                     datetime.now().isoformat()
                 )
 
         except Exception as e:
+
             print(
                 f"Reset marker error: {e}"
             )
@@ -490,9 +587,14 @@ def initialize():
     load_state()
     load_history()
 
-    stats = state["statistics"]
+    stats = state[
+        "statistics"
+    ]
 
-    print("==========================================")
+    print(
+        "=========================================="
+    )
+
     print("STATE LOADED")
 
     print(
@@ -511,23 +613,19 @@ def initialize():
     )
 
     print(
-        f"History: "
-        f"{len(trade_history)}"
+        f"History: {len(trade_history)}"
     )
 
     print(
-        f"Trades: "
-        f"{stats['total_trades']}"
+        f"Trades: {stats['total_trades']}"
     )
 
     print(
-        f"Wins: "
-        f"{stats['wins']}"
+        f"Wins: {stats['wins']}"
     )
 
     print(
-        f"Losses: "
-        f"{stats['losses']}"
+        f"Losses: {stats['losses']}"
     )
 
     print(
@@ -540,7 +638,9 @@ def initialize():
         f"{stats['total_r']:+.2f}R"
     )
 
-    print("==========================================")
+    print(
+        "=========================================="
+    )
 
 
 # ============================================================
@@ -548,10 +648,12 @@ def initialize():
 # ============================================================
 
 def send_telegram(message):
+
     if (
         not TELEGRAM_BOT_TOKEN
         or not TELEGRAM_CHAT_ID
     ):
+
         print(
             "Telegram credentials missing."
         )
@@ -574,6 +676,7 @@ def send_telegram(message):
     }
 
     try:
+
         response = requests.post(
             url,
             data=payload,
@@ -581,6 +684,7 @@ def send_telegram(message):
         )
 
         if response.status_code != 200:
+
             print(
                 "Telegram error:",
                 response.status_code,
@@ -592,6 +696,7 @@ def send_telegram(message):
         return True
 
     except Exception as e:
+
         print(
             f"Telegram exception: {e}"
         )
@@ -600,14 +705,16 @@ def send_telegram(message):
 
 
 # ============================================================
-# FORMATTERS
+# FORMATTING
 # ============================================================
 
 def fmt_price(value):
+
     if value is None:
         return "-"
 
     try:
+
         value = float(value)
 
         if abs(value) >= 1000:
@@ -628,10 +735,12 @@ def fmt_price(value):
         return f"{value:.10f}"
 
     except Exception:
+
         return str(value)
 
 
 def pct(value):
+
     return f"{float(value):+.2f}%"
 
 
@@ -640,7 +749,9 @@ def pct(value):
 # ============================================================
 
 def fetch_ohlcv(symbol):
+
     try:
+
         data = exchange.fetch_ohlcv(
             symbol,
             timeframe=TIMEFRAME,
@@ -669,6 +780,7 @@ def fetch_ohlcv(symbol):
             "close",
             "volume"
         ]:
+
             df[column] = pd.to_numeric(
                 df[column],
                 errors="coerce"
@@ -689,6 +801,7 @@ def fetch_ohlcv(symbol):
         )
 
     except Exception as e:
+
         print(
             f"OHLCV error {symbol}: {e}"
         )
@@ -697,15 +810,22 @@ def fetch_ohlcv(symbol):
 
 
 def fetch_live_price(symbol):
+
     try:
+
         ticker = exchange.fetch_ticker(
             symbol
         )
 
-        price = ticker.get("last")
+        price = ticker.get(
+            "last"
+        )
 
         if price is None:
-            price = ticker.get("close")
+
+            price = ticker.get(
+                "close"
+            )
 
         if price is None:
             return None
@@ -713,6 +833,7 @@ def fetch_live_price(symbol):
         return float(price)
 
     except Exception as e:
+
         print(
             f"Ticker error {symbol}: {e}"
         )
@@ -725,9 +846,18 @@ def fetch_live_price(symbol):
 # ============================================================
 
 def calculate_true_range(df):
-    high = df["high"].astype(float)
-    low = df["low"].astype(float)
-    close = df["close"].astype(float)
+
+    high = df[
+        "high"
+    ].astype(float)
+
+    low = df[
+        "low"
+    ].astype(float)
+
+    close = df[
+        "close"
+    ].astype(float)
 
     previous_close = close.shift(1)
 
@@ -742,7 +872,11 @@ def calculate_true_range(df):
     ).abs()
 
     tr = pd.concat(
-        [tr1, tr2, tr3],
+        [
+            tr1,
+            tr2,
+            tr3
+        ],
         axis=1
     ).max(
         axis=1,
@@ -750,6 +884,7 @@ def calculate_true_range(df):
     )
 
     if len(tr) > 0:
+
         tr.iloc[0] = (
             high.iloc[0]
             - low.iloc[0]
@@ -762,7 +897,10 @@ def calculate_atr(
     df,
     period=10
 ):
-    tr = calculate_true_range(df)
+
+    tr = calculate_true_range(
+        df
+    )
 
     atr = pd.Series(
         float("nan"),
@@ -793,12 +931,15 @@ def calculate_atr(
             i - 1
         ]
 
-        current_tr = tr.iloc[i]
+        current_tr = tr.iloc[
+            i
+        ]
 
         if (
             pd.isna(previous_atr)
             or pd.isna(current_tr)
         ):
+
             continue
 
         atr.iloc[i] = (
@@ -817,6 +958,7 @@ def calculate_atr(
 # ============================================================
 
 def ema_length_one(series):
+
     return series.astype(
         float
     ).copy()
@@ -828,6 +970,7 @@ def pine_crossover(
     previous_a,
     previous_b
 ):
+
     if any(
         pd.isna(x)
         for x in [
@@ -837,6 +980,7 @@ def pine_crossover(
             previous_b
         ]
     ):
+
         return False
 
     return (
@@ -849,28 +993,45 @@ def calculate_ut_bot(df):
 
     df = df.copy()
 
-    df["ut_src"] = (
-        df["close"].astype(float)
-    )
+    df[
+        "ut_src"
+    ] = df[
+        "close"
+    ].astype(float)
 
-    df["atr"] = calculate_atr(
+    df[
+        "atr"
+    ] = calculate_atr(
         df,
         UT_ATR_PERIOD
     )
 
-    df["nloss"] = (
-        UT_KEY * df["atr"]
+    df[
+        "nloss"
+    ] = (
+        UT_KEY
+        * df["atr"]
     )
 
-    df["ut_stop"] = float("nan")
+    df[
+        "ut_stop"
+    ] = float("nan")
 
-    df["ut_direction"] = 0
+    df[
+        "ut_direction"
+    ] = 0
 
-    df["ut_buy"] = False
+    df[
+        "ut_buy"
+    ] = False
 
-    df["ut_sell"] = False
+    df[
+        "ut_sell"
+    ] = False
 
-    df["ut_ema1"] = ema_length_one(
+    df[
+        "ut_ema1"
+    ] = ema_length_one(
         df["ut_src"]
     )
 
@@ -878,18 +1039,14 @@ def calculate_ut_bot(df):
         return df
 
     previous_stop = 0.0
-    previous_src = float(
-        df.iloc[0]["ut_src"]
-    )
-    previous_ema = float(
-        df.iloc[0]["ut_ema1"]
-    )
 
-    previous_stop_for_crossover = 0.0
-    previous_valid_stop = False
     previous_direction = 0
 
-    for i in range(len(df)):
+    previous_valid_stop = False
+
+    for i in range(
+        len(df)
+    ):
 
         src = float(
             df.iloc[i]["ut_src"]
@@ -914,28 +1071,36 @@ def calculate_ut_bot(df):
                 "ut_direction"
             ] = previous_direction
 
-            previous_src = src
-            previous_ema = src
-
             continue
 
         nloss = float(nloss)
 
         if previous_valid_stop:
-            nz_previous_stop = previous_stop
+
+            nz_previous_stop = (
+                previous_stop
+            )
+
         else:
+
             nz_previous_stop = 0.0
 
         if i > 0:
+
             previous_src_value = float(
                 df.iloc[i - 1]["ut_src"]
             )
+
         else:
-            previous_src_value = float("nan")
+
+            previous_src_value = float(
+                "nan"
+            )
 
         if (
             src > nz_previous_stop
-            and previous_src_value > nz_previous_stop
+            and previous_src_value
+            > nz_previous_stop
         ):
 
             stop = max(
@@ -945,7 +1110,8 @@ def calculate_ut_bot(df):
 
         elif (
             src < nz_previous_stop
-            and previous_src_value < nz_previous_stop
+            and previous_src_value
+            < nz_previous_stop
         ):
 
             stop = min(
@@ -973,7 +1139,8 @@ def calculate_ut_bot(df):
         if (
             i > 0
             and previous_valid_stop
-            and previous_src_value < nz_previous_stop
+            and previous_src_value
+            < nz_previous_stop
             and src > nz_previous_stop
         ):
 
@@ -982,7 +1149,8 @@ def calculate_ut_bot(df):
         elif (
             i > 0
             and previous_valid_stop
-            and previous_src_value > nz_previous_stop
+            and previous_src_value
+            > nz_previous_stop
             and src < nz_previous_stop
         ):
 
@@ -990,7 +1158,9 @@ def calculate_ut_bot(df):
 
         else:
 
-            direction = previous_direction
+            direction = (
+                previous_direction
+            )
 
         df.loc[
             df.index[i],
@@ -1000,11 +1170,16 @@ def calculate_ut_bot(df):
         current_ema = src
 
         if i > 0:
+
             previous_ema_value = float(
                 df.iloc[i - 1]["ut_ema1"]
             )
+
         else:
-            previous_ema_value = float("nan")
+
+            previous_ema_value = float(
+                "nan"
+            )
 
         above = pine_crossover(
             current_ema,
@@ -1049,14 +1224,12 @@ def calculate_ut_bot(df):
         ] = bool(sell)
 
         previous_stop = stop
+
         previous_valid_stop = True
 
-        previous_src = src
-        previous_ema = current_ema
-
-        previous_stop_for_crossover = stop
-
-        previous_direction = direction
+        previous_direction = (
+            direction
+        )
 
     return df
 
@@ -1070,10 +1243,18 @@ def is_swing_low(
     index
 ):
 
-    if index - SWING_LEFT < 0:
+    if (
+        index - SWING_LEFT
+        < 0
+    ):
+
         return False
 
-    if index + SWING_RIGHT >= len(df):
+    if (
+        index + SWING_RIGHT
+        >= len(df)
+    ):
+
         return False
 
     value = float(
@@ -1111,10 +1292,18 @@ def is_swing_high(
     index
 ):
 
-    if index - SWING_LEFT < 0:
+    if (
+        index - SWING_LEFT
+        < 0
+    ):
+
         return False
 
-    if index + SWING_RIGHT >= len(df):
+    if (
+        index + SWING_RIGHT
+        >= len(df)
+    ):
+
         return False
 
     value = float(
@@ -1210,7 +1399,7 @@ def find_last_valid_swing_high(
 
 
 # ============================================================
-# TRADE PNL
+# PNL / STATISTICS
 # ============================================================
 
 def calculate_trade_pnl(
@@ -1232,13 +1421,11 @@ def calculate_trade_pnl(
     ) * 100
 
 
-# ============================================================
-# STATISTICS
-# ============================================================
-
 def get_statistics():
 
-    stats = state["statistics"]
+    stats = state[
+        "statistics"
+    ]
 
     total = int(
         stats.get(
@@ -1313,95 +1500,42 @@ def telegram_ut_signal(
     signal_time
 ):
 
-    emoji = (
-        "🟢"
-        if side == "BUY"
-        else "🔴"
-    )
-
-    # Compact event.
-    # Full signal details remain in state/pending report.
-    message = (
-        f"{emoji} <b>UT {side}</b> | "
-        f"<b>{symbol}</b>\n"
-        f"📌 Close: <b>{fmt_price(signal_price)}</b> | "
-        f"High: <b>{fmt_price(signal_high)}</b> | "
-        f"Low: <b>{fmt_price(signal_low)}</b>\n"
-        f"🛑 Stop: <b>{fmt_price(ut_stop)}</b> | "
-        f"🕐 {format_iran_time(signal_time)}\n"
-        f"⏳ <b>WAITING CONFIRMATION</b>"
-    )
-
     RUN_EVENTS.append({
         "type": "SIGNAL",
-        "side": side,
         "symbol": symbol,
-        "signal_price": signal_price,
-        "signal_high": signal_high,
-        "signal_low": signal_low,
-        "ut_stop": ut_stop,
-        "signal_time": signal_time,
-        "message": message
+        "side": side,
+        "price": float(signal_price),
+        "high": float(signal_high),
+        "low": float(signal_low),
+        "stop": float(ut_stop),
+        "time": signal_time
     })
 
-
-def telegram_trade_open(trade):
-
-    side = trade["side"]
-
-    emoji = (
-        "🟢"
-        if side == "LONG"
-        else "🔴"
+    print(
+        f"📌 EVENT SIGNAL: "
+        f"{symbol} {side}"
     )
 
-    entry = float(
-        trade["entry"]
-    )
 
-    sl = float(
-        trade["sl"]
-    )
-
-    tp = float(
-        trade["tp"]
-    )
-
-    sl_pct = (
-        (sl - entry)
-        / entry
-        * 100
-    )
-
-    tp_pct = (
-        (tp - entry)
-        / entry
-        * 100
-    )
-
-    message = (
-        f"{emoji} <b>{side} ENTRY</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"💎 <b>{trade['symbol']}</b>\n"
-        f"⏱ {TIMEFRAME} | "
-        f"UT <b>{trade['ut_signal']}</b>\n"
-        f"🎯 Entry: <b>{fmt_price(entry)}</b>\n"
-        f"🛑 SL: <b>{fmt_price(sl)}</b> "
-        f"({pct(sl_pct)})\n"
-        f"💰 TP: <b>{fmt_price(tp)}</b> "
-        f"({pct(tp_pct)})\n"
-        f"📐 RR: <b>1:1</b>\n"
-        f"🕐 Entry: "
-        f"<b>{format_iran_time(trade['opened_at'])}</b>\n"
-        f"🔒 <b>SL / TP FIXED</b>"
-    )
+def telegram_trade_open(
+    trade
+):
 
     RUN_EVENTS.append({
-        "type": "OPEN",
-        "side": side,
+        "type": "ENTRY",
         "symbol": trade["symbol"],
-        "message": message
+        "side": trade["side"],
+        "entry": float(trade["entry"]),
+        "sl": float(trade["sl"]),
+        "tp": float(trade["tp"]),
+        "time": trade["opened_at"]
     })
+
+    print(
+        f"📥 EVENT ENTRY: "
+        f"{trade['symbol']} "
+        f"{trade['side']}"
+    )
 
 
 def telegram_trade_exit(
@@ -1412,57 +1546,27 @@ def telegram_trade_exit(
     r_multiple
 ):
 
-    if result == "WIN":
-        emoji = "✅"
-
-    elif result == "LOSS":
-        emoji = "❌"
-
-    else:
-        emoji = "➖"
-
-    stats = get_statistics()
-
-    message = (
-        f"{emoji} <b>TRADE CLOSED - {result}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"💎 <b>{trade['symbol']}</b>\n"
-        f"📊 Side: <b>{trade['side']}</b>\n"
-        f"🎯 Entry: "
-        f"<b>{fmt_price(trade['entry'])}</b>\n"
-        f"🚪 Exit: "
-        f"<b>{fmt_price(exit_price)}</b>\n"
-        f"🛑 SL: "
-        f"<b>{fmt_price(trade['sl'])}</b>\n"
-        f"💰 TP: "
-        f"<b>{fmt_price(trade['tp'])}</b>\n"
-        f"📈 P&L: <b>{pct(pnl_pct)}</b>\n"
-        f"📐 R: <b>{r_multiple:+.2f}R</b>\n"
-        f"⏱ Duration: "
-        f"<b>{format_duration(trade['opened_at'])}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📊 Trades: <b>{stats['total']}</b> | "
-        f"🟢 {stats['wins']} | "
-        f"🔴 {stats['losses']} | "
-        f"⚪ {stats['breakeven']}\n"
-        f"🏆 Win Rate: "
-        f"<b>{stats['win_rate']:.2f}%</b>\n"
-        f"💵 Total P&L: "
-        f"<b>{stats['pnl']:+.2f}%</b>\n"
-        f"📐 Total R: "
-        f"<b>{stats['r']:+.2f}R</b>"
-    )
-
     RUN_EVENTS.append({
         "type": "EXIT",
-        "result": result,
         "symbol": trade["symbol"],
-        "message": message
+        "side": trade["side"],
+        "entry": float(trade["entry"]),
+        "exit": float(exit_price),
+        "result": result,
+        "pnl": float(pnl_pct),
+        "r": float(r_multiple),
+        "time": iso_now_iran()
     })
+
+    print(
+        f"📤 EVENT EXIT: "
+        f"{trade['symbol']} "
+        f"{result}"
+    )
 
 
 # ============================================================
-# TRADE CREATION
+# CREATE TRADE
 # ============================================================
 
 def create_trade(
@@ -1544,6 +1648,7 @@ def process_pending_signal(
         confirmation_timestamp
         <= pending_timestamp
     ):
+
         return False
 
     confirmation_time = (
@@ -1556,7 +1661,9 @@ def process_pending_signal(
         confirmation["close"]
     )
 
-    signal_side = pending["side"]
+    signal_side = pending[
+        "side"
+    ]
 
     signal_high = float(
         pending["signal_high"]
@@ -1566,7 +1673,10 @@ def process_pending_signal(
         pending["signal_low"]
     )
 
-    # Opposite UT signal cancels pending signal.
+    # --------------------------------------------------------
+    # CANCEL ON OPPOSITE SIGNAL
+    # --------------------------------------------------------
+
     if (
         bool(confirmation["ut_buy"])
         and signal_side == "SHORT"
@@ -1579,8 +1689,9 @@ def process_pending_signal(
         save_state()
 
         print(
-            f"{symbol}: SHORT pending "
-            f"cancelled by opposite BUY."
+            f"{symbol}: "
+            f"SHORT pending cancelled "
+            f"by opposite BUY."
         )
 
         return False
@@ -1597,15 +1708,16 @@ def process_pending_signal(
         save_state()
 
         print(
-            f"{symbol}: LONG pending "
-            f"cancelled by opposite SELL."
+            f"{symbol}: "
+            f"LONG pending cancelled "
+            f"by opposite SELL."
         )
 
         return False
 
-    # ========================================================
+    # --------------------------------------------------------
     # LONG
-    # ========================================================
+    # --------------------------------------------------------
 
     if signal_side == "LONG":
 
@@ -1615,7 +1727,8 @@ def process_pending_signal(
         ):
 
             print(
-                f"{symbol}: LONG waiting. "
+                f"{symbol}: "
+                f"LONG waiting. "
                 f"Close {confirmation_close} "
                 f"<= {signal_high}"
             )
@@ -1632,8 +1745,9 @@ def process_pending_signal(
         if swing_low is None:
 
             print(
-                f"{symbol}: LONG confirmed "
-                f"but no valid swing low."
+                f"{symbol}: "
+                f"LONG confirmed but "
+                f"no valid swing low."
             )
 
             return False
@@ -1651,7 +1765,8 @@ def process_pending_signal(
         if sl >= entry:
 
             print(
-                f"{symbol}: Invalid LONG SL."
+                f"{symbol}: "
+                f"Invalid LONG SL."
             )
 
             return False
@@ -1663,9 +1778,7 @@ def process_pending_signal(
 
         tp = (
             entry
-            + (
-                risk * RR
-            )
+            + (risk * RR)
         )
 
         trade = create_trade(
@@ -1697,14 +1810,15 @@ def process_pending_signal(
         )
 
         print(
-            f"🟢 LONG OPENED: {symbol}"
+            f"🟢 LONG OPENED: "
+            f"{symbol}"
         )
 
         return True
 
-    # ========================================================
+    # --------------------------------------------------------
     # SHORT
-    # ========================================================
+    # --------------------------------------------------------
 
     if signal_side == "SHORT":
 
@@ -1714,7 +1828,8 @@ def process_pending_signal(
         ):
 
             print(
-                f"{symbol}: SHORT waiting. "
+                f"{symbol}: "
+                f"SHORT waiting. "
                 f"Close {confirmation_close} "
                 f">= {signal_low}"
             )
@@ -1731,8 +1846,9 @@ def process_pending_signal(
         if swing_high is None:
 
             print(
-                f"{symbol}: SHORT confirmed "
-                f"but no valid swing high."
+                f"{symbol}: "
+                f"SHORT confirmed but "
+                f"no valid swing high."
             )
 
             return False
@@ -1750,7 +1866,8 @@ def process_pending_signal(
         if sl <= entry:
 
             print(
-                f"{symbol}: Invalid SHORT SL."
+                f"{symbol}: "
+                f"Invalid SHORT SL."
             )
 
             return False
@@ -1762,9 +1879,7 @@ def process_pending_signal(
 
         tp = (
             entry
-            - (
-                risk * RR
-            )
+            - (risk * RR)
         )
 
         trade = create_trade(
@@ -1796,7 +1911,8 @@ def process_pending_signal(
         )
 
         print(
-            f"🔴 SHORT OPENED: {symbol}"
+            f"🔴 SHORT OPENED: "
+            f"{symbol}"
         )
 
         return True
@@ -1805,7 +1921,7 @@ def process_pending_signal(
 
 
 # ============================================================
-# NEW UT SIGNAL
+# DETECT NEW UT SIGNAL
 # ============================================================
 
 def detect_new_ut_signal(
@@ -1844,14 +1960,21 @@ def detect_new_ut_signal(
         ].get(symbol)
         == signal_key
     ):
+
         return None
 
     side = None
 
-    if bool(signal["ut_buy"]):
+    if bool(
+        signal["ut_buy"]
+    ):
+
         side = "LONG"
 
-    elif bool(signal["ut_sell"]):
+    elif bool(
+        signal["ut_sell"]
+    ):
+
         side = "SHORT"
 
     state[
@@ -1912,14 +2035,15 @@ def detect_new_ut_signal(
     )
 
     print(
-        f"📌 NEW {side} SIGNAL: {symbol}"
+        f"📌 NEW {side} SIGNAL: "
+        f"{symbol}"
     )
 
     return pending
 
 
 # ============================================================
-# OPEN TRADE CHECK
+# CHECK OPEN TRADE
 # ============================================================
 
 def check_open_trade(
@@ -1937,7 +2061,9 @@ def check_open_trade(
     if len(df) < 3:
         return False
 
-    candle = df.iloc[-2]
+    candle = df.iloc[
+        -2
+    ]
 
     high = float(
         candle["high"]
@@ -1959,22 +2085,29 @@ def check_open_trade(
         trade["tp"]
     )
 
-    side = trade["side"]
+    side = trade[
+        "side"
+    ]
 
     exit_price = None
     result = None
     r_multiple = 0.0
 
-    # ========================================================
+    # --------------------------------------------------------
     # LONG
-    # ========================================================
+    # --------------------------------------------------------
 
     if side == "LONG":
 
-        hit_sl = low <= sl
-        hit_tp = high >= tp
+        hit_sl = (
+            low <= sl
+        )
 
-        # Conservative SL-first logic
+        hit_tp = (
+            high >= tp
+        )
+
+        # SL FIRST if both are hit
         if hit_sl:
 
             exit_price = sl
@@ -1987,16 +2120,21 @@ def check_open_trade(
             result = "WIN"
             r_multiple = RR
 
-    # ========================================================
+    # --------------------------------------------------------
     # SHORT
-    # ========================================================
+    # --------------------------------------------------------
 
     elif side == "SHORT":
 
-        hit_sl = high >= sl
-        hit_tp = low <= tp
+        hit_sl = (
+            high >= sl
+        )
 
-        # Conservative SL-first logic
+        hit_tp = (
+            low <= tp
+        )
+
+        # SL FIRST if both are hit
         if hit_sl:
 
             exit_price = sl
@@ -2018,27 +2156,49 @@ def check_open_trade(
         exit_price
     )
 
-    stats = state["statistics"]
+    stats = state[
+        "statistics"
+    ]
 
-    stats["total_trades"] += 1
+    stats[
+        "total_trades"
+    ] += 1
 
     if result == "WIN":
-        stats["wins"] += 1
+
+        stats[
+            "wins"
+        ] += 1
 
     elif result == "LOSS":
-        stats["losses"] += 1
+
+        stats[
+            "losses"
+        ] += 1
 
     else:
-        stats["breakeven"] += 1
 
-    stats["total_pnl"] += pnl_pct
-    stats["total_r"] += r_multiple
+        stats[
+            "breakeven"
+        ] += 1
 
-    closed_trade = dict(trade)
+    stats[
+        "total_pnl"
+    ] += pnl_pct
+
+    stats[
+        "total_r"
+    ] += r_multiple
+
+    closed_trade = dict(
+        trade
+    )
 
     closed_trade[
         "exit_price"
-    ] = float(exit_price)
+    ] = float(
+        exit_price
+    )
 
     closed_trade[
         "result"
@@ -2046,11 +2206,15 @@ def check_open_trade(
 
     closed_trade[
         "pnl_pct"
-    ] = float(pnl_pct)
+    ] = float(
+        pnl_pct
+    )
 
     closed_trade[
         "r_multiple"
-    ] = float(r_multiple)
+    ] = float(
+        r_multiple
+    )
 
     closed_trade[
         "closed_at"
@@ -2126,159 +2290,22 @@ def calculate_open_pnl():
             "entry": entry,
             "current": current,
             "pnl": pnl,
-            "sl": float(trade["sl"]),
-            "tp": float(trade["tp"]),
-            "opened_at": trade["opened_at"]
+            "sl": float(
+                trade["sl"]
+            ),
+            "tp": float(
+                trade["tp"]
+            ),
+            "opened_at": trade[
+                "opened_at"
+            ]
         })
 
     return results
 
 
 # ============================================================
-# TELEGRAM REPORT HELPERS
-# ============================================================
-
-def build_event_summary():
-
-    lines = []
-
-    total_events = len(
-        RUN_EVENTS
-    )
-
-    signal_events = [
-        e for e in RUN_EVENTS
-        if e.get("type") == "SIGNAL"
-    ]
-
-    open_events = [
-        e for e in RUN_EVENTS
-        if e.get("type") == "OPEN"
-    ]
-
-    exit_events = [
-        e for e in RUN_EVENTS
-        if e.get("type") == "EXIT"
-    ]
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    lines.append(
-        f"⚡ <b>THIS RUN EVENTS: "
-        f"{total_events}</b>"
-    )
-
-    # --------------------------------------------------------
-    # SIGNALS
-    # --------------------------------------------------------
-
-    if signal_events:
-
-        buy_count = sum(
-            1
-            for e in signal_events
-            if e.get("side") == "LONG"
-        )
-
-        sell_count = sum(
-            1
-            for e in signal_events
-            if e.get("side") == "SHORT"
-        )
-
-        lines.append(
-            f"📌 New UT Signals: "
-            f"<b>{len(signal_events)}</b> "
-            f"(🟢 {buy_count} / 🔴 {sell_count})"
-        )
-
-        for event in signal_events:
-
-            emoji = (
-                "🟢"
-                if event["side"] == "LONG"
-                else "🔴"
-            )
-
-            direction = (
-                "BUY"
-                if event["side"] == "LONG"
-                else "SELL"
-            )
-
-            lines.append(
-                f"{emoji} <b>{event['symbol']}</b> "
-                f"{direction} | "
-                f"Close "
-                f"<b>{fmt_price(event['signal_price'])}</b> | "
-                f"{format_iran_time(event['signal_time'])}"
-            )
-
-    # --------------------------------------------------------
-    # OPEN EVENTS
-    # --------------------------------------------------------
-
-    if open_events:
-
-        lines.append(
-            f"🚀 <b>NEW ENTRIES: "
-            f"{len(open_events)}</b>"
-        )
-
-        for event in open_events:
-
-            emoji = (
-                "🟢"
-                if event["side"] == "LONG"
-                else "🔴"
-            )
-
-            lines.append(
-                f"{emoji} <b>{event['symbol']}</b> "
-                f"{event['side']} ENTRY"
-            )
-
-    # --------------------------------------------------------
-    # EXIT EVENTS
-    # --------------------------------------------------------
-
-    if exit_events:
-
-        lines.append(
-            f"🏁 <b>CLOSED TRADES: "
-            f"{len(exit_events)}</b>"
-        )
-
-        for event in exit_events:
-
-            if event["result"] == "WIN":
-                emoji = "✅"
-
-            elif event["result"] == "LOSS":
-                emoji = "❌"
-
-            else:
-                emoji = "➖"
-
-            lines.append(
-                f"{emoji} <b>{event['symbol']}</b> "
-                f"{event['result']}"
-            )
-
-    if not RUN_EVENTS:
-
-        lines.append(
-            "⚪ No new signals / "
-            "entries / exits"
-        )
-
-    return lines
-
-
-# ============================================================
-# REPORT
+# COMPACT TELEGRAM REPORT
 # ============================================================
 
 def build_report():
@@ -2287,96 +2314,180 @@ def build_report():
 
     lines = []
 
-    # ========================================================
+    # --------------------------------------------------------
     # HEADER
-    # ========================================================
+    # --------------------------------------------------------
 
     lines.append(
         "📡 <b>CRYPTO UT BOT REPORT</b>"
     )
 
     lines.append(
-        "━━━━━━━━━━━━━━━━━━"
+        f"🕐 {now_iran().strftime('%Y-%m-%d %H:%M:%S')}"
     )
 
     lines.append(
-        f"🕐 "
-        f"{now_iran().strftime('%Y-%m-%d %H:%M:%S')}"
+        f"⏱ {TIMEFRAME} CLOSED | "
+        f"TOP {TOP_COINS}"
     )
 
     lines.append(
-        f"⏱ Timeframe: "
-        f"<b>{TIMEFRAME}</b>"
-    )
-
-    lines.append(
-        f"💎 Market Scan: "
-        f"<b>TOP {TOP_COINS}</b>"
-    )
-
-    lines.append(
-        f"🤖 UT Bot: "
-        f"<b>Key {UT_KEY} / ATR {UT_ATR_PERIOD}</b>"
+        f"🤖 UT {UT_KEY}/{UT_ATR_PERIOD} | "
+        f"RR 1:1"
     )
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    # ========================================================
-    # CUMULATIVE PERFORMANCE
-    # ========================================================
+    # --------------------------------------------------------
+    # STATISTICS
+    # --------------------------------------------------------
 
     lines.append(
-        "📊 <b>CUMULATIVE PERFORMANCE</b>"
-    )
-
-    lines.append(
-        f"📈 Total Trades: "
-        f"<b>{stats['total']}</b>"
+        "📊 <b>PERFORMANCE</b>"
     )
 
     lines.append(
-        f"🟢 Wins: "
-        f"<b>{stats['wins']}</b>"
+        f"Trades {stats['total']} | "
+        f"🟢 {stats['wins']} | "
+        f"🔴 {stats['losses']} | "
+        f"⚪ {stats['breakeven']}"
     )
 
     lines.append(
-        f"🔴 Losses: "
-        f"<b>{stats['losses']}</b>"
+        f"🏆 WR {stats['win_rate']:.1f}% | "
+        f"P&L {stats['pnl']:+.2f}% | "
+        f"R {stats['r']:+.2f}"
+    )
+
+    # --------------------------------------------------------
+    # THIS RUN EVENTS
+    # --------------------------------------------------------
+
+    signal_events = [
+        x
+        for x in RUN_EVENTS
+        if x["type"] == "SIGNAL"
+    ]
+
+    entry_events = [
+        x
+        for x in RUN_EVENTS
+        if x["type"] == "ENTRY"
+    ]
+
+    exit_events = [
+        x
+        for x in RUN_EVENTS
+        if x["type"] == "EXIT"
+    ]
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
-        f"⚪ Breakeven: "
-        f"<b>{stats['breakeven']}</b>"
+        f"⚡ <b>THIS RUN: "
+        f"{len(RUN_EVENTS)} EVENTS</b>"
     )
 
-    lines.append(
-        f"🏆 Win Rate: "
-        f"<b>{stats['win_rate']:.2f}%</b>"
-    )
+    # --------------------------------------------------------
+    # SIGNALS
+    # --------------------------------------------------------
 
-    lines.append(
-        f"💵 Total P&L: "
-        f"<b>{stats['pnl']:+.2f}%</b>"
-    )
+    if signal_events:
 
-    lines.append(
-        f"📐 Total R: "
-        f"<b>{stats['r']:+.2f}R</b>"
-    )
+        buys = sum(
+            1
+            for x in signal_events
+            if x["side"] == "BUY"
+        )
 
-    # ========================================================
-    # CURRENT RUN EVENTS
-    # ========================================================
+        sells = sum(
+            1
+            for x in signal_events
+            if x["side"] == "SELL"
+        )
 
-    lines.extend(
-        build_event_summary()
-    )
+        lines.append(
+            f"📌 Signals: "
+            f"{len(signal_events)} "
+            f"(🟢 {buys} / 🔴 {sells})"
+        )
 
-    # ========================================================
+        for event in signal_events:
+
+            emoji = (
+                "🟢"
+                if event["side"] == "BUY"
+                else "🔴"
+            )
+
+            lines.append(
+                f"{emoji} "
+                f"{event['symbol']} | "
+                f"{event['side']} | "
+                f"{fmt_price(event['price'])} | "
+                f"{short_iran_time(event['time'])}"
+            )
+
+    # --------------------------------------------------------
+    # ENTRIES
+    # --------------------------------------------------------
+
+    if entry_events:
+
+        lines.append(
+            "📥 <b>NEW ENTRIES</b>"
+        )
+
+        for event in entry_events:
+
+            emoji = (
+                "🟢"
+                if event["side"] == "LONG"
+                else "🔴"
+            )
+
+            lines.append(
+                f"{emoji} "
+                f"{event['symbol']} | "
+                f"{event['side']} | "
+                f"E {fmt_price(event['entry'])} | "
+                f"SL {fmt_price(event['sl'])} | "
+                f"TP {fmt_price(event['tp'])}"
+            )
+
+    # --------------------------------------------------------
+    # CLOSED
+    # --------------------------------------------------------
+
+    if exit_events:
+
+        lines.append(
+            "📤 <b>CLOSED</b>"
+        )
+
+        for event in exit_events:
+
+            emoji = (
+                "✅"
+                if event["result"] == "WIN"
+                else "❌"
+            )
+
+            lines.append(
+                f"{emoji} "
+                f"{event['symbol']} | "
+                f"{event['result']} | "
+                f"{event['pnl']:+.2f}% | "
+                f"{event['r']:+.1f}R"
+            )
+
+    # --------------------------------------------------------
     # PENDING
-    # ========================================================
+    # --------------------------------------------------------
 
     pending = state[
         "pending_signals"
@@ -2387,53 +2498,41 @@ def build_report():
     )
 
     lines.append(
-        f"⏳ <b>PENDING UT SIGNALS: "
+        f"⏳ <b>PENDING: "
         f"{len(pending)}</b>"
     )
 
-    if not pending:
+    if pending:
 
-        lines.append(
-            "⚪ No pending signals"
-        )
-
-    else:
-
-        for symbol, item in (
-            pending.items()
-        ):
+        for symbol, item in pending.items():
 
             if item["side"] == "LONG":
 
-                emoji = "🟢"
-                direction = "LONG"
-
-                condition = (
-                    f"Close > "
+                lines.append(
+                    f"🟢 {symbol} | "
+                    f"LONG | "
+                    f"Confirm > "
                     f"{fmt_price(item['signal_high'])}"
                 )
 
             else:
 
-                emoji = "🔴"
-                direction = "SHORT"
-
-                condition = (
-                    f"Close < "
+                lines.append(
+                    f"🔴 {symbol} | "
+                    f"SHORT | "
+                    f"Confirm < "
                     f"{fmt_price(item['signal_low'])}"
                 )
 
-            lines.append(
-                f"{emoji} <b>{symbol}</b> "
-                f"{direction} | "
-                f"Close "
-                f"<b>{fmt_price(item['signal_close'])}</b> | "
-                f"Confirm: <b>{condition}</b>"
-            )
+    else:
 
-    # ========================================================
+        lines.append(
+            "⚪ None"
+        )
+
+    # --------------------------------------------------------
     # OPEN TRADES
-    # ========================================================
+    # --------------------------------------------------------
 
     open_results = (
         calculate_open_pnl()
@@ -2444,19 +2543,19 @@ def build_report():
     )
 
     lines.append(
-        f"📂 <b>OPEN TRADES: "
+        f"📂 <b>OPEN: "
         f"{len(open_results)}</b>"
     )
+
+    total_open_pnl = 0.0
 
     if not open_results:
 
         lines.append(
-            "⚪ No open trades"
+            "⚪ None"
         )
 
     else:
-
-        total_open_pnl = 0.0
 
         for item in open_results:
 
@@ -2470,238 +2569,77 @@ def build_report():
                 else "🔴"
             )
 
-            entry = item["entry"]
-            sl = item["sl"]
-            tp = item["tp"]
-
-            sl_pct = (
-                (sl - entry)
-                / entry
-                * 100
-            )
-
-            tp_pct = (
-                (tp - entry)
-                / entry
-                * 100
+            lines.append(
+                f"{emoji} "
+                f"{item['symbol']} | "
+                f"{item['side']} | "
+                f"E {fmt_price(item['entry'])} | "
+                f"Now {fmt_price(item['current'])} | "
+                f"{item['pnl']:+.2f}%"
             )
 
             lines.append(
-                f"\n{emoji} <b>{item['symbol']}</b>"
-            )
-
-            lines.append(
-                f"Side: "
-                f"<b>{item['side']}</b>"
-            )
-
-            lines.append(
-                f"Entry: "
-                f"<b>{fmt_price(entry)}</b>"
-            )
-
-            lines.append(
-                f"Current: "
-                f"<b>{fmt_price(item['current'])}</b>"
-            )
-
-            lines.append(
-                f"P&L: "
-                f"<b>{pct(item['pnl'])}</b>"
-            )
-
-            lines.append(
-                f"🛑 SL: "
-                f"<b>{fmt_price(sl)}</b> "
-                f"({pct(sl_pct)})"
-            )
-
-            lines.append(
-                f"💰 TP: "
-                f"<b>{fmt_price(tp)}</b> "
-                f"({pct(tp_pct)})"
-            )
-
-            lines.append(
-                f"🕐 Open: "
-                f"<b>{format_iran_time(item['opened_at'])}</b>"
-            )
-
-            lines.append(
-                f"⏱ Duration: "
-                f"<b>{format_duration(item['opened_at'])}</b>"
+                f"   SL {fmt_price(item['sl'])} | "
+                f"TP {fmt_price(item['tp'])} | "
+                f"{format_duration(item['opened_at'])}"
             )
 
         lines.append(
-            f"\n📊 Open P&L: "
+            f"📊 Open P&L: "
             f"<b>{total_open_pnl:+.2f}%</b>"
         )
 
-    # ========================================================
-    # SAFE LENGTH CONTROL
-    # ========================================================
-
-    # Build complete report first.
-    full_message = "\n".join(
-        lines
-    )
-
-    if len(full_message) <= MAX_TELEGRAM_LENGTH:
-        return full_message
-
     # --------------------------------------------------------
-    # If report is too long:
-    #
-    # Keep:
-    #   Header
-    #   Cumulative statistics
-    #   Event summary
-    #   Pending count + compact pending
-    #   Open trades
-    #
-    # The compact event section is already small,
-    # but pending/open trades can still become large.
+    # BUILD WITHOUT TRUNCATION
     # --------------------------------------------------------
 
-    compact_lines = []
+    final_lines = []
 
-    # Header + statistics
+    current_length = 0
+
     for line in lines:
 
-        compact_lines.append(line)
+        extra = (
+            len(line)
+            + (
+                1
+                if final_lines
+                else 0
+            )
+        )
 
         if (
-            line.startswith(
-                "📐 Total R:"
-            )
+            current_length
+            + extra
+            > MAX_TELEGRAM_LENGTH
         ):
-            break
 
-    # Events
-    event_lines = build_event_summary()
+            # Skip lower-priority lines
+            # instead of cutting the report.
+            continue
 
-    compact_lines.extend(
-        event_lines
-    )
-
-    # Pending compact section
-    compact_lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    compact_lines.append(
-        f"⏳ <b>PENDING UT SIGNALS: "
-        f"{len(pending)}</b>"
-    )
-
-    for symbol, item in list(
-        pending.items()
-    ):
-
-        direction = (
-            "LONG"
-            if item["side"] == "LONG"
-            else "SHORT"
+        final_lines.append(
+            line
         )
 
-        emoji = (
-            "🟢"
-            if direction == "LONG"
-            else "🔴"
-        )
+        current_length += extra
 
-        compact_lines.append(
-            f"{emoji} <b>{symbol}</b> "
-            f"{direction} | "
-            f"{fmt_price(item['signal_close'])}"
-        )
-
-    # Open trades
-    compact_lines.append(
-        "━━━━━━━━━━━━━━━━━━"
+    report = "\n".join(
+        final_lines
     )
 
-    compact_lines.append(
-        f"📂 <b>OPEN TRADES: "
-        f"{len(open_results)}</b>"
-    )
-
-    total_open_pnl = 0.0
-
-    for item in open_results:
-
-        total_open_pnl += (
-            item["pnl"]
-        )
-
-        emoji = (
-            "🟢"
-            if item["side"] == "LONG"
-            else "🔴"
-        )
-
-        compact_lines.append(
-            f"{emoji} <b>{item['symbol']}</b> "
-            f"{item['side']} | "
-            f"Entry {fmt_price(item['entry'])} | "
-            f"Now {fmt_price(item['current'])} | "
-            f"P&L {pct(item['pnl'])} | "
-            f"SL {fmt_price(item['sl'])} | "
-            f"TP {fmt_price(item['tp'])}"
-        )
-
-    compact_lines.append(
-        f"📊 Open P&L: "
-        f"<b>{total_open_pnl:+.2f}%</b>"
-    )
-
-    # --------------------------------------------------------
-    # Final safety line-based truncation.
-    # Never cut an HTML tag in half.
-    # --------------------------------------------------------
-
-    result = ""
-
-    for line in compact_lines:
-
-        candidate = (
-            result
-            + (
-                "\n"
-                if result
-                else ""
-            )
-            + line
-        )
-
-        if len(candidate) > (
-            MAX_TELEGRAM_LENGTH
-            - 120
-        ):
-            break
-
-        result = candidate
-
-    result += (
-        "\n━━━━━━━━━━━━━━━━━━\n"
-        "ℹ️ <b>Report compacted "
-        "to fit Telegram limit.</b>"
-    )
-
-    return result
+    return report
 
 
 # ============================================================
-# TOP COINS
+# TOP 60 SYMBOLS
 # ============================================================
 
 def get_top_symbols():
 
     try:
 
-        markets = (
-            exchange.load_markets()
-        )
+        markets = exchange.load_markets()
 
         candidates = []
 
@@ -2715,26 +2653,31 @@ def get_top_symbols():
                     "active",
                     True
                 ):
+
                     continue
 
                 if market.get(
                     "linear"
                 ) is not True:
+
                     continue
 
                 if market.get(
                     "quote"
                 ) != "USD":
+
                     continue
 
                 if market.get(
                     "settle"
                 ) != "USD":
+
                     continue
 
                 if market.get(
                     "swap"
                 ) is not True:
+
                     continue
 
                 candidates.append(
@@ -2742,6 +2685,7 @@ def get_top_symbols():
                 )
 
             except Exception:
+
                 continue
 
         if not candidates:
@@ -2752,10 +2696,8 @@ def get_top_symbols():
             f"{len(candidates)}"
         )
 
-        tickers = (
-            exchange.fetch_tickers(
-                candidates
-            )
+        tickers = exchange.fetch_tickers(
+            candidates
         )
 
         ranked = []
@@ -2775,10 +2717,8 @@ def get_top_symbols():
 
             if volume is None:
 
-                base_volume = (
-                    ticker.get(
-                        "baseVolume"
-                    )
+                base_volume = ticker.get(
+                    "baseVolume"
                 )
 
                 last = ticker.get(
@@ -2793,24 +2733,25 @@ def get_top_symbols():
                     try:
 
                         volume = (
-                            float(
-                                base_volume
-                            )
+                            float(base_volume)
                             * float(last)
                         )
 
                     except Exception:
+
                         volume = None
 
             if volume is None:
                 continue
 
             try:
+
                 volume = float(
                     volume
                 )
 
             except Exception:
+
                 continue
 
             ranked.append(
@@ -2828,9 +2769,7 @@ def get_top_symbols():
         symbols = [
             symbol
             for symbol, volume
-            in ranked[
-                :TOP_COINS
-            ]
+            in ranked[:TOP_COINS]
         ]
 
         print(
@@ -2890,7 +2829,7 @@ def scan_symbol(symbol):
         )
 
         # ----------------------------------------------------
-        # Existing open trade
+        # OPEN TRADE
         # ----------------------------------------------------
 
         if symbol in state[
@@ -2905,10 +2844,11 @@ def scan_symbol(symbol):
             if symbol in state[
                 "open_trades"
             ]:
+
                 return
 
         # ----------------------------------------------------
-        # Existing pending signal
+        # PENDING SIGNAL
         # ----------------------------------------------------
 
         if symbol in state[
@@ -2923,15 +2863,17 @@ def scan_symbol(symbol):
             if symbol in state[
                 "pending_signals"
             ]:
+
                 return
 
             if symbol in state[
                 "open_trades"
             ]:
+
                 return
 
         # ----------------------------------------------------
-        # Detect new signal
+        # NEW SIGNAL
         # ----------------------------------------------------
 
         detect_new_ut_signal(
@@ -2994,9 +2936,10 @@ def run_scan():
 
         return
 
-    # Always scan active trades and
-    # pending signals even if they dropped
-    # out of the current top 100.
+    # --------------------------------------------------------
+    # KEEP OPEN/PENDING EVEN IF OUTSIDE TOP 60
+    # --------------------------------------------------------
+
     important_symbols = set(
         state[
             "open_trades"
@@ -3012,6 +2955,7 @@ def run_scan():
     for symbol in important_symbols:
 
         if symbol not in symbols:
+
             symbols.append(
                 symbol
             )
@@ -3044,7 +2988,7 @@ def run_scan():
 
 
 # ============================================================
-# SEND FINAL REPORT
+# SEND FINAL SINGLE REPORT
 # ============================================================
 
 def send_report():
@@ -3052,10 +2996,24 @@ def send_report():
     message = build_report()
 
     print(
-        f"Final Telegram report length: "
-        f"{len(message)} characters"
+        "=========================================="
     )
 
+    print(
+        f"Telegram report length: "
+        f"{len(message)}"
+    )
+
+    print(
+        f"Run events: "
+        f"{len(RUN_EVENTS)}"
+    )
+
+    print(
+        "=========================================="
+    )
+
+    # EXACTLY ONE TELEGRAM SEND
     send_telegram(
         message
     )
@@ -3070,7 +3028,6 @@ def main():
     global RUN_EVENTS
 
     # Reset events for this execution only.
-    # State/statistics are NOT reset.
     RUN_EVENTS = []
 
     print(
@@ -3078,7 +3035,7 @@ def main():
     )
 
     print(
-        "CRYPTO UT BOT SCANNER v12.5"
+        "CRYPTO UT BOT SCANNER v12.6"
     )
 
     print(
@@ -3106,7 +3063,7 @@ def main():
     )
 
     print(
-        "TELEGRAM: ONE MESSAGE PER SCAN"
+        "TELEGRAM: ONE COMPACT MESSAGE"
     )
 
     print(
@@ -3123,7 +3080,6 @@ def main():
 
         run_scan()
 
-        # ONLY Telegram send in the whole run.
         send_report()
 
         save_state()
