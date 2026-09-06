@@ -307,6 +307,23 @@
       "closed_at": "2026-09-06T20:40:03.841439+00:00",
       "duration_seconds": 2493,
       "duration": "41m"
+    },
+    {
+      "id": "DOT/USD:USD_SELL_1788721759",
+      "symbol": "DOT/USD:USD",
+      "side": "SELL",
+      "entry": 0.9564,
+      "sl": 0.9671,
+      "tp": 0.9457000000000001,
+      "score": 60,
+      "opened_at": "2026-09-06T19:09:19.731614+00:00",
+      "result": "LOSS",
+      "exit": 0.9678,
+      "pnl_pct": -1.1187787536595495,
+      "r": -1,
+      "closed_at": "2026-09-06T20:49:31.798552+00:00",
+      "duration_seconds": 6012,
+      "duration": "1h 40m"
     }
   ]
 }
