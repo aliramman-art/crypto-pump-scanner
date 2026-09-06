@@ -20,16 +20,6 @@
       "score": 60,
       "opened_at": "2026-09-06T16:03:48.998268+00:00"
     },
-    "ARB/USD:USD_BUY_1788712265": {
-      "id": "ARB/USD:USD_BUY_1788712265",
-      "symbol": "ARB/USD:USD",
-      "side": "BUY",
-      "entry": 0.1906,
-      "sl": 0.186,
-      "tp": 0.19519999999999998,
-      "score": 81,
-      "opened_at": "2026-09-06T16:31:05.039898+00:00"
-    },
     "ZEC/USD:USD_BUY_1788712959": {
       "id": "ZEC/USD:USD_BUY_1788712959",
       "symbol": "ZEC/USD:USD",
@@ -49,6 +39,16 @@
       "tp": 54.699999999999996,
       "score": 65,
       "opened_at": "2026-09-06T17:00:46.873798+00:00"
+    },
+    "CRV/USD:USD_BUY_1788714906": {
+      "id": "CRV/USD:USD_BUY_1788714906",
+      "symbol": "CRV/USD:USD",
+      "side": "BUY",
+      "entry": 0.3726,
+      "sl": 0.369,
+      "tp": 0.3762,
+      "score": 87,
+      "opened_at": "2026-09-06T17:15:06.698814+00:00"
     }
   },
   "last_signals": {
@@ -59,6 +59,7 @@
     "LINK/USD:USD:BUY": "2026-09-06T16:10:00+00:00",
     "ARB/USD:USD:BUY": "2026-09-06T16:25:00+00:00",
     "ZEC/USD:USD:BUY": "2026-09-06T16:35:00+00:00",
-    "LTC/USD:USD:BUY": "2026-09-06T16:55:00+00:00"
+    "LTC/USD:USD:BUY": "2026-09-06T16:55:00+00:00",
+    "CRV/USD:USD:BUY": "2026-09-06T17:10:00+00:00"
   }
 }
