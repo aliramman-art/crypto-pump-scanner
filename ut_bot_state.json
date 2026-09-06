@@ -59,6 +59,16 @@
       "tp": 0.1793,
       "score": 77,
       "opened_at": "2026-09-06T18:47:50.366251+00:00"
+    },
+    "PEPE/USD:USD_BUY_1788721017": {
+      "id": "PEPE/USD:USD_BUY_1788721017",
+      "symbol": "PEPE/USD:USD",
+      "side": "BUY",
+      "entry": 3.5939e-06,
+      "sl": 3.5925e-06,
+      "tp": 3.5953e-06,
+      "score": 57,
+      "opened_at": "2026-09-06T18:56:57.621586+00:00"
     }
   },
   "last_signals": {
@@ -76,6 +86,7 @@
     "ENA/USD:USD:BUY": "2026-09-06T18:00:00+00:00",
     "BNB/USD:USD:BUY": "2026-09-06T18:15:00+00:00",
     "PUMP/USD:USD:BUY": "2026-09-06T18:30:00+00:00",
-    "FARTCOIN/USD:USD:SELL": "2026-09-06T18:40:00+00:00"
+    "FARTCOIN/USD:USD:SELL": "2026-09-06T18:40:00+00:00",
+    "PEPE/USD:USD:BUY": "2026-09-06T18:50:00+00:00"
   }
 }
