@@ -30,16 +30,6 @@
       "score": 77,
       "opened_at": "2026-09-06T17:55:39.501290+00:00"
     },
-    "ENA/USD:USD_BUY_1788718118": {
-      "id": "ENA/USD:USD_BUY_1788718118",
-      "symbol": "ENA/USD:USD",
-      "side": "BUY",
-      "entry": 0.17424,
-      "sl": 0.1734,
-      "tp": 0.17508,
-      "score": 80,
-      "opened_at": "2026-09-06T18:08:38.658914+00:00"
-    },
     "BNB/USD:USD_BUY_1788719069": {
       "id": "BNB/USD:USD_BUY_1788719069",
       "symbol": "BNB/USD:USD",
@@ -59,6 +49,16 @@
       "tp": 0.003933000000000001,
       "score": 81,
       "opened_at": "2026-09-06T18:37:55.399783+00:00"
+    },
+    "FARTCOIN/USD:USD_SELL_1788720470": {
+      "id": "FARTCOIN/USD:USD_SELL_1788720470",
+      "symbol": "FARTCOIN/USD:USD",
+      "side": "SELL",
+      "entry": 0.1812,
+      "sl": 0.1831,
+      "tp": 0.1793,
+      "score": 77,
+      "opened_at": "2026-09-06T18:47:50.366251+00:00"
     }
   },
   "last_signals": {
@@ -75,6 +75,7 @@
     "TAO/USD:USD:BUY": "2026-09-06T17:40:00+00:00",
     "ENA/USD:USD:BUY": "2026-09-06T18:00:00+00:00",
     "BNB/USD:USD:BUY": "2026-09-06T18:15:00+00:00",
-    "PUMP/USD:USD:BUY": "2026-09-06T18:30:00+00:00"
+    "PUMP/USD:USD:BUY": "2026-09-06T18:30:00+00:00",
+    "FARTCOIN/USD:USD:SELL": "2026-09-06T18:40:00+00:00"
   }
 }
