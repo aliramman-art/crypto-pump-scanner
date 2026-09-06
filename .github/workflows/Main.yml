@@ -4,7 +4,6 @@ on:
   workflow_dispatch:
 
   schedule:
-    # Every 5 minutes
     - cron: "*/5 * * * *"
 
 permissions:
@@ -20,125 +19,135 @@ jobs:
 
     steps:
 
-      # ======================================================
+      # =====================================================
       # CHECKOUT
-      # ======================================================
+      # =====================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: main
 
-      # ======================================================
-      # PYTHON
-      # ======================================================
+      # =====================================================
+      # SETUP PYTHON
+      # =====================================================
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ======================================================
+      # =====================================================
       # INSTALL DEPENDENCIES
-      # ======================================================
+      # =====================================================
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install ccxt pandas requests
 
-      # ======================================================
-      # CHECK FILES
-      # ======================================================
-      - name: Check scanner files
+      # =====================================================
+      # CHECK SCANNER
+      # =====================================================
+
+      - name: Check scanner
         run: |
           echo "=========================================="
-          echo "Repository files"
+          echo "CHECKING SCANNER"
           echo "=========================================="
 
-          ls -la
-
-          echo ""
-          echo "=========================================="
-          echo "Scanner"
-          echo "=========================================="
-
-          if [ -f scanner.py ]; then
-            echo "scanner.py FOUND"
-          else
-            echo "ERROR: scanner.py NOT FOUND"
+          if [ ! -f scanner.py ]; then
+            echo "ERROR: scanner.py not found!"
             exit 1
           fi
 
-          echo ""
+          echo "scanner.py FOUND"
+          ls -lh scanner.py
+
+      # =====================================================
+      # INITIALIZE STATE FILES
+      # =====================================================
+
+      - name: Initialize price action state
+        run: |
           echo "=========================================="
-          echo "Price Action state files"
+          echo "INITIALIZING STATE"
           echo "=========================================="
 
-          if [ -f price_action_state.json ]; then
-            echo "price_action_state.json FOUND"
-            cat price_action_state.json
+          if [ ! -f price_action_state.json ]; then
+            echo '{"open": {}, "last_signals": {}}' > price_action_state.json
+            echo "Created price_action_state.json"
           else
-            echo "price_action_state.json NOT FOUND"
-            echo "A new state file will be created."
+            echo "price_action_state.json already exists"
+          fi
+
+          if [ ! -f price_action_trade_history.json ]; then
+            echo '[]' > price_action_trade_history.json
+            echo "Created price_action_trade_history.json"
+          else
+            echo "price_action_trade_history.json already exists"
           fi
 
           echo ""
+          echo "CURRENT STATE:"
+          cat price_action_state.json
 
-          if [ -f price_action_trade_history.json ]; then
-            echo "price_action_trade_history.json FOUND"
-            cat price_action_trade_history.json
-          else
-            echo "price_action_trade_history.json NOT FOUND"
-            echo "A new history file will be created."
-          fi
+          echo ""
+          echo "CURRENT HISTORY:"
+          cat price_action_trade_history.json
 
-      # ======================================================
+      # =====================================================
       # RUN SCANNER
-      # ======================================================
+      # =====================================================
+
       - name: Run Price Action Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           echo "=========================================="
-          echo "Starting Price Action Scanner"
+          echo "RUNNING PRICE ACTION SCANNER"
           echo "=========================================="
 
           python -u scanner.py
 
-      # ======================================================
-      # SHOW UPDATED STATE
-      # ======================================================
-      - name: Show updated state
+      # =====================================================
+      # SHOW RESULT
+      # =====================================================
+
+      - name: Show scanner result
         if: always()
         run: |
           echo "=========================================="
-          echo "UPDATED PRICE ACTION STATE"
+          echo "SCANNER RESULT"
           echo "=========================================="
 
+          echo ""
+          echo "STATE:"
           if [ -f price_action_state.json ]; then
             cat price_action_state.json
           else
-            echo "price_action_state.json does not exist."
+            echo "ERROR: state file missing!"
           fi
 
           echo ""
-          echo "=========================================="
-          echo "UPDATED TRADE HISTORY"
-          echo "=========================================="
-
+          echo "TRADE HISTORY:"
           if [ -f price_action_trade_history.json ]; then
             cat price_action_trade_history.json
           else
-            echo "price_action_trade_history.json does not exist."
+            echo "ERROR: history file missing!"
           fi
 
-      # ======================================================
-      # SAVE STATE TO GITHUB
-      # ======================================================
+      # =====================================================
+      # SAVE STATE
+      # =====================================================
+
       - name: Save scanner state
-        if: success()
+        if: always()
         run: |
           echo "=========================================="
-          echo "Saving scanner state"
+          echo "SAVING SCANNER STATE"
           echo "=========================================="
 
           git config user.name "github-actions[bot]"
@@ -148,8 +157,18 @@ jobs:
           echo "Git status BEFORE add:"
           git status --short
 
-          # IMPORTANT:
-          # These are the exact files used by scanner.py
+          # Make sure files exist
+          if [ ! -f price_action_state.json ]; then
+            echo '{"open": {}, "last_signals": {}}' > price_action_state.json
+            echo "Re-created missing state file."
+          fi
+
+          if [ ! -f price_action_trade_history.json ]; then
+            echo '[]' > price_action_trade_history.json
+            echo "Re-created missing history file."
+          fi
+
+          # Add exact files used by scanner.py
           git add price_action_state.json
           git add price_action_trade_history.json
 
@@ -157,38 +176,74 @@ jobs:
           echo "Git status AFTER add:"
           git status --short
 
+          # =================================================
+          # COMMIT IF CHANGED
+          # =================================================
+
           if git diff --cached --quiet; then
+
+            echo ""
             echo "No state changes to commit."
+
           else
+
+            echo ""
+            echo "Changes detected."
+            echo "Creating commit..."
 
             git commit -m "Update price action scanner state"
 
-            echo ""
-            echo "Pulling latest repository changes..."
+            # =================================================
+            # SYNC WITH MAIN
+            # =================================================
 
-            git pull --rebase origin main
+            echo ""
+            echo "Syncing with origin/main..."
+
+            git fetch origin main
+
+            git rebase origin/main
+
+            # =================================================
+            # PUSH
+            # =================================================
 
             echo ""
-            echo "Pushing scanner state..."
+            echo "Pushing state to GitHub..."
 
             git push origin HEAD:main
 
             echo ""
-            echo "State successfully saved."
+            echo "=========================================="
+            echo "STATE SAVED SUCCESSFULLY"
+            echo "=========================================="
+
           fi
 
-      # ======================================================
+      # =====================================================
       # FINAL STATUS
-      # ======================================================
+      # =====================================================
+
       - name: Final status
         if: always()
         run: |
           echo "=========================================="
-          echo "WORKFLOW FINISHED"
+          echo "FINAL STATUS"
           echo "=========================================="
 
+          echo ""
+          echo "Repository status:"
           git status --short
 
           echo ""
-          echo "Scanner state files:"
-          ls -lh price_action_state.json price_action_trade_history.json 2>/dev/null || true
+          echo "State files:"
+
+          ls -lh \
+            price_action_state.json \
+            price_action_trade_history.json \
+            2>/dev/null || true
+
+          echo ""
+          echo "=========================================="
+          echo "WORKFLOW FINISHED"
+          echo "=========================================="
