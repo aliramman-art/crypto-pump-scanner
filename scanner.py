@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO PRICE ACTION SCANNER v1.2
+# CRYPTO PRICE ACTION SCANNER v1.3
 # ============================================================
 # Kraken Futures
 # TOP 30 high-volume coins
@@ -12,9 +12,19 @@
 # - CHOCH
 # - Pullback
 # - Candle Confirmation
+# - Volume
 # - Structural SL
 # - TP / RR
 # - Score 0-100
+#
+# POSITION MANAGEMENT v1.3
+# - MAX 5 OPEN TRADES
+# - MAX 1 OPEN TRADE PER SYMBOL
+# - WAITING QUEUE
+# - HIGHER SCORE PRIORITY
+# - DUPLICATE SIGNAL PROTECTION
+# - SIGNAL DURATION
+# - CLOSED TRADE DURATION
 #
 # TELEGRAM
 # - Jalali date
@@ -22,19 +32,17 @@
 # - English numbers
 # - Performance
 # - Open trades
+# - Waiting signals
 # - SL percentage
 # - TP percentage
-# - LIVE market P&L percentage
+# - LIVE market P&L
+# - Duration
 #
 # IMPORTANT
-# - Signals are generated from CLOSED 5M candles
-# - Open trade Live P&L uses CURRENT MARKET PRICE
+# - Signals generated from CLOSED 5M candles
+# - Live P&L uses CURRENT MARKET PRICE
 # - SL/TP closing logic uses CLOSED 5M candle
-# - No pending trades
-#
-# GitHub Actions:
-# scanner.py runs once per workflow
-# workflow runs every 5 minutes
+# - No automatic replacement of an open trade
 # ============================================================
 
 import os
@@ -64,6 +72,21 @@ MIN_SCORE = 55
 
 RR = 1.0
 
+# ------------------------------------------------------------
+# POSITION LIMITS
+# ------------------------------------------------------------
+
+MAX_OPEN_TRADES = 5
+MAX_TRADES_PER_SYMBOL = 1
+
+MAX_WAITING_TRADES = 20
+
+# Prevent same signal from being recreated too quickly
+SIGNAL_COOLDOWN_CANDLES = 3
+
+# A signal with same symbol/side/candle cannot duplicate
+DUPLICATE_CANDLE_PROTECTION = True
+
 STATE_FILE = "ut_bot_state.json"
 HISTORY_FILE = "ut_bot_trade_history.json"
 
@@ -71,8 +94,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 REQUEST_TIMEOUT = 20
-
-SIGNAL_COOLDOWN_CANDLES = 3
 
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
@@ -148,6 +169,7 @@ state = load_json(
     STATE_FILE,
     {
         "open": {},
+        "waiting": {},
         "last_signals": {}
     }
 )
@@ -161,18 +183,28 @@ history = load_json(
 
 if not isinstance(state, dict):
 
-    state = {
-        "open": {},
-        "last_signals": {}
-    }
+    state = {}
+
+
+if not isinstance(history, dict):
+
+    history = {}
+
 
 if "open" not in state:
     state["open"] = {}
 
+if "waiting" not in state:
+    state["waiting"] = {}
+
 if "last_signals" not in state:
     state["last_signals"] = {}
 
-# Remove legacy pending section
+if "trades" not in history:
+    history["trades"] = []
+
+
+# Remove old legacy section
 state.pop("pending", None)
 
 
@@ -186,11 +218,9 @@ def fmt_number(value, decimals=2):
         return "-"
 
     try:
-
         return f"{float(value):.{decimals}f}"
 
     except Exception:
-
         return str(value)
 
 
@@ -200,27 +230,21 @@ def fmt_price(price):
         return "-"
 
     try:
-
         price = float(price)
 
     except Exception:
-
         return "-"
 
     if price >= 1000:
-
         return f"{price:.4f}"
 
     elif price >= 1:
-
         return f"{price:.6f}"
 
     elif price >= 0.01:
-
         return f"{price:.6f}"
 
     else:
-
         return f"{price:.8f}"
 
 
@@ -230,18 +254,131 @@ def fmt_pct(value, signed=False):
         return "-"
 
     try:
-
         value = float(value)
 
     except Exception:
-
         return "-"
 
     if signed:
-
         return f"{value:+.2f}%"
 
     return f"{value:.2f}%"
+
+
+# ============================================================
+# DURATION
+# ============================================================
+
+def parse_datetime(value):
+
+    if not value:
+        return None
+
+    try:
+
+        dt = datetime.fromisoformat(
+            str(value).replace(
+                "Z",
+                "+00:00"
+            )
+        )
+
+        if dt.tzinfo is None:
+
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return dt
+
+    except Exception:
+
+        return None
+
+
+def duration_seconds(opened_at, now=None):
+
+    opened = parse_datetime(
+        opened_at
+    )
+
+    if opened is None:
+        return 0
+
+    if now is None:
+
+        now = datetime.now(
+            timezone.utc
+        )
+
+    try:
+
+        seconds = (
+            now - opened
+        ).total_seconds()
+
+        return max(
+            0,
+            int(seconds)
+        )
+
+    except Exception:
+
+        return 0
+
+
+def format_duration_from_seconds(seconds):
+
+    try:
+        seconds = int(seconds)
+
+    except Exception:
+        seconds = 0
+
+    seconds = max(
+        0,
+        seconds
+    )
+
+    minutes = seconds // 60
+
+    days = minutes // 1440
+
+    minutes %= 1440
+
+    hours = minutes // 60
+
+    minutes %= 60
+
+    if days > 0:
+
+        return (
+            f"{days}d "
+            f"{hours}h "
+            f"{minutes}m"
+        )
+
+    if hours > 0:
+
+        return (
+            f"{hours}h "
+            f"{minutes}m"
+        )
+
+    return f"{minutes}m"
+
+
+def format_duration(
+    opened_at,
+    now=None
+):
+
+    return format_duration_from_seconds(
+        duration_seconds(
+            opened_at,
+            now
+        )
+    )
 
 
 # ============================================================
@@ -1483,6 +1620,100 @@ def performance():
         for x in trades
     )
 
+    durations = []
+
+    win_durations = []
+
+    loss_durations = []
+
+    for trade in trades:
+
+        duration = trade.get(
+            "duration_seconds"
+        )
+
+        if duration is None:
+
+            opened_at = trade.get(
+                "opened_at"
+            )
+
+            closed_at = trade.get(
+                "closed_at"
+            )
+
+            opened = parse_datetime(
+                opened_at
+            )
+
+            closed = parse_datetime(
+                closed_at
+            )
+
+            if (
+                opened
+                and
+                closed
+            ):
+
+                duration = max(
+                    0,
+                    int(
+                        (
+                            closed
+                            -
+                            opened
+                        ).total_seconds()
+                    )
+                )
+
+        if duration is None:
+            continue
+
+        try:
+            duration = int(duration)
+
+        except Exception:
+            continue
+
+        durations.append(
+            duration
+        )
+
+        if trade.get("result") == "WIN":
+
+            win_durations.append(
+                duration
+            )
+
+        elif trade.get("result") == "LOSS":
+
+            loss_durations.append(
+                duration
+            )
+
+    avg_duration = (
+        sum(durations) / len(durations)
+        if durations
+        else 0
+    )
+
+    avg_win_duration = (
+        sum(win_durations)
+        /
+        len(win_durations)
+        if win_durations
+        else 0
+    )
+
+    avg_loss_duration = (
+        sum(loss_durations)
+        /
+        len(loss_durations)
+        if loss_durations
+        else 0
+    )
+
     wr = (
         wins / total * 100
         if total
@@ -1496,7 +1727,10 @@ def performance():
         "neutral": neutral,
         "pnl": pnl,
         "r": r_total,
-        "wr": wr
+        "wr": wr,
+        "avg_duration": avg_duration,
+        "avg_win_duration": avg_win_duration,
+        "avg_loss_duration": avg_loss_duration
     }
 
 
@@ -1614,6 +1848,535 @@ def trade_levels_percent(
 
 
 # ============================================================
+# OPEN SYMBOL CHECK
+# ============================================================
+
+def has_open_symbol(symbol):
+
+    for trade in state.get(
+        "open",
+        {}
+    ).values():
+
+        if trade.get(
+            "symbol"
+        ) == symbol:
+
+            return True
+
+    return False
+
+
+# ============================================================
+# WAITING SYMBOL CHECK
+# ============================================================
+
+def has_waiting_symbol(
+    symbol
+):
+
+    for trade in state.get(
+        "waiting",
+        {}
+    ).values():
+
+        if trade.get(
+            "symbol"
+        ) == symbol:
+
+            return True
+
+    return False
+
+
+# ============================================================
+# SIGNAL KEY
+# ============================================================
+
+def signal_key(
+    symbol,
+    side
+):
+
+    return (
+        f"{symbol}:{side}"
+    )
+
+
+# ============================================================
+# DUPLICATE CHECK
+# ============================================================
+
+def is_duplicate_signal(
+    candidate
+):
+
+    symbol = candidate["symbol"]
+    side = candidate["side"]
+
+    candle_time = (
+        candidate[
+            "structure"
+        ].get(
+            "last_candle_time",
+            ""
+        )
+    )
+
+    key = signal_key(
+        symbol,
+        side
+    )
+
+    # --------------------------------------------------------
+    # Check OPEN
+    # --------------------------------------------------------
+
+    for trade in state.get(
+        "open",
+        {}
+    ).values():
+
+        if (
+            trade.get("symbol")
+            ==
+            symbol
+            and
+            trade.get("side")
+            ==
+            side
+        ):
+
+            existing_candle = trade.get(
+                "signal_candle_time",
+                ""
+            )
+
+            if (
+                not DUPLICATE_CANDLE_PROTECTION
+                or
+                existing_candle
+                ==
+                candle_time
+            ):
+
+                return True
+
+    # --------------------------------------------------------
+    # Check WAITING
+    # --------------------------------------------------------
+
+    for trade in state.get(
+        "waiting",
+        {}
+    ).values():
+
+        if (
+            trade.get("symbol")
+            ==
+            symbol
+            and
+            trade.get("side")
+            ==
+            side
+        ):
+
+            existing_candle = trade.get(
+                "signal_candle_time",
+                ""
+            )
+
+            if (
+                not DUPLICATE_CANDLE_PROTECTION
+                or
+                existing_candle
+                ==
+                candle_time
+            ):
+
+                return True
+
+    # --------------------------------------------------------
+    # Check last signal
+    # --------------------------------------------------------
+
+    previous = state[
+        "last_signals"
+    ].get(key)
+
+    if previous:
+
+        try:
+
+            previous_ts = pd.Timestamp(
+                previous
+            )
+
+            current_ts = pd.Timestamp(
+                candle_time
+            )
+
+            diff = (
+                current_ts
+                -
+                previous_ts
+            ).total_seconds()
+
+            if diff < (
+                SIGNAL_COOLDOWN_CANDLES
+                * 5
+                * 60
+            ):
+
+                return True
+
+        except Exception:
+
+            pass
+
+    return False
+
+
+# ============================================================
+# BUILD TRADE OBJECT
+# ============================================================
+
+def candidate_to_trade(
+    candidate
+):
+
+    symbol = candidate["symbol"]
+    side = candidate["side"]
+
+    candle_time = (
+        candidate[
+            "structure"
+        ].get(
+            "last_candle_time",
+            ""
+        )
+    )
+
+    now = datetime.now(
+        timezone.utc
+    ).isoformat()
+
+    trade_id = (
+        f"{symbol}_"
+        f"{side}_"
+        f"{candle_time}_"
+        f"{int(time.time() * 1000)}"
+    )
+
+    return {
+        "id": trade_id,
+        "symbol": symbol,
+        "side": side,
+        "entry": candidate["entry"],
+        "sl": candidate["sl"],
+        "tp": candidate["tp"],
+        "score": candidate["score"],
+        "reasons": candidate.get(
+            "reasons",
+            []
+        ),
+        "signal_candle_time": candle_time,
+        "opened_at": now,
+        "queued_at": now
+    }
+
+
+# ============================================================
+# ADD WAITING
+# ============================================================
+
+def add_waiting(
+    candidate
+):
+
+    symbol = candidate["symbol"]
+
+    # Never queue another trade for
+    # a symbol already open
+    if has_open_symbol(symbol):
+
+        return False
+
+    # Never duplicate waiting symbol
+    if has_waiting_symbol(symbol):
+
+        return False
+
+    # Duplicate signal protection
+    if is_duplicate_signal(
+        candidate
+    ):
+
+        return False
+
+    if len(
+        state.get(
+            "waiting",
+            {}
+        )
+    ) >= MAX_WAITING_TRADES:
+
+        # Remove lowest score waiting
+        waiting_items = list(
+            state[
+                "waiting"
+            ].items()
+        )
+
+        waiting_items.sort(
+            key=lambda x:
+            x[1].get(
+                "score",
+                0
+            )
+        )
+
+        if waiting_items:
+
+            lowest_id, lowest = (
+                waiting_items[0]
+            )
+
+            if candidate["score"] <= (
+                lowest.get(
+                    "score",
+                    0
+                )
+            ):
+
+                return False
+
+            del state[
+                "waiting"
+            ][
+                lowest_id
+            ]
+
+    trade = candidate_to_trade(
+        candidate
+    )
+
+    state[
+        "waiting"
+    ][
+        trade["id"]
+    ] = trade
+
+    key = signal_key(
+        symbol,
+        candidate["side"]
+    )
+
+    state[
+        "last_signals"
+    ][
+        key
+    ] = candidate[
+        "structure"
+    ].get(
+        "last_candle_time",
+        ""
+    )
+
+    print(
+        f"WAITING "
+        f"{symbol} "
+        f"{candidate['side']} "
+        f"Score={candidate['score']}"
+    )
+
+    return True
+
+
+# ============================================================
+# OPEN TRADE
+# ============================================================
+
+def open_candidate(
+    candidate
+):
+
+    symbol = candidate["symbol"]
+
+    if len(
+        state.get(
+            "open",
+            {}
+        )
+    ) >= MAX_OPEN_TRADES:
+
+        return False
+
+    if has_open_symbol(symbol):
+
+        return False
+
+    if is_duplicate_signal(
+        candidate
+    ):
+
+        return False
+
+    trade = candidate_to_trade(
+        candidate
+    )
+
+    # queued_at is not used as opening time
+    trade["opened_at"] = (
+        datetime.now(
+            timezone.utc
+        ).isoformat()
+    )
+
+    state[
+        "open"
+    ][
+        trade["id"]
+    ] = trade
+
+    key = signal_key(
+        symbol,
+        candidate["side"]
+    )
+
+    state[
+        "last_signals"
+    ][
+        key
+    ] = candidate[
+        "structure"
+    ].get(
+        "last_candle_time",
+        ""
+    )
+
+    print(
+        f"OPEN "
+        f"{symbol} "
+        f"{candidate['side']} "
+        f"Score={candidate['score']}"
+    )
+
+    return True
+
+
+# ============================================================
+# PROMOTE WAITING
+# ============================================================
+
+def promote_waiting():
+
+    promoted = []
+
+    while (
+        len(
+            state.get(
+                "open",
+                {}
+            )
+        )
+        <
+        MAX_OPEN_TRADES
+        and
+        state.get(
+            "waiting",
+            {}
+        )
+    ):
+
+        candidates = list(
+            state[
+                "waiting"
+            ].items()
+        )
+
+        # Highest Score first
+        candidates.sort(
+            key=lambda x: (
+                x[1].get(
+                    "score",
+                    0
+                ),
+                x[1].get(
+                    "queued_at",
+                    ""
+                )
+            ),
+            reverse=True
+        )
+
+        selected_id = None
+        selected_trade = None
+
+        for waiting_id, waiting_trade in candidates:
+
+            symbol = waiting_trade.get(
+                "symbol"
+            )
+
+            if has_open_symbol(
+                symbol
+            ):
+
+                continue
+
+            selected_id = waiting_id
+            selected_trade = waiting_trade
+            break
+
+        if selected_trade is None:
+            break
+
+        del state[
+            "waiting"
+        ][
+            selected_id
+        ]
+
+        # ----------------------------------------------------
+        # Re-check duplicate protection.
+        # A waiting trade may be stale.
+        # ----------------------------------------------------
+
+        if has_open_symbol(
+            selected_trade["symbol"]
+        ):
+
+            continue
+
+        state[
+            "open"
+        ][
+            selected_id
+        ] = selected_trade
+
+        selected_trade["opened_at"] = (
+            datetime.now(
+                timezone.utc
+            ).isoformat()
+        )
+
+        selected_trade["promoted_from_waiting"] = True
+
+        promoted.append(
+            selected_trade
+        )
+
+        print(
+            f"PROMOTED "
+            f"{selected_trade['symbol']} "
+            f"Score={selected_trade.get('score', 0)}"
+        )
+
+    return promoted
+
+
+# ============================================================
 # UPDATE OPEN TRADES
 # ============================================================
 
@@ -1623,7 +2386,9 @@ def update_open_trades(
 
     if not state.get("open"):
 
-        return
+        return []
+
+    closed_events = []
 
     remaining = {}
 
@@ -1741,15 +2506,50 @@ def update_open_trades(
                 trade
             )
 
+            closed_at = datetime.now(
+                timezone.utc
+            )
+
+            opened_at = parse_datetime(
+                trade.get(
+                    "opened_at"
+                )
+            )
+
+            if opened_at:
+
+                duration_sec = max(
+                    0,
+                    int(
+                        (
+                            closed_at
+                            -
+                            opened_at
+                        ).total_seconds()
+                    )
+                )
+
+            else:
+
+                duration_sec = 0
+
             closed["result"] = outcome
             closed["exit"] = price
             closed["pnl_pct"] = pnl_pct
             closed["r"] = r
 
             closed["closed_at"] = (
-                datetime.now(
-                    timezone.utc
-                ).isoformat()
+                closed_at.isoformat()
+            )
+
+            closed[
+                "duration_seconds"
+            ] = duration_sec
+
+            closed[
+                "duration"
+            ] = format_duration_from_seconds(
+                duration_sec
             )
 
             history[
@@ -1758,11 +2558,17 @@ def update_open_trades(
                 closed
             )
 
+            closed_events.append(
+                closed
+            )
+
             print(
                 f"CLOSED "
                 f"{symbol} "
                 f"{side} "
-                f"{outcome}"
+                f"{outcome} "
+                f"Duration="
+                f"{closed['duration']}"
             )
 
         else:
@@ -1771,100 +2577,182 @@ def update_open_trades(
                 trade_id
             ] = trade
 
-    state["open"] = remaining
-
-
-# ============================================================
-# CREATE SIGNAL
-# ============================================================
-
-def create_signal(
-    result
-):
-
-    symbol = result["symbol"]
-    side = result["side"]
-
-    candle_time = (
-        result["structure"].get(
-            "last_candle_time",
-            ""
-        )
-    )
-
-    key = (
-        f"{symbol}:{side}"
-    )
-
-    previous = (
-        state["last_signals"].get(
-            key
-        )
-    )
-
-    if previous:
-
-        try:
-
-            previous_ts = pd.Timestamp(
-                previous
-            )
-
-            current_ts = pd.Timestamp(
-                candle_time
-            )
-
-            diff = (
-                current_ts
-                -
-                previous_ts
-            ).total_seconds()
-
-            if diff < (
-                SIGNAL_COOLDOWN_CANDLES
-                * 5
-                * 60
-            ):
-
-                return False
-
-        except Exception:
-
-            pass
-
-    trade_id = (
-        f"{symbol}_{side}_"
-        f"{int(time.time())}"
-    )
-
-    trade = {
-        "id": trade_id,
-        "symbol": symbol,
-        "side": side,
-        "entry": result["entry"],
-        "sl": result["sl"],
-        "tp": result["tp"],
-        "score": result["score"],
-        "opened_at": (
-            datetime.now(
-                timezone.utc
-            ).isoformat()
-        )
-    }
-
     state[
         "open"
-    ][
-        trade_id
-    ] = trade
+    ] = remaining
+
+    return closed_events
+
+
+# ============================================================
+# CLEAN WAITING QUEUE
+# ============================================================
+
+def clean_waiting_queue():
+
+    waiting = state.get(
+        "waiting",
+        {}
+    )
+
+    if not waiting:
+        return
+
+    cleaned = {}
+
+    # Only one waiting trade per symbol
+    used_symbols = set()
+
+    # Highest score first
+    items = list(
+        waiting.items()
+    )
+
+    items.sort(
+        key=lambda x: (
+            x[1].get(
+                "score",
+                0
+            ),
+            x[1].get(
+                "queued_at",
+                ""
+            )
+        ),
+        reverse=True
+    )
+
+    for trade_id, trade in items:
+
+        symbol = trade.get(
+            "symbol"
+        )
+
+        if not symbol:
+            continue
+
+        if has_open_symbol(
+            symbol
+        ):
+            continue
+
+        if symbol in used_symbols:
+            continue
+
+        used_symbols.add(
+            symbol
+        )
+
+        cleaned[
+            trade_id
+        ] = trade
+
+        if len(cleaned) >= MAX_WAITING_TRADES:
+            break
 
     state[
-        "last_signals"
-    ][
-        key
-    ] = candle_time
+        "waiting"
+    ] = cleaned
 
-    return True
+
+# ============================================================
+# CREATE EVENTS
+# ============================================================
+
+def process_candidates(
+    candidates
+):
+
+    events = []
+    waiting_events = []
+
+    # Highest score first
+    candidates = sorted(
+        candidates,
+        key=lambda x: x["score"],
+        reverse=True
+    )
+
+    # --------------------------------------------------------
+    # First promote existing WAITING
+    # --------------------------------------------------------
+
+    promoted = promote_waiting()
+
+    # --------------------------------------------------------
+    # Process fresh candidates
+    # --------------------------------------------------------
+
+    for candidate in candidates:
+
+        if candidate["score"] < MIN_SCORE:
+            continue
+
+        symbol = candidate["symbol"]
+
+        # One trade per symbol
+        if has_open_symbol(symbol):
+            continue
+
+        # If already waiting, don't duplicate
+        if has_waiting_symbol(symbol):
+            continue
+
+        # ----------------------------------------------------
+        # OPEN SLOT AVAILABLE
+        # ----------------------------------------------------
+
+        if len(
+            state["open"]
+        ) < MAX_OPEN_TRADES:
+
+            created = open_candidate(
+                candidate
+            )
+
+            if created:
+
+                events.append(
+                    candidate
+                )
+
+            continue
+
+        # ----------------------------------------------------
+        # NO OPEN SLOT
+        # ----------------------------------------------------
+
+        queued = add_waiting(
+            candidate
+        )
+
+        if queued:
+
+            waiting_events.append(
+                candidate
+            )
+
+    # --------------------------------------------------------
+    # If fresh signals filled slots, try waiting again
+    # --------------------------------------------------------
+
+    more_promoted = promote_waiting()
+
+    promoted.extend(
+        more_promoted
+    )
+
+    # --------------------------------------------------------
+    # Cleanup
+    # --------------------------------------------------------
+
+    clean_waiting_queue()
+
+    return (
+        events,
+        waiting_events,
+        promoted
+    )
 
 
 # ============================================================
@@ -1891,12 +2779,154 @@ def clean_symbol(symbol):
 
 
 # ============================================================
+# BUILD TRADE BLOCK
+# ============================================================
+
+def build_trade_block(
+    trade,
+    results
+):
+
+    symbol = clean_symbol(
+        trade["symbol"]
+    )
+
+    emoji = (
+        "🟢"
+        if trade["side"] == "BUY"
+        else "🔴"
+    )
+
+    # --------------------------------------------------------
+    # CURRENT PRICE
+    # --------------------------------------------------------
+
+    current_price = (
+        get_current_market_price(
+            trade["symbol"]
+        )
+    )
+
+    if current_price is None:
+
+        result = results.get(
+            trade["symbol"]
+        )
+
+        if result:
+
+            current_price = (
+                result[
+                    "structure"
+                ][
+                    "last_close"
+                ]
+            )
+
+        else:
+
+            current_price = float(
+                trade["entry"]
+            )
+
+    # --------------------------------------------------------
+    # LIVE PNL
+    # --------------------------------------------------------
+
+    live_pnl = calculate_live_pnl(
+        trade,
+        current_price
+    )
+
+    sl_pct, tp_pct = (
+        trade_levels_percent(
+            trade
+        )
+    )
+
+    if live_pnl is not None:
+
+        pnl_emoji = (
+            "🟢"
+            if live_pnl >= 0
+            else "🔴"
+        )
+
+        live_pnl_text = fmt_pct(
+            live_pnl,
+            True
+        )
+
+    else:
+
+        pnl_emoji = "⚪"
+        live_pnl_text = "-"
+
+    duration = format_duration(
+        trade.get(
+            "opened_at"
+        )
+    )
+
+    lines = []
+
+    lines.append(
+        f"{emoji} <b>{symbol}</b> "
+        f"| {trade['side']}"
+    )
+
+    lines.append(
+        f"💰 Entry: "
+        f"{fmt_price(trade['entry'])}"
+    )
+
+    lines.append(
+        f"📍 Now: "
+        f"{fmt_price(current_price)}"
+    )
+
+    lines.append(
+        f"🛑 SL: "
+        f"{fmt_price(trade['sl'])} "
+        f"({fmt_pct(sl_pct, True)})"
+    )
+
+    lines.append(
+        f"🎯 TP: "
+        f"{fmt_price(trade['tp'])} "
+        f"({fmt_pct(tp_pct, True)})"
+    )
+
+    lines.append(
+        f"{pnl_emoji} "
+        f"<b>Live P&L: "
+        f"{live_pnl_text}</b>"
+    )
+
+    lines.append(
+        f"📊 Score: "
+        f"{trade.get('score', 0)}/100"
+    )
+
+    lines.append(
+        f"⏱ Duration: "
+        f"<b>{duration}</b>"
+    )
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
 # TELEGRAM REPORT
 # ============================================================
 
 def build_report(
     results,
     events,
+    waiting_events,
+    promoted,
     elapsed
 ):
 
@@ -1949,6 +2979,29 @@ def build_report(
         f"🏆 WR {perf['wr']:.1f}% | "
         f"P&L {fmt_pct(perf['pnl'], True)} | "
         f"R {perf['r']:+.2f}"
+    )
+
+    if perf["total"]:
+
+        lines.append(
+            f"⏱ Avg Duration: "
+            f"{format_duration_from_seconds(perf['avg_duration'])}"
+        )
+
+        lines.append(
+            f"🟢 Avg Win: "
+            f"{format_duration_from_seconds(perf['avg_win_duration'])} | "
+            f"🔴 Avg Loss: "
+            f"{format_duration_from_seconds(perf['avg_loss_duration'])}"
+        )
+
+    # --------------------------------------------------------
+    # POSITION LIMIT
+    # --------------------------------------------------------
+
+    lines.append(
+        f"🔒 Open Limit: "
+        f"{MAX_OPEN_TRADES}"
     )
 
     lines.append(
@@ -2066,6 +3119,72 @@ def build_report(
         )
 
     # --------------------------------------------------------
+    # PROMOTED
+    # --------------------------------------------------------
+
+    if promoted:
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        lines.append(
+            f"⬆️ <b>PROMOTED FROM WAITING: "
+            f"{len(promoted)}</b>"
+        )
+
+        for trade in promoted:
+
+            symbol = clean_symbol(
+                trade["symbol"]
+            )
+
+            emoji = (
+                "🟢"
+                if trade["side"] == "BUY"
+                else "🔴"
+            )
+
+            lines.append(
+                f"{emoji} {symbol} | "
+                f"{trade['side']} | "
+                f"Score {trade.get('score', 0)}/100"
+            )
+
+    # --------------------------------------------------------
+    # WAITING EVENTS
+    # --------------------------------------------------------
+
+    if waiting_events:
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        lines.append(
+            f"⏳ <b>NEW WAITING: "
+            f"{len(waiting_events)}</b>"
+        )
+
+        for candidate in waiting_events:
+
+            symbol = clean_symbol(
+                candidate["symbol"]
+            )
+
+            emoji = (
+                "🟢"
+                if candidate["side"] == "BUY"
+                else "🔴"
+            )
+
+            lines.append(
+                f"{emoji} {symbol} | "
+                f"{candidate['side']} | "
+                f"Score {candidate['score']}/100"
+            )
+
+    # --------------------------------------------------------
     # OPEN TRADES
     # --------------------------------------------------------
 
@@ -2080,12 +3199,78 @@ def build_report(
 
     lines.append(
         f"📂 <b>OPEN: "
-        f"{len(opens)}</b>"
+        f"{len(opens)}/{MAX_OPEN_TRADES}</b>"
     )
 
     if opens:
 
-        for trade in opens.values():
+        open_list = list(
+            opens.values()
+        )
+
+        open_list.sort(
+            key=lambda x:
+            x.get(
+                "score",
+                0
+            ),
+            reverse=True
+        )
+
+        for trade in open_list:
+
+            lines.append("")
+
+            lines.append(
+                build_trade_block(
+                    trade,
+                    results
+                )
+            )
+
+    else:
+
+        lines.append(
+            "⚪ None"
+        )
+
+    # --------------------------------------------------------
+    # WAITING QUEUE
+    # --------------------------------------------------------
+
+    waiting = state.get(
+        "waiting",
+        {}
+    )
+
+    if waiting:
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        lines.append(
+            f"⏳ <b>WAITING: "
+            f"{len(waiting)}</b>"
+        )
+
+        waiting_list = list(
+            waiting.values()
+        )
+
+        waiting_list.sort(
+            key=lambda x:
+            x.get(
+                "score",
+                0
+            ),
+            reverse=True
+        )
+
+        for i, trade in enumerate(
+            waiting_list,
+            1
+        ):
 
             symbol = clean_symbol(
                 trade["symbol"]
@@ -2097,118 +3282,20 @@ def build_report(
                 else "🔴"
             )
 
-            # ------------------------------------------------
-            # CURRENT MARKET PRICE
-            # ------------------------------------------------
-
-            current_price = (
-                get_current_market_price(
-                    trade["symbol"]
+            queued_duration = format_duration(
+                trade.get(
+                    "queued_at"
                 )
             )
 
-            if current_price is None:
-
-                result = results.get(
-                    trade["symbol"]
-                )
-
-                if result:
-
-                    current_price = (
-                        result[
-                            "structure"
-                        ][
-                            "last_close"
-                        ]
-                    )
-
-                else:
-
-                    current_price = float(
-                        trade["entry"]
-                    )
-
-            # ------------------------------------------------
-            # LIVE PNL
-            # ------------------------------------------------
-
-            live_pnl = (
-                calculate_live_pnl(
-                    trade,
-                    current_price
-                )
-            )
-
-            sl_pct, tp_pct = (
-                trade_levels_percent(
-                    trade
-                )
-            )
-
-            if live_pnl is not None:
-
-                pnl_emoji = (
-                    "🟢"
-                    if live_pnl >= 0
-                    else "🔴"
-                )
-
-                live_pnl_text = fmt_pct(
-                    live_pnl,
-                    True
-                )
-
-            else:
-
-                pnl_emoji = "⚪"
-                live_pnl_text = "-"
-
-            lines.append("")
-
             lines.append(
-                f"{emoji} <b>{symbol}</b> "
-                f"| {trade['side']}"
+                f"{i}. {emoji} "
+                f"<b>{symbol}</b> | "
+                f"{trade['side']} | "
+                f"Score "
+                f"{trade.get('score', 0)}/100 | "
+                f"⏱ {queued_duration}"
             )
-
-            lines.append(
-                f"💰 Entry: "
-                f"{fmt_price(trade['entry'])}"
-            )
-
-            lines.append(
-                f"📍 Now: "
-                f"{fmt_price(current_price)}"
-            )
-
-            lines.append(
-                f"🛑 SL: "
-                f"{fmt_price(trade['sl'])} "
-                f"({fmt_pct(sl_pct, True)})"
-            )
-
-            lines.append(
-                f"🎯 TP: "
-                f"{fmt_price(trade['tp'])} "
-                f"({fmt_pct(tp_pct, True)})"
-            )
-
-            lines.append(
-                f"{pnl_emoji} "
-                f"<b>Live P&L: "
-                f"{live_pnl_text}</b>"
-            )
-
-            lines.append(
-                f"📊 Score: "
-                f"{trade.get('score', 0)}/100"
-            )
-
-    else:
-
-        lines.append(
-            "⚪ None"
-        )
 
     # --------------------------------------------------------
     # SCAN TIME
@@ -2241,7 +3328,7 @@ def main():
     )
 
     print(
-        "CRYPTO PRICE ACTION SCANNER"
+        "CRYPTO PRICE ACTION SCANNER v1.3"
     )
 
     print(
@@ -2255,8 +3342,28 @@ def main():
     )
 
     print(
+        "MAX OPEN:",
+        MAX_OPEN_TRADES
+    )
+
+    print(
+        "MAX PER SYMBOL:",
+        MAX_TRADES_PER_SYMBOL
+    )
+
+    print(
         "=" * 60
     )
+
+    # --------------------------------------------------------
+    # CLEAN OLD WAITING DATA
+    # --------------------------------------------------------
+
+    clean_waiting_queue()
+
+    # --------------------------------------------------------
+    # GET SYMBOLS
+    # --------------------------------------------------------
 
     symbols = get_top_symbols()
 
@@ -2318,59 +3425,47 @@ def main():
             symbol
         ] = analysis
 
-        candidates.append(
-            analysis
-        )
+        if analysis["score"] >= MIN_SCORE:
+
+            candidates.append(
+                analysis
+            )
 
     # --------------------------------------------------------
     # UPDATE OPEN TRADES
     # --------------------------------------------------------
 
-    update_open_trades(
-        results
+    closed_events = (
+        update_open_trades(
+            results
+        )
     )
 
     # --------------------------------------------------------
-    # SORT
+    # PROCESS CANDIDATES
     # --------------------------------------------------------
 
-    candidates.sort(
-        key=lambda x: x["score"],
-        reverse=True
+    (
+        events,
+        waiting_events,
+        promoted
+    ) = process_candidates(
+        candidates
     )
 
     # --------------------------------------------------------
-    # BEST CANDIDATE
+    # AFTER CLOSURES, PROMOTE AGAIN
     # --------------------------------------------------------
 
-    events = []
+    if closed_events:
 
-    if candidates:
-
-        best = candidates[0]
-
-        print(
-            "BEST:",
-            best["symbol"],
-            best["side"],
-            best["score"]
+        extra_promoted = (
+            promote_waiting()
         )
 
-        if (
-            best["score"]
-            >=
-            MIN_SCORE
-        ):
-
-            created = create_signal(
-                best
-            )
-
-            if created:
-
-                events.append(
-                    best
-                )
+        promoted.extend(
+            extra_promoted
+        )
 
     # --------------------------------------------------------
     # SAVE
@@ -2399,6 +3494,8 @@ def main():
     report = build_report(
         results,
         events,
+        waiting_events,
+        promoted,
         elapsed
     )
 
