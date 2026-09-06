@@ -10,16 +10,6 @@
       "score": 60,
       "opened_at": "2026-09-06T15:28:31.037629+00:00"
     },
-    "ARB/USD:USD_SELL_1788708643": {
-      "id": "ARB/USD:USD_SELL_1788708643",
-      "symbol": "ARB/USD:USD",
-      "side": "SELL",
-      "entry": 0.18533,
-      "sl": 0.18821,
-      "tp": 0.18245,
-      "score": 67,
-      "opened_at": "2026-09-06T15:30:43.795850+00:00"
-    },
     "BTC/USD:USD_BUY_1788710628": {
       "id": "BTC/USD:USD_BUY_1788710628",
       "symbol": "BTC/USD:USD",
@@ -39,6 +29,16 @@
       "tp": 12.357000000000001,
       "score": 80,
       "opened_at": "2026-09-06T16:17:35.110386+00:00"
+    },
+    "ARB/USD:USD_BUY_1788712265": {
+      "id": "ARB/USD:USD_BUY_1788712265",
+      "symbol": "ARB/USD:USD",
+      "side": "BUY",
+      "entry": 0.1906,
+      "sl": 0.186,
+      "tp": 0.19519999999999998,
+      "score": 81,
+      "opened_at": "2026-09-06T16:31:05.039898+00:00"
     }
   },
   "last_signals": {
@@ -46,6 +46,7 @@
     "ARB/USD:USD:SELL": "2026-09-06T15:25:00+00:00",
     "INJ/USD:USD:BUY": "2026-09-06T15:35:00+00:00",
     "BTC/USD:USD:BUY": "2026-09-06T15:55:00+00:00",
-    "LINK/USD:USD:BUY": "2026-09-06T16:10:00+00:00"
+    "LINK/USD:USD:BUY": "2026-09-06T16:10:00+00:00",
+    "ARB/USD:USD:BUY": "2026-09-06T16:25:00+00:00"
   }
 }
