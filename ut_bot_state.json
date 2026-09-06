@@ -20,16 +20,6 @@
       "score": 60,
       "opened_at": "2026-09-06T16:03:48.998268+00:00"
     },
-    "LINK/USD:USD_BUY_1788711455": {
-      "id": "LINK/USD:USD_BUY_1788711455",
-      "symbol": "LINK/USD:USD",
-      "side": "BUY",
-      "entry": 12.259,
-      "sl": 12.161,
-      "tp": 12.357000000000001,
-      "score": 80,
-      "opened_at": "2026-09-06T16:17:35.110386+00:00"
-    },
     "ARB/USD:USD_BUY_1788712265": {
       "id": "ARB/USD:USD_BUY_1788712265",
       "symbol": "ARB/USD:USD",
@@ -39,6 +29,16 @@
       "tp": 0.19519999999999998,
       "score": 81,
       "opened_at": "2026-09-06T16:31:05.039898+00:00"
+    },
+    "ZEC/USD:USD_BUY_1788712959": {
+      "id": "ZEC/USD:USD_BUY_1788712959",
+      "symbol": "ZEC/USD:USD",
+      "side": "BUY",
+      "entry": 1181.07,
+      "sl": 1151.49,
+      "tp": 1210.6499999999999,
+      "score": 67,
+      "opened_at": "2026-09-06T16:42:39.686318+00:00"
     }
   },
   "last_signals": {
@@ -47,6 +47,7 @@
     "INJ/USD:USD:BUY": "2026-09-06T15:35:00+00:00",
     "BTC/USD:USD:BUY": "2026-09-06T15:55:00+00:00",
     "LINK/USD:USD:BUY": "2026-09-06T16:10:00+00:00",
-    "ARB/USD:USD:BUY": "2026-09-06T16:25:00+00:00"
+    "ARB/USD:USD:BUY": "2026-09-06T16:25:00+00:00",
+    "ZEC/USD:USD:BUY": "2026-09-06T16:35:00+00:00"
   }
 }
