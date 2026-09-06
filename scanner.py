@@ -1,5 +1,5 @@
 # ============================================================
-# CRYPTO UT BOT SCANNER v12.3
+# CRYPTO UT BOT SCANNER v12.4
 # ============================================================
 # Kraken Futures
 # 100 IMPORTANT / HIGH-VOLUME COINS
@@ -10,6 +10,7 @@
 #   GitHub Actions runs every 5 minutes
 #
 # UT BOT:
+#   TradingView Pine v4 compatible logic
 #   Key Value = 3
 #   ATR Period = 10
 #
@@ -92,8 +93,11 @@ SWING_RIGHT = 2
 # ------------------------------------------------------------
 # CANDLE DATA
 # ------------------------------------------------------------
+# Increased from 250 to 500 so the recursive UT Bot
+# trailing stop has more historical data to stabilize.
+# ------------------------------------------------------------
 
-OHLCV_LIMIT = 250
+OHLCV_LIMIT = 500
 
 
 # ============================================================
@@ -209,6 +213,7 @@ def candle_time_to_iran(ms):
 def format_iran_time(value):
 
     if not value:
+
         return "-"
 
     try:
@@ -937,32 +942,27 @@ def fetch_live_price(symbol):
 
 
 # ============================================================
-# ATR
+# TRUE RANGE
 # ============================================================
 
-def calculate_atr(
-    df,
-    period=10
-):
+def calculate_true_range(df):
 
-    high = df["high"]
+    high = df["high"].astype(float)
 
-    low = df["low"]
+    low = df["low"].astype(float)
 
-    close = df["close"]
+    close = df["close"].astype(float)
 
     previous_close = close.shift(1)
 
     tr1 = high - low
 
     tr2 = (
-        high
-        - previous_close
+        high - previous_close
     ).abs()
 
     tr3 = (
-        low
-        - previous_close
+        low - previous_close
     ).abs()
 
     tr = pd.concat(
@@ -972,9 +972,49 @@ def calculate_atr(
             tr3
         ],
         axis=1
-    ).max(axis=1)
+    ).max(
+        axis=1,
+        skipna=False
+    )
+
+    # Pine's first TR effectively starts from high-low
+    # because previous close is unavailable on the first bar.
+    if len(tr) > 0:
+
+        tr.iloc[0] = (
+            high.iloc[0]
+            - low.iloc[0]
+        )
+
+    return tr
+
+
+# ============================================================
+# ATR / PINE RMA
+# ============================================================
+# TradingView ATR:
+#
+# atr(length) = rma(tr, length)
+#
+# RMA:
+#   first valid value = SMA(length)
+#   next values:
+#   (previous_rma * (length - 1) + current_value) / length
+#
+# This matches the Wilder/RMA structure used by Pine.
+# ============================================================
+
+def calculate_atr(
+    df,
+    period=10
+):
+
+    tr = calculate_true_range(
+        df
+    )
 
     atr = pd.Series(
+        float("nan"),
         index=df.index,
         dtype=float
     )
@@ -983,45 +1023,177 @@ def calculate_atr(
 
         return atr
 
-    atr.iloc[
-        period - 1
-    ] = tr.iloc[
+    first_value = tr.iloc[
         :period
     ].mean()
+
+    if pd.isna(
+        first_value
+    ):
+
+        return atr
+
+    atr.iloc[
+        period - 1
+    ] = first_value
 
     for i in range(
         period,
         len(df)
     ):
 
+        previous_atr = atr.iloc[
+            i - 1
+        ]
+
+        current_tr = tr.iloc[
+            i
+        ]
+
+        if (
+            pd.isna(previous_atr)
+            or pd.isna(current_tr)
+        ):
+
+            continue
+
         atr.iloc[i] = (
             (
-                atr.iloc[i - 1]
+                previous_atr
                 * (period - 1)
             )
-            + tr.iloc[i]
+            + current_tr
         ) / period
 
     return atr
 
 
 # ============================================================
+# EMA LENGTH 1
+# ============================================================
+# Pine:
+#
+# ema = ema(src, 1)
+#
+# EMA with length 1 is exactly src.
+# We keep it explicit because the original TradingView
+# code uses EMA(1) before crossover().
+# ============================================================
+
+def ema_length_one(series):
+
+    return series.astype(
+        float
+    ).copy()
+
+
+# ============================================================
+# PINE CROSSOVER
+# ============================================================
+
+def pine_crossover(
+    current_a,
+    current_b,
+    previous_a,
+    previous_b
+):
+
+    if any(
+        pd.isna(x)
+        for x in [
+            current_a,
+            current_b,
+            previous_a,
+            previous_b
+        ]
+    ):
+
+        return False
+
+    return (
+        current_a > current_b
+        and previous_a <= previous_b
+    )
+
+
+# ============================================================
 # UT BOT
+# ============================================================
+#
+# Based directly on the supplied TradingView Pine v4:
+#
+# xATR  = atr(c)
+# nLoss = a * xATR
+#
+# src = close because h=false
+#
+# xATRTrailingStop recursive logic:
+#
+# iff(
+#   src > nz(stop[1],0)
+#   and src[1] > nz(stop[1],0),
+#   max(stop[1], src-nLoss),
+#
+#   iff(
+#     src < nz(stop[1],0)
+#     and src[1] < nz(stop[1],0),
+#     min(stop[1], src+nLoss),
+#
+#     iff(
+#       src > nz(stop[1],0),
+#       src-nLoss,
+#       src+nLoss
+#     )
+#   )
+# )
+#
+# ema = ema(src,1)
+#
+# above = crossover(ema, stop)
+# below = crossover(stop, ema)
+#
+# buy  = src > stop and above
+# sell = src < stop and below
+#
 # ============================================================
 
 def calculate_ut_bot(df):
 
     df = df.copy()
 
+    # --------------------------------------------------------
+    # SOURCE
+    # --------------------------------------------------------
+    # Pine setting h=false:
+    # src = close
+    # --------------------------------------------------------
+
+    df["ut_src"] = (
+        df["close"]
+        .astype(float)
+    )
+
+    # --------------------------------------------------------
+    # ATR
+    # --------------------------------------------------------
+
     df["atr"] = calculate_atr(
         df,
         UT_ATR_PERIOD
     )
 
+    # --------------------------------------------------------
+    # nLoss = Key * ATR
+    # --------------------------------------------------------
+
     df["nloss"] = (
         UT_KEY
         * df["atr"]
     )
+
+    # --------------------------------------------------------
+    # OUTPUT COLUMNS
+    # --------------------------------------------------------
 
     df["ut_stop"] = float("nan")
 
@@ -1031,114 +1203,208 @@ def calculate_ut_bot(df):
 
     df["ut_sell"] = False
 
-    first_valid = None
+    # --------------------------------------------------------
+    # EMA(src, 1)
+    # --------------------------------------------------------
 
-    for i in range(
-        len(df)
-    ):
+    df["ut_ema1"] = ema_length_one(
+        df["ut_src"]
+    )
 
-        if not pd.isna(
-            df.iloc[i]["atr"]
-        ):
-
-            first_valid = i
-
-            break
-
-    if first_valid is None:
+    if len(df) == 0:
 
         return df
 
-    close = float(
-        df.iloc[first_valid]["close"]
+    # --------------------------------------------------------
+    # Pine starts:
+    #
+    # xATRTrailingStop = 0.0
+    #
+    # and references:
+    #
+    # nz(xATRTrailingStop[1], 0)
+    #
+    # So previous stop is effectively zero whenever
+    # there is no previous valid stop.
+    # --------------------------------------------------------
+
+    previous_stop = 0.0
+
+    previous_src = float(
+        df.iloc[0]["ut_src"]
     )
 
-    nloss = float(
-        df.iloc[first_valid]["nloss"]
+    previous_ema = float(
+        df.iloc[0]["ut_ema1"]
     )
 
-    if nloss <= 0:
+    previous_stop_for_crossover = 0.0
 
-        return df
+    previous_valid_stop = False
 
-    df.loc[
-        df.index[first_valid],
-        "ut_stop"
-    ] = close - nloss
-
-    df.loc[
-        df.index[first_valid],
-        "ut_direction"
-    ] = 1
+    previous_direction = 0
 
     for i in range(
-        first_valid + 1,
         len(df)
     ):
 
         src = float(
-            df.iloc[i]["close"]
+            df.iloc[i]["ut_src"]
         )
 
-        previous_src = float(
-            df.iloc[i - 1]["close"]
-        )
+        atr = df.iloc[i]["atr"]
 
-        nloss = float(
-            df.iloc[i]["nloss"]
-        )
+        nloss = df.iloc[i]["nloss"]
 
-        previous_stop = float(
-            df.iloc[i - 1]["ut_stop"]
-        )
+        # ----------------------------------------------------
+        # Pine ATR is na before enough history exists.
+        #
+        # During these bars the stop remains na.
+        # ----------------------------------------------------
 
         if (
-            src > previous_stop
-            and previous_src > previous_stop
+            pd.isna(atr)
+            or pd.isna(nloss)
+        ):
+
+            df.loc[
+                df.index[i],
+                "ut_stop"
+            ] = float("nan")
+
+            df.loc[
+                df.index[i],
+                "ut_direction"
+            ] = previous_direction
+
+            previous_src = src
+
+            previous_ema = src
+
+            continue
+
+        nloss = float(
+            nloss
+        )
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Pine uses nz(previous_stop, 0)
+        # ----------------------------------------------------
+
+        if previous_valid_stop:
+
+            nz_previous_stop = (
+                previous_stop
+            )
+
+        else:
+
+            nz_previous_stop = 0.0
+
+        # ----------------------------------------------------
+        # Previous source
+        #
+        # Pine src[1] is na on first bar.
+        # Once ATR is valid there is always a previous
+        # candle, so this is normally available.
+        # ----------------------------------------------------
+
+        if i > 0:
+
+            previous_src_value = float(
+                df.iloc[i - 1]["ut_src"]
+            )
+
+        else:
+
+            previous_src_value = float("nan")
+
+        # ----------------------------------------------------
+        # EXACT TRAILING STOP BRANCHES
+        # ----------------------------------------------------
+
+        if (
+            src > nz_previous_stop
+            and previous_src_value > nz_previous_stop
         ):
 
             stop = max(
-                previous_stop,
+                nz_previous_stop,
                 src - nloss
             )
 
         elif (
-            src < previous_stop
-            and previous_src < previous_stop
+            src < nz_previous_stop
+            and previous_src_value < nz_previous_stop
         ):
 
             stop = min(
-                previous_stop,
+                nz_previous_stop,
                 src + nloss
             )
 
-        elif src > previous_stop:
+        elif src > nz_previous_stop:
 
-            stop = src - nloss
+            stop = (
+                src - nloss
+            )
 
         else:
 
-            stop = src + nloss
+            stop = (
+                src + nloss
+            )
+
+        # ----------------------------------------------------
+        # STORE STOP
+        # ----------------------------------------------------
 
         df.loc[
             df.index[i],
             "ut_stop"
         ] = stop
 
-        if src > stop:
+        # ----------------------------------------------------
+        # POSITION DIRECTION
+        #
+        # Pine:
+        #
+        # pos := iff(
+        #   src[1] < stop[1] and src > stop[1], 1,
+        #   iff(
+        #     src[1] > stop[1] and src < stop[1],
+        #     -1,
+        #     nz(pos[1],0)
+        #   )
+        # )
+        #
+        # This direction is not used to generate signals,
+        # but we preserve it for fidelity.
+        # ----------------------------------------------------
+
+        if (
+            i > 0
+            and previous_valid_stop
+            and previous_src_value < nz_previous_stop
+            and src > nz_previous_stop
+        ):
 
             direction = 1
 
-        elif src < stop:
+        elif (
+            i > 0
+            and previous_valid_stop
+            and previous_src_value > nz_previous_stop
+            and src < nz_previous_stop
+        ):
 
             direction = -1
 
         else:
 
-            direction = int(
-                df.iloc[
-                    i - 1
-                ]["ut_direction"]
+            direction = (
+                previous_direction
             )
 
         df.loc[
@@ -1146,25 +1412,112 @@ def calculate_ut_bot(df):
             "ut_direction"
         ] = direction
 
+        # ----------------------------------------------------
+        # Pine:
+        #
+        # ema = ema(src,1)
+        #
+        # Since length=1:
+        #
+        # ema == src
+        # ----------------------------------------------------
+
+        current_ema = src
+
+        # ----------------------------------------------------
+        # Previous EMA
+        # ----------------------------------------------------
+
+        if i > 0:
+
+            previous_ema_value = float(
+                df.iloc[i - 1]["ut_ema1"]
+            )
+
+        else:
+
+            previous_ema_value = float(
+                "nan"
+            )
+
+        # ----------------------------------------------------
+        # Pine:
+        #
+        # above = crossover(
+        #     ema,
+        #     xATRTrailingStop
+        # )
+        #
+        # below = crossover(
+        #     xATRTrailingStop,
+        #     ema
+        # )
+        # ----------------------------------------------------
+
+        above = pine_crossover(
+            current_ema,
+            stop,
+            previous_ema_value,
+            (
+                nz_previous_stop
+                if previous_valid_stop
+                else float("nan")
+            )
+        )
+
+        below = pine_crossover(
+            stop,
+            current_ema,
+            (
+                nz_previous_stop
+                if previous_valid_stop
+                else float("nan")
+            ),
+            previous_ema_value
+        )
+
+        # ----------------------------------------------------
+        # Pine:
+        #
+        # buy = src > stop and above
+        # sell = src < stop and below
+        # ----------------------------------------------------
+
         buy = (
             src > stop
-            and previous_src <= previous_stop
+            and above
         )
 
         sell = (
             src < stop
-            and previous_src >= previous_stop
+            and below
         )
 
         df.loc[
             df.index[i],
             "ut_buy"
-        ] = buy
+        ] = bool(buy)
 
         df.loc[
             df.index[i],
             "ut_sell"
-        ] = sell
+        ] = bool(sell)
+
+        # ----------------------------------------------------
+        # Update recursive state
+        # ----------------------------------------------------
+
+        previous_stop = stop
+
+        previous_valid_stop = True
+
+        previous_src = src
+
+        previous_ema = current_ema
+
+        previous_stop_for_crossover = stop
+
+        previous_direction = direction
 
     return df
 
@@ -1773,13 +2126,35 @@ def process_pending_signal(
         confirmation_index
     ]
 
+    confirmation_timestamp = int(
+        confirmation[
+            "timestamp"
+        ]
+    )
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Confirmation must be a LATER candle than the UT signal.
+    # This prevents accidental same-candle confirmation.
+    # --------------------------------------------------------
+
+    pending_timestamp = int(
+        pending.get(
+            "signal_timestamp",
+            0
+        )
+    )
+
+    if (
+        confirmation_timestamp
+        <= pending_timestamp
+    ):
+
+        return False
+
     confirmation_time = (
         candle_time_to_iran(
-            int(
-                confirmation[
-                    "timestamp"
-                ]
-            )
+            confirmation_timestamp
         )
     )
 
@@ -3321,7 +3696,7 @@ def main():
     )
 
     print(
-        "CRYPTO UT BOT SCANNER v12.3"
+        "CRYPTO UT BOT SCANNER v12.4"
     )
 
     print(
@@ -3342,6 +3717,10 @@ def main():
 
     print(
         "SL / TP: FIXED"
+    )
+
+    print(
+        "UT: TRADINGVIEW PINE v4 COMPATIBLE"
     )
 
     print(
