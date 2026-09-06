@@ -47,25 +47,36 @@ jobs:
 
 
       # ============================================================
-      # SHOW FILES
+      # CHECK STATE FILES
       # ============================================================
       - name: Check scanner files
         run: |
           echo "=========================================="
-          echo "PRICE ACTION SCANNER"
+          echo "CRYPTO PRICE ACTION SCANNER"
           echo "=========================================="
 
           pwd
           ls -la
 
           echo "=========================================="
-          echo "STATE FILES"
+          echo "PRICE ACTION STATE FILES"
           echo "=========================================="
 
-          ls -la \
-            ut_bot_state.json \
-            ut_bot_trade_history.json \
-            2>/dev/null || true
+          if [ -f price_action_state.json ]; then
+            echo "price_action_state.json FOUND"
+            cat price_action_state.json
+          else
+            echo "price_action_state.json NOT FOUND"
+          fi
+
+          echo ""
+
+          if [ -f price_action_trade_history.json ]; then
+            echo "price_action_trade_history.json FOUND"
+            cat price_action_trade_history.json
+          else
+            echo "price_action_trade_history.json NOT FOUND"
+          fi
 
 
       # ============================================================
@@ -77,6 +88,34 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python -u scanner.py
+
+
+      # ============================================================
+      # SHOW UPDATED STATE
+      # ============================================================
+      - name: Show updated scanner state
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "UPDATED PRICE ACTION STATE"
+          echo "=========================================="
+
+          if [ -f price_action_state.json ]; then
+            cat price_action_state.json
+          else
+            echo "price_action_state.json NOT FOUND"
+          fi
+
+          echo ""
+          echo "=========================================="
+          echo "UPDATED TRADE HISTORY"
+          echo "=========================================="
+
+          if [ -f price_action_trade_history.json ]; then
+            cat price_action_trade_history.json
+          else
+            echo "price_action_trade_history.json NOT FOUND"
+          fi
 
 
       # ============================================================
@@ -94,10 +133,11 @@ jobs:
 
           git status --short
 
+          # IMPORTANT:
+          # scanner.py uses these exact files
           git add \
-            ut_bot_state.json \
-            ut_bot_trade_history.json \
-            2>/dev/null || true
+            price_action_state.json \
+            price_action_trade_history.json
 
           echo "=========================================="
           echo "STAGED CHANGES"
