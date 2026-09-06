@@ -20,16 +20,6 @@
       "score": 81,
       "opened_at": "2026-09-06T18:37:55.399783+00:00"
     },
-    "FARTCOIN/USD:USD_SELL_1788720470": {
-      "id": "FARTCOIN/USD:USD_SELL_1788720470",
-      "symbol": "FARTCOIN/USD:USD",
-      "side": "SELL",
-      "entry": 0.1812,
-      "sl": 0.1831,
-      "tp": 0.1793,
-      "score": 77,
-      "opened_at": "2026-09-06T18:47:50.366251+00:00"
-    },
     "DOT/USD:USD_SELL_1788721759": {
       "id": "DOT/USD:USD_SELL_1788721759",
       "symbol": "DOT/USD:USD",
@@ -40,16 +30,6 @@
       "score": 60,
       "opened_at": "2026-09-06T19:09:19.731614+00:00"
     },
-    "ENA/USD:USD_BUY_1788723031": {
-      "id": "ENA/USD:USD_BUY_1788723031",
-      "symbol": "ENA/USD:USD",
-      "side": "BUY",
-      "entry": 0.17594,
-      "sl": 0.17513,
-      "tp": 0.17675000000000002,
-      "score": 80,
-      "opened_at": "2026-09-06T19:30:31.422099+00:00"
-    },
     "INJ/USD:USD_BUY_1788723639": {
       "id": "INJ/USD:USD_BUY_1788723639",
       "symbol": "INJ/USD:USD",
@@ -59,16 +39,6 @@
       "tp": 5.282,
       "score": 67,
       "opened_at": "2026-09-06T19:40:39.853098+00:00"
-    },
-    "ENA/USD:USD_BUY_1788724180": {
-      "id": "ENA/USD:USD_BUY_1788724180",
-      "symbol": "ENA/USD:USD",
-      "side": "BUY",
-      "entry": 0.17641,
-      "sl": 0.17523,
-      "tp": 0.17759000000000003,
-      "score": 87,
-      "opened_at": "2026-09-06T19:49:40.300136+00:00"
     },
     "CRV/USD:USD_BUY_1788724710": {
       "id": "CRV/USD:USD_BUY_1788724710",
@@ -99,6 +69,81 @@
     "FARTCOIN/USD:USD:SELL": "2026-09-06T18:40:00+00:00",
     "PEPE/USD:USD:BUY": "2026-09-06T18:50:00+00:00",
     "DOT/USD:USD:SELL": "2026-09-06T19:00:00+00:00",
-    "TRUMP/USD:USD:SELL": "2026-09-06T19:15:00+00:00"
+    "TRUMP/USD:USD:SELL": "2026-09-06T19:15:00+00:00",
+    "ZEC/USD:USD:SELL": "2026-09-06T20:05:00+00:00",
+    "PEPE/USD:USD:SELL": "2026-09-06T20:05:00+00:00",
+    "ETH/USD:USD:SELL": "2026-09-06T20:05:00+00:00",
+    "LINK/USD:USD:SELL": "2026-09-06T20:05:00+00:00"
+  },
+  "waiting": {
+    "ZEC/USD:USD_SELL_2026-09-06T20:05:00+00:00_1788725620970": {
+      "id": "ZEC/USD:USD_SELL_2026-09-06T20:05:00+00:00_1788725620970",
+      "symbol": "ZEC/USD:USD",
+      "side": "SELL",
+      "entry": 1212.65,
+      "sl": 1224.12,
+      "tp": 1201.1800000000003,
+      "score": 67,
+      "reasons": [
+        "Bearish Structure",
+        "Pullback",
+        "BEARISH ENGULFING",
+        "Volume x2.0"
+      ],
+      "signal_candle_time": "2026-09-06T20:05:00+00:00",
+      "opened_at": "2026-09-06T20:13:40.970832+00:00",
+      "queued_at": "2026-09-06T20:13:40.970832+00:00"
+    },
+    "PEPE/USD:USD_SELL_2026-09-06T20:05:00+00:00_1788725620970": {
+      "id": "PEPE/USD:USD_SELL_2026-09-06T20:05:00+00:00_1788725620970",
+      "symbol": "PEPE/USD:USD",
+      "side": "SELL",
+      "entry": 3.5919e-06,
+      "sl": 3.6008e-06,
+      "tp": 3.583e-06,
+      "score": 60,
+      "reasons": [
+        "Bearish Structure",
+        "Pullback",
+        "BEARISH ENGULFING"
+      ],
+      "signal_candle_time": "2026-09-06T20:05:00+00:00",
+      "opened_at": "2026-09-06T20:13:40.970851+00:00",
+      "queued_at": "2026-09-06T20:13:40.970851+00:00"
+    },
+    "LINK/USD:USD_SELL_2026-09-06T20:05:00+00:00_1788725620970": {
+      "id": "LINK/USD:USD_SELL_2026-09-06T20:05:00+00:00_1788725620970",
+      "symbol": "LINK/USD:USD",
+      "side": "SELL",
+      "entry": 12.347,
+      "sl": 12.395,
+      "tp": 12.299,
+      "score": 55,
+      "reasons": [
+        "Bearish Structure",
+        "Pullback",
+        "BEARISH REJECTION"
+      ],
+      "signal_candle_time": "2026-09-06T20:05:00+00:00",
+      "opened_at": "2026-09-06T20:13:40.970876+00:00",
+      "queued_at": "2026-09-06T20:13:40.970876+00:00"
+    },
+    "ETH/USD:USD_SELL_2026-09-06T20:05:00+00:00_1788725620970": {
+      "id": "ETH/USD:USD_SELL_2026-09-06T20:05:00+00:00_1788725620970",
+      "symbol": "ETH/USD:USD",
+      "side": "SELL",
+      "entry": 2488.7,
+      "sl": 2493.5,
+      "tp": 2483.8999999999996,
+      "score": 55,
+      "reasons": [
+        "Bearish Structure",
+        "Pullback",
+        "Volume x2.4"
+      ],
+      "signal_candle_time": "2026-09-06T20:05:00+00:00",
+      "opened_at": "2026-09-06T20:13:40.970865+00:00",
+      "queued_at": "2026-09-06T20:13:40.970865+00:00"
+    }
   }
 }

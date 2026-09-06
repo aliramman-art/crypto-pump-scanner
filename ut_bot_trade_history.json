@@ -239,6 +239,57 @@
       "pnl_pct": -0.13003901170351598,
       "r": -1,
       "closed_at": "2026-09-06T19:58:30.817466+00:00"
+    },
+    {
+      "id": "FARTCOIN/USD:USD_SELL_1788720470",
+      "symbol": "FARTCOIN/USD:USD",
+      "side": "SELL",
+      "entry": 0.1812,
+      "sl": 0.1831,
+      "tp": 0.1793,
+      "score": 77,
+      "opened_at": "2026-09-06T18:47:50.366251+00:00",
+      "result": "WIN",
+      "exit": 0.1787,
+      "pnl_pct": 1.0485651214128107,
+      "r": 1.0,
+      "closed_at": "2026-09-06T20:13:40.970740+00:00",
+      "duration_seconds": 5150,
+      "duration": "1h 25m"
+    },
+    {
+      "id": "ENA/USD:USD_BUY_1788723031",
+      "symbol": "ENA/USD:USD",
+      "side": "BUY",
+      "entry": 0.17594,
+      "sl": 0.17513,
+      "tp": 0.17675000000000002,
+      "score": 80,
+      "opened_at": "2026-09-06T19:30:31.422099+00:00",
+      "result": "LOSS",
+      "exit": 0.175,
+      "pnl_pct": -0.4603842218938304,
+      "r": -1,
+      "closed_at": "2026-09-06T20:13:40.970786+00:00",
+      "duration_seconds": 2589,
+      "duration": "43m"
+    },
+    {
+      "id": "ENA/USD:USD_BUY_1788724180",
+      "symbol": "ENA/USD:USD",
+      "side": "BUY",
+      "entry": 0.17641,
+      "sl": 0.17523,
+      "tp": 0.17759000000000003,
+      "score": 87,
+      "opened_at": "2026-09-06T19:49:40.300136+00:00",
+      "result": "LOSS",
+      "exit": 0.175,
+      "pnl_pct": -0.6688963210702422,
+      "r": -1,
+      "closed_at": "2026-09-06T20:13:40.970801+00:00",
+      "duration_seconds": 1440,
+      "duration": "24m"
     }
   ]
 }
