@@ -1,32 +1,53 @@
 # ============================================================
-# LBANK FUTURES + BINANCE FUTURES PRICE ACTION SCANNER
+# BINANCE FUTURES PRICE ACTION SCANNER
 # ============================================================
-# SOURCE:
-#   LBank Futures  -> Volume ranking / TOP 30
-#   Binance USD-M  -> 5m OHLCV / Price Action
+#
+# MARKET:
+#   Binance USDⓈ-M Futures
+#
+# RANKING:
+#   24h quote volume
+#
+# TIMEFRAME:
+#   5m CLOSED candles
 #
 # STRATEGY:
-#   1) TOP 30 LBank Futures by turnover
-#   2) Binance Futures equivalent symbol
-#   3) 5m CLOSED candles only
-#   4) Tenkan/Kijun = 9/26
-#   5) ONLY the MOST RECENT Tenkan/Kijun cross
-#   6) Cross candle is NOT part of Box
-#   7) Box = 26 candles immediately BEFORE latest cross
-#   8) BUY  = later closed candle closes above Box High
-#   9) SELL = later closed candle closes below Box Low
-#  10) Swing = confirmed pivot with 2 candles left + 2 right
-#  11) BUY SL  = below latest valid Swing Low
-#  12) SELL SL = above latest valid Swing High
-#  13) TP = 50% of Box width
-#  14) MAX OPEN TRADES = 1
+#   Tenkan  = 9
+#   Kijun   = 26
+#
+#   ONLY MOST RECENT Tenkan/Kijun CROSS
+#
+#   Cross candle is excluded from Box.
+#
+#   Box = 26 candles immediately BEFORE latest cross.
+#
+#   BUY:
+#       later CLOSED candle closes above Box High
+#
+#   SELL:
+#       later CLOSED candle closes below Box Low
+#
+#   SWING:
+#       confirmed pivot:
+#       2 candles left + 2 candles right
+#
+#   BUY SL:
+#       below latest valid Swing Low
+#
+#   SELL SL:
+#       above latest valid Swing High
+#
+#   TP:
+#       50% of Box width
+#
+#   MAX OPEN TRADES:
+#       1
 #
 # ============================================================
 
 import os
 import json
 import time
-import math
 from datetime import datetime, timezone
 
 import requests
@@ -36,66 +57,104 @@ import requests
 # CONFIG
 # ============================================================
 
-LBANK_BASE = "https://lbkperp.lbank.com/cfd/openApi/v1/pub"
-LBANK_MARKET_DATA = f"{LBANK_BASE}/marketData"
+BASE_URL = "https://fapi.binance.com"
 
-BINANCE_BASE = "https://fapi.binance.com"
-BINANCE_EXCHANGE_INFO = f"{BINANCE_BASE}/fapi/v1/exchangeInfo"
-BINANCE_KLINES = f"{BINANCE_BASE}/fapi/v1/klines"
-BINANCE_TICKER = f"{BINANCE_BASE}/fapi/v1/ticker/price"
+EXCHANGE_INFO_URL = (
+    f"{BASE_URL}/fapi/v1/exchangeInfo"
+)
 
-PRODUCT_GROUP = "SwapU"
+TICKER_24H_URL = (
+    f"{BASE_URL}/fapi/v1/ticker/24hr"
+)
+
+KLINES_URL = (
+    f"{BASE_URL}/fapi/v1/klines"
+)
+
+PRICE_URL = (
+    f"{BASE_URL}/fapi/v1/ticker/price"
+)
+
+TIME_URL = (
+    f"{BASE_URL}/fapi/v1/time"
+)
+
+
+# ------------------------------------------------------------
+# Strategy
+# ------------------------------------------------------------
 
 TIMEFRAME = "5m"
 
-TOP_LBANK = 30
+TOP_SYMBOLS = 30
 
-# Enough candles for:
-# latest cross + 26 box candles + breakout + swing
-CANDLE_LIMIT = 300
+KLINE_LIMIT = 300
 
 TENKAN_PERIOD = 9
+
 KIJUN_PERIOD = 26
 
 BOX_SIZE = 26
 
 PIVOT_LEFT = 2
+
 PIVOT_RIGHT = 2
 
 VOLUME_LOOKBACK = 20
 
-# TP = 50% of box width
 TP_BOX_PERCENT = 0.50
 
-# Small structural SL buffer
 SL_BUFFER_PERCENT = 0.0015
 
 MAX_OPEN_TRADES = 1
 
+
+# ------------------------------------------------------------
+# Files
+# ------------------------------------------------------------
+
+STATE_FILE = (
+    "binance_price_action_state.json"
+)
+
+HISTORY_FILE = (
+    "binance_price_action_trade_history.json"
+)
+
+
+# ------------------------------------------------------------
+# HTTP
+# ------------------------------------------------------------
+
 REQUEST_TIMEOUT = 20
-
-STATE_FILE = "lbank_futures_price_action_state.json"
-HISTORY_FILE = "lbank_futures_price_action_trade_history.json"
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-
-
-# ============================================================
-# SESSION
-# ============================================================
 
 SESSION = requests.Session()
 
 SESSION.headers.update(
     {
-        "User-Agent": "Mozilla/5.0 Crypto-Price-Action-Scanner/1.0"
+        "User-Agent":
+        "Binance-Futures-Price-Action-Scanner/1.0"
     }
 )
 
 
+# ------------------------------------------------------------
+# Telegram
+# ------------------------------------------------------------
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+).strip()
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+).strip()
+
+
 # ============================================================
-# HELPERS
+# GENERAL HELPERS
 # ============================================================
 
 def now_utc():
@@ -103,7 +162,9 @@ def now_utc():
 
 
 def now_iso():
-    return now_utc().strftime("%Y-%m-%d %H:%M:%S UTC")
+    return now_utc().strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
 
 
 def safe_float(value, default=0.0):
@@ -122,18 +183,25 @@ def fmt_price(value):
     except Exception:
         return str(value)
 
-    if value >= 1000:
+    if value >= 10000:
         return f"{value:,.2f}"
-    if value >= 100:
+
+    if value >= 1000:
         return f"{value:,.3f}"
-    if value >= 1:
+
+    if value >= 100:
         return f"{value:,.4f}"
-    if value >= 0.1:
+
+    if value >= 1:
         return f"{value:,.5f}"
-    if value >= 0.01:
+
+    if value >= 0.1:
         return f"{value:,.6f}"
 
-    return f"{value:.8f}"
+    if value >= 0.01:
+        return f"{value:,.7f}"
+
+    return f"{value:.10f}"
 
 
 def fmt_pct(value):
@@ -148,48 +216,42 @@ def ms_to_iso(ms):
         return datetime.fromtimestamp(
             ms / 1000,
             tz=timezone.utc
-        ).strftime("%Y-%m-%d %H:%M:%S")
+        ).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
     except Exception:
         return "N/A"
 
 
-def normalize_symbol(symbol):
-    """
-    Converts common LBank formats to Binance-style:
-
-        btc_usdt  -> BTCUSDT
-        BTC-USDT  -> BTCUSDT
-        BTCUSDT   -> BTCUSDT
-    """
-
-    if not symbol:
-        return ""
-
-    s = str(symbol).upper().strip()
-
-    for ch in ["_", "-", "/", ":", "."]:
-        s = s.replace(ch, "")
-
-    return s
-
-
-def json_load(path, default):
+def load_json(path, default):
     try:
         if not os.path.exists(path):
             return default
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(
+            path,
+            "r",
+            encoding="utf-8"
+        ) as f:
             return json.load(f)
 
     except Exception as e:
-        print(f"[WARN] Failed reading {path}: {e}")
+        print(
+            f"[WARN] Cannot read {path}: {e}"
+        )
+
         return default
 
 
-def json_save(path, data):
-    temp = path + ".tmp"
+def save_json(path, data):
+    temp_path = path + ".tmp"
 
-    with open(temp, "w", encoding="utf-8") as f:
+    with open(
+        temp_path,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
         json.dump(
             data,
             f,
@@ -197,443 +259,642 @@ def json_save(path, data):
             indent=2
         )
 
-    os.replace(temp, path)
+    os.replace(
+        temp_path,
+        path
+    )
 
 
 def load_state():
-    default = {
-        "open_trade": None,
-        "last_run": None,
-        "last_signal": None
-    }
-
-    return json_load(STATE_FILE, default)
+    return load_json(
+        STATE_FILE,
+        {
+            "open_trade": None,
+            "last_run": None,
+            "last_signal": None
+        }
+    )
 
 
 def save_state(state):
     state["last_run"] = now_iso()
-    json_save(STATE_FILE, state)
+
+    save_json(
+        STATE_FILE,
+        state
+    )
 
 
 def load_history():
-    return json_load(HISTORY_FILE, [])
+    return load_json(
+        HISTORY_FILE,
+        []
+    )
 
 
 def save_history(history):
-    json_save(HISTORY_FILE, history)
+    save_json(
+        HISTORY_FILE,
+        history
+    )
 
 
 # ============================================================
-# HTTP
+# HTTP REQUEST
 # ============================================================
 
 def http_get(url, params=None):
+
     try:
-        r = SESSION.get(
+
+        response = SESSION.get(
             url,
             params=params,
             timeout=REQUEST_TIMEOUT
         )
 
-        r.raise_for_status()
+        response.raise_for_status()
 
-        return r.json()
+        return response.json()
 
     except Exception as e:
+
         print(
-            f"[HTTP ERROR] {url} "
-            f"params={params} "
-            f"error={e}"
+            "[HTTP ERROR]"
         )
+
+        print(
+            f"URL: {url}"
+        )
+
+        print(
+            f"PARAMS: {params}"
+        )
+
+        print(
+            f"ERROR: {e}"
+        )
+
         return None
 
 
 # ============================================================
-# LBANK FUTURES
+# BINANCE TIME
 # ============================================================
 
-def get_lbank_market_data():
-    """
-    Get LBank Futures market data.
-
-    LBank is used ONLY for:
-        - Futures universe
-        - volume/turnover ranking
-    """
-
-    params = {
-        "productGroup": PRODUCT_GROUP
-    }
+def get_server_time():
 
     data = http_get(
-        LBANK_MARKET_DATA,
-        params
+        TIME_URL
     )
 
-    if data is None:
-        return []
+    if isinstance(data, dict):
 
-    # LBank responses may vary slightly.
-    if isinstance(data, list):
-        rows = data
-
-    elif isinstance(data, dict):
-        rows = (
-            data.get("data")
-            or data.get("result")
-            or data.get("markets")
-            or data.get("rows")
-            or []
+        return int(
+            data.get(
+                "serverTime",
+                int(time.time() * 1000)
+            )
         )
 
-    else:
-        rows = []
-
-    if not isinstance(rows, list):
-        return []
-
-    markets = []
-
-    for item in rows:
-
-        if not isinstance(item, dict):
-            continue
-
-        raw_symbol = (
-            item.get("symbol")
-            or item.get("pair")
-            or item.get("instrument")
-        )
-
-        symbol = normalize_symbol(raw_symbol)
-
-        if not symbol:
-            continue
-
-        last_price = safe_float(
-            item.get("lastPrice")
-            or item.get("last")
-            or item.get("price")
-        )
-
-        turnover = safe_float(
-            item.get("turnover")
-            or item.get("turnover24h")
-            or item.get("quoteVolume")
-            or item.get("amount")
-        )
-
-        volume = safe_float(
-            item.get("volume")
-            or item.get("baseVolume")
-        )
-
-        if turnover <= 0 and volume > 0 and last_price > 0:
-            turnover = volume * last_price
-
-        if turnover <= 0:
-            continue
-
-        markets.append(
-            {
-                "lbank_symbol": raw_symbol,
-                "symbol": symbol,
-                "last_price": last_price,
-                "turnover": turnover,
-                "volume": volume
-            }
-        )
-
-    return markets
-
-
-def rank_lbank_markets(markets):
-    markets = sorted(
-        markets,
-        key=lambda x: x.get("turnover", 0),
-        reverse=True
+    return int(
+        time.time() * 1000
     )
-
-    return markets[:TOP_LBANK]
 
 
 # ============================================================
 # BINANCE FUTURES SYMBOLS
 # ============================================================
 
-def get_binance_symbols():
-    """
-    Returns currently TRADING Binance USD-M Futures symbols.
-    """
+def get_trading_symbols():
 
-    data = http_get(BINANCE_EXCHANGE_INFO)
+    data = http_get(
+        EXCHANGE_INFO_URL
+    )
 
     if not isinstance(data, dict):
+
         return set()
 
     symbols = set()
 
-    for item in data.get("symbols", []):
-        if not isinstance(item, dict):
+    for item in data.get(
+        "symbols",
+        []
+    ):
+
+        if not isinstance(
+            item,
+            dict
+        ):
             continue
 
-        symbol = item.get("symbol")
-        status = item.get("status")
+        symbol = item.get(
+            "symbol"
+        )
 
-        if symbol and status == "TRADING":
+        status = item.get(
+            "status"
+        )
+
+        contract_type = item.get(
+            "contractType"
+        )
+
+        quote_asset = item.get(
+            "quoteAsset"
+        )
+
+        # Only active perpetual USDT futures.
+        if (
+            symbol
+            and status == "TRADING"
+            and contract_type == "PERPETUAL"
+            and quote_asset == "USDT"
+        ):
+
             symbols.add(
-                normalize_symbol(symbol)
+                symbol.upper()
             )
 
     return symbols
 
 
 # ============================================================
-# BINANCE FUTURES KLINES
+# 24H VOLUME RANKING
 # ============================================================
 
-def get_binance_klines(symbol):
-    """
-    Binance USD-M Futures 5m candles.
+def get_top_symbols(
+    trading_symbols
+):
 
-    We intentionally request more than enough history.
+    data = http_get(
+        TICKER_24H_URL
+    )
 
-    The final currently-open candle is removed.
-    """
+    if not isinstance(
+        data,
+        list
+    ):
+
+        return []
+
+    markets = []
+
+    for item in data:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+            continue
+
+        symbol = str(
+            item.get(
+                "symbol",
+                ""
+            )
+        ).upper()
+
+        if symbol not in trading_symbols:
+            continue
+
+        # quoteVolume = USDT turnover over 24h
+        quote_volume = safe_float(
+            item.get(
+                "quoteVolume"
+            )
+        )
+
+        volume = safe_float(
+            item.get(
+                "volume"
+            )
+        )
+
+        last_price = safe_float(
+            item.get(
+                "lastPrice"
+            )
+        )
+
+        if quote_volume <= 0:
+            continue
+
+        markets.append(
+            {
+                "symbol": symbol,
+                "quote_volume": quote_volume,
+                "volume": volume,
+                "last_price": last_price
+            }
+        )
+
+    markets.sort(
+        key=lambda x:
+        x["quote_volume"],
+        reverse=True
+    )
+
+    return markets[:TOP_SYMBOLS]
+
+
+# ============================================================
+# KLINES
+# ============================================================
+
+def get_klines(
+    symbol
+):
 
     params = {
         "symbol": symbol,
         "interval": TIMEFRAME,
-        "limit": CANDLE_LIMIT
+        "limit": KLINE_LIMIT
     }
 
     data = http_get(
-        BINANCE_KLINES,
+        KLINES_URL,
         params
     )
 
-    if not isinstance(data, list):
+    if not isinstance(
+        data,
+        list
+    ):
         return []
+
+    server_time = get_server_time()
 
     candles = []
 
-    current_ms = int(time.time() * 1000)
-
     for row in data:
 
-        if not isinstance(row, list):
+        if not isinstance(
+            row,
+            list
+        ):
             continue
 
         if len(row) < 7:
             continue
 
         try:
-            open_time = int(row[0])
-            open_price = float(row[1])
-            high = float(row[2])
-            low = float(row[3])
-            close = float(row[4])
-            volume = float(row[5])
-            close_time = int(row[6])
+
+            open_time = int(
+                row[0]
+            )
+
+            open_price = float(
+                row[1]
+            )
+
+            high = float(
+                row[2]
+            )
+
+            low = float(
+                row[3]
+            )
+
+            close = float(
+                row[4]
+            )
+
+            volume = float(
+                row[5]
+            )
+
+            close_time = int(
+                row[6]
+            )
 
         except Exception:
+
             continue
 
-        # Only CLOSED candles
-        if close_time >= current_ms:
+        # ----------------------------------------------------
+        # Only CLOSED candles.
+        # ----------------------------------------------------
+
+        if close_time >= server_time:
+
             continue
 
         candles.append(
             {
-                "open_time": open_time,
-                "close_time": close_time,
-                "open": open_price,
-                "high": high,
-                "low": low,
-                "close": close,
-                "volume": volume
+                "open_time":
+                    open_time,
+
+                "close_time":
+                    close_time,
+
+                "open":
+                    open_price,
+
+                "high":
+                    high,
+
+                "low":
+                    low,
+
+                "close":
+                    close,
+
+                "volume":
+                    volume
             }
         )
 
     candles.sort(
-        key=lambda x: x["open_time"]
+        key=lambda x:
+        x["open_time"]
     )
 
     return candles
 
 
 # ============================================================
-# BINANCE CURRENT PRICE
+# CURRENT PRICE
 # ============================================================
 
-def get_binance_price(symbol):
+def get_current_price(
+    symbol
+):
+
     data = http_get(
-        BINANCE_TICKER,
-        {"symbol": symbol}
+        PRICE_URL,
+        {
+            "symbol": symbol
+        }
     )
 
-    if isinstance(data, dict):
+    if isinstance(
+        data,
+        dict
+    ):
+
         return safe_float(
-            data.get("price")
+            data.get(
+                "price"
+            )
         )
 
     return 0.0
 
 
 # ============================================================
-# TENKAN / KIJUN
+# TENKAN
 # ============================================================
 
-def calculate_tenkan(candles, index):
+def calculate_tenkan(
+    candles,
+    index
+):
+
     if index + 1 < TENKAN_PERIOD:
+
         return None
 
-    start = index - TENKAN_PERIOD + 1
-    section = candles[start:index + 1]
+    start = (
+        index
+        - TENKAN_PERIOD
+        + 1
+    )
+
+    section = candles[
+        start:index + 1
+    ]
 
     highest = max(
-        x["high"] for x in section
+        candle["high"]
+        for candle in section
     )
 
     lowest = min(
-        x["low"] for x in section
+        candle["low"]
+        for candle in section
     )
 
-    return (highest + lowest) / 2.0
+    return (
+        highest + lowest
+    ) / 2.0
 
 
-def calculate_kijun(candles, index):
+# ============================================================
+# KIJUN
+# ============================================================
+
+def calculate_kijun(
+    candles,
+    index
+):
+
     if index + 1 < KIJUN_PERIOD:
+
         return None
 
-    start = index - KIJUN_PERIOD + 1
-    section = candles[start:index + 1]
+    start = (
+        index
+        - KIJUN_PERIOD
+        + 1
+    )
+
+    section = candles[
+        start:index + 1
+    ]
 
     highest = max(
-        x["high"] for x in section
+        candle["high"]
+        for candle in section
     )
 
     lowest = min(
-        x["low"] for x in section
+        candle["low"]
+        for candle in section
     )
 
-    return (highest + lowest) / 2.0
+    return (
+        highest + lowest
+    ) / 2.0
 
 
 # ============================================================
-# LATEST CROSS
+# LATEST TENKAN / KIJUN CROSS
 # ============================================================
 
-def find_latest_cross(candles):
-    """
-    IMPORTANT:
-    Only the latest cross is returned.
+def find_latest_cross(
+    candles
+):
 
-    Older crosses are ignored.
-    """
-
-    if len(candles) < KIJUN_PERIOD + 2:
+    if len(candles) < (
+        KIJUN_PERIOD + 2
+    ):
         return None
 
-    latest = None
+    latest_cross = None
 
     previous_tenkan = None
     previous_kijun = None
 
-    for i in range(len(candles)):
+    for index in range(
+        len(candles)
+    ):
 
         tenkan = calculate_tenkan(
             candles,
-            i
+            index
         )
 
         kijun = calculate_kijun(
             candles,
-            i
+            index
         )
 
-        if tenkan is None or kijun is None:
+        if (
+            tenkan is None
+            or kijun is None
+        ):
             continue
 
-        if previous_tenkan is not None and previous_kijun is not None:
+        if (
+            previous_tenkan is not None
+            and previous_kijun is not None
+        ):
 
             cross_type = None
 
+            # Bullish cross
             if (
-                previous_tenkan <= previous_kijun
-                and tenkan > kijun
+                previous_tenkan
+                <= previous_kijun
+                and
+                tenkan
+                > kijun
             ):
+
                 cross_type = "BUY"
 
+            # Bearish cross
             elif (
-                previous_tenkan >= previous_kijun
-                and tenkan < kijun
+                previous_tenkan
+                >= previous_kijun
+                and
+                tenkan
+                < kijun
             ):
+
                 cross_type = "SELL"
 
             if cross_type:
-                latest = {
-                    "index": i,
-                    "type": cross_type,
-                    "open_time": candles[i]["open_time"],
-                    "close": candles[i]["close"],
-                    "tenkan": tenkan,
-                    "kijun": kijun
+
+                latest_cross = {
+                    "index":
+                        index,
+
+                    "type":
+                        cross_type,
+
+                    "open_time":
+                        candles[
+                            index
+                        ]["open_time"],
+
+                    "close":
+                        candles[
+                            index
+                        ]["close"],
+
+                    "tenkan":
+                        tenkan,
+
+                    "kijun":
+                        kijun
                 }
 
         previous_tenkan = tenkan
+
         previous_kijun = kijun
 
-    return latest
+    return latest_cross
 
 
 # ============================================================
 # BOX
 # ============================================================
 
-def build_box(candles, cross):
-    """
-    Cross candle is EXCLUDED.
-
-    Box = exactly 26 candles immediately before cross.
-    """
+def build_box(
+    candles,
+    cross
+):
 
     if not cross:
+
         return None
 
-    cross_index = cross["index"]
+    cross_index = cross[
+        "index"
+    ]
 
-    start = cross_index - BOX_SIZE
+    # Cross candle excluded.
+    start = (
+        cross_index
+        - BOX_SIZE
+    )
+
     end = cross_index
 
     if start < 0:
+
         return None
 
-    box_candles = candles[start:end]
+    box_candles = candles[
+        start:end
+    ]
 
-    if len(box_candles) != BOX_SIZE:
+    if len(
+        box_candles
+    ) != BOX_SIZE:
+
         return None
 
     box_high = max(
-        x["high"] for x in box_candles
+        candle["high"]
+        for candle in box_candles
     )
 
     box_low = min(
-        x["low"] for x in box_candles
+        candle["low"]
+        for candle in box_candles
     )
 
-    width = box_high - box_low
+    width = (
+        box_high
+        - box_low
+    )
 
     if width <= 0:
+
         return None
 
     return {
-        "start_index": start,
-        "end_index": end - 1,
-        "high": box_high,
-        "low": box_low,
-        "width": width,
-        "count": len(box_candles)
+        "start_index":
+            start,
+
+        "end_index":
+            end - 1,
+
+        "high":
+            box_high,
+
+        "low":
+            box_low,
+
+        "width":
+            width,
+
+        "count":
+            len(box_candles)
     }
 
 
@@ -641,158 +902,268 @@ def build_box(candles, cross):
 # BREAKOUT
 # ============================================================
 
-def find_breakout(candles, cross, box):
-    """
-    Search only candles AFTER the latest cross.
+def find_breakout(
+    candles,
+    cross,
+    box
+):
 
-    BUY:
-        close > Box High
+    if (
+        not cross
+        or not box
+    ):
 
-    SELL:
-        close < Box Low
-
-    The latest qualifying closed breakout is kept.
-    """
-
-    if not cross or not box:
         return None
 
-    cross_index = cross["index"]
+    cross_index = cross[
+        "index"
+    ]
 
-    breakout = None
+    latest_breakout = None
 
-    for i in range(cross_index + 1, len(candles)):
+    for index in range(
+        cross_index + 1,
+        len(candles)
+    ):
 
-        candle = candles[i]
+        candle = candles[
+            index
+        ]
 
+        # BUY breakout
         if candle["close"] > box["high"]:
-            breakout = {
-                "index": i,
-                "type": "BUY",
-                "open_time": candle["open_time"],
-                "close": candle["close"]
+
+            latest_breakout = {
+                "index":
+                    index,
+
+                "type":
+                    "BUY",
+
+                "open_time":
+                    candle[
+                        "open_time"
+                    ],
+
+                "close":
+                    candle[
+                        "close"
+                    ]
             }
 
+        # SELL breakout
         elif candle["close"] < box["low"]:
-            breakout = {
-                "index": i,
-                "type": "SELL",
-                "open_time": candle["open_time"],
-                "close": candle["close"]
+
+            latest_breakout = {
+                "index":
+                    index,
+
+                "type":
+                    "SELL",
+
+                "open_time":
+                    candle[
+                        "open_time"
+                    ],
+
+                "close":
+                    candle[
+                        "close"
+                    ]
             }
 
-    return breakout
+    return latest_breakout
 
 
 # ============================================================
-# CONFIRMED SWINGS
+# SWING LOW
 # ============================================================
 
-def is_swing_low(candles, index):
-    left = PIVOT_LEFT
-    right = PIVOT_RIGHT
+def is_swing_low(
+    candles,
+    index
+):
 
-    if index - left < 0:
+    if index - PIVOT_LEFT < 0:
+
         return False
 
-    if index + right >= len(candles):
+    if (
+        index + PIVOT_RIGHT
+        >= len(candles)
+    ):
+
         return False
 
-    value = candles[index]["low"]
+    pivot_low = candles[
+        index
+    ]["low"]
 
     for i in range(
-        index - left,
-        index + right + 1
+        index - PIVOT_LEFT,
+        index + PIVOT_RIGHT + 1
     ):
+
         if i == index:
             continue
 
-        if candles[i]["low"] <= value:
+        if (
+            candles[i]["low"]
+            <= pivot_low
+        ):
+
             return False
 
     return True
 
 
-def is_swing_high(candles, index):
-    left = PIVOT_LEFT
-    right = PIVOT_RIGHT
+# ============================================================
+# SWING HIGH
+# ============================================================
 
-    if index - left < 0:
+def is_swing_high(
+    candles,
+    index
+):
+
+    if index - PIVOT_LEFT < 0:
+
         return False
 
-    if index + right >= len(candles):
+    if (
+        index + PIVOT_RIGHT
+        >= len(candles)
+    ):
+
         return False
 
-    value = candles[index]["high"]
+    pivot_high = candles[
+        index
+    ]["high"]
 
     for i in range(
-        index - left,
-        index + right + 1
+        index - PIVOT_LEFT,
+        index + PIVOT_RIGHT + 1
     ):
+
         if i == index:
             continue
 
-        if candles[i]["high"] >= value:
+        if (
+            candles[i]["high"]
+            >= pivot_high
+        ):
+
             return False
 
     return True
 
 
-def find_latest_swing(candles, cross, breakout):
-    """
-    Swing must be confirmed.
+# ============================================================
+# LATEST VALID SWING
+# ============================================================
 
-    We search BEFORE the breakout candle,
-    because the breakout candle itself should not
-    become the structural swing.
-    """
+def find_latest_swing(
+    candles,
+    cross,
+    breakout
+):
 
-    if not cross or not breakout:
+    if (
+        not cross
+        or not breakout
+    ):
+
         return None
 
-    cross_index = cross["index"]
-    breakout_index = breakout["index"]
+    cross_index = cross[
+        "index"
+    ]
 
-    start = cross_index + 1
-    end = breakout_index - 1
+    breakout_index = breakout[
+        "index"
+    ]
 
-    if end - start + 1 < 5:
+    start = (
+        cross_index + 1
+    )
+
+    end = (
+        breakout_index - 1
+    )
+
+    if end < start:
+
         return None
+
+    # --------------------------------------------------------
+    # BUY needs Swing Low
+    # --------------------------------------------------------
 
     if breakout["type"] == "BUY":
 
-        for i in range(
+        for index in range(
             end,
             start - 1,
             -1
         ):
+
             if is_swing_low(
                 candles,
-                i
+                index
             ):
+
                 return {
-                    "type": "LOW",
-                    "index": i,
-                    "price": candles[i]["low"],
-                    "open_time": candles[i]["open_time"]
+                    "type":
+                        "LOW",
+
+                    "index":
+                        index,
+
+                    "price":
+                        candles[
+                            index
+                        ]["low"],
+
+                    "open_time":
+                        candles[
+                            index
+                        ]["open_time"]
                 }
 
-    elif breakout["type"] == "SELL":
+    # --------------------------------------------------------
+    # SELL needs Swing High
+    # --------------------------------------------------------
 
-        for i in range(
+    if breakout["type"] == "SELL":
+
+        for index in range(
             end,
             start - 1,
             -1
         ):
+
             if is_swing_high(
                 candles,
-                i
+                index
             ):
+
                 return {
-                    "type": "HIGH",
-                    "index": i,
-                    "price": candles[i]["high"],
-                    "open_time": candles[i]["open_time"]
+                    "type":
+                        "HIGH",
+
+                    "index":
+                        index,
+
+                    "price":
+                        candles[
+                            index
+                        ]["high"],
+
+                    "open_time":
+                        candles[
+                            index
+                        ]["open_time"]
                 }
 
     return None
@@ -802,61 +1173,134 @@ def find_latest_swing(candles, cross, breakout):
 # VOLUME RATIO
 # ============================================================
 
-def calculate_volume_ratio(candles):
-    if len(candles) < VOLUME_LOOKBACK + 1:
+def calculate_volume_ratio(
+    candles
+):
+
+    if len(candles) <= (
+        VOLUME_LOOKBACK
+    ):
+
         return 0.0
 
-    current = candles[-1]["volume"]
+    current_volume = candles[
+        -1
+    ]["volume"]
 
     previous = candles[
         -VOLUME_LOOKBACK - 1:-1
     ]
 
-    avg = sum(
-        x["volume"] for x in previous
-    ) / len(previous)
+    if not previous:
 
-    if avg <= 0:
         return 0.0
 
-    return current / avg
+    average_volume = (
+        sum(
+            candle["volume"]
+            for candle in previous
+        )
+        / len(previous)
+    )
+
+    if average_volume <= 0:
+
+        return 0.0
+
+    return (
+        current_volume
+        / average_volume
+    )
 
 
 # ============================================================
-# SETUP
+# ANALYZE SYMBOL
 # ============================================================
 
-def analyze_symbol(lbank_market, candles):
+def analyze_symbol(
+    symbol,
+    candles,
+    market
+):
+
     result = {
-        "symbol": lbank_market["symbol"],
-        "lbank_symbol": lbank_market.get("lbank_symbol"),
-        "status": "NO SIGNAL",
-        "reason": "",
-        "cross": None,
-        "box": None,
-        "breakout": None,
-        "swing": None,
-        "volume_ratio": calculate_volume_ratio(candles),
-        "candles": len(candles)
+
+        "symbol":
+            symbol,
+
+        "status":
+            "NO SIGNAL",
+
+        "reason":
+            "",
+
+        "candles":
+            len(candles),
+
+        "quote_volume":
+            market.get(
+                "quote_volume",
+                0
+            ),
+
+        "cross":
+            None,
+
+        "box":
+            None,
+
+        "breakout":
+            None,
+
+        "swing":
+            None,
+
+        "volume_ratio":
+            calculate_volume_ratio(
+                candles
+            )
     }
 
-    if len(candles) < (
+    # --------------------------------------------------------
+    # Minimum data
+    # --------------------------------------------------------
+
+    minimum_candles = (
         KIJUN_PERIOD
         + BOX_SIZE
         + 10
-    ):
+    )
+
+    if len(candles) < minimum_candles:
+
         result["reason"] = (
-            f"Insufficient Kline ({len(candles)})"
+            f"INSUFFICIENT KLINE "
+            f"({len(candles)})"
         )
+
         return result
 
-    cross = find_latest_cross(candles)
+    # --------------------------------------------------------
+    # Latest cross
+    # --------------------------------------------------------
+
+    cross = find_latest_cross(
+        candles
+    )
 
     if not cross:
-        result["reason"] = "NO LATEST CROSS"
+
+        result["reason"] = (
+            "NO LATEST CROSS"
+        )
+
         return result
 
     result["cross"] = cross
+
+    # --------------------------------------------------------
+    # Box
+    # --------------------------------------------------------
 
     box = build_box(
         candles,
@@ -864,10 +1308,18 @@ def analyze_symbol(lbank_market, candles):
     )
 
     if not box:
-        result["reason"] = "BOX FAILED"
+
+        result["reason"] = (
+            "BOX FAILED"
+        )
+
         return result
 
     result["box"] = box
+
+    # --------------------------------------------------------
+    # Breakout
+    # --------------------------------------------------------
 
     breakout = find_breakout(
         candles,
@@ -876,10 +1328,18 @@ def analyze_symbol(lbank_market, candles):
     )
 
     if not breakout:
-        result["reason"] = "NO BREAKOUT"
+
+        result["reason"] = (
+            "NO BREAKOUT"
+        )
+
         return result
 
     result["breakout"] = breakout
+
+    # --------------------------------------------------------
+    # Swing
+    # --------------------------------------------------------
 
     swing = find_latest_swing(
         candles,
@@ -888,71 +1348,133 @@ def analyze_symbol(lbank_market, candles):
     )
 
     if not swing:
-        result["reason"] = "NO CONFIRMED SWING"
+
+        result["reason"] = (
+            "NO CONFIRMED SWING"
+        )
+
         return result
 
     result["swing"] = swing
 
     # --------------------------------------------------------
-    # Make sure swing direction matches breakout.
+    # Entry
+    # --------------------------------------------------------
+
+    entry = breakout[
+        "close"
+    ]
+
+    # --------------------------------------------------------
+    # BUY
     # --------------------------------------------------------
 
     if breakout["type"] == "BUY":
 
-        entry = breakout["close"]
-
-        sl = swing["price"] * (
-            1.0 - SL_BUFFER_PERCENT
+        sl = (
+            swing["price"]
+            * (
+                1
+                - SL_BUFFER_PERCENT
+            )
         )
 
-        risk = entry - sl
+        risk = (
+            entry
+            - sl
+        )
+
+        tp = (
+            entry
+            + (
+                box["width"]
+                * TP_BOX_PERCENT
+            )
+        )
 
         if risk <= 0:
-            result["reason"] = "INVALID BUY SL"
+
+            result["reason"] = (
+                "INVALID BUY SL"
+            )
+
             return result
 
-        tp = entry + (
-            box["width"]
-            * TP_BOX_PERCENT
-        )
+        if tp <= entry:
+
+            result["reason"] = (
+                "INVALID BUY TP"
+            )
+
+            return result
+
+    # --------------------------------------------------------
+    # SELL
+    # --------------------------------------------------------
 
     else:
 
-        entry = breakout["close"]
-
-        sl = swing["price"] * (
-            1.0 + SL_BUFFER_PERCENT
+        sl = (
+            swing["price"]
+            * (
+                1
+                + SL_BUFFER_PERCENT
+            )
         )
 
-        risk = sl - entry
+        risk = (
+            sl
+            - entry
+        )
+
+        tp = (
+            entry
+            - (
+                box["width"]
+                * TP_BOX_PERCENT
+            )
+        )
 
         if risk <= 0:
-            result["reason"] = "INVALID SELL SL"
+
+            result["reason"] = (
+                "INVALID SELL SL"
+            )
+
             return result
 
-        tp = entry - (
-            box["width"]
-            * TP_BOX_PERCENT
-        )
+        if tp >= entry:
 
-    if breakout["type"] == "BUY" and tp <= entry:
-        result["reason"] = "INVALID BUY TP"
-        return result
+            result["reason"] = (
+                "INVALID SELL TP"
+            )
 
-    if breakout["type"] == "SELL" and tp >= entry:
-        result["reason"] = "INVALID SELL TP"
-        return result
+            return result
 
-    result["status"] = breakout["type"]
+    # --------------------------------------------------------
+    # Valid signal
+    # --------------------------------------------------------
+
+    result["status"] = (
+        breakout["type"]
+    )
 
     result["entry"] = entry
+
     result["sl"] = sl
+
     result["tp"] = tp
+
+    result["risk"] = risk
+
+    result["reward"] = abs(
+        tp - entry
+    )
 
     result["rr"] = (
         abs(tp - entry)
-        / abs(entry - sl)
-        if abs(entry - sl) > 0
+        / risk
+        if risk > 0
         else 0
     )
 
@@ -960,122 +1482,184 @@ def analyze_symbol(lbank_market, candles):
 
 
 # ============================================================
-# OPEN TRADE
+# PNL
 # ============================================================
 
-def calculate_trade_pnl(trade, current_price):
-    if not trade or current_price <= 0:
-        return 0.0
+def calculate_pnl(
+    trade,
+    current_price
+):
 
     entry = safe_float(
-        trade.get("entry")
+        trade.get(
+            "entry"
+        )
     )
 
     if entry <= 0:
+
         return 0.0
 
-    side = trade.get("side")
+    side = trade.get(
+        "side"
+    )
 
     if side == "BUY":
+
         return (
-            (current_price - entry)
+            (
+                current_price
+                - entry
+            )
             / entry
-        ) * 100.0
+        ) * 100
 
     return (
-        (entry - current_price)
+        (
+            entry
+            - current_price
+        )
         / entry
-    ) * 100.0
+    ) * 100
 
 
-def check_open_trade(state, history):
-    trade = state.get("open_trade")
+# ============================================================
+# OPEN TRADE CHECK
+# ============================================================
+
+def check_open_trade(
+    state,
+    history
+):
+
+    trade = state.get(
+        "open_trade"
+    )
 
     if not trade:
+
         return None
 
-    symbol = trade.get("binance_symbol")
+    symbol = trade.get(
+        "symbol"
+    )
 
     if not symbol:
+
         return None
 
-    current_price = get_binance_price(symbol)
+    current_price = get_current_price(
+        symbol
+    )
 
     if current_price <= 0:
+
         return None
 
-    trade["current_price"] = current_price
-
-    pnl = calculate_trade_pnl(
+    pnl = calculate_pnl(
         trade,
         current_price
     )
 
-    trade["pnl_percent"] = pnl
+    trade[
+        "current_price"
+    ] = current_price
 
-    side = trade.get("side")
+    trade[
+        "pnl_percent"
+    ] = pnl
+
+    side = trade.get(
+        "side"
+    )
 
     tp = safe_float(
-        trade.get("tp")
+        trade.get(
+            "tp"
+        )
     )
 
     sl = safe_float(
-        trade.get("sl")
+        trade.get(
+            "sl"
+        )
     )
 
     exit_reason = None
-    exit_price = None
 
     if side == "BUY":
 
         if current_price >= tp:
+
             exit_reason = "TP"
-            exit_price = current_price
 
         elif current_price <= sl:
-            exit_reason = "SL"
-            exit_price = current_price
 
-    elif side == "SELL":
+            exit_reason = "SL"
+
+    else:
 
         if current_price <= tp:
+
             exit_reason = "TP"
-            exit_price = current_price
 
         elif current_price >= sl:
+
             exit_reason = "SL"
-            exit_price = current_price
 
-    if exit_reason:
-
-        final_pnl = calculate_trade_pnl(
-            trade,
-            exit_price
-        )
-
-        closed = dict(trade)
-
-        closed["exit_price"] = exit_price
-        closed["exit_time"] = now_iso()
-        closed["exit_reason"] = exit_reason
-        closed["final_pnl_percent"] = final_pnl
-
-        history.append(closed)
-
-        state["open_trade"] = None
+    if not exit_reason:
 
         return {
-            "closed": True,
-            "reason": exit_reason,
-            "pnl": final_pnl,
-            "trade": closed
+            "closed":
+                False,
+
+            "pnl":
+                pnl,
+
+            "trade":
+                trade
         }
 
+    closed_trade = dict(
+        trade
+    )
+
+    closed_trade[
+        "exit_price"
+    ] = current_price
+
+    closed_trade[
+        "exit_time"
+    ] = now_iso()
+
+    closed_trade[
+        "exit_reason"
+    ] = exit_reason
+
+    closed_trade[
+        "final_pnl_percent"
+    ] = pnl
+
+    history.append(
+        closed_trade
+    )
+
+    state[
+        "open_trade"
+    ] = None
+
     return {
-        "closed": False,
-        "reason": None,
-        "pnl": pnl,
-        "trade": trade
+        "closed":
+            True,
+
+        "pnl":
+            pnl,
+
+        "reason":
+            exit_reason,
+
+        "trade":
+            closed_trade
     }
 
 
@@ -1083,54 +1667,96 @@ def check_open_trade(state, history):
 # OPEN NEW TRADE
 # ============================================================
 
-def open_trade_from_signal(
+def open_trade(
     state,
-    signal,
-    lbank_market
+    signal
 ):
-    if state.get("open_trade"):
+
+    if state.get(
+        "open_trade"
+    ):
+
         return False
 
-    side = signal["status"]
-
     trade = {
-        "id": f"{signal['symbol']}_{int(time.time())}",
-        "symbol": signal["symbol"],
-        "lbank_symbol": lbank_market.get(
-            "lbank_symbol"
-        ),
-        "binance_symbol": signal["symbol"],
 
-        "side": side,
+        "symbol":
+            signal["symbol"],
 
-        "entry": signal["entry"],
-        "sl": signal["sl"],
-        "tp": signal["tp"],
+        "side":
+            signal["status"],
 
-        "box_high": signal["box"]["high"],
-        "box_low": signal["box"]["low"],
-        "box_width": signal["box"]["width"],
+        "entry":
+            signal["entry"],
 
-        "cross_time": ms_to_iso(
-            signal["cross"]["open_time"]
-        ),
+        "sl":
+            signal["sl"],
 
-        "breakout_time": ms_to_iso(
-            signal["breakout"]["open_time"]
-        ),
+        "tp":
+            signal["tp"],
 
-        "swing_time": ms_to_iso(
-            signal["swing"]["open_time"]
-        ),
+        "rr":
+            signal["rr"],
 
-        "volume_ratio": signal[
-            "volume_ratio"
-        ],
+        "box_high":
+            signal[
+                "box"
+            ]["high"],
 
-        "opened_at": now_iso()
+        "box_low":
+            signal[
+                "box"
+            ]["low"],
+
+        "box_width":
+            signal[
+                "box"
+            ]["width"],
+
+        "cross_type":
+            signal[
+                "cross"
+            ]["type"],
+
+        "cross_time":
+            ms_to_iso(
+                signal[
+                    "cross"
+                ]["open_time"]
+            ),
+
+        "breakout_time":
+            ms_to_iso(
+                signal[
+                    "breakout"
+                ]["open_time"]
+            ),
+
+        "swing_price":
+            signal[
+                "swing"
+            ]["price"],
+
+        "volume_ratio":
+            signal[
+                "volume_ratio"
+            ],
+
+        "opened_at":
+            now_iso(),
+
+        "current_price":
+            signal[
+                "entry"
+            ],
+
+        "pnl_percent":
+            0.0
     }
 
-    state["open_trade"] = trade
+    state[
+        "open_trade"
+    ] = trade
 
     return True
 
@@ -1139,11 +1765,18 @@ def open_trade_from_signal(
 # PERFORMANCE
 # ============================================================
 
-def performance_summary(history):
-    trades = len(history)
+def performance(
+    history
+):
+
+    trades = len(
+        history
+    )
 
     wins = 0
+
     losses = 0
+
     breakeven = 0
 
     total_pnl = 0.0
@@ -1152,35 +1785,53 @@ def performance_summary(history):
 
         pnl = safe_float(
             trade.get(
-                "final_pnl_percent"
+                "final_pnl_percent",
+                0
             )
         )
 
         total_pnl += pnl
 
         if pnl > 0:
+
             wins += 1
 
         elif pnl < 0:
+
             losses += 1
 
         else:
+
             breakeven += 1
 
-    if trades > 0:
-        win_rate = (
-            wins / trades
-        ) * 100.0
-    else:
-        win_rate = 0.0
+    win_rate = (
+        (
+            wins
+            / trades
+        )
+        * 100
+        if trades
+        else 0
+    )
 
     return {
-        "trades": trades,
-        "wins": wins,
-        "losses": losses,
-        "breakeven": breakeven,
-        "win_rate": win_rate,
-        "total_pnl": total_pnl
+        "trades":
+            trades,
+
+        "wins":
+            wins,
+
+        "losses":
+            losses,
+
+        "breakeven":
+            breakeven,
+
+        "win_rate":
+            win_rate,
+
+        "total_pnl":
+            total_pnl
     }
 
 
@@ -1188,38 +1839,57 @@ def performance_summary(history):
 # TELEGRAM
 # ============================================================
 
-def telegram_send(text):
+def telegram_send(
+    text
+):
+
     if not TELEGRAM_BOT_TOKEN:
-        print("[WARN] TELEGRAM_BOT_TOKEN missing")
+
+        print(
+            "[WARN] TELEGRAM_BOT_TOKEN missing"
+        )
+
         return False
 
     if not TELEGRAM_CHAT_ID:
-        print("[WARN] TELEGRAM_CHAT_ID missing")
+
+        print(
+            "[WARN] TELEGRAM_CHAT_ID missing"
+        )
+
         return False
 
     url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+        "https://api.telegram.org/bot"
+        + TELEGRAM_BOT_TOKEN
+        + "/sendMessage"
     )
 
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
+        "chat_id":
+            TELEGRAM_CHAT_ID,
+
+        "text":
+            text,
+
+        "parse_mode":
+            "Markdown"
     }
 
     try:
-        r = SESSION.post(
+
+        response = SESSION.post(
             url,
             json=payload,
             timeout=REQUEST_TIMEOUT
         )
 
-        r.raise_for_status()
+        response.raise_for_status()
 
         return True
 
     except Exception as e:
+
         print(
             f"[TELEGRAM ERROR] {e}"
         )
@@ -1232,19 +1902,20 @@ def telegram_send(text):
 # ============================================================
 
 def build_report(
-    markets,
-    valid_count,
+    top_markets,
     analyses,
     state,
     history,
-    binance_supported,
     closed_trade
 ):
-    perf = performance_summary(history)
 
-    latest_cross_buy = 0
-    latest_cross_sell = 0
-    latest_cross_none = 0
+    perf = performance(
+        history
+    )
+
+    cross_buy = 0
+    cross_sell = 0
+    cross_none = 0
 
     box_ready = 0
     box_failed = 0
@@ -1258,49 +1929,81 @@ def build_report(
 
     for item in analyses:
 
-        cross = item.get("cross")
+        cross = item.get(
+            "cross"
+        )
 
         if not cross:
-            latest_cross_none += 1
+
+            cross_none += 1
 
         elif cross["type"] == "BUY":
-            latest_cross_buy += 1
 
-        elif cross["type"] == "SELL":
-            latest_cross_sell += 1
+            cross_buy += 1
 
-        if item.get("box"):
-            box_ready += 1
         else:
+
+            cross_sell += 1
+
+        if item.get(
+            "box"
+        ):
+
+            box_ready += 1
+
+        else:
+
             box_failed += 1
 
-        breakout = item.get("breakout")
+        breakout = item.get(
+            "breakout"
+        )
 
         if not breakout:
+
             breakout_none += 1
 
         elif breakout["type"] == "BUY":
+
             breakout_buy += 1
 
-        elif breakout["type"] == "SELL":
+        else:
+
             breakout_sell += 1
 
-        if item.get("swing"):
+        if item.get(
+            "swing"
+        ):
+
             swing_valid += 1
+
         else:
+
             swing_failed += 1
 
-    signal_candidates = [
-        x for x in analyses
-        if x.get("status")
-        in ("BUY", "SELL")
+    candidates = [
+        item
+        for item in analyses
+        if item.get(
+            "status"
+        ) in (
+            "BUY",
+            "SELL"
+        )
     ]
 
-    signal_candidates.sort(
+    candidates.sort(
         key=lambda x: (
-            x.get("volume_ratio", 0),
-            x.get("breakout", {}).get(
-                "open_time", 0
+            x.get(
+                "volume_ratio",
+                0
+            ),
+            x.get(
+                "breakout",
+                {}
+            ).get(
+                "open_time",
+                0
             )
         ),
         reverse=True
@@ -1309,7 +2012,7 @@ def build_report(
     lines = []
 
     lines.append(
-        "📡 *LBANK FUTURES PRICE ACTION REPORT*"
+        "📡 *BINANCE FUTURES PRICE ACTION REPORT*"
     )
 
     lines.append(
@@ -1317,7 +2020,7 @@ def build_report(
     )
 
     lines.append(
-        f"⏱ *{TIMEFRAME} CLOSED | TOP {TOP_LBANK}*"
+        f"⏱ *{TIMEFRAME} CLOSED | TOP {TOP_SYMBOLS}*"
     )
 
     lines.append(
@@ -1328,7 +2031,13 @@ def build_report(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    lines.append("📊 *PERFORMANCE*")
+    # --------------------------------------------------------
+    # Performance
+    # --------------------------------------------------------
+
+    lines.append(
+        "📊 *PERFORMANCE*"
+    )
 
     lines.append(
         f"Trades {perf['trades']} | "
@@ -1338,7 +2047,8 @@ def build_report(
     )
 
     lines.append(
-        f"🏆 WR: {perf['win_rate']:.1f}%"
+        f"🏆 WR: "
+        f"{perf['win_rate']:.1f}%"
     )
 
     lines.append(
@@ -1350,30 +2060,38 @@ def build_report(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    lines.append("🔎 *PIPELINE*")
+    # --------------------------------------------------------
+    # Pipeline
+    # --------------------------------------------------------
 
     lines.append(
-        f"LBank Futures: {len(markets)}"
+        "🔎 *PIPELINE*"
     )
 
     lines.append(
-        f"Binance supported: "
-        f"{len(binance_supported)}"
+        f"Futures Universe: "
+        f"{len(top_markets)}"
     )
 
     lines.append(
-        f"Kline Valid: {valid_count}"
+        f"Kline Valid: "
+        f"{sum(
+            1
+            for x in analyses
+            if x.get('candles', 0) > 0
+        )}"
     )
 
     lines.append(
         f"Latest Cross: "
-        f"🟢 {latest_cross_buy} / "
-        f"🔴 {latest_cross_sell} / "
-        f"⚪ {latest_cross_none}"
+        f"🟢 {cross_buy} / "
+        f"🔴 {cross_sell} / "
+        f"⚪ {cross_none}"
     )
 
     lines.append(
-        f"Box Ready: {box_ready} | "
+        f"Box Ready: "
+        f"{box_ready} | "
         f"Failed: {box_failed}"
     )
 
@@ -1385,7 +2103,8 @@ def build_report(
     )
 
     lines.append(
-        f"Swing: {swing_valid} | "
+        f"Swing: "
+        f"{swing_valid} | "
         f"Failed: {swing_failed}"
     )
 
@@ -1394,11 +2113,18 @@ def build_report(
     )
 
     # --------------------------------------------------------
-    # CLOSED TRADE
+    # Closed trade
     # --------------------------------------------------------
 
     if closed_trade:
-        lines.append("🔔 *TRADE CLOSED*")
+
+        lines.append(
+            "🔔 *TRADE CLOSED*"
+        )
+
+        trade = closed_trade[
+            "trade"
+        ]
 
         emoji = (
             "🟢"
@@ -1410,13 +2136,15 @@ def build_report(
 
         lines.append(
             f"{emoji} "
-            f"{closed_trade['trade']['symbol']} "
+            f"{trade['symbol']} "
             f"{closed_trade['reason']}"
         )
 
         lines.append(
             f"P&L: "
-            f"{fmt_pct(closed_trade['pnl'])}"
+            f"{fmt_pct(
+                closed_trade['pnl']
+            )}"
         )
 
         lines.append(
@@ -1424,50 +2152,79 @@ def build_report(
         )
 
     # --------------------------------------------------------
-    # OPEN TRADE
+    # Open trade
     # --------------------------------------------------------
 
-    open_trade = state.get("open_trade")
+    open_trade_data = state.get(
+        "open_trade"
+    )
 
-    if open_trade:
-
-        lines.append("🔴 *OPEN TRADE*")
+    if open_trade_data:
 
         lines.append(
-            f"{open_trade['symbol']} "
-            f"{open_trade['side']}"
+            "🔴 *OPEN TRADE*"
         )
 
         lines.append(
-            f"Entry: {fmt_price(open_trade['entry'])}"
+            f"{open_trade_data['symbol']} "
+            f"{open_trade_data['side']}"
         )
 
         lines.append(
-            f"SL: {fmt_price(open_trade['sl'])}"
+            f"Entry: "
+            f"{fmt_price(
+                open_trade_data['entry']
+            )}"
         )
 
         lines.append(
-            f"TP: {fmt_price(open_trade['tp'])}"
+            f"SL: "
+            f"{fmt_price(
+                open_trade_data['sl']
+            )}"
+        )
+
+        lines.append(
+            f"TP: "
+            f"{fmt_price(
+                open_trade_data['tp']
+            )}"
         )
 
         lines.append(
             f"Current: "
-            f"{fmt_price(open_trade.get('current_price'))}"
+            f"{fmt_price(
+                open_trade_data[
+                    'current_price'
+                ]
+            )}"
         )
 
         lines.append(
             f"P&L: "
-            f"{fmt_pct(open_trade.get('pnl_percent'))}"
+            f"{fmt_pct(
+                open_trade_data[
+                    'pnl_percent'
+                ]
+            )}"
         )
 
         lines.append(
             f"Box High: "
-            f"{fmt_price(open_trade['box_high'])}"
+            f"{fmt_price(
+                open_trade_data[
+                    'box_high'
+                ]
+            )}"
         )
 
         lines.append(
             f"Box Low: "
-            f"{fmt_price(open_trade['box_low'])}"
+            f"{fmt_price(
+                open_trade_data[
+                    'box_low'
+                ]
+            )}"
         )
 
         lines.append(
@@ -1485,16 +2242,16 @@ def build_report(
         )
 
     # --------------------------------------------------------
-    # SIGNAL
+    # New signal
     # --------------------------------------------------------
 
-    if signal_candidates:
+    if candidates:
 
-        best = signal_candidates[0]
+        signal = candidates[0]
 
         emoji = (
             "🟢"
-            if best["status"] == "BUY"
+            if signal["status"] == "BUY"
             else "🔴"
         )
 
@@ -1503,59 +2260,89 @@ def build_report(
         )
 
         lines.append(
-            f"*{best['symbol']}* "
-            f"{best['status']}"
+            f"*{signal['symbol']}* "
+            f"{signal['status']}"
         )
 
         lines.append(
-            f"Entry: {fmt_price(best['entry'])}"
+            f"Entry: "
+            f"{fmt_price(
+                signal['entry']
+            )}"
         )
 
         lines.append(
-            f"SL: {fmt_price(best['sl'])}"
+            f"SL: "
+            f"{fmt_price(
+                signal['sl']
+            )}"
         )
 
         lines.append(
-            f"TP: {fmt_price(best['tp'])}"
+            f"TP: "
+            f"{fmt_price(
+                signal['tp']
+            )}"
         )
 
         lines.append(
-            f"RR: {best['rr']:.2f}"
+            f"RR: "
+            f"{signal['rr']:.2f}"
         )
 
         lines.append(
             f"Box High: "
-            f"{fmt_price(best['box']['high'])}"
+            f"{fmt_price(
+                signal['box']['high']
+            )}"
         )
 
         lines.append(
             f"Box Low: "
-            f"{fmt_price(best['box']['low'])}"
+            f"{fmt_price(
+                signal['box']['low']
+            )}"
         )
 
         lines.append(
             f"Box Width: "
-            f"{fmt_price(best['box']['width'])}"
+            f"{fmt_price(
+                signal['box']['width']
+            )}"
         )
 
         lines.append(
             f"Cross: "
-            f"{ms_to_iso(best['cross']['open_time'])}"
+            f"{ms_to_iso(
+                signal[
+                    'cross'
+                ]['open_time']
+            )}"
         )
 
         lines.append(
             f"Breakout: "
-            f"{ms_to_iso(best['breakout']['open_time'])}"
+            f"{ms_to_iso(
+                signal[
+                    'breakout'
+                ]['open_time']
+            )}"
         )
 
         lines.append(
             f"Swing: "
-            f"{fmt_price(best['swing']['price'])}"
+            f"{fmt_price(
+                signal[
+                    'swing'
+                ]['price']
+            )}"
         )
 
         lines.append(
             f"Volume Ratio: "
-            f"{best['volume_ratio']:.2f}x"
+            f"{signal[
+                'volume_ratio'
+            ]:.2f}x"
         )
 
     else:
@@ -1564,11 +2351,7 @@ def build_report(
             "⚪ *NO VALID SIGNAL*"
         )
 
-        # ----------------------------------------------------
-        # Reasons
-        # ----------------------------------------------------
-
-        reason_count = {}
+        reason_counts = {}
 
         for item in analyses:
 
@@ -1577,14 +2360,20 @@ def build_report(
                 "UNKNOWN"
             )
 
-            reason_count[reason] = (
-                reason_count.get(reason, 0)
+            reason_counts[
+                reason
+            ] = (
+                reason_counts.get(
+                    reason,
+                    0
+                )
                 + 1
             )
 
         sorted_reasons = sorted(
-            reason_count.items(),
-            key=lambda x: x[1],
+            reason_counts.items(),
+            key=lambda x:
+            x[1],
             reverse=True
         )
 
@@ -1594,14 +2383,16 @@ def build_report(
                 "Main reasons:"
             )
 
-            for reason, count in sorted_reasons[:5]:
+            for reason, count in (
+                sorted_reasons[:6]
+            ):
 
                 lines.append(
                     f"• {reason}: {count}"
                 )
 
     # --------------------------------------------------------
-    # TOP DIAGNOSTICS
+    # Diagnostics
     # --------------------------------------------------------
 
     lines.append(
@@ -1612,21 +2403,17 @@ def build_report(
         "🔍 *TOP DIAGNOSTICS*"
     )
 
-    diagnostic_items = sorted(
+    diagnostic = sorted(
         analyses,
-        key=lambda x: x.get(
-            "volume_ratio",
+        key=lambda x:
+        x.get(
+            "quote_volume",
             0
         ),
         reverse=True
     )
 
-    shown = 0
-
-    for item in diagnostic_items:
-
-        if shown >= 10:
-            break
+    for item in diagnostic[:10]:
 
         symbol = item.get(
             "symbol",
@@ -1643,29 +2430,31 @@ def build_report(
             ""
         )
 
-        volume_ratio = item.get(
-            "volume_ratio",
-            0
-        )
-
-        if status in ("BUY", "SELL"):
+        if status in (
+            "BUY",
+            "SELL"
+        ):
 
             lines.append(
-                f"• {symbol} "
-                f"→ {status} "
-                f"| Vol {volume_ratio:.2f}x"
+                f"• {symbol} → "
+                f"{status} | "
+                f"Vol "
+                f"{item.get(
+                    'volume_ratio',
+                    0
+                ):.2f}x"
             )
 
         else:
 
             lines.append(
-                f"• {symbol} "
-                f"→ {reason}"
+                f"• {symbol} → "
+                f"{reason}"
             )
 
-        shown += 1
-
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -1675,7 +2464,12 @@ def build_report(
 def main():
 
     print("=" * 70)
-    print("LBANK FUTURES + BINANCE FUTURES PRICE ACTION SCANNER")
+
+    print(
+        "BINANCE USD-M FUTURES "
+        "PRICE ACTION SCANNER"
+    )
+
     print("=" * 70)
 
     print(
@@ -1683,25 +2477,34 @@ def main():
     )
 
     print(
-        f"TOP LBank: {TOP_LBANK}"
+        f"TOP: {TOP_SYMBOLS}"
     )
 
     print(
-        f"Box: {BOX_SIZE} candles"
+        f"Box: {BOX_SIZE}"
     )
 
     print(
-        f"Max Open Trades: {MAX_OPEN_TRADES}"
+        "Exchange: Binance USD-M Futures"
+    )
+
+    print(
+        "Max Open Trades: 1"
     )
 
     print("=" * 70)
 
+    # --------------------------------------------------------
+    # State
+    # --------------------------------------------------------
+
     state = load_state()
+
     history = load_history()
 
-    # ========================================================
-    # 1. Check existing trade first
-    # ========================================================
+    # --------------------------------------------------------
+    # Check existing trade
+    # --------------------------------------------------------
 
     closed_trade = check_open_trade(
         state,
@@ -1709,151 +2512,183 @@ def main():
     )
 
     if closed_trade:
+
         print(
             "[TRADE CLOSED] "
             f"{closed_trade['reason']} "
-            f"P&L={closed_trade['pnl']:.2f}%"
+            f"P&L="
+            f"{closed_trade['pnl']:.2f}%"
         )
 
-        save_history(history)
+        save_history(
+            history
+        )
 
-    # ========================================================
-    # 2. Get LBank Futures markets
-    # ========================================================
-
-    all_markets = get_lbank_market_data()
+    # --------------------------------------------------------
+    # Exchange symbols
+    # --------------------------------------------------------
 
     print(
-        f"[INFO] LBank Futures Markets: "
-        f"{len(all_markets)}"
+        "[INFO] Loading Binance Futures symbols..."
     )
 
-    if not all_markets:
+    trading_symbols = (
+        get_trading_symbols()
+    )
+
+    print(
+        f"[INFO] Trading perpetual "
+        f"USDT symbols: "
+        f"{len(trading_symbols)}"
+    )
+
+    if not trading_symbols:
 
         print(
-            "[ERROR] No LBank Futures markets."
+            "[ERROR] Binance Futures "
+            "returned no trading symbols."
         )
 
         telegram_send(
             "❌ *SCANNER ERROR*\n"
-            "LBank Futures marketData returned no markets."
+            "Binance Futures returned "
+            "no trading symbols."
         )
 
-        save_state(state)
+        save_state(
+            state
+        )
 
         return
 
-    top_markets = rank_lbank_markets(
-        all_markets
-    )
+    # --------------------------------------------------------
+    # TOP 30
+    # --------------------------------------------------------
 
     print(
-        f"[INFO] TOP {TOP_LBANK}:"
+        "[INFO] Ranking markets by "
+        "24h quote volume..."
     )
 
-    for i, market in enumerate(
+    top_markets = get_top_symbols(
+        trading_symbols
+    )
+
+    if not top_markets:
+
+        print(
+            "[ERROR] No markets after "
+            "Binance volume ranking."
+        )
+
+        telegram_send(
+            "❌ *SCANNER ERROR*\n"
+            "Binance Futures 24h ticker "
+            "returned no valid markets."
+        )
+
+        save_state(
+            state
+        )
+
+        return
+
+    print(
+        f"[INFO] TOP {len(top_markets)}:"
+    )
+
+    for index, market in enumerate(
         top_markets,
         start=1
     ):
+
         print(
-            f"{i:02d}. "
-            f"{market['symbol']} "
-            f"turnover={market['turnover']:.2f}"
+            f"{index:02d}. "
+            f"{market['symbol']} | "
+            f"24h Quote Vol="
+            f"{market['quote_volume']:,.0f}"
         )
 
-    # ========================================================
-    # 3. Binance Futures symbols
-    # ========================================================
-
-    binance_symbols = get_binance_symbols()
-
-    print(
-        f"[INFO] Binance Futures symbols: "
-        f"{len(binance_symbols)}"
-    )
-
-    # ========================================================
-    # 4. Analyze TOP 30
-    # ========================================================
+    # --------------------------------------------------------
+    # Analyze
+    # --------------------------------------------------------
 
     analyses = []
 
-    valid_count = 0
-
     for market in top_markets:
 
-        symbol = normalize_symbol(
-            market["symbol"]
+        symbol = market[
+            "symbol"
+        ]
+
+        print(
+            f"[KLINE] {symbol}"
         )
 
-        if symbol not in binance_symbols:
-
-            analyses.append(
-                {
-                    "symbol": symbol,
-                    "lbank_symbol": market.get(
-                        "lbank_symbol"
-                    ),
-                    "status": "NO SIGNAL",
-                    "reason": (
-                        "NOT ON BINANCE FUTURES"
-                    ),
-                    "cross": None,
-                    "box": None,
-                    "breakout": None,
-                    "swing": None,
-                    "volume_ratio": 0,
-                    "candles": 0
-                }
-            )
-
-            print(
-                f"[SKIP] {symbol} "
-                f"-> NOT ON BINANCE FUTURES"
-            )
-
-            continue
-
-        candles = get_binance_klines(
+        candles = get_klines(
             symbol
         )
 
         if not candles:
 
+            result = {
+
+                "symbol":
+                    symbol,
+
+                "status":
+                    "NO SIGNAL",
+
+                "reason":
+                    "BAD BINANCE KLINE",
+
+                "candles":
+                    0,
+
+                "quote_volume":
+                    market[
+                        "quote_volume"
+                    ],
+
+                "cross":
+                    None,
+
+                "box":
+                    None,
+
+                "breakout":
+                    None,
+
+                "swing":
+                    None,
+
+                "volume_ratio":
+                    0
+            }
+
             analyses.append(
-                {
-                    "symbol": symbol,
-                    "lbank_symbol": market.get(
-                        "lbank_symbol"
-                    ),
-                    "status": "NO SIGNAL",
-                    "reason": "BAD BINANCE KLINE",
-                    "cross": None,
-                    "box": None,
-                    "breakout": None,
-                    "swing": None,
-                    "volume_ratio": 0,
-                    "candles": 0
-                }
+                result
             )
 
             print(
-                f"[BAD KLINE] {symbol}"
+                f"[BAD KLINE] "
+                f"{symbol}"
             )
 
             continue
 
-        valid_count += 1
-
         result = analyze_symbol(
-            market,
-            candles
+            symbol,
+            candles,
+            market
         )
 
-        analyses.append(result)
+        analyses.append(
+            result
+        )
 
         print(
-            f"[SCAN] "
+            f"[RESULT] "
             f"{symbol} | "
             f"{result['status']} | "
             f"{result['reason']}"
@@ -1865,28 +2700,49 @@ def main():
         ):
 
             print(
-                f"       Entry="
-                f"{fmt_price(result['entry'])} "
+                f"         Entry="
+                f"{fmt_price(
+                    result['entry']
+                )} "
                 f"SL="
-                f"{fmt_price(result['sl'])} "
+                f"{fmt_price(
+                    result['sl']
+                )} "
                 f"TP="
-                f"{fmt_price(result['tp'])}"
+                f"{fmt_price(
+                    result['tp']
+                )}"
             )
 
-    # ========================================================
-    # 5. Signal candidates
-    # ========================================================
+    # --------------------------------------------------------
+    # Candidates
+    # --------------------------------------------------------
 
     candidates = [
-        x for x in analyses
-        if x.get("status")
-        in ("BUY", "SELL")
+        item
+        for item in analyses
+        if item.get(
+            "status"
+        ) in (
+            "BUY",
+            "SELL"
+        )
     ]
 
     candidates.sort(
         key=lambda x: (
-            x.get("volume_ratio", 0),
-            x.get("breakout", {}).get(
+            x.get(
+                "volume_ratio",
+                0
+            ),
+            x.get(
+                "quote_volume",
+                0
+            ),
+            x.get(
+                "breakout",
+                {}
+            ).get(
                 "open_time",
                 0
             )
@@ -1894,66 +2750,73 @@ def main():
         reverse=True
     )
 
-    # ========================================================
-    # 6. Open maximum ONE trade
-    # ========================================================
+    # --------------------------------------------------------
+    # MAX 1 OPEN TRADE
+    # --------------------------------------------------------
 
     if (
-        not state.get("open_trade")
+        not state.get(
+            "open_trade"
+        )
         and candidates
     ):
 
-        best = candidates[0]
+        best_signal = candidates[
+            0
+        ]
 
-        matching_market = None
+        opened = open_trade(
+            state,
+            best_signal
+        )
 
-        for market in top_markets:
+        if opened:
 
-            if normalize_symbol(
-                market["symbol"]
-            ) == best["symbol"]:
-
-                matching_market = market
-                break
-
-        if matching_market:
-
-            opened = open_trade_from_signal(
-                state,
-                best,
-                matching_market
+            current_price = (
+                get_current_price(
+                    best_signal[
+                        "symbol"
+                    ]
+                )
             )
 
-            if opened:
+            if current_price > 0:
 
-                print(
-                    "[NEW TRADE] "
-                    f"{best['symbol']} "
-                    f"{best['status']} "
-                    f"Entry={best['entry']}"
-                )
-
-                # Recalculate open trade current P&L
-                current_price = get_binance_price(
-                    best["symbol"]
-                )
-
-                state["open_trade"][
+                state[
+                    "open_trade"
+                ][
                     "current_price"
                 ] = current_price
 
-                state["open_trade"][
+                state[
+                    "open_trade"
+                ][
                     "pnl_percent"
-                ] = calculate_trade_pnl(
-                    state["open_trade"],
+                ] = calculate_pnl(
+                    state[
+                        "open_trade"
+                    ],
                     current_price
                 )
 
-    elif state.get("open_trade"):
+            print(
+                "[NEW TRADE] "
+                f"{best_signal['symbol']} "
+                f"{best_signal['status']}"
+            )
+
+    elif state.get(
+        "open_trade"
+    ):
 
         print(
-            "[INFO] Open trade exists. "
-            "No new trade will be opened."
+            "[INFO] Existing trade "
+            "is open."
+        )
+
+        print(
+            "[INFO] No new trade "
+            "will be opened."
         )
 
     else:
@@ -1962,37 +2825,51 @@ def main():
             "[INFO] No valid signal."
         )
 
-    # ========================================================
-    # 7. Save
-    # ========================================================
+    # --------------------------------------------------------
+    # Save state
+    # --------------------------------------------------------
 
-    save_history(history)
-    save_state(state)
+    save_history(
+        history
+    )
 
-    # ========================================================
-    # 8. Telegram report
-    # ========================================================
+    save_state(
+        state
+    )
+
+    # --------------------------------------------------------
+    # Telegram
+    # --------------------------------------------------------
 
     report = build_report(
-        markets=top_markets,
-        valid_count=valid_count,
+        top_markets=top_markets,
         analyses=analyses,
         state=state,
         history=history,
-        binance_supported=binance_symbols,
         closed_trade=closed_trade
     )
 
     print("=" * 70)
-    print(report)
+
+    print(
+        report
+    )
+
     print("=" * 70)
 
-    telegram_send(report)
+    telegram_send(
+        report
+    )
 
     print(
         "[DONE]"
     )
 
 
+# ============================================================
+# ENTRY
+# ============================================================
+
 if __name__ == "__main__":
+
     main()
