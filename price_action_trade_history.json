@@ -60,5 +60,36 @@
     "closed_at": "2026-09-07T01:11:24.532156+00:00",
     "closed_at_tehran": "1404/10/17 04:41:24",
     "exit_candle_close": 3.6282e-06
+  },
+  {
+    "trade_id": "ETH/USDT_SELL_1788743100000",
+    "symbol": "ETH/USDT",
+    "exchange_symbol": "ETH/USD:USD",
+    "side": "SELL",
+    "entry": 2504.6,
+    "sl": 2517.0,
+    "tp": 2492.2,
+    "risk_pct": 0.493,
+    "score": 100,
+    "reasons": [
+      "Bearish Structure",
+      "BOS",
+      "Pullback",
+      "Bearish Engulfing",
+      "Bearish Momentum",
+      "Volume 1.6x"
+    ],
+    "atr": 5.47143,
+    "opened_at": "2026-09-07T01:11:24.532268+00:00",
+    "opened_at_tehran": "1404/10/17 04:41:24",
+    "entry_candle": "2026-09-07T01:05:00+00:00",
+    "entry_candle_timestamp": 1788743100000,
+    "status": "LOSS",
+    "exit": 2517.0,
+    "pnl_pct": -0.495,
+    "r": -1.0,
+    "closed_at": "2026-09-07T02:45:19.253942+00:00",
+    "closed_at_tehran": "1404/10/17 06:15:19",
+    "exit_candle_close": 2527.4
   }
 ]
