@@ -1,10 +1,10 @@
-name: Kraken Ichimoku Backtest
+name: Kraken Backtest Test
 
 on:
   workflow_dispatch:
 
 jobs:
-  backtest:
+  test:
     runs-on: ubuntu-latest
 
     steps:
@@ -12,55 +12,79 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+      - name: Show files
+        run: |
+          echo "===== FILES ====="
+          pwd
+          ls -la
+          echo "===== PY FILES ====="
+          find . -maxdepth 2 -type f -name "*.py" -print
+
+      - name: Python version
+        run: |
+          echo "===== PYTHON ====="
+          python --version
+          python3 --version
 
       - name: Install requests
         run: |
+          echo "===== INSTALL ====="
           python -m pip install requests
 
-      - name: Verify files
+      - name: Check backtest.py exists
         run: |
-          echo "===== VERIFY ====="
-          pwd
-          echo "----- FILES -----"
-          ls -la
-          echo "----- BACKTEST -----"
-          ls -lh backtest.py
-          echo "----- PYTHON -----"
-          python --version
-          echo "===== VERIFY DONE ====="
+          echo "===== CHECK FILE ====="
 
-      - name: Run backtest
-        continue-on-error: true
+          if [ -f "backtest.py" ]; then
+            echo "backtest.py EXISTS"
+            wc -l backtest.py
+            head -n 5 backtest.py
+          else
+            echo "ERROR: backtest.py NOT FOUND"
+            exit 1
+          fi
+
+      - name: Syntax check
+        run: |
+          echo "===== SYNTAX CHECK ====="
+          python -m py_compile backtest.py
+          echo "SYNTAX OK"
+
+      - name: Test Python execution
+        run: |
+          echo "===== PYTHON EXECUTION ====="
+          python -c "print('PYTHON WORKS')"
+
+      - name: Test Kraken connection
+        run: |
+          echo "===== KRAKEN CONNECTION ====="
+
+          python - <<'PY'
+          import requests
+
+          url = "https://futures.kraken.com"
+
+          print("Connecting to:", url)
+
+          r = requests.get(
+              url,
+              timeout=20
+          )
+
+          print("HTTP STATUS:", r.status_code)
+          print("RESPONSE LENGTH:", len(r.text))
+
+          r.raise_for_status()
+
+          print("KRAKEN CONNECTION OK")
+          PY
+
+      - name: Test backtest import
+        run: |
+          echo "===== IMPORT TEST ====="
+          python -c "import backtest; print('BACKTEST IMPORT OK')"
+
+      - name: Start backtest
         run: |
           echo "===== START BACKTEST ====="
-
-          python -u backtest.py > backtest.log 2>&1
-
-          CODE=$?
-
-          echo "===== PYTHON EXIT CODE: $CODE ====="
-
-          echo "===== BACKTEST LOG ====="
-          cat backtest.log || true
-          echo "===== END BACKTEST LOG ====="
-
-          exit 0
-
-      - name: Upload backtest log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: backtest-debug-log
-          path: backtest.log
-          if-no-files-found: warn
-
-      - name: Show final status
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "BACKTEST DEBUG RUN FINISHED"
-          echo "=========================================="
+          python -u backtest.py
