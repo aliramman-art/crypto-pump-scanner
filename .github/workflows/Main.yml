@@ -2,9 +2,7 @@ name: Crypto Price Action Scanner
 
 on:
   schedule:
-    # Every 5 minutes
     - cron: "*/5 * * * *"
-
   workflow_dispatch:
 
 permissions:
@@ -17,59 +15,97 @@ concurrency:
 jobs:
   scanner:
     runs-on: ubuntu-latest
-
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
-
-      # =====================================================
-      # CHECKOUT
-      # =====================================================
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # =====================================================
-      # PYTHON
-      # =====================================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # =====================================================
-      # INSTALL DEPENDENCIES
-      # =====================================================
-      - name: Install dependencies
+      - name: Show Python Version
+        run: |
+          python --version
+          pip --version
+
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
+          python -c "import requests; print('requests OK:', requests.__version__)"
 
-      # =====================================================
-      # RUN SCANNER
-      # =====================================================
-      - name: Run Price Action Scanner
+      - name: Check Scanner File
+        run: |
+          echo "=========================================="
+          echo "CHECKING scanner.py"
+          echo "=========================================="
+          ls -la
+          test -f scanner.py
+          python -m py_compile scanner.py
+          echo "scanner.py syntax OK"
+
+      - name: Run Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONUNBUFFERED: "1"
         run: |
           echo "=========================================="
           echo "CRYPTO PRICE ACTION SCANNER"
           echo "=========================================="
           echo "Timeframe: 5m"
-          echo "TOP: 30 abnormal-volume markets"
+          echo "TOP: 30"
           echo "BOX: 26 candles"
-          echo "TP: 50% Box Width"
           echo "MAX OPEN: 1"
           echo "=========================================="
 
-          python -u scanner.py
+          set -o pipefail
 
-      # =====================================================
-      # SAVE STATE / HISTORY
-      # =====================================================
-      - name: Save scanner state
+          python -u scanner.py 2>&1 | tee scanner_output.log
+
+          EXIT_CODE=${PIPESTATUS[0]}
+
+          echo "=========================================="
+          echo "SCANNER EXIT CODE: $EXIT_CODE"
+          echo "=========================================="
+
+          exit $EXIT_CODE
+
+      - name: Show Scanner Log On Failure
+        if: failure()
+        run: |
+          echo "=========================================="
+          echo "FULL SCANNER ERROR LOG"
+          echo "=========================================="
+
+          if [ -f scanner_output.log ]; then
+            cat scanner_output.log
+          else
+            echo "scanner_output.log was not created."
+          fi
+
+          echo "=========================================="
+          echo "FILES"
+          echo "=========================================="
+          ls -la
+
+      - name: Save Scanner Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scanner-log
+          path: |
+            scanner_output.log
+            price_action_state.json
+            price_action_trade_history.json
+          if-no-files-found: ignore
+
+      - name: Save Scanner State
         if: always()
         run: |
           git config user.name "github-actions[bot]"
