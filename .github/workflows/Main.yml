@@ -1,10 +1,11 @@
 name: Crypto Price Action Scanner
 
 on:
-  workflow_dispatch:
-
   schedule:
+    # Every 5 minutes
     - cron: "*/5 * * * *"
+
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,25 +15,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  scan:
+  scanner:
     runs-on: ubuntu-latest
+
+    timeout-minutes: 5
 
     steps:
 
       # =====================================================
       # CHECKOUT
       # =====================================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: main
 
       # =====================================================
-      # SETUP PYTHON
+      # PYTHON
       # =====================================================
-
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -41,209 +41,45 @@ jobs:
       # =====================================================
       # INSTALL DEPENDENCIES
       # =====================================================
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ccxt pandas requests
-
-      # =====================================================
-      # CHECK SCANNER
-      # =====================================================
-
-      - name: Check scanner
-        run: |
-          echo "=========================================="
-          echo "CHECKING SCANNER"
-          echo "=========================================="
-
-          if [ ! -f scanner.py ]; then
-            echo "ERROR: scanner.py not found!"
-            exit 1
-          fi
-
-          echo "scanner.py FOUND"
-          ls -lh scanner.py
-
-      # =====================================================
-      # INITIALIZE STATE FILES
-      # =====================================================
-
-      - name: Initialize price action state
-        run: |
-          echo "=========================================="
-          echo "INITIALIZING STATE"
-          echo "=========================================="
-
-          if [ ! -f price_action_state.json ]; then
-            echo '{"open": {}, "last_signals": {}}' > price_action_state.json
-            echo "Created price_action_state.json"
-          else
-            echo "price_action_state.json already exists"
-          fi
-
-          if [ ! -f price_action_trade_history.json ]; then
-            echo '[]' > price_action_trade_history.json
-            echo "Created price_action_trade_history.json"
-          else
-            echo "price_action_trade_history.json already exists"
-          fi
-
-          echo ""
-          echo "CURRENT STATE:"
-          cat price_action_state.json
-
-          echo ""
-          echo "CURRENT HISTORY:"
-          cat price_action_trade_history.json
+          pip install requests
 
       # =====================================================
       # RUN SCANNER
       # =====================================================
-
       - name: Run Price Action Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           echo "=========================================="
-          echo "RUNNING PRICE ACTION SCANNER"
+          echo "CRYPTO PRICE ACTION SCANNER"
+          echo "=========================================="
+          echo "Timeframe: 5m"
+          echo "TOP: 30 abnormal-volume markets"
+          echo "BOX: 26 candles"
+          echo "TP: 50% Box Width"
+          echo "MAX OPEN: 1"
           echo "=========================================="
 
           python -u scanner.py
 
       # =====================================================
-      # SHOW RESULT
+      # SAVE STATE / HISTORY
       # =====================================================
-
-      - name: Show scanner result
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "SCANNER RESULT"
-          echo "=========================================="
-
-          echo ""
-          echo "STATE:"
-          if [ -f price_action_state.json ]; then
-            cat price_action_state.json
-          else
-            echo "ERROR: state file missing!"
-          fi
-
-          echo ""
-          echo "TRADE HISTORY:"
-          if [ -f price_action_trade_history.json ]; then
-            cat price_action_trade_history.json
-          else
-            echo "ERROR: history file missing!"
-          fi
-
-      # =====================================================
-      # SAVE STATE
-      # =====================================================
-
       - name: Save scanner state
         if: always()
         run: |
-          echo "=========================================="
-          echo "SAVING SCANNER STATE"
-          echo "=========================================="
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          echo ""
-          echo "Git status BEFORE add:"
-          git status --short
-
-          # Make sure files exist
-          if [ ! -f price_action_state.json ]; then
-            echo '{"open": {}, "last_signals": {}}' > price_action_state.json
-            echo "Re-created missing state file."
-          fi
-
-          if [ ! -f price_action_trade_history.json ]; then
-            echo '[]' > price_action_trade_history.json
-            echo "Re-created missing history file."
-          fi
-
-          # Add exact files used by scanner.py
-          git add price_action_state.json
-          git add price_action_trade_history.json
-
-          echo ""
-          echo "Git status AFTER add:"
-          git status --short
-
-          # =================================================
-          # COMMIT IF CHANGED
-          # =================================================
+          git add price_action_state.json price_action_trade_history.json || true
 
           if git diff --cached --quiet; then
-
-            echo ""
             echo "No state changes to commit."
-
           else
-
-            echo ""
-            echo "Changes detected."
-            echo "Creating commit..."
-
             git commit -m "Update price action scanner state"
-
-            # =================================================
-            # SYNC WITH MAIN
-            # =================================================
-
-            echo ""
-            echo "Syncing with origin/main..."
-
-            git fetch origin main
-
-            git rebase origin/main
-
-            # =================================================
-            # PUSH
-            # =================================================
-
-            echo ""
-            echo "Pushing state to GitHub..."
-
-            git push origin HEAD:main
-
-            echo ""
-            echo "=========================================="
-            echo "STATE SAVED SUCCESSFULLY"
-            echo "=========================================="
-
+            git push
           fi
-
-      # =====================================================
-      # FINAL STATUS
-      # =====================================================
-
-      - name: Final status
-        if: always()
-        run: |
-          echo "=========================================="
-          echo "FINAL STATUS"
-          echo "=========================================="
-
-          echo ""
-          echo "Repository status:"
-          git status --short
-
-          echo ""
-          echo "State files:"
-
-          ls -lh \
-            price_action_state.json \
-            price_action_trade_history.json \
-            2>/dev/null || true
-
-          echo ""
-          echo "=========================================="
-          echo "WORKFLOW FINISHED"
-          echo "=========================================="
