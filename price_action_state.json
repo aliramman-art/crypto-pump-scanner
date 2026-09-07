@@ -1,14 +1,14 @@
 {
   "open": {
-    "UNI/USDT_BUY_1788731700000": {
-      "trade_id": "UNI/USDT_BUY_1788731700000",
-      "symbol": "UNI/USDT",
-      "exchange_symbol": "UNI/USD:USD",
+    "PEPE/USDT_BUY_1788739800000": {
+      "trade_id": "PEPE/USDT_BUY_1788739800000",
+      "symbol": "PEPE/USDT",
+      "exchange_symbol": "PEPE/USD:USD",
       "side": "BUY",
-      "entry": 7.189,
-      "sl": 7.13243,
-      "tp": 7.24557,
-      "risk_pct": 0.793,
+      "entry": 3.66e-06,
+      "sl": 3.65e-06,
+      "tp": 3.67e-06,
+      "risk_pct": 0.395,
       "score": 100,
       "reasons": [
         "Bullish Structure",
@@ -16,18 +16,23 @@
         "Pullback",
         "Bullish Engulfing",
         "Bullish Momentum",
-        "Volume 1.5x"
+        "Volume 5.0x"
       ],
-      "atr": 0.0188571,
-      "opened_at": "2026-09-06T22:04:21.073505+00:00",
-      "opened_at_tehran": "1404/10/17 01:34:21",
-      "entry_candle": "2026-09-06T21:55:00+00:00",
-      "entry_candle_timestamp": 1788731700000
+      "atr": 1e-08,
+      "opened_at": "2026-09-07T00:16:24.425014+00:00",
+      "opened_at_tehran": "1404/10/17 03:46:24",
+      "entry_candle": "2026-09-07T00:10:00+00:00",
+      "entry_candle_timestamp": 1788739800000
     }
   },
   "last_signals": {
     "UNI/USD:USD": {
       "timestamp": 1788731700000,
+      "side": "BUY",
+      "score": 100
+    },
+    "PEPE/USD:USD": {
+      "timestamp": 1788739800000,
       "side": "BUY",
       "score": 100
     }

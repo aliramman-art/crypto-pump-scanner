@@ -1,1 +1,33 @@
-[]
+[
+  {
+    "trade_id": "UNI/USDT_BUY_1788731700000",
+    "symbol": "UNI/USDT",
+    "exchange_symbol": "UNI/USD:USD",
+    "side": "BUY",
+    "entry": 7.189,
+    "sl": 7.13243,
+    "tp": 7.24557,
+    "risk_pct": 0.793,
+    "score": 100,
+    "reasons": [
+      "Bullish Structure",
+      "BOS",
+      "Pullback",
+      "Bullish Engulfing",
+      "Bullish Momentum",
+      "Volume 1.5x"
+    ],
+    "atr": 0.0188571,
+    "opened_at": "2026-09-06T22:04:21.073505+00:00",
+    "opened_at_tehran": "1404/10/17 01:34:21",
+    "entry_candle": "2026-09-06T21:55:00+00:00",
+    "entry_candle_timestamp": 1788731700000,
+    "status": "WIN",
+    "exit": 7.24557,
+    "pnl_pct": 0.787,
+    "r": 1.0,
+    "closed_at": "2026-09-07T00:16:24.424897+00:00",
+    "closed_at_tehran": "1404/10/17 03:46:24",
+    "exit_candle_close": 7.257
+  }
+]
