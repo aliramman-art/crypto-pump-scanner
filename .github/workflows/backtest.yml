@@ -1,0 +1,56 @@
+name: Crypto Strategy Backtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas numpy
+
+      - name: Check files
+        run: |
+          echo "=========================================="
+          echo "BACKTEST ENVIRONMENT"
+          echo "=========================================="
+          python --version
+          echo ""
+          echo "Repository files:"
+          ls -la
+          echo ""
+          echo "Workflow files:"
+          ls -la .github/workflows
+          echo ""
+          echo "Checking backtest.py..."
+          test -f backtest.py
+          echo "backtest.py FOUND"
+          echo "=========================================="
+
+      - name: Run Backtest
+        run: |
+          echo "=========================================="
+          echo "RUNNING KRAKEN PRICE ACTION BACKTEST"
+          echo "=========================================="
+          echo "Period: 2025-09-07 -> 2026-09-07"
+          echo "Timeframe: 5m"
+          echo "Universe: TOP 100"
+          echo "=========================================="
+
+          python -u backtest.py
