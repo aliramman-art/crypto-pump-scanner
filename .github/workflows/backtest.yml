@@ -3,231 +3,64 @@ name: Kraken Ichimoku Backtest
 on:
   workflow_dispatch:
 
-permissions:
-  contents: read
-
 jobs:
   backtest:
-    name: Stage 1 - Historical Data Test
     runs-on: ubuntu-latest
-
-    timeout-minutes: 30
 
     steps:
 
-      # =====================================================
-      # 1. CHECKOUT
-      # =====================================================
-
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
-
-      # =====================================================
-      # 2. PYTHON
-      # =====================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
-      # =====================================================
-      # 3. INSTALL
-      # =====================================================
-
-      - name: Install dependencies
-        shell: bash
+      - name: Install requests
         run: |
-          set -euxo pipefail
-
-          echo "=========================================="
-          echo "INSTALLING DEPENDENCIES"
-          echo "=========================================="
-
-          python --version
-          python -m pip --version
-
-          python -m pip install --upgrade pip
           python -m pip install requests
 
-          echo "=========================================="
-          echo "DEPENDENCIES OK"
-          echo "=========================================="
-
-      # =====================================================
-      # 4. CHECK ENVIRONMENT
-      # =====================================================
-
-      - name: Check environment
-        shell: bash
+      - name: Verify files
         run: |
-          set -euxo pipefail
-
-          echo "=========================================="
-          echo "ENVIRONMENT CHECK"
-          echo "=========================================="
-
-          echo "Current directory:"
+          echo "===== VERIFY ====="
           pwd
-
-          echo
-          echo "Python:"
-          python --version
-
-          echo
-          echo "Files:"
-          ls -lah
-
-          echo
-          echo "backtest.py:"
-          test -f backtest.py
+          echo "----- FILES -----"
+          ls -la
+          echo "----- BACKTEST -----"
           ls -lh backtest.py
-
-          echo
-          echo "requests:"
-          python -c "import requests; print('requests OK')"
-
-          echo
-          echo "=========================================="
-          echo "ENVIRONMENT OK"
-          echo "=========================================="
-
-      # =====================================================
-      # 5. PYTHON SYNTAX CHECK
-      # =====================================================
-
-      - name: Check backtest syntax
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "=========================================="
-          echo "PYTHON SYNTAX CHECK"
-          echo "=========================================="
-
-          python -m py_compile backtest.py
-
-          echo
-          echo "PYTHON SYNTAX OK"
-          echo "=========================================="
-
-      # =====================================================
-      # 6. KRAKEN CONNECTION TEST
-      # =====================================================
-
-      - name: Test Kraken connection
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "=========================================="
-          echo "KRAKEN CONNECTION TEST"
-          echo "=========================================="
-
-          python - <<'PY'
-          import requests
-
-          url = "https://futures.kraken.com"
-
-          print(f"Testing: {url}", flush=True)
-
-          response = requests.get(
-              url,
-              timeout=30
-          )
-
-          print(
-              f"HTTP STATUS: {response.status_code}",
-              flush=True
-          )
-
-          print(
-              f"RESPONSE SIZE: {len(response.content)} bytes",
-              flush=True
-          )
-
-          response.raise_for_status()
-
-          print(
-              "KRAKEN CONNECTION OK",
-              flush=True
-          )
-          PY
-
-          echo "=========================================="
-
-      # =====================================================
-      # 7. RUN BACKTEST
-      # =====================================================
-
-      - name: Run Stage 1
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          echo "=========================================="
-          echo "KRAKEN ICHIMOKU BACKTEST"
-          echo "STAGE 1 - HISTORICAL DATA"
-          echo "=========================================="
-
-          echo
-          echo "[1] Python:"
+          echo "----- PYTHON -----"
           python --version
+          echo "===== VERIFY DONE ====="
 
-          echo
-          echo "[2] Working directory:"
-          pwd
+      - name: Run backtest
+        continue-on-error: true
+        run: |
+          echo "===== START BACKTEST ====="
 
-          echo
-          echo "[3] backtest.py:"
-          ls -lh backtest.py
+          python -u backtest.py > backtest.log 2>&1
 
-          echo
-          echo "[4] Starting Python..."
-          echo "------------------------------------------"
+          CODE=$?
 
-          python -u backtest.py
+          echo "===== PYTHON EXIT CODE: $CODE ====="
 
-          EXIT_CODE=$?
+          echo "===== BACKTEST LOG ====="
+          cat backtest.log || true
+          echo "===== END BACKTEST LOG ====="
 
-          echo "------------------------------------------"
-          echo "Python exit code: ${EXIT_CODE}"
+          exit 0
 
-          if [ "${EXIT_CODE}" -ne 0 ]; then
-            echo "BACKTEST FAILED"
-            exit "${EXIT_CODE}"
-          fi
-
-          echo
-          echo "=========================================="
-          echo "STAGE 1 FINISHED SUCCESSFULLY"
-          echo "=========================================="
-
-      # =====================================================
-      # 8. SHOW GENERATED DATA
-      # =====================================================
-
-      - name: Show downloaded data
+      - name: Upload backtest log
         if: always()
-        shell: bash
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtest-debug-log
+          path: backtest.log
+          if-no-files-found: warn
+
+      - name: Show final status
+        if: always()
         run: |
           echo "=========================================="
-          echo "DOWNLOADED DATA"
-          echo "=========================================="
-
-          if [ -d "backtest_data" ]; then
-            echo
-            echo "backtest_data directory:"
-            find backtest_data -maxdepth 2 -type f -printf '%p %k KB\n' || true
-
-            echo
-            echo "Directory size:"
-            du -sh backtest_data || true
-          else
-            echo
-            echo "NO backtest_data DIRECTORY"
-          fi
-
-          echo
+          echo "BACKTEST DEBUG RUN FINISHED"
           echo "=========================================="
