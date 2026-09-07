@@ -1,67 +1,135 @@
-name: Crypto Price Action Scanner
+name: Binance Futures Price Action Scanner
 
 on:
   schedule:
     - cron: "*/5 * * * *"
+
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: crypto-price-action-scanner
+  group: binance-futures-price-action-scanner
   cancel-in-progress: false
 
 jobs:
+
   scanner:
+
     runs-on: ubuntu-latest
+
     timeout-minutes: 10
 
     steps:
+
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+
+      # ============================================================
+      # PYTHON
+      # ============================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Show Python Version
-        run: |
-          python --version
-          pip --version
+
+      # ============================================================
+      # INSTALL DEPENDENCIES
+      # ============================================================
 
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests
+
           python -c "import requests; print('requests OK:', requests.__version__)"
 
-      - name: Check Scanner File
+
+      # ============================================================
+      # CHECK SCANNER
+      # ============================================================
+
+      - name: Check Scanner
         run: |
           echo "=========================================="
           echo "CHECKING scanner.py"
           echo "=========================================="
+
           ls -la
+
           test -f scanner.py
+
           python -m py_compile scanner.py
+
           echo "scanner.py syntax OK"
+
+
+      # ============================================================
+      # RUN SCANNER
+      # ============================================================
 
       - name: Run Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          # CoinAPI
+          COINAPI_KEY: ${{ secrets.COINAPI_KEY }}
+
           PYTHONUNBUFFERED: "1"
+
         run: |
+
           echo "=========================================="
-          echo "CRYPTO PRICE ACTION SCANNER"
+          echo "BINANCE FUTURES PRICE ACTION SCANNER"
           echo "=========================================="
-          echo "Timeframe: 5m"
+
+          echo "Exchange: Binance USD-M Futures"
+          echo "Data Provider: CoinAPI"
+          echo "Timeframe: 5m CLOSED"
           echo "TOP: 30"
-          echo "BOX: 26 candles"
-          echo "MAX OPEN: 1"
+
+          echo "Tenkan: 9"
+          echo "Kijun: 26"
+
+          echo "Box: 26 candles"
+          echo "Swing: 2 + 2"
+
+          echo "TP: 50% Box"
+          echo "Max Open: 1"
+
+          echo "=========================================="
+
+          if [ -z "$COINAPI_KEY" ]; then
+            echo "ERROR: COINAPI_KEY is not configured."
+            echo "Please add COINAPI_KEY to GitHub Secrets."
+            exit 1
+          fi
+
+          if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "ERROR: TELEGRAM_BOT_TOKEN is not configured."
+            exit 1
+          fi
+
+          if [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo "ERROR: TELEGRAM_CHAT_ID is not configured."
+            exit 1
+          fi
+
+          echo "Required secrets detected."
+
+          echo "=========================================="
+          echo "STARTING SCANNER"
           echo "=========================================="
 
           set -o pipefail
@@ -76,9 +144,15 @@ jobs:
 
           exit $EXIT_CODE
 
+
+      # ============================================================
+      # SHOW ERROR LOG
+      # ============================================================
+
       - name: Show Scanner Log On Failure
         if: failure()
         run: |
+
           echo "=========================================="
           echo "FULL SCANNER ERROR LOG"
           echo "=========================================="
@@ -90,32 +164,51 @@ jobs:
           fi
 
           echo "=========================================="
-          echo "FILES"
-          echo "=========================================="
+
           ls -la
+
+
+      # ============================================================
+      # SAVE LOG / STATE AS ARTIFACT
+      # ============================================================
 
       - name: Save Scanner Log
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: scanner-log
+          name: binance-scanner-log
           path: |
             scanner_output.log
-            price_action_state.json
-            price_action_trade_history.json
+            binance_price_action_state.json
+            binance_price_action_trade_history.json
           if-no-files-found: ignore
+
+
+      # ============================================================
+      # SAVE STATE TO GITHUB
+      # ============================================================
 
       - name: Save Scanner State
         if: always()
         run: |
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add price_action_state.json price_action_trade_history.json || true
+          git add \
+            binance_price_action_state.json \
+            binance_price_action_trade_history.json \
+            || true
 
           if git diff --cached --quiet; then
+
             echo "No state changes to commit."
+
           else
-            git commit -m "Update price action scanner state"
+
+            git commit \
+              -m "Update Binance futures scanner state"
+
             git push
+
           fi
