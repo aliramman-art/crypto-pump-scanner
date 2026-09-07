@@ -3,27 +3,231 @@ name: Kraken Ichimoku Backtest
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   backtest:
+    name: Stage 1 - Historical Data Test
     runs-on: ubuntu-latest
 
+    timeout-minutes: 30
+
     steps:
-      - name: Checkout
+
+      # =====================================================
+      # 1. CHECKOUT
+      # =====================================================
+
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      # =====================================================
+      # 2. PYTHON
+      # =====================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
+
+      # =====================================================
+      # 3. INSTALL
+      # =====================================================
 
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euxo pipefail
+
+          echo "=========================================="
+          echo "INSTALLING DEPENDENCIES"
+          echo "=========================================="
+
+          python --version
+          python -m pip --version
+
           python -m pip install --upgrade pip
-          pip install requests
+          python -m pip install requests
+
+          echo "=========================================="
+          echo "DEPENDENCIES OK"
+          echo "=========================================="
+
+      # =====================================================
+      # 4. CHECK ENVIRONMENT
+      # =====================================================
+
+      - name: Check environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "=========================================="
+          echo "ENVIRONMENT CHECK"
+          echo "=========================================="
+
+          echo "Current directory:"
+          pwd
+
+          echo
+          echo "Python:"
+          python --version
+
+          echo
+          echo "Files:"
+          ls -lah
+
+          echo
+          echo "backtest.py:"
+          test -f backtest.py
+          ls -lh backtest.py
+
+          echo
+          echo "requests:"
+          python -c "import requests; print('requests OK')"
+
+          echo
+          echo "=========================================="
+          echo "ENVIRONMENT OK"
+          echo "=========================================="
+
+      # =====================================================
+      # 5. PYTHON SYNTAX CHECK
+      # =====================================================
+
+      - name: Check backtest syntax
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "=========================================="
+          echo "PYTHON SYNTAX CHECK"
+          echo "=========================================="
+
+          python -m py_compile backtest.py
+
+          echo
+          echo "PYTHON SYNTAX OK"
+          echo "=========================================="
+
+      # =====================================================
+      # 6. KRAKEN CONNECTION TEST
+      # =====================================================
+
+      - name: Test Kraken connection
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "=========================================="
+          echo "KRAKEN CONNECTION TEST"
+          echo "=========================================="
+
+          python - <<'PY'
+          import requests
+
+          url = "https://futures.kraken.com"
+
+          print(f"Testing: {url}", flush=True)
+
+          response = requests.get(
+              url,
+              timeout=30
+          )
+
+          print(
+              f"HTTP STATUS: {response.status_code}",
+              flush=True
+          )
+
+          print(
+              f"RESPONSE SIZE: {len(response.content)} bytes",
+              flush=True
+          )
+
+          response.raise_for_status()
+
+          print(
+              "KRAKEN CONNECTION OK",
+              flush=True
+          )
+          PY
+
+          echo "=========================================="
+
+      # =====================================================
+      # 7. RUN BACKTEST
+      # =====================================================
 
       - name: Run Stage 1
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "=========================================="
+          echo "KRAKEN ICHIMOKU BACKTEST"
+          echo "STAGE 1 - HISTORICAL DATA"
+          echo "=========================================="
+
+          echo
+          echo "[1] Python:"
+          python --version
+
+          echo
+          echo "[2] Working directory:"
+          pwd
+
+          echo
+          echo "[3] backtest.py:"
+          ls -lh backtest.py
+
+          echo
+          echo "[4] Starting Python..."
+          echo "------------------------------------------"
+
+          python -u backtest.py
+
+          EXIT_CODE=$?
+
+          echo "------------------------------------------"
+          echo "Python exit code: ${EXIT_CODE}"
+
+          if [ "${EXIT_CODE}" -ne 0 ]; then
+            echo "BACKTEST FAILED"
+            exit "${EXIT_CODE}"
+          fi
+
+          echo
+          echo "=========================================="
+          echo "STAGE 1 FINISHED SUCCESSFULLY"
+          echo "=========================================="
+
+      # =====================================================
+      # 8. SHOW GENERATED DATA
+      # =====================================================
+
+      - name: Show downloaded data
+        if: always()
+        shell: bash
         run: |
           echo "=========================================="
-          echo "KRAKEN ICHIMOKU BACKTEST - STAGE 1"
+          echo "DOWNLOADED DATA"
           echo "=========================================="
-          python -u backtest.py
+
+          if [ -d "backtest_data" ]; then
+            echo
+            echo "backtest_data directory:"
+            find backtest_data -maxdepth 2 -type f -printf '%p %k KB\n' || true
+
+            echo
+            echo "Directory size:"
+            du -sh backtest_data || true
+          else
+            echo
+            echo "NO backtest_data DIRECTORY"
+          fi
+
+          echo
+          echo "=========================================="
