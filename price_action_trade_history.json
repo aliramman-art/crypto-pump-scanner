@@ -29,5 +29,36 @@
     "closed_at": "2026-09-07T00:16:24.424897+00:00",
     "closed_at_tehran": "1404/10/17 03:46:24",
     "exit_candle_close": 7.257
+  },
+  {
+    "trade_id": "PEPE/USDT_BUY_1788739800000",
+    "symbol": "PEPE/USDT",
+    "exchange_symbol": "PEPE/USD:USD",
+    "side": "BUY",
+    "entry": 3.66e-06,
+    "sl": 3.65e-06,
+    "tp": 3.67e-06,
+    "risk_pct": 0.395,
+    "score": 100,
+    "reasons": [
+      "Bullish Structure",
+      "BOS",
+      "Pullback",
+      "Bullish Engulfing",
+      "Bullish Momentum",
+      "Volume 5.0x"
+    ],
+    "atr": 1e-08,
+    "opened_at": "2026-09-07T00:16:24.425014+00:00",
+    "opened_at_tehran": "1404/10/17 03:46:24",
+    "entry_candle": "2026-09-07T00:10:00+00:00",
+    "entry_candle_timestamp": 1788739800000,
+    "status": "LOSS",
+    "exit": 3.65e-06,
+    "pnl_pct": -0.273,
+    "r": -1.0,
+    "closed_at": "2026-09-07T01:11:24.532156+00:00",
+    "closed_at_tehran": "1404/10/17 04:41:24",
+    "exit_candle_close": 3.6282e-06
   }
 ]

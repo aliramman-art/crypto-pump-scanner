@@ -1,28 +1,28 @@
 {
   "open": {
-    "PEPE/USDT_BUY_1788739800000": {
-      "trade_id": "PEPE/USDT_BUY_1788739800000",
-      "symbol": "PEPE/USDT",
-      "exchange_symbol": "PEPE/USD:USD",
-      "side": "BUY",
-      "entry": 3.66e-06,
-      "sl": 3.65e-06,
-      "tp": 3.67e-06,
-      "risk_pct": 0.395,
+    "ETH/USDT_SELL_1788743100000": {
+      "trade_id": "ETH/USDT_SELL_1788743100000",
+      "symbol": "ETH/USDT",
+      "exchange_symbol": "ETH/USD:USD",
+      "side": "SELL",
+      "entry": 2504.6,
+      "sl": 2517.0,
+      "tp": 2492.2,
+      "risk_pct": 0.493,
       "score": 100,
       "reasons": [
-        "Bullish Structure",
+        "Bearish Structure",
         "BOS",
         "Pullback",
-        "Bullish Engulfing",
-        "Bullish Momentum",
-        "Volume 5.0x"
+        "Bearish Engulfing",
+        "Bearish Momentum",
+        "Volume 1.6x"
       ],
-      "atr": 1e-08,
-      "opened_at": "2026-09-07T00:16:24.425014+00:00",
-      "opened_at_tehran": "1404/10/17 03:46:24",
-      "entry_candle": "2026-09-07T00:10:00+00:00",
-      "entry_candle_timestamp": 1788739800000
+      "atr": 5.47143,
+      "opened_at": "2026-09-07T01:11:24.532268+00:00",
+      "opened_at_tehran": "1404/10/17 04:41:24",
+      "entry_candle": "2026-09-07T01:05:00+00:00",
+      "entry_candle_timestamp": 1788743100000
     }
   },
   "last_signals": {
@@ -34,6 +34,11 @@
     "PEPE/USD:USD": {
       "timestamp": 1788739800000,
       "side": "BUY",
+      "score": 100
+    },
+    "ETH/USD:USD": {
+      "timestamp": 1788743100000,
+      "side": "SELL",
       "score": 100
     }
   }
