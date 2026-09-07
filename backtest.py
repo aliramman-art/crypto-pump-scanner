@@ -1,19 +1,17 @@
 # ============================================================
 # KRAKEN FUTURES HISTORICAL DATA DOWNLOADER
 # ============================================================
-# Stage 1 of Ichimoku MTF Backtest
-#
-# Downloads 5m historical candles from Kraken Futures
-# for a full one-year period.
-#
-# NO TRADING LOGIC HERE.
+# STAGE 1
+# One-year 5m historical data test
 # ============================================================
 
 import os
+import sys
 import time
 import json
 import requests
 from datetime import datetime, timezone
+
 
 # ============================================================
 # CONFIG
@@ -23,33 +21,35 @@ BASE_URL = "https://futures.kraken.com/api/charts/v1/trade"
 
 TIMEFRAME = "5m"
 
-# Exact backtest period
 START_DATE = "2025-09-07"
 END_DATE = "2026-09-07"
 
-# Stage 1:
-# Test with ONE symbol first.
-# After successful test, change this.
+# Stage 1 = ONE symbol only
 TEST_SYMBOL = "PI_XBTUSD"
 
-# Number of candles requested per API call
 CHUNK_SIZE = 1000
 
 REQUEST_TIMEOUT = 30
 REQUEST_RETRIES = 3
-REQUEST_SLEEP = 0.5
+REQUEST_SLEEP = 0.3
 
 DATA_DIR = "backtest_data"
 
+
 # ============================================================
-# HELPERS
+# LOG
 # ============================================================
 
+def log(message=""):
+    print(message, flush=True)
+
+
+# ============================================================
+# TIME
+# ============================================================
 
 def utc_timestamp(date_string):
-    """
-    Convert YYYY-MM-DD to Unix timestamp.
-    """
+
     dt = datetime.strptime(
         date_string,
         "%Y-%m-%d"
@@ -59,28 +59,18 @@ def utc_timestamp(date_string):
 
 
 def timestamp_to_iso(ts):
-    """
-    Unix timestamp -> UTC ISO string.
-    """
+
     return datetime.fromtimestamp(
         ts,
         tz=timezone.utc
     ).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def normalize_candle(candle):
-    """
-    Kraken candle formats can vary.
-    Convert the important fields to a common format.
+# ============================================================
+# CANDLE NORMALIZER
+# ============================================================
 
-    Expected:
-        time
-        open
-        high
-        low
-        close
-        volume
-    """
+def normalize_candle(candle):
 
     if isinstance(candle, dict):
 
@@ -121,9 +111,10 @@ def normalize_candle(candle):
         return None
 
     try:
+
         ts = int(float(ts))
 
-        # Some APIs may return milliseconds
+        # milliseconds -> seconds
         if ts > 10_000_000_000:
             ts //= 1000
 
@@ -137,18 +128,15 @@ def normalize_candle(candle):
         }
 
     except (TypeError, ValueError):
+
         return None
 
 
 # ============================================================
-# API
+# KRAKEN REQUEST
 # ============================================================
 
-
 def request_chunk(symbol, start_ts, end_ts):
-    """
-    Request one historical chunk from Kraken.
-    """
 
     url = f"{BASE_URL}/{symbol}/{TIMEFRAME}"
 
@@ -157,6 +145,12 @@ def request_chunk(symbol, start_ts, end_ts):
         "to": end_ts,
         "count": CHUNK_SIZE,
     }
+
+    log(
+        f"[HTTP] {symbol} "
+        f"{timestamp_to_iso(start_ts)} -> "
+        f"{timestamp_to_iso(end_ts)}"
+    )
 
     last_error = None
 
@@ -170,22 +164,31 @@ def request_chunk(symbol, start_ts, end_ts):
                 timeout=REQUEST_TIMEOUT,
             )
 
+            log(
+                f"[HTTP] status={response.status_code}"
+            )
+
             response.raise_for_status()
 
             data = response.json()
 
             if not isinstance(data, dict):
+
                 raise RuntimeError(
-                    f"Unexpected API response type: "
-                    f"{type(data).__name__}"
+                    "Unexpected API response type"
                 )
 
             candles = data.get("candles", [])
 
             if not isinstance(candles, list):
+
                 raise RuntimeError(
-                    "API returned invalid candles field"
+                    "Invalid candles field"
                 )
+
+            log(
+                f"[HTTP] candles={len(candles)}"
+            )
 
             return candles
 
@@ -193,84 +196,73 @@ def request_chunk(symbol, start_ts, end_ts):
 
             last_error = exc
 
-            print(
-                f"[WARN] Request failed "
-                f"{symbol} "
-                f"attempt {attempt}/{REQUEST_RETRIES}: "
+            log(
+                f"[WARN] Attempt "
+                f"{attempt}/{REQUEST_RETRIES}: "
                 f"{exc}"
             )
 
             if attempt < REQUEST_RETRIES:
+
                 time.sleep(2 * attempt)
 
     raise RuntimeError(
-        f"Failed to download {symbol}: {last_error}"
+        f"Kraken request failed: {last_error}"
     )
 
 
 # ============================================================
-# DOWNLOAD
+# DOWNLOAD SYMBOL
 # ============================================================
 
-
 def download_symbol(symbol):
-    """
-    Download the complete requested period.
 
-    We move forward in time chunk-by-chunk.
-    """
+    log()
+    log("=" * 70)
+    log("STARTING HISTORICAL DOWNLOAD")
+    log("=" * 70)
 
     start_ts = utc_timestamp(START_DATE)
     end_ts = utc_timestamp(END_DATE)
 
-    # 5-minute candle = 300 seconds
     candle_seconds = 300
 
     current_ts = start_ts
 
     all_candles = {}
 
-    total_requests = 0
+    request_number = 0
 
-    print()
-    print("=" * 70)
-    print(f"DOWNLOADING: {symbol}")
-    print(f"TIMEFRAME : {TIMEFRAME}")
-    print(
-        f"PERIOD    : "
-        f"{timestamp_to_iso(start_ts)}"
-        f" -> "
-        f"{timestamp_to_iso(end_ts)}"
-    )
-    print("=" * 70)
+    log(f"Symbol       : {symbol}")
+    log(f"Timeframe    : {TIMEFRAME}")
+    log(f"Start        : {timestamp_to_iso(start_ts)}")
+    log(f"End          : {timestamp_to_iso(end_ts)}")
+    log(f"Chunk        : {CHUNK_SIZE}")
+    log()
 
     while current_ts < end_ts:
 
-        # Request approximately CHUNK_SIZE candles.
-        #
-        # One extra candle overlap helps prevent gaps
-        # caused by API boundary behavior.
+        request_number += 1
+
         request_end = min(
-            current_ts + (CHUNK_SIZE * candle_seconds),
-            end_ts,
+            current_ts +
+            CHUNK_SIZE * candle_seconds,
+            end_ts
         )
 
-        total_requests += 1
-
-        print(
-            f"[{total_requests}] "
-            f"{timestamp_to_iso(current_ts)}"
-            f" -> "
+        log(
+            f"[CHUNK {request_number}] "
+            f"{timestamp_to_iso(current_ts)} -> "
             f"{timestamp_to_iso(request_end)}"
         )
 
         raw_candles = request_chunk(
             symbol,
             current_ts,
-            request_end,
+            request_end
         )
 
-        normalized = []
+        valid = 0
 
         for candle in raw_candles:
 
@@ -281,48 +273,89 @@ def download_symbol(symbol):
 
             ts = item["time"]
 
-            # Keep only requested period
             if ts < start_ts:
                 continue
 
             if ts >= end_ts:
                 continue
 
-            normalized.append(item)
-
             all_candles[ts] = item
 
-        print(
-            f"    received={len(raw_candles)} "
-            f"valid={len(normalized)} "
+            valid += 1
+
+        log(
+            f"[CHUNK {request_number}] "
+            f"valid={valid} "
             f"total={len(all_candles)}"
         )
 
         # ----------------------------------------------------
-        # IMPORTANT:
-        # If API returns no candles, move forward anyway.
-        # Otherwise an API anomaly could create an infinite loop.
+        # Move forward
         # ----------------------------------------------------
 
-        if normalized:
+        if raw_candles:
 
-            newest_ts = max(
-                x["time"] for x in normalized
-            )
+            normalized_times = []
 
-            next_ts = newest_ts + candle_seconds
+            for candle in raw_candles:
 
-            # Never move backwards
-            if next_ts <= current_ts:
-                next_ts = current_ts + (
-                    CHUNK_SIZE * candle_seconds
+                item = normalize_candle(candle)
+
+                if item is not None:
+                    normalized_times.append(
+                        item["time"]
+                    )
+
+            if normalized_times:
+
+                newest_ts = max(
+                    normalized_times
                 )
 
-            current_ts = next_ts
+                next_ts = (
+                    newest_ts +
+                    candle_seconds
+                )
+
+                if next_ts <= current_ts:
+
+                    next_ts = (
+                        current_ts +
+                        CHUNK_SIZE *
+                        candle_seconds
+                    )
+
+                current_ts = next_ts
+
+            else:
+
+                current_ts = request_end
 
         else:
 
+            log(
+                "[WARN] Kraken returned ZERO candles"
+            )
+
             current_ts = request_end
+
+        # Progress
+        elapsed = end_ts - start_ts
+        done = current_ts - start_ts
+
+        progress = min(
+            100.0,
+            max(
+                0.0,
+                done / elapsed * 100
+            )
+        )
+
+        log(
+            f"[PROGRESS] "
+            f"{progress:.2f}% | "
+            f"candles={len(all_candles)}"
+        )
 
         time.sleep(REQUEST_SLEEP)
 
@@ -336,17 +369,36 @@ def download_symbol(symbol):
     )
 
     # ========================================================
-    # REMOVE INCOMPLETE FINAL CANDLE
+    # REMOVE FUTURE / INCOMPLETE
     # ========================================================
 
     now_ts = int(
-        datetime.now(timezone.utc).timestamp()
+        datetime.now(
+            timezone.utc
+        ).timestamp()
     )
 
     candles = [
         c for c in candles
         if c["time"] + candle_seconds <= now_ts
     ]
+
+    # ========================================================
+    # EXPECTED
+    # ========================================================
+
+    expected = int(
+        (end_ts - start_ts)
+        / candle_seconds
+    )
+
+    actual = len(candles)
+
+    coverage = (
+        actual / expected * 100
+        if expected
+        else 0
+    )
 
     # ========================================================
     # GAP CHECK
@@ -366,53 +418,50 @@ def download_symbol(symbol):
             gaps.append({
                 "from": previous,
                 "to": current,
-                "missing_seconds": diff - candle_seconds,
+                "missing_seconds":
+                    diff - candle_seconds
             })
 
     # ========================================================
-    # STATISTICS
+    # RESULT
     # ========================================================
 
-    expected = int(
-        (end_ts - start_ts) / candle_seconds
-    )
+    log()
+    log("=" * 70)
+    log("DOWNLOAD COMPLETE")
+    log("=" * 70)
 
-    actual = len(candles)
+    log(f"Symbol           : {symbol}")
+    log(f"Expected candles : {expected:,}")
+    log(f"Downloaded       : {actual:,}")
+    log(f"Coverage         : {coverage:.2f}%")
+    log(f"Gaps             : {len(gaps):,}")
 
-    coverage = (
-        (actual / expected) * 100
-        if expected > 0
-        else 0
-    )
+    if candles:
 
-    print()
-    print("=" * 70)
-    print("DOWNLOAD COMPLETE")
-    print("=" * 70)
+        log(
+            "First candle     : "
+            f"{timestamp_to_iso(candles[0]['time'])}"
+        )
 
-    print(f"Symbol           : {symbol}")
-    print(f"Expected candles : {expected:,}")
-    print(f"Downloaded       : {actual:,}")
-    print(f"Coverage         : {coverage:.2f}%")
-    print(f"Gaps             : {len(gaps):,}")
-    print(
-        f"First candle     : "
-        f"{timestamp_to_iso(candles[0]['time'])}"
-        if candles
-        else "First candle     : NONE"
-    )
-    print(
-        f"Last candle      : "
-        f"{timestamp_to_iso(candles[-1]['time'])}"
-        if candles
-        else "Last candle      : NONE"
-    )
+        log(
+            "Last candle      : "
+            f"{timestamp_to_iso(candles[-1]['time'])}"
+        )
+
+    else:
+
+        log("First candle     : NONE")
+        log("Last candle      : NONE")
 
     # ========================================================
     # SAVE
     # ========================================================
 
-    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(
+        DATA_DIR,
+        exist_ok=True
+    )
 
     output_file = os.path.join(
         DATA_DIR,
@@ -424,9 +473,10 @@ def download_symbol(symbol):
         "timeframe": TIMEFRAME,
         "start": START_DATE,
         "end": END_DATE,
-        "downloaded_at": datetime.now(
-            timezone.utc
-        ).isoformat(),
+        "downloaded_at":
+            datetime.now(
+                timezone.utc
+            ).isoformat(),
         "expected_candles": expected,
         "actual_candles": actual,
         "coverage_percent": coverage,
@@ -435,20 +485,24 @@ def download_symbol(symbol):
         "candles": candles,
     }
 
+    log()
+    log("[SAVE] Writing JSON...")
+
     with open(
         output_file,
         "w",
-        encoding="utf-8",
+        encoding="utf-8"
     ) as f:
 
         json.dump(
             result,
             f,
-            ensure_ascii=False,
+            ensure_ascii=False
         )
 
-    print()
-    print(f"[SAVED] {output_file}")
+    log(
+        f"[SAVE] {output_file}"
+    )
 
     return result
 
@@ -457,53 +511,124 @@ def download_symbol(symbol):
 # MAIN
 # ============================================================
 
-
 def main():
 
-    print("=" * 70)
-    print("KRAKEN FUTURES HISTORICAL DATA TEST")
-    print("=" * 70)
+    log()
+    log("=" * 70)
+    log("KRAKEN FUTURES ICHIMOKU BACKTEST")
+    log("STAGE 1 - HISTORICAL DATA TEST")
+    log("=" * 70)
 
-    print(f"Symbol    : {TEST_SYMBOL}")
-    print(f"Timeframe : {TIMEFRAME}")
-    print(f"Start     : {START_DATE}")
-    print(f"End       : {END_DATE}")
+    log(
+        f"Python version: "
+        f"{sys.version.split()[0]}"
+    )
+
+    log(
+        f"Started: "
+        f"{datetime.now(timezone.utc).isoformat()}"
+    )
+
+    log()
+    log(f"TEST SYMBOL : {TEST_SYMBOL}")
+    log(f"TIMEFRAME   : {TIMEFRAME}")
+    log(f"START       : {START_DATE}")
+    log(f"END         : {END_DATE}")
+
+    # ========================================================
+    # INTERNET / KRAKEN TEST
+    # ========================================================
+
+    log()
+    log("[TEST] Connecting to Kraken...")
 
     try:
 
-        result = download_symbol(TEST_SYMBOL)
+        response = requests.get(
+            "https://futures.kraken.com",
+            timeout=REQUEST_TIMEOUT
+        )
+
+        log(
+            f"[TEST] Kraken HTTP "
+            f"status={response.status_code}"
+        )
+
+    except Exception as exc:
+
+        log(
+            f"[TEST ERROR] "
+            f"Cannot connect to Kraken: {exc}"
+        )
+
+        return 1
+
+    # ========================================================
+    # DOWNLOAD
+    # ========================================================
+
+    try:
+
+        result = download_symbol(
+            TEST_SYMBOL
+        )
 
         if result["actual_candles"] == 0:
 
-            print()
-            print("[ERROR] No candles downloaded.")
+            log()
+            log(
+                "[ERROR] ZERO CANDLES DOWNLOADED"
+            )
+
             return 1
 
-        print()
-        print("=" * 70)
-        print("STAGE 1 SUCCESS")
-        print("=" * 70)
+        log()
+        log("=" * 70)
+        log("STAGE 1 SUCCESS")
+        log("=" * 70)
 
         return 0
 
     except KeyboardInterrupt:
 
-        print()
-        print("[STOPPED] User interrupted.")
+        log()
+        log("[STOPPED] Interrupted by user.")
 
         return 1
 
     except Exception as exc:
 
-        print()
-        print("=" * 70)
-        print("STAGE 1 FAILED")
-        print("=" * 70)
+        log()
+        log("=" * 70)
+        log("STAGE 1 FAILED")
+        log("=" * 70)
 
-        print(f"ERROR: {exc}")
+        log(
+            f"ERROR TYPE: "
+            f"{type(exc).__name__}"
+        )
+
+        log(
+            f"ERROR: {exc}"
+        )
 
         return 1
 
 
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+
+    exit_code = main()
+
+    log()
+    log(
+        f"PROCESS EXIT CODE: {exit_code}"
+    )
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+
+    raise SystemExit(exit_code)
