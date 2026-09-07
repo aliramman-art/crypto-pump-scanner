@@ -1,43 +1,62 @@
 # ============================================================
-# KRAKEN FUTURES PRICE ACTION SCANNER
+# KRAKEN FUTURES ICHIMOKU MTF SCANNER
 # ============================================================
 #
-# Kraken Futures
-# 5m CLOSED candles
-# TOP 30 by 24h quote volume
+# TOP 100 KRAKEN FUTURES
+#
+# TIMEFRAMES
+# ------------------------------------------------------------
+# 1H  = Main Trend
+# 30m = Confirmation
+# 15m = Pullback
+# 5m  = Entry Trigger
 #
 # STRATEGY
 # ------------------------------------------------------------
+# ICHIMOKU:
 # Tenkan = 9
 # Kijun  = 26
+# Senkou B = 52
+# Displacement = 26
 #
-# 1) Find ONLY the latest Tenkan/Kijun crossover
-# 2) Ignore all older crosses
-# 3) Crossover candle is NOT part of the box
-# 4) Box = 26 candles immediately BEFORE crossover
-# 5) BUY  = later CLOSED candle closes above Box High
-# 6) SELL = later CLOSED candle closes below Box Low
-#
-# SWING
+# LONG:
 # ------------------------------------------------------------
-# Confirmed pivot:
-# 2 candles left + 2 candles right
+# 1H:
+#   Price > Kumo
+#   Tenkan > Kijun
+#   Kijun slope positive
+#   Future Kumo bullish
+#   Chikou bullish
 #
-# BUY SL:
-# slightly below latest valid Swing Low
+# 30m:
+#   Price > Kumo
+#   Tenkan > Kijun
+#   Kijun slope positive
 #
-# SELL SL:
-# slightly above latest valid Swing High
+# 15m:
+#   Price above Kumo
+#   Pullback toward Tenkan/Kijun
+#   Distance normalized by ATR
+#   Tenkan > Kijun
+#
+# 5m:
+#   Closed candle crosses above Tenkan
+#   Tenkan > Kijun
+#
+# SHORT = exact opposite
+#
+# ONLY ONE OPEN TRADE
+# ------------------------------------------------------------
+#
+# SL:
+#   Latest confirmed swing
 #
 # TP:
-# 50% of Box width
-#
-# MAX OPEN TRADES:
-# 1
+#   RR based
 #
 # Telegram:
-# Signal simulator only
-# No real orders are placed
+#   Virtual trade simulator only
+#   No real orders
 # ============================================================
 
 import os
@@ -78,55 +97,120 @@ TELEGRAM_CHAT_ID = (
     .strip()
 )
 
-# ------------------------------------------------------------
-# Strategy
-# ------------------------------------------------------------
 
-TIMEFRAME = "5m"
+# ============================================================
+# MARKET CONFIG
+# ============================================================
 
-TOP_SYMBOLS = 30
+TOP_SYMBOLS = 100
 
-CANDLE_LIMIT = 100
+# We use closed candles only.
+TIMEFRAMES = {
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60
+}
+
+CANDLE_LIMIT = 180
+
+
+# ============================================================
+# ICHIMOKU
+# ============================================================
 
 TENKAN_PERIOD = 9
 KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
+DISPLACEMENT = 26
 
-BOX_PERIOD = 26
 
-SWING_LEFT = 2
-SWING_RIGHT = 2
+# ============================================================
+# ATR
+# ============================================================
 
-TP_BOX_PERCENT = 0.50
+ATR_PERIOD = 14
 
-SL_BUFFER_PERCENT = 0.15
+# Maximum acceptable distance from Tenkan/Kijun
+# on the 15m pullback.
+MAX_PULLBACK_DISTANCE_ATR = 1.50
+
+
+# ============================================================
+# SCORE
+# ============================================================
+
+MIN_1H_SCORE = 7.0
+MIN_30M_SCORE = 6.0
+MIN_15M_SCORE = 4.0
+
+# Maximum score = 10
+# ------------------------------------------------------------
+# 1H
+# Price vs Kumo       2
+# Tenkan vs Kijun     2
+# Kijun slope         1
+# Future Kumo         2
+# Chikou              1
+# Distance            2
+#
+# 30m
+# Price vs Kumo       3
+# Tenkan vs Kijun     2
+# Kijun slope         2
+# Future Kumo         2
+# Distance            1
+#
+# 15m
+# Price vs Kumo       2
+# Pullback            3
+# Tenkan vs Kijun     2
+# Kijun slope         1
+# Distance            2
+# ============================================================
+
+
+# ============================================================
+# TRADE CONFIG
+# ============================================================
 
 MAX_OPEN_TRADES = 1
 
-# Maximum number of candles after breakout
-# that the scanner accepts as a fresh signal.
-MAX_BREAKOUT_AGE = 2
+# Recommended default.
+# Can be changed to 1.5 or 2.0.
+TARGET_RR = 1.0
 
-# ------------------------------------------------------------
-# Runtime
-# ------------------------------------------------------------
+# SL buffer beyond confirmed swing.
+SL_BUFFER_PERCENT = 0.15
 
-MAX_WORKERS = 5
+# Maximum holding time.
+MAX_HOLDING_HOURS = 4
+
+# Signal must be on the latest closed 5m candle.
+MAX_SIGNAL_AGE_CANDLES = 0
+
+
+# ============================================================
+# RUNTIME
+# ============================================================
+
+MAX_WORKERS = 8
 
 REQUEST_TIMEOUT = 20
 
 REQUEST_RETRIES = 3
 
 STATE_FILE = (
-    "kraken_price_action_state.json"
+    "kraken_ichimoku_state.json"
 )
 
 HISTORY_FILE = (
-    "kraken_price_action_trade_history.json"
+    "kraken_ichimoku_trade_history.json"
 )
 
 
 # ============================================================
-# HTTP SESSIONS
+# HTTP
 # ============================================================
 
 KRAKEN_SESSION = requests.Session()
@@ -134,7 +218,7 @@ KRAKEN_SESSION = requests.Session()
 KRAKEN_SESSION.headers.update({
     "Accept": "application/json",
     "User-Agent":
-        "Kraken-Futures-Price-Action-Scanner/1.0"
+        "Kraken-Futures-Ichimoku-Scanner/1.0"
 })
 
 
@@ -143,13 +227,9 @@ TELEGRAM_SESSION = requests.Session()
 TELEGRAM_SESSION.headers.update({
     "Accept": "application/json",
     "User-Agent":
-        "Kraken-Futures-Price-Action-Scanner/1.0"
+        "Kraken-Futures-Ichimoku-Scanner/1.0"
 })
 
-
-# ============================================================
-# GLOBAL LOCK
-# ============================================================
 
 STATE_LOCK = threading.Lock()
 
@@ -163,19 +243,32 @@ def utc_now():
 
 
 def utc_timestamp():
-    return int(utc_now().timestamp())
+    return int(
+        utc_now().timestamp()
+    )
 
 
 def format_time(ts):
+
     try:
-        if isinstance(ts, (int, float)):
+
+        if isinstance(
+            ts,
+            (int, float)
+        ):
+
             dt = datetime.fromtimestamp(
                 ts,
                 tz=timezone.utc
             )
+
         else:
+
             dt = datetime.fromisoformat(
-                str(ts).replace("Z", "+00:00")
+                str(ts).replace(
+                    "Z",
+                    "+00:00"
+                )
             )
 
         return dt.strftime(
@@ -183,6 +276,7 @@ def format_time(ts):
         )
 
     except Exception:
+
         return str(ts)
 
 
@@ -190,14 +284,20 @@ def format_time(ts):
 # NUMBER HELPERS
 # ============================================================
 
-def safe_float(value, default=0.0):
+def safe_float(
+    value,
+    default=0.0
+):
+
     try:
         return float(value)
+
     except Exception:
         return default
 
 
 def fmt_price(value):
+
     value = safe_float(value)
 
     if value == 0:
@@ -225,15 +325,23 @@ def fmt_price(value):
 
 
 def fmt_pct(value):
-    return f"{safe_float(value):+.2f}%"
+
+    return (
+        f"{safe_float(value):+.2f}%"
+    )
 
 
 # ============================================================
 # JSON
 # ============================================================
 
-def load_json(path, default):
+def load_json(
+    path,
+    default
+):
+
     try:
+
         if not os.path.exists(path):
             return default
 
@@ -242,24 +350,34 @@ def load_json(path, default):
             "r",
             encoding="utf-8"
         ) as f:
+
             return json.load(f)
 
     except Exception as e:
+
         print(
-            f"[WARN] Cannot load {path}: {e}"
+            f"[WARN] Cannot load "
+            f"{path}: {e}"
         )
+
         return default
 
 
-def save_json(path, data):
+def save_json(
+    path,
+    data
+):
+
     temp_path = path + ".tmp"
 
     try:
+
         with open(
             temp_path,
             "w",
             encoding="utf-8"
         ) as f:
+
             json.dump(
                 data,
                 f,
@@ -273,8 +391,10 @@ def save_json(path, data):
         )
 
     except Exception as e:
+
         print(
-            f"[ERROR] Cannot save {path}: {e}"
+            f"[ERROR] Cannot save "
+            f"{path}: {e}"
         )
 
 
@@ -283,6 +403,7 @@ def save_json(path, data):
 # ============================================================
 
 def default_state():
+
     return {
         "open_trade": None,
         "last_signal_key": None,
@@ -291,6 +412,7 @@ def default_state():
 
 
 def default_history():
+
     return {
         "trades": []
     }
@@ -307,13 +429,27 @@ HISTORY = load_json(
 )
 
 
-if not isinstance(STATE, dict):
+if not isinstance(
+    STATE,
+    dict
+):
+
     STATE = default_state()
 
-if not isinstance(HISTORY, dict):
+
+if not isinstance(
+    HISTORY,
+    dict
+):
+
     HISTORY = default_history()
 
-if "trades" not in HISTORY:
+
+if not isinstance(
+    HISTORY.get("trades"),
+    list
+):
+
     HISTORY["trades"] = []
 
 
@@ -326,9 +462,13 @@ def kraken_get(
     params=None,
     retries=REQUEST_RETRIES
 ):
+
     last_error = None
 
-    for attempt in range(1, retries + 1):
+    for attempt in range(
+        1,
+        retries + 1
+    ):
 
         try:
 
@@ -340,9 +480,7 @@ def kraken_get(
 
             response.raise_for_status()
 
-            data = response.json()
-
-            return data
+            return response.json()
 
         except Exception as e:
 
@@ -350,17 +488,18 @@ def kraken_get(
 
             print(
                 f"[WARN] Kraken request failed "
-                f"attempt {attempt}/{retries}: "
-                f"{e}"
+                f"{attempt}/{retries}: {e}"
             )
 
             if attempt < retries:
+
                 time.sleep(
                     1.5 * attempt
                 )
 
     raise RuntimeError(
-        f"Kraken request failed: {last_error}"
+        f"Kraken request failed: "
+        f"{last_error}"
     )
 
 
@@ -368,20 +507,26 @@ def kraken_get(
 # TELEGRAM
 # ============================================================
 
-def send_telegram(message):
+def send_telegram(
+    message
+):
 
     if not TELEGRAM_BOT_TOKEN:
+
         print(
             "[WARN] TELEGRAM_BOT_TOKEN "
             "not configured."
         )
+
         return False
 
     if not TELEGRAM_CHAT_ID:
+
         print(
             "[WARN] TELEGRAM_CHAT_ID "
             "not configured."
         )
+
         return False
 
     url = (
@@ -393,17 +538,20 @@ def send_telegram(message):
     try:
 
         payload = {
-            "chat_id": str(
-                TELEGRAM_CHAT_ID
-            ),
-            "text": str(message),
-            "parse_mode": "Markdown"
+            "chat_id":
+                str(TELEGRAM_CHAT_ID),
+            "text":
+                str(message),
+            "parse_mode":
+                "Markdown"
         }
 
-        response = TELEGRAM_SESSION.post(
-            url,
-            json=payload,
-            timeout=REQUEST_TIMEOUT
+        response = (
+            TELEGRAM_SESSION.post(
+                url,
+                json=payload,
+                timeout=REQUEST_TIMEOUT
+            )
         )
 
         if response.status_code != 200:
@@ -418,7 +566,10 @@ def send_telegram(message):
 
         result = response.json()
 
-        if not result.get("ok", False):
+        if not result.get(
+            "ok",
+            False
+        ):
 
             print(
                 "[WARN] Telegram API error:",
@@ -428,7 +579,7 @@ def send_telegram(message):
             return False
 
         print(
-            "[INFO] Telegram message sent successfully."
+            "[INFO] Telegram message sent."
         )
 
         return True
@@ -442,13 +593,17 @@ def send_telegram(message):
         return False
 
 
-def send_telegram_error(message):
+def send_telegram_error(
+    message
+):
 
     try:
+
         send_telegram(
-            "🚨 *SCANNER ERROR*\n\n" +
-            str(message)
+            "🚨 *SCANNER ERROR*\n\n"
+            + str(message)
         )
+
     except Exception:
         pass
 
@@ -476,12 +631,13 @@ def get_futures_instruments():
     )
 
     if not instruments:
+
         raise RuntimeError(
             "Kraken returned zero futures instruments."
         )
 
     print(
-        f"[INFO] Kraken instruments: "
+        f"[INFO] Instruments: "
         f"{len(instruments)}"
     )
 
@@ -511,12 +667,13 @@ def get_futures_tickers():
     )
 
     if not tickers:
+
         raise RuntimeError(
             "Kraken returned zero futures tickers."
         )
 
     print(
-        f"[INFO] Kraken tickers: "
+        f"[INFO] Tickers: "
         f"{len(tickers)}"
     )
 
@@ -524,21 +681,28 @@ def get_futures_tickers():
 
 
 # ============================================================
-# BUILD TOP SYMBOL LIST
+# TOP 100
 # ============================================================
 
 def get_top_symbols():
 
-    instruments = get_futures_instruments()
+    instruments = (
+        get_futures_instruments()
+    )
 
-    tickers = get_futures_tickers()
+    tickers = (
+        get_futures_tickers()
+    )
 
     instrument_map = {}
 
     for item in instruments:
 
         symbol = str(
-            item.get("symbol", "")
+            item.get(
+                "symbol",
+                ""
+            )
         ).strip()
 
         if not symbol:
@@ -553,48 +717,57 @@ def get_top_symbols():
     for ticker in tickers:
 
         symbol = str(
-            ticker.get("symbol", "")
+            ticker.get(
+                "symbol",
+                ""
+            )
         ).strip()
 
         if not symbol:
             continue
 
-        upper_symbol = symbol.upper()
+        upper_symbol = (
+            symbol.upper()
+        )
 
-        instrument = instrument_map.get(
-            upper_symbol
+        instrument = (
+            instrument_map.get(
+                upper_symbol
+            )
         )
 
         if not instrument:
             continue
 
-        # ----------------------------------------------------
-        # Only perpetual contracts
-        # ----------------------------------------------------
-
         tag = str(
-            ticker.get("tag", "")
+            ticker.get(
+                "tag",
+                ""
+            )
         ).lower()
 
         instrument_type = str(
-            instrument.get("type", "")
+            instrument.get(
+                "type",
+                ""
+            )
         ).lower()
 
         is_perpetual = (
             tag == "perpetual"
             or
-            "perpetual" in instrument_type
+            "perpetual"
+            in instrument_type
         )
 
         if not is_perpetual:
             continue
 
-        # ----------------------------------------------------
-        # We prefer USD-margined perpetuals
-        # ----------------------------------------------------
-
         pair = str(
-            ticker.get("pair", "")
+            ticker.get(
+                "pair",
+                ""
+            )
         ).upper()
 
         underlying = str(
@@ -604,19 +777,15 @@ def get_top_symbols():
             )
         ).upper()
 
-        # Kraken uses symbols such as:
-        # PF_XBTUSD
-        # PF_ETHUSD
-        #
-        # We keep USD perpetual contracts.
-        if "USD" not in upper_symbol and \
-           "USD" not in pair and \
-           "USD" not in underlying:
+        # USD quoted/margined markets.
+        if (
+            "USD" not in upper_symbol
+            and
+            "USD" not in pair
+            and
+            "USD" not in underlying
+        ):
             continue
-
-        # ----------------------------------------------------
-        # Volume
-        # ----------------------------------------------------
 
         volume_quote = safe_float(
             ticker.get(
@@ -625,18 +794,14 @@ def get_top_symbols():
             )
         )
 
-        vol24 = safe_float(
-            ticker.get(
-                "vol24h",
-                0
-            )
-        )
-
-        # Some Kraken responses can have
-        # volumeQuote missing/zero.
-        # Use vol24h as fallback.
         if volume_quote <= 0:
-            volume_quote = vol24
+
+            volume_quote = safe_float(
+                ticker.get(
+                    "vol24h",
+                    0
+                )
+            )
 
         mark_price = safe_float(
             ticker.get(
@@ -653,6 +818,7 @@ def get_top_symbols():
         )
 
         if mark_price <= 0:
+
             mark_price = last_price
 
         if mark_price <= 0:
@@ -692,10 +858,10 @@ def get_top_symbols():
     ):
 
         print(
-            f"{i:02d}. "
+            f"{i:03d}. "
             f"{item['symbol']} | "
-            f"Volume: "
-            f"{item['volume_quote']:,.2f} | "
+            f"Vol: "
+            f"{item['volume_quote']:,.0f} | "
             f"Price: "
             f"{fmt_price(item['mark_price'])}"
         )
@@ -704,10 +870,12 @@ def get_top_symbols():
 
 
 # ============================================================
-# CANDLE PARSER
+# CANDLE NORMALIZATION
 # ============================================================
 
-def normalize_candle(item):
+def normalize_candle(
+    item
+):
 
     try:
 
@@ -715,6 +883,8 @@ def normalize_candle(item):
             item.get("time")
         )
 
+        # Kraken may return seconds
+        # or milliseconds.
         if ts < 10_000_000_000:
             ts *= 1000
 
@@ -738,18 +908,66 @@ def normalize_candle(item):
         }
 
     except Exception:
+
         return None
+
+
+# ============================================================
+# FILTER CLOSED
+# ============================================================
+
+def filter_closed_candles(
+    candles,
+    timeframe_minutes
+):
+
+    if not candles:
+        return []
+
+    now_ms = (
+        utc_timestamp() *
+        1000
+    )
+
+    timeframe_ms = (
+        timeframe_minutes *
+        60 *
+        1000
+    )
+
+    closed = []
+
+    for candle in candles:
+
+        candle_end = (
+            candle["time"] +
+            timeframe_ms
+        )
+
+        if candle_end <= now_ms:
+
+            closed.append(
+                candle
+            )
+
+    return closed
 
 
 # ============================================================
 # FETCH CANDLES
 # ============================================================
 
-def fetch_candles(symbol):
+def fetch_candles(
+    symbol,
+    timeframe
+):
+
+    if timeframe not in TIMEFRAMES:
+        return []
 
     url = (
         KRAKEN_CHART_BASE +
-        f"/trade/{symbol}/{TIMEFRAME}"
+        f"/trade/{symbol}/{timeframe}"
     )
 
     params = {
@@ -772,14 +990,20 @@ def fetch_candles(symbol):
 
         for item in raw:
 
-            candle = normalize_candle(
-                item
+            candle = (
+                normalize_candle(item)
             )
 
             if candle is None:
                 continue
 
             if candle["close"] <= 0:
+                continue
+
+            if candle["high"] <= 0:
+                continue
+
+            if candle["low"] <= 0:
                 continue
 
             candles.append(
@@ -791,60 +1015,53 @@ def fetch_candles(symbol):
                 x["time"]
         )
 
+        candles = (
+            filter_closed_candles(
+                candles,
+                TIMEFRAMES[timeframe]
+            )
+        )
+
         return candles
 
     except Exception as e:
 
         print(
             f"[WARN] Candle error "
-            f"{symbol}: {e}"
+            f"{symbol} {timeframe}: {e}"
         )
 
         return []
 
 
 # ============================================================
-# FILTER CLOSED CANDLES
+# FETCH ALL MTF CANDLES
 # ============================================================
 
-def filter_closed_candles(candles):
-
-    if not candles:
-        return []
-
-    now_ms = int(
-        utc_timestamp() * 1000
-    )
-
-    timeframe_ms = 5 * 60 * 1000
-
-    closed = []
-
-    for candle in candles:
-
-        candle_end = (
-            candle["time"] +
-            timeframe_ms
-        )
-
-        if candle_end <= now_ms:
-            closed.append(
-                candle
-            )
-
-    return closed
-
-
-# ============================================================
-# FETCH ALL CANDLES
-# ============================================================
-
-def fetch_top_candles(top_symbols):
+def fetch_all_candles(
+    top_symbols
+):
 
     result = {}
 
+    jobs = []
+
+    for item in top_symbols:
+
+        symbol = item["symbol"]
+
+        for timeframe in TIMEFRAMES:
+
+            jobs.append(
+                (
+                    symbol,
+                    timeframe
+                )
+            )
+
     print(
-        "[INFO] Downloading 5m candles..."
+        f"[INFO] Downloading "
+        f"{len(jobs)} candle sets..."
     )
 
     with ThreadPoolExecutor(
@@ -853,49 +1070,54 @@ def fetch_top_candles(top_symbols):
 
         futures = {}
 
-        for item in top_symbols:
+        for symbol, timeframe in jobs:
 
-            symbol = item["symbol"]
+            future = executor.submit(
+                fetch_candles,
+                symbol,
+                timeframe
+            )
 
-            futures[
-                executor.submit(
-                    fetch_candles,
-                    symbol
-                )
-            ] = symbol
+            futures[future] = (
+                symbol,
+                timeframe
+            )
 
         for future in as_completed(
             futures
         ):
 
-            symbol = futures[
-                future
-            ]
+            symbol, timeframe = (
+                futures[future]
+            )
 
             try:
 
-                candles = future.result()
-
                 candles = (
-                    filter_closed_candles(
-                        candles
-                    )
+                    future.result()
                 )
 
                 if candles:
-                    result[
-                        symbol
+
+                    if symbol not in result:
+
+                        result[symbol] = {}
+
+                    result[symbol][
+                        timeframe
                     ] = candles
 
             except Exception as e:
 
                 print(
                     f"[WARN] "
-                    f"{symbol}: {e}"
+                    f"{symbol} "
+                    f"{timeframe}: "
+                    f"{e}"
                 )
 
     print(
-        f"[INFO] Valid candle sets: "
+        f"[INFO] Symbols with data: "
         f"{len(result)}"
     )
 
@@ -903,17 +1125,18 @@ def fetch_top_candles(top_symbols):
 
 
 # ============================================================
-# TENKAN
+# DONCHIAN
 # ============================================================
 
-def tenkan_value(
+def donchian(
     candles,
-    index
+    index,
+    period
 ):
 
     start = (
         index -
-        TENKAN_PERIOD +
+        period +
         1
     )
 
@@ -924,7 +1147,7 @@ def tenkan_value(
         start:index + 1
     ]
 
-    if len(window) != TENKAN_PERIOD:
+    if len(window) != period:
         return None
 
     highest = max(
@@ -944,235 +1167,613 @@ def tenkan_value(
 
 
 # ============================================================
-# KIJUN
+# ICHIMOKU VALUES
 # ============================================================
 
-def kijun_value(
+def ichimoku_at(
     candles,
     index
 ):
 
-    start = (
-        index -
-        KIJUN_PERIOD +
-        1
-    )
+    if index < (
+        SENKOU_B_PERIOD - 1
+    ):
 
-    if start < 0:
         return None
 
-    window = candles[
-        start:index + 1
-    ]
+    tenkan = donchian(
+        candles,
+        index,
+        TENKAN_PERIOD
+    )
 
-    if len(window) != KIJUN_PERIOD:
+    kijun = donchian(
+        candles,
+        index,
+        KIJUN_PERIOD
+    )
+
+    senkou_b = donchian(
+        candles,
+        index,
+        SENKOU_B_PERIOD
+    )
+
+    if (
+        tenkan is None
+        or kijun is None
+        or senkou_b is None
+    ):
+
         return None
 
-    highest = max(
-        c["high"]
-        for c in window
-    )
-
-    lowest = min(
-        c["low"]
-        for c in window
-    )
-
-    return (
-        highest +
-        lowest
+    senkou_a = (
+        tenkan +
+        kijun
     ) / 2.0
 
-
-# ============================================================
-# FIND LATEST TENKAN/KIJUN CROSS
-# ============================================================
-
-def find_latest_cross(candles):
-
-    if len(candles) < (
-        KIJUN_PERIOD + 2
-    ):
-        return None
-
-    latest = None
-
-    for i in range(
-        KIJUN_PERIOD,
-        len(candles)
-    ):
-
-        tenkan_prev = tenkan_value(
-            candles,
-            i - 1
-        )
-
-        kijun_prev = kijun_value(
-            candles,
-            i - 1
-        )
-
-        tenkan_now = tenkan_value(
-            candles,
-            i
-        )
-
-        kijun_now = kijun_value(
-            candles,
-            i
-        )
-
-        if (
-            tenkan_prev is None
-            or kijun_prev is None
-            or tenkan_now is None
-            or kijun_now is None
-        ):
-            continue
-
-        direction = None
-
-        # Bullish cross
-        if (
-            tenkan_prev <= kijun_prev
-            and
-            tenkan_now > kijun_now
-        ):
-            direction = "BUY"
-
-        # Bearish cross
-        elif (
-            tenkan_prev >= kijun_prev
-            and
-            tenkan_now < kijun_now
-        ):
-            direction = "SELL"
-
-        if direction:
-
-            latest = {
-                "index": i,
-                "direction": direction,
-                "time": candles[i]["time"],
-                "tenkan": tenkan_now,
-                "kijun": kijun_now
-            }
-
-    return latest
-
-
-# ============================================================
-# BOX
-# ============================================================
-
-def build_box(
-    candles,
-    cross_index
-):
-
-    start = (
-        cross_index -
-        BOX_PERIOD
+    cloud_top = max(
+        senkou_a,
+        senkou_b
     )
 
-    end = cross_index
-
-    if start < 0:
-        return None
-
-    box_candles = candles[
-        start:end
-    ]
-
-    if len(box_candles) != BOX_PERIOD:
-        return None
-
-    box_high = max(
-        c["high"]
-        for c in box_candles
+    cloud_bottom = min(
+        senkou_a,
+        senkou_b
     )
-
-    box_low = min(
-        c["low"]
-        for c in box_candles
-    )
-
-    width = (
-        box_high -
-        box_low
-    )
-
-    if width <= 0:
-        return None
 
     return {
-        "high": box_high,
-        "low": box_low,
-        "width": width,
-        "start_time":
-            box_candles[0]["time"],
-        "end_time":
-            box_candles[-1]["time"]
+        "tenkan": tenkan,
+        "kijun": kijun,
+        "senkou_a": senkou_a,
+        "senkou_b": senkou_b,
+        "cloud_top": cloud_top,
+        "cloud_bottom":
+            cloud_bottom,
+        "cloud_width":
+            cloud_top -
+            cloud_bottom
     }
 
 
 # ============================================================
-# BREAKOUT
+# ATR
 # ============================================================
 
-def find_breakout(
+def atr(
     candles,
-    cross,
-    box
+    index,
+    period=ATR_PERIOD
 ):
 
-    cross_index = cross[
-        "index"
-    ]
+    if index < period:
+        return None
 
-    direction = cross[
-        "direction"
-    ]
+    trs = []
 
-    # Breakout must happen AFTER cross.
+    start = (
+        index -
+        period +
+        1
+    )
+
     for i in range(
-        cross_index + 1,
-        len(candles)
+        start,
+        index + 1
     ):
 
-        candle = candles[i]
+        current = candles[i]
 
-        if direction == "BUY":
+        previous_close = (
+            candles[i - 1]["close"]
+            if i > 0
+            else current["close"]
+        )
 
-            if candle["close"] > box["high"]:
+        tr = max(
+            current["high"] -
+            current["low"],
 
-                return {
-                    "index": i,
-                    "direction": "BUY",
-                    "time": candle["time"],
-                    "entry": candle["close"],
-                    "age":
-                        len(candles) -
-                        1 -
-                        i
-                }
+            abs(
+                current["high"] -
+                previous_close
+            ),
 
-        elif direction == "SELL":
+            abs(
+                current["low"] -
+                previous_close
+            )
+        )
 
-            if candle["close"] < box["low"]:
+        trs.append(tr)
 
-                return {
-                    "index": i,
-                    "direction": "SELL",
-                    "time": candle["time"],
-                    "entry": candle["close"],
-                    "age":
-                        len(candles) -
-                        1 -
-                        i
-                }
+    if len(trs) != period:
+        return None
 
-    return None
+    return (
+        sum(trs) /
+        len(trs)
+    )
+
+
+# ============================================================
+# ICHIMOKU STATE
+# ============================================================
+
+def get_market_state(
+    candles,
+    index=None
+):
+
+    if not candles:
+        return None
+
+    if index is None:
+
+        index = (
+            len(candles) - 1
+        )
+
+    if index < (
+        SENKOU_B_PERIOD + 2
+    ):
+
+        return None
+
+    current = candles[index]
+
+    ichi = ichimoku_at(
+        candles,
+        index
+    )
+
+    previous_ichi = ichimoku_at(
+        candles,
+        index - 1
+    )
+
+    if (
+        ichi is None
+        or previous_ichi is None
+    ):
+
+        return None
+
+    current_close = (
+        current["close"]
+    )
+
+    previous_close = (
+        candles[index - 1]["close"]
+    )
+
+    current_atr = atr(
+        candles,
+        index
+    )
+
+    if current_atr is None:
+        return None
+
+    # --------------------------------------------------------
+    # Kijun slope
+    # --------------------------------------------------------
+
+    kijun_change = (
+        ichi["kijun"] -
+        previous_ichi["kijun"]
+    )
+
+    kijun_slope_pct = (
+        kijun_change /
+        ichi["kijun"]
+    ) * 100
+
+    # --------------------------------------------------------
+    # Tenkan slope
+    # --------------------------------------------------------
+
+    tenkan_change = (
+        ichi["tenkan"] -
+        previous_ichi["tenkan"]
+    )
+
+    tenkan_slope_pct = (
+        tenkan_change /
+        ichi["tenkan"]
+    ) * 100
+
+    # --------------------------------------------------------
+    # Price distance
+    # --------------------------------------------------------
+
+    distance_tenkan = (
+        abs(
+            current_close -
+            ichi["tenkan"]
+        ) /
+        current_atr
+    )
+
+    distance_kijun = (
+        abs(
+            current_close -
+            ichi["kijun"]
+        ) /
+        current_atr
+    )
+
+    # --------------------------------------------------------
+    # Chikou
+    # --------------------------------------------------------
+
+    chikou_bullish = False
+    chikou_bearish = False
+
+    chikou_index = (
+        index -
+        DISPLACEMENT
+    )
+
+    if chikou_index >= 0:
+
+        chikou_close = (
+            candles[
+                chikou_index
+            ]["close"]
+        )
+
+        # Chikou bullish when current
+        # price is above price 26 bars ago.
+        if current_close > chikou_close:
+
+            chikou_bullish = True
+
+        elif current_close < chikou_close:
+
+            chikou_bearish = True
+
+    # --------------------------------------------------------
+    # Current Kumo
+    # --------------------------------------------------------
+
+    above_cloud = (
+        current_close >
+        ichi["cloud_top"]
+    )
+
+    below_cloud = (
+        current_close <
+        ichi["cloud_bottom"]
+    )
+
+    inside_cloud = (
+        not above_cloud
+        and
+        not below_cloud
+    )
+
+    # --------------------------------------------------------
+    # Future Kumo
+    # --------------------------------------------------------
+
+    future_kumo_bullish = (
+        ichi["senkou_a"] >
+        ichi["senkou_b"]
+    )
+
+    future_kumo_bearish = (
+        ichi["senkou_a"] <
+        ichi["senkou_b"]
+    )
+
+    # --------------------------------------------------------
+    # Tenkan / Kijun
+    # --------------------------------------------------------
+
+    tenkan_above_kijun = (
+        ichi["tenkan"] >
+        ichi["kijun"]
+    )
+
+    tenkan_below_kijun = (
+        ichi["tenkan"] <
+        ichi["kijun"]
+    )
+
+    # --------------------------------------------------------
+    # 5m trigger
+    # --------------------------------------------------------
+
+    bullish_tenkan_cross = (
+        previous_close <=
+        previous_ichi["tenkan"]
+        and
+        current_close >
+        ichi["tenkan"]
+    )
+
+    bearish_tenkan_cross = (
+        previous_close >=
+        previous_ichi["tenkan"]
+        and
+        current_close <
+        ichi["tenkan"]
+    )
+
+    return {
+        "close": current_close,
+        "atr": current_atr,
+
+        "tenkan": ichi["tenkan"],
+        "kijun": ichi["kijun"],
+
+        "senkou_a":
+            ichi["senkou_a"],
+        "senkou_b":
+            ichi["senkou_b"],
+
+        "cloud_top":
+            ichi["cloud_top"],
+        "cloud_bottom":
+            ichi["cloud_bottom"],
+
+        "cloud_width":
+            ichi["cloud_width"],
+
+        "above_cloud":
+            above_cloud,
+        "below_cloud":
+            below_cloud,
+        "inside_cloud":
+            inside_cloud,
+
+        "future_kumo_bullish":
+            future_kumo_bullish,
+
+        "future_kumo_bearish":
+            future_kumo_bearish,
+
+        "tenkan_above_kijun":
+            tenkan_above_kijun,
+
+        "tenkan_below_kijun":
+            tenkan_below_kijun,
+
+        "kijun_slope_pct":
+            kijun_slope_pct,
+
+        "tenkan_slope_pct":
+            tenkan_slope_pct,
+
+        "distance_tenkan_atr":
+            distance_tenkan,
+
+        "distance_kijun_atr":
+            distance_kijun,
+
+        "chikou_bullish":
+            chikou_bullish,
+
+        "chikou_bearish":
+            chikou_bearish,
+
+        "bullish_tenkan_cross":
+            bullish_tenkan_cross,
+
+        "bearish_tenkan_cross":
+            bearish_tenkan_cross
+    }
+
+
+# ============================================================
+# SCORE 1H
+# ============================================================
+
+def score_1h(
+    state
+):
+
+    bull = 0.0
+    bear = 0.0
+
+    # Price vs cloud
+    if state["above_cloud"]:
+        bull += 2.0
+
+    elif state["below_cloud"]:
+        bear += 2.0
+
+    # Tenkan/Kijun
+    if state["tenkan_above_kijun"]:
+        bull += 2.0
+
+    elif state["tenkan_below_kijun"]:
+        bear += 2.0
+
+    # Kijun slope
+    if state["kijun_slope_pct"] > 0:
+        bull += 1.0
+
+    elif state["kijun_slope_pct"] < 0:
+        bear += 1.0
+
+    # Future Kumo
+    if state["future_kumo_bullish"]:
+        bull += 2.0
+
+    elif state["future_kumo_bearish"]:
+        bear += 2.0
+
+    # Chikou
+    if state["chikou_bullish"]:
+        bull += 1.0
+
+    elif state["chikou_bearish"]:
+        bear += 1.0
+
+    # Distance
+    if state[
+        "distance_tenkan_atr"
+    ] <= 1.5:
+
+        if state["tenkan_above_kijun"]:
+            bull += 2.0
+
+        elif state["tenkan_below_kijun"]:
+            bear += 2.0
+
+    return {
+        "bull": min(
+            bull,
+            10.0
+        ),
+        "bear": min(
+            bear,
+            10.0
+        )
+    }
+
+
+# ============================================================
+# SCORE 30M
+# ============================================================
+
+def score_30m(
+    state
+):
+
+    bull = 0.0
+    bear = 0.0
+
+    # Price vs cloud
+    if state["above_cloud"]:
+        bull += 3.0
+
+    elif state["below_cloud"]:
+        bear += 3.0
+
+    # Tenkan/Kijun
+    if state["tenkan_above_kijun"]:
+        bull += 2.0
+
+    elif state["tenkan_below_kijun"]:
+        bear += 2.0
+
+    # Kijun slope
+    if state["kijun_slope_pct"] > 0:
+        bull += 2.0
+
+    elif state["kijun_slope_pct"] < 0:
+        bear += 2.0
+
+    # Future Kumo
+    if state["future_kumo_bullish"]:
+        bull += 2.0
+
+    elif state["future_kumo_bearish"]:
+        bear += 2.0
+
+    # Distance
+    if state[
+        "distance_tenkan_atr"
+    ] <= 1.5:
+
+        if state["tenkan_above_kijun"]:
+            bull += 1.0
+
+        elif state["tenkan_below_kijun"]:
+            bear += 1.0
+
+    return {
+        "bull": min(
+            bull,
+            10.0
+        ),
+        "bear": min(
+            bear,
+            10.0
+        )
+    }
+
+
+# ============================================================
+# SCORE 15M
+# ============================================================
+
+def score_15m(
+    state
+):
+
+    bull = 0.0
+    bear = 0.0
+
+    # Price vs cloud
+    if state["above_cloud"]:
+        bull += 2.0
+
+    elif state["below_cloud"]:
+        bear += 2.0
+
+    # Tenkan/Kijun
+    if state["tenkan_above_kijun"]:
+        bull += 2.0
+
+    elif state["tenkan_below_kijun"]:
+        bear += 2.0
+
+    # Kijun slope
+    if state["kijun_slope_pct"] > 0:
+        bull += 1.0
+
+    elif state["kijun_slope_pct"] < 0:
+        bear += 1.0
+
+    # Pullback proximity
+    distance = min(
+        state[
+            "distance_tenkan_atr"
+        ],
+        state[
+            "distance_kijun_atr"
+        ]
+    )
+
+    if distance <= 0.75:
+
+        if state["tenkan_above_kijun"]:
+            bull += 3.0
+
+        elif state["tenkan_below_kijun"]:
+            bear += 3.0
+
+    elif distance <= 1.50:
+
+        if state["tenkan_above_kijun"]:
+            bull += 2.0
+
+        elif state["tenkan_below_kijun"]:
+            bear += 2.0
+
+    # Additional distance point
+    if distance <= 1.50:
+
+        if state["tenkan_above_kijun"]:
+            bull += 2.0
+
+        elif state["tenkan_below_kijun"]:
+            bear += 2.0
+
+    return {
+        "bull": min(
+            bull,
+            10.0
+        ),
+        "bear": min(
+            bear,
+            10.0
+        )
+    }
 
 
 # ============================================================
@@ -1181,40 +1782,41 @@ def find_breakout(
 
 def is_swing_low(
     candles,
-    index
+    index,
+    left=2,
+    right=2
 ):
 
-    if index < SWING_LEFT:
+    if index < left:
         return False
 
-    if (
-        index +
-        SWING_RIGHT
-        >= len(candles)
-    ):
+    if index + right >= len(candles):
         return False
 
     value = candles[
         index
     ]["low"]
 
-    left = candles[
-        index - SWING_LEFT:
+    for i in range(
+        index - left,
         index
-    ]
+    ):
 
-    right = candles[
-        index + 1:
-        index + 1 +
-        SWING_RIGHT
-    ]
+        if value >= candles[
+            i
+        ]["low"]:
 
-    for c in left:
-        if value >= c["low"]:
             return False
 
-    for c in right:
-        if value >= c["low"]:
+    for i in range(
+        index + 1,
+        index + 1 + right
+    ):
+
+        if value >= candles[
+            i
+        ]["low"]:
+
             return False
 
     return True
@@ -1226,86 +1828,87 @@ def is_swing_low(
 
 def is_swing_high(
     candles,
-    index
+    index,
+    left=2,
+    right=2
 ):
 
-    if index < SWING_LEFT:
+    if index < left:
         return False
 
-    if (
-        index +
-        SWING_RIGHT
-        >= len(candles)
-    ):
+    if index + right >= len(candles):
         return False
 
     value = candles[
         index
     ]["high"]
 
-    left = candles[
-        index - SWING_LEFT:
+    for i in range(
+        index - left,
         index
-    ]
+    ):
 
-    right = candles[
-        index + 1:
-        index + 1 +
-        SWING_RIGHT
-    ]
+        if value <= candles[
+            i
+        ]["high"]:
 
-    for c in left:
-        if value <= c["high"]:
             return False
 
-    for c in right:
-        if value <= c["high"]:
+    for i in range(
+        index + 1,
+        index + 1 + right
+    ):
+
+        if value <= candles[
+            i
+        ]["high"]:
+
             return False
 
     return True
 
 
 # ============================================================
-# FIND LATEST VALID SWING
+# LATEST CONFIRMED SWING
 # ============================================================
 
-def find_latest_swing(
+def latest_swing(
     candles,
     direction,
     before_index
 ):
 
-    if before_index <= 0:
+    if before_index <= 2:
         return None
 
-    # We search backwards.
-    # Only CONFIRMED swings are accepted.
-    start = min(
+    # Do not use the latest two candles
+    # because they cannot yet be confirmed.
+    max_index = min(
         before_index - 1,
-        len(candles) -
-        SWING_RIGHT -
-        1
+        len(candles) - 3
     )
 
     if direction == "BUY":
 
         for i in range(
-            start,
-            SWING_LEFT - 1,
+            max_index,
+            1,
             -1
         ):
 
             if is_swing_low(
                 candles,
-                i
+                i,
+                2,
+                2
             ):
 
                 return {
                     "index": i,
-                    "time":
-                        candles[i]["time"],
                     "price":
                         candles[i]["low"],
+                    "time":
+                        candles[i]["time"],
                     "type":
                         "SWING_LOW"
                 }
@@ -1313,22 +1916,24 @@ def find_latest_swing(
     else:
 
         for i in range(
-            start,
-            SWING_LEFT - 1,
+            max_index,
+            1,
             -1
         ):
 
             if is_swing_high(
                 candles,
-                i
+                i,
+                2,
+                2
             ):
 
                 return {
                     "index": i,
-                    "time":
-                        candles[i]["time"],
                     "price":
                         candles[i]["high"],
+                    "time":
+                        candles[i]["time"],
                     "type":
                         "SWING_HIGH"
                 }
@@ -1337,105 +1942,220 @@ def find_latest_swing(
 
 
 # ============================================================
-# CREATE SIGNAL
+# ANALYZE ONE SYMBOL
 # ============================================================
 
 def analyze_symbol(
     symbol,
-    candles
+    symbol_data
 ):
 
-    if len(candles) < (
-        KIJUN_PERIOD +
-        BOX_PERIOD +
-        SWING_LEFT +
-        SWING_RIGHT +
-        5
-    ):
-        return None
+    required = [
+        "1h",
+        "30m",
+        "15m",
+        "5m"
+    ]
 
-    cross = find_latest_cross(
-        candles
+    for tf in required:
+
+        if tf not in symbol_data:
+            return None
+
+        if len(
+            symbol_data[tf]
+        ) < 70:
+
+            return None
+
+    candles_1h = symbol_data["1h"]
+    candles_30m = symbol_data["30m"]
+    candles_15m = symbol_data["15m"]
+    candles_5m = symbol_data["5m"]
+
+    # --------------------------------------------------------
+    # Latest CLOSED candle
+    # --------------------------------------------------------
+
+    s1 = get_market_state(
+        candles_1h
     )
 
-    if not cross:
-        return None
-
-    box = build_box(
-        candles,
-        cross["index"]
+    s30 = get_market_state(
+        candles_30m
     )
 
-    if not box:
-        return None
-
-    breakout = find_breakout(
-        candles,
-        cross,
-        box
+    s15 = get_market_state(
+        candles_15m
     )
 
-    if not breakout:
+    s5 = get_market_state(
+        candles_5m
+    )
+
+    if not s1 or not s30 or not s15 or not s5:
         return None
 
     # --------------------------------------------------------
-    # Breakout must be fresh
+    # Scores
     # --------------------------------------------------------
 
-    if breakout["age"] > MAX_BREAKOUT_AGE:
+    sc1 = score_1h(s1)
+    sc30 = score_30m(s30)
+    sc15 = score_15m(s15)
+
+    # ========================================================
+    # LONG
+    # ========================================================
+
+    long_ok = (
+        sc1["bull"] >= MIN_1H_SCORE
+        and
+        sc30["bull"] >= MIN_30M_SCORE
+        and
+        sc15["bull"] >= MIN_15M_SCORE
+
+        and
+        s1["above_cloud"]
+        and
+        s1["tenkan_above_kijun"]
+        and
+        s1["kijun_slope_pct"] > 0
+        and
+        s1["future_kumo_bullish"]
+
+        and
+        s30["above_cloud"]
+        and
+        s30["tenkan_above_kijun"]
+        and
+        s30["kijun_slope_pct"] > 0
+
+        and
+        s15["above_cloud"]
+        and
+        s15["tenkan_above_kijun"]
+        and
+        s15["kijun_slope_pct"] >= 0
+
+        and
+        min(
+            s15["distance_tenkan_atr"],
+            s15["distance_kijun_atr"]
+        )
+        <= MAX_PULLBACK_DISTANCE_ATR
+
+        and
+        s5["bullish_tenkan_cross"]
+        and
+        s5["tenkan_above_kijun"]
+    )
+
+    # ========================================================
+    # SHORT
+    # ========================================================
+
+    short_ok = (
+        sc1["bear"] >= MIN_1H_SCORE
+        and
+        sc30["bear"] >= MIN_30M_SCORE
+        and
+        sc15["bear"] >= MIN_15M_SCORE
+
+        and
+        s1["below_cloud"]
+        and
+        s1["tenkan_below_kijun"]
+        and
+        s1["kijun_slope_pct"] < 0
+        and
+        s1["future_kumo_bearish"]
+
+        and
+        s30["below_cloud"]
+        and
+        s30["tenkan_below_kijun"]
+        and
+        s30["kijun_slope_pct"] < 0
+
+        and
+        s15["below_cloud"]
+        and
+        s15["tenkan_below_kijun"]
+        and
+        s15["kijun_slope_pct"] <= 0
+
+        and
+        min(
+            s15["distance_tenkan_atr"],
+            s15["distance_kijun_atr"]
+        )
+        <= MAX_PULLBACK_DISTANCE_ATR
+
+        and
+        s5["bearish_tenkan_cross"]
+        and
+        s5["tenkan_below_kijun"]
+    )
+
+    if not long_ok and not short_ok:
         return None
 
     # --------------------------------------------------------
-    # Find confirmed swing
+    # Direction
     # --------------------------------------------------------
 
-    swing = find_latest_swing(
-        candles,
-        breakout["direction"],
-        breakout["index"]
+    if long_ok:
+
+        direction = "BUY"
+
+        score_1 = sc1["bull"]
+        score_30 = sc30["bull"]
+        score_15 = sc15["bull"]
+
+    else:
+
+        direction = "SELL"
+
+        score_1 = sc1["bear"]
+        score_30 = sc30["bear"]
+        score_15 = sc15["bear"]
+
+    # --------------------------------------------------------
+    # 5m entry
+    # --------------------------------------------------------
+
+    entry = s5["close"]
+
+    # --------------------------------------------------------
+    # Swing
+    # --------------------------------------------------------
+
+    swing = latest_swing(
+        candles_5m,
+        direction,
+        len(candles_5m) - 1
     )
 
     if not swing:
         return None
 
-    entry = breakout[
-        "entry"
-    ]
-
-    box_width = box[
-        "width"
-    ]
-
     # --------------------------------------------------------
-    # BUY
+    # SL
     # --------------------------------------------------------
 
-    if breakout["direction"] == "BUY":
+    if direction == "BUY":
 
         sl = (
             swing["price"] *
             (
                 1 -
-                SL_BUFFER_PERCENT /
-                100
+                SL_BUFFER_PERCENT / 100
             )
-        )
-
-        tp = (
-            entry +
-            box_width *
-            TP_BOX_PERCENT
         )
 
         if sl >= entry:
             return None
-
-        if tp <= entry:
-            return None
-
-    # --------------------------------------------------------
-    # SELL
-    # --------------------------------------------------------
 
     else:
 
@@ -1443,90 +2163,156 @@ def analyze_symbol(
             swing["price"] *
             (
                 1 +
-                SL_BUFFER_PERCENT /
-                100
+                SL_BUFFER_PERCENT / 100
             )
-        )
-
-        tp = (
-            entry -
-            box_width *
-            TP_BOX_PERCENT
         )
 
         if sl <= entry:
             return None
 
-        if tp >= entry:
-            return None
-
     risk = abs(
-        entry -
-        sl
-    )
-
-    reward = abs(
-        tp -
-        entry
+        entry - sl
     )
 
     if risk <= 0:
         return None
 
-    rr = reward / risk
+    # --------------------------------------------------------
+    # TP
+    # --------------------------------------------------------
+
+    if direction == "BUY":
+
+        tp = (
+            entry +
+            risk * TARGET_RR
+        )
+
+    else:
+
+        tp = (
+            entry -
+            risk * TARGET_RR
+        )
+
+    reward = abs(
+        tp - entry
+    )
+
+    rr = (
+        reward / risk
+        if risk > 0
+        else 0
+    )
+
+    # --------------------------------------------------------
+    # Combined score
+    # --------------------------------------------------------
+
+    combined_score = (
+        score_1 * 0.50
+        +
+        score_30 * 0.30
+        +
+        score_15 * 0.20
+    )
+
+    # --------------------------------------------------------
+    # Freshness
+    # --------------------------------------------------------
+
+    breakout_time = candles_5m[-1]["time"]
+
+    now_ms = (
+        utc_timestamp() *
+        1000
+    )
+
+    candle_age_minutes = max(
+        0,
+        (
+            now_ms -
+            breakout_time
+        ) / 60000
+    )
+
+    if (
+        candle_age_minutes >
+        TIMEFRAMES["5m"]
+        *
+        (
+            MAX_SIGNAL_AGE_CANDLES + 1
+        )
+    ):
+
+        return None
+
+    # --------------------------------------------------------
+    # Signal key
+    # --------------------------------------------------------
 
     signal_key = (
         f"{symbol}|"
-        f"{breakout['direction']}|"
-        f"{breakout['time']}"
+        f"{direction}|"
+        f"{breakout_time}"
     )
+
+    # --------------------------------------------------------
+    # Return
+    # --------------------------------------------------------
 
     return {
         "symbol": symbol,
-        "direction":
-            breakout["direction"],
+        "direction": direction,
+
         "entry": entry,
         "sl": sl,
         "tp": tp,
+
         "risk": risk,
         "reward": reward,
         "rr": rr,
 
-        "cross_time":
-            cross["time"],
+        "score_1h": score_1,
+        "score_30m": score_30,
+        "score_15m": score_15,
 
-        "cross_direction":
-            cross["direction"],
+        "combined_score":
+            combined_score,
 
-        "cross_tenkan":
-            cross["tenkan"],
+        "atr_5m":
+            s5["atr"],
 
-        "cross_kijun":
-            cross["kijun"],
+        "distance_tenkan_atr":
+            s15["distance_tenkan_atr"],
 
-        "box_high":
-            box["high"],
+        "distance_kijun_atr":
+            s15["distance_kijun_atr"],
 
-        "box_low":
-            box["low"],
+        "tenkan_5m":
+            s5["tenkan"],
 
-        "box_width":
-            box["width"],
+        "kijun_5m":
+            s5["kijun"],
 
-        "box_start":
-            box["start_time"],
+        "tenkan_15m":
+            s15["tenkan"],
 
-        "box_end":
-            box["end_time"],
+        "kijun_15m":
+            s15["kijun"],
 
-        "breakout_time":
-            breakout["time"],
+        "cloud_top_15m":
+            s15["cloud_top"],
 
-        "breakout_index":
-            breakout["index"],
+        "cloud_bottom_15m":
+            s15["cloud_bottom"],
 
-        "breakout_age":
-            breakout["age"],
+        "future_kumo":
+            (
+                "BULLISH"
+                if direction == "BUY"
+                else "BEARISH"
+            ),
 
         "swing_type":
             swing["type"],
@@ -1537,58 +2323,19 @@ def analyze_symbol(
         "swing_time":
             swing["time"],
 
+        "signal_time":
+            breakout_time,
+
+        "signal_age_minutes":
+            candle_age_minutes,
+
         "signal_key":
             signal_key
     }
 
 
 # ============================================================
-# VOLUME RATIO
-# ============================================================
-
-def volume_ratio(
-    candles,
-    index,
-    period=20
-):
-
-    if index < period:
-        return 1.0
-
-    current = safe_float(
-        candles[index]["volume"]
-    )
-
-    previous = candles[
-        index - period:
-        index
-    ]
-
-    values = [
-        safe_float(
-            c["volume"]
-        )
-        for c in previous
-    ]
-
-    values = [
-        x for x in values
-        if x > 0
-    ]
-
-    if not values:
-        return 1.0
-
-    avg = sum(values) / len(values)
-
-    if avg <= 0:
-        return 1.0
-
-    return current / avg
-
-
-# ============================================================
-# OPEN TRADE
+# GET OPEN TRADE
 # ============================================================
 
 def get_open_trade():
@@ -1603,6 +2350,7 @@ def get_open_trade():
             trade,
             dict
         ):
+
             return dict(trade)
 
     return None
@@ -1651,24 +2399,68 @@ def close_trade(
             entry
         ) * 100
 
-    result = (
-        "WIN"
-        if pnl_pct > 0
-        else
-        "LOSS"
-        if pnl_pct < 0
-        else
-        "BE"
+    risk = safe_float(
+        trade.get(
+            "risk",
+            0
+        )
     )
 
-    completed = dict(trade)
+    if risk > 0:
+
+        if direction == "BUY":
+
+            r_multiple = (
+                exit_price -
+                entry
+            ) / risk
+
+        else:
+
+            r_multiple = (
+                entry -
+                exit_price
+            ) / risk
+
+    else:
+
+        r_multiple = 0.0
+
+    if r_multiple > 0:
+
+        result = "WIN"
+
+    elif r_multiple < 0:
+
+        result = "LOSS"
+
+    else:
+
+        result = "BE"
+
+    completed = dict(
+        trade
+    )
 
     completed.update({
-        "exit": exit_price,
-        "exit_reason": reason,
-        "exit_time": candle_time,
-        "pnl_pct": pnl_pct,
-        "result": result
+
+        "exit":
+            exit_price,
+
+        "exit_reason":
+            reason,
+
+        "exit_time":
+            candle_time,
+
+        "pnl_pct":
+            pnl_pct,
+
+        "r_multiple":
+            r_multiple,
+
+        "result":
+            result
     })
 
     HISTORY.setdefault(
@@ -1693,18 +2485,19 @@ def close_trade(
     )
 
     print(
-        f"[TRADE CLOSED] "
+        "[TRADE CLOSED] "
         f"{trade['symbol']} "
         f"{direction} "
         f"{reason} "
-        f"{pnl_pct:+.2f}%"
+        f"{pnl_pct:+.2f}% "
+        f"{r_multiple:+.2f}R"
     )
 
     return completed
 
 
 # ============================================================
-# CHECK OPEN TRADE
+# UPDATE OPEN TRADE
 # ============================================================
 
 def update_open_trade(
@@ -1720,21 +2513,30 @@ def update_open_trade(
         "symbol"
     ]
 
-    candles = candles_by_symbol.get(
-        symbol,
+    symbol_data = (
+        candles_by_symbol.get(
+            symbol,
+            {}
+        )
+    )
+
+    candles = symbol_data.get(
+        "5m",
         []
     )
 
     if not candles:
+
+        print(
+            f"[WARN] No 5m data for "
+            f"open trade {symbol}"
+        )
+
         return None
 
     direction = trade[
         "direction"
     ]
-
-    entry = safe_float(
-        trade["entry"]
-    )
 
     sl = safe_float(
         trade["sl"]
@@ -1744,29 +2546,40 @@ def update_open_trade(
         trade["tp"]
     )
 
-    last_processed = trade.get(
+    opened_at = safe_float(
+        trade.get(
+            "opened_at",
+            utc_timestamp()
+        )
+    )
+
+    last_checked = trade.get(
         "last_checked_candle"
     )
 
-    new_candles = []
+    # --------------------------------------------------------
+    # Timeout
+    # --------------------------------------------------------
+
+    max_hold_seconds = (
+        MAX_HOLDING_HOURS *
+        3600
+    )
+
+    # --------------------------------------------------------
+    # Process new closed candles
+    # --------------------------------------------------------
 
     for candle in candles:
 
         if (
-            last_processed is not None
-            and candle["time"] <=
-            last_processed
+            last_checked is not None
+            and
+            candle["time"] <=
+            last_checked
         ):
+
             continue
-
-        new_candles.append(
-            candle
-        )
-
-    if not new_candles:
-        return None
-
-    for candle in new_candles:
 
         high = candle["high"]
         low = candle["low"]
@@ -1788,9 +2601,9 @@ def update_open_trade(
                 high >= tp
             )
 
-            # Conservative assumption:
-            # if both are touched on the same candle,
-            # SL comes first.
+            # Conservative:
+            # if both are touched,
+            # SL is assumed first.
             if hit_sl:
 
                 exit_price = sl
@@ -1831,14 +2644,43 @@ def update_open_trade(
 
         if exit_price is not None:
 
-            result = close_trade(
+            return close_trade(
                 trade,
                 exit_price,
                 reason,
                 candle["time"]
             )
 
-            return result
+        # ----------------------------------------------------
+        # TIMEOUT
+        # ----------------------------------------------------
+
+        candle_seconds = (
+            candle["time"] /
+            1000
+        )
+
+        if (
+            candle_seconds -
+            opened_at
+            >=
+            max_hold_seconds
+        ):
+
+            exit_price = (
+                candle["close"]
+            )
+
+            return close_trade(
+                trade,
+                exit_price,
+                "TIMEOUT",
+                candle["time"]
+            )
+
+    # --------------------------------------------------------
+    # Save updated state
+    # --------------------------------------------------------
 
     STATE[
         "open_trade"
@@ -1863,48 +2705,185 @@ def performance():
         []
     )
 
-    total = len(trades)
+    total = len(
+        trades
+    )
 
     wins = sum(
         1
         for t in trades
-        if t.get("result") == "WIN"
+        if t.get(
+            "result"
+        ) == "WIN"
     )
 
     losses = sum(
         1
         for t in trades
-        if t.get("result") == "LOSS"
+        if t.get(
+            "result"
+        ) == "LOSS"
     )
 
     be = sum(
         1
         for t in trades
-        if t.get("result") == "BE"
+        if t.get(
+            "result"
+        ) == "BE"
     )
 
-    if total > 0:
-        win_rate = (
-            wins /
-            total
-        ) * 100
-    else:
-        win_rate = 0.0
-
-    pnl = sum(
+    win_values = [
         safe_float(
-            t.get("pnl_pct", 0)
+            t.get(
+                "pnl_pct",
+                0
+            )
+        )
+        for t in trades
+        if t.get(
+            "result"
+        ) == "WIN"
+    ]
+
+    loss_values = [
+        abs(
+            safe_float(
+                t.get(
+                    "pnl_pct",
+                    0
+                )
+            )
+        )
+        for t in trades
+        if t.get(
+            "result"
+        ) == "LOSS"
+    ]
+
+    avg_win = (
+        sum(win_values) /
+        len(win_values)
+        if win_values
+        else 0.0
+    )
+
+    avg_loss = (
+        sum(loss_values) /
+        len(loss_values)
+        if loss_values
+        else 0.0
+    )
+
+    gross_profit = sum(
+        win_values
+    )
+
+    gross_loss = sum(
+        loss_values
+    )
+
+    if gross_loss > 0:
+
+        profit_factor = (
+            gross_profit /
+            gross_loss
+        )
+
+    else:
+
+        profit_factor = (
+            float("inf")
+            if gross_profit > 0
+            else 0.0
+        )
+
+    net_pct = sum(
+        safe_float(
+            t.get(
+                "pnl_pct",
+                0
+            )
         )
         for t in trades
     )
 
+    net_r = sum(
+        safe_float(
+            t.get(
+                "r_multiple",
+                0
+            )
+        )
+        for t in trades
+    )
+
+    # --------------------------------------------------------
+    # Max losing streak
+    # --------------------------------------------------------
+
+    current_streak = 0
+    max_losing_streak = 0
+
+    for trade in trades:
+
+        if trade.get(
+            "result"
+        ) == "LOSS":
+
+            current_streak += 1
+
+            max_losing_streak = max(
+                max_losing_streak,
+                current_streak
+            )
+
+        else:
+
+            current_streak = 0
+
+    win_rate = (
+        wins /
+        total *
+        100
+        if total > 0
+        else 0.0
+    )
+
     return {
-        "total": total,
-        "wins": wins,
-        "losses": losses,
-        "be": be,
-        "win_rate": win_rate,
-        "pnl": pnl
+
+        "total":
+            total,
+
+        "wins":
+            wins,
+
+        "losses":
+            losses,
+
+        "be":
+            be,
+
+        "win_rate":
+            win_rate,
+
+        "avg_win":
+            avg_win,
+
+        "avg_loss":
+            avg_loss,
+
+        "profit_factor":
+            profit_factor,
+
+        "net_pct":
+            net_pct,
+
+        "net_r":
+            net_r,
+
+        "max_losing_streak":
+            max_losing_streak
     }
 
 
@@ -1950,13 +2929,68 @@ def live_pnl(
 
 
 # ============================================================
-# REPORT
+# CURRENT PRICE
+# ============================================================
+
+def get_current_prices(
+    top_symbols,
+    all_tickers=None
+):
+
+    prices = {}
+
+    if all_tickers is None:
+
+        all_tickers = (
+            get_futures_tickers()
+        )
+
+    for ticker in all_tickers:
+
+        symbol = str(
+            ticker.get(
+                "symbol",
+                ""
+            )
+        ).strip()
+
+        if not symbol:
+            continue
+
+        mark = safe_float(
+            ticker.get(
+                "markPrice",
+                0
+            )
+        )
+
+        if mark <= 0:
+
+            mark = safe_float(
+                ticker.get(
+                    "last",
+                    0
+                )
+            )
+
+        if mark > 0:
+
+            prices[
+                symbol
+            ] = mark
+
+    return prices
+
+
+# ============================================================
+# BUILD REPORT
 # ============================================================
 
 def build_report(
     top_symbols,
-    signals,
-    current_prices
+    selected_signal,
+    current_prices,
+    closed_trade=None
 ):
 
     perf = performance()
@@ -1970,7 +3004,7 @@ def build_report(
     lines = []
 
     lines.append(
-        "📡 *KRAKEN FUTURES PRICE ACTION REPORT*"
+        "📡 *KRAKEN FUTURES ICHIMOKU REPORT*"
     )
 
     lines.append(
@@ -1978,44 +3012,164 @@ def build_report(
     )
 
     lines.append(
-        f"⏱ *{TIMEFRAME.upper()} CLOSED | TOP {TOP_SYMBOLS}*"
+        f"⏱ *5m CLOSED | TOP {TOP_SYMBOLS}*"
     )
 
     lines.append(
-        "🤖 *TENKAN/KIJUN + BOX BREAKOUT*"
+        "🤖 *ICHIMOKU MTF*"
+    )
+
+    lines.append(
+        "1H → Trend | 30m → Confirm | "
+        "15m → Pullback | 5m → Trigger"
     )
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
+
+    # ========================================================
+    # PERFORMANCE
+    # ========================================================
 
     lines.append(
         "📊 *PERFORMANCE*"
     )
 
     lines.append(
-        f"Trades {perf['total']} | "
-        f"🟢 {perf['wins']} | "
-        f"🔴 {perf['losses']} | "
-        f"⚪ {perf['be']}"
+        f"Trades: `{perf['total']}`"
     )
 
     lines.append(
-        f"🏆 WR: {perf['win_rate']:.1f}%"
+        f"🟢 Wins: `{perf['wins']}`"
     )
 
     lines.append(
-        f"📈 Closed P&L: "
-        f"{perf['pnl']:+.2f}%"
+        f"🔴 Losses: `{perf['losses']}`"
     )
+
+    lines.append(
+        f"⚪ BE: `{perf['be']}`"
+    )
+
+    lines.append(
+        f"🏆 Win Rate: "
+        f"`{perf['win_rate']:.2f}%`"
+    )
+
+    lines.append(
+        f"📈 Net P&L: "
+        f"`{perf['net_pct']:+.2f}%`"
+    )
+
+    lines.append(
+        f"💰 Net R: "
+        f"`{perf['net_r']:+.2f}R`"
+    )
+
+    lines.append(
+        f"📊 Avg Win: "
+        f"`{perf['avg_win']:+.2f}%`"
+    )
+
+    lines.append(
+        f"📉 Avg Loss: "
+        f"`-{perf['avg_loss']:.2f}%`"
+    )
+
+    if math.isinf(
+        perf["profit_factor"]
+    ):
+
+        pf_text = "∞"
+
+    else:
+
+        pf_text = (
+            f"{perf['profit_factor']:.2f}"
+        )
+
+    lines.append(
+        f"⚖️ Profit Factor: "
+        f"`{pf_text}`"
+    )
+
+    lines.append(
+        f"🔥 Max Losing Streak: "
+        f"`{perf['max_losing_streak']}`"
+    )
+
+    # ========================================================
+    # CLOSED TRADE
+    # ========================================================
+
+    if closed_trade:
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        result = closed_trade.get(
+            "result",
+            "BE"
+        )
+
+        emoji = (
+            "🟢"
+            if result == "WIN"
+            else
+            "🔴"
+            if result == "LOSS"
+            else
+            "⚪"
+        )
+
+        lines.append(
+            f"{emoji} *TRADE CLOSED*"
+        )
+
+        lines.append(
+            f"{closed_trade['symbol']} "
+            f"{closed_trade['direction']}"
+        )
+
+        lines.append(
+            f"Entry: "
+            f"`{fmt_price(closed_trade['entry'])}`"
+        )
+
+        lines.append(
+            f"Exit: "
+            f"`{fmt_price(closed_trade['exit'])}`"
+        )
+
+        lines.append(
+            f"Reason: "
+            f"`{closed_trade['exit_reason']}`"
+        )
+
+        lines.append(
+            f"Result: "
+            f"`{result}`"
+        )
+
+        lines.append(
+            f"P&L: "
+            f"`{closed_trade['pnl_pct']:+.2f}%`"
+        )
+
+        lines.append(
+            f"R: "
+            f"`{closed_trade['r_multiple']:+.2f}R`"
+        )
+
+    # ========================================================
+    # OPEN TRADE
+    # ========================================================
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
-
-    # --------------------------------------------------------
-    # OPEN TRADE
-    # --------------------------------------------------------
 
     if open_trade:
 
@@ -2023,7 +3177,7 @@ def build_report(
             "symbol"
         ]
 
-        price = safe_float(
+        current_price = safe_float(
             current_prices.get(
                 symbol,
                 open_trade["entry"]
@@ -2032,7 +3186,7 @@ def build_report(
 
         pnl = live_pnl(
             open_trade,
-            price
+            current_price
         )
 
         emoji = (
@@ -2042,34 +3196,84 @@ def build_report(
             "🔴"
         )
 
+        entry = safe_float(
+            open_trade["entry"]
+        )
+
+        sl = safe_float(
+            open_trade["sl"]
+        )
+
+        tp = safe_float(
+            open_trade["tp"]
+        )
+
+        # Distance to TP/SL
+        if open_trade[
+            "direction"
+        ] == "BUY":
+
+            tp_distance = (
+                (
+                    tp -
+                    current_price
+                ) /
+                current_price
+            ) * 100
+
+            sl_distance = (
+                (
+                    current_price -
+                    sl
+                ) /
+                current_price
+            ) * 100
+
+        else:
+
+            tp_distance = (
+                (
+                    current_price -
+                    tp
+                ) /
+                current_price
+            ) * 100
+
+            sl_distance = (
+                (
+                    sl -
+                    current_price
+                ) /
+                current_price
+            ) * 100
+
+        age_hours = (
+            utc_timestamp() -
+            safe_float(
+                open_trade.get(
+                    "opened_at",
+                    utc_timestamp()
+                )
+            )
+        ) / 3600
+
         lines.append(
             "📌 *OPEN TRADE*"
         )
 
         lines.append(
-            f"{emoji} "
-            f"*{symbol}* "
-            f"{open_trade['direction']}"
+            f"{emoji} *{symbol}* "
+            f"*{open_trade['direction']}*"
         )
 
         lines.append(
-            f"Entry: "
-            f"`{fmt_price(open_trade['entry'])}`"
+            f"Signal: "
+            f"`{fmt_price(entry)}`"
         )
 
         lines.append(
-            f"SL: "
-            f"`{fmt_price(open_trade['sl'])}`"
-        )
-
-        lines.append(
-            f"TP: "
-            f"`{fmt_price(open_trade['tp'])}`"
-        )
-
-        lines.append(
-            f"Price: "
-            f"`{fmt_price(price)}`"
+            f"Current: "
+            f"`{fmt_price(current_price)}`"
         )
 
         lines.append(
@@ -2078,18 +3282,45 @@ def build_report(
         )
 
         lines.append(
-            f"Box High: "
-            f"`{fmt_price(open_trade['box_high'])}`"
+            f"🎯 TP: "
+            f"`{fmt_price(tp)}` "
+            f"({tp_distance:+.2f}% from current)"
         )
 
         lines.append(
-            f"Box Low: "
-            f"`{fmt_price(open_trade['box_low'])}`"
+            f"🛑 SL: "
+            f"`{fmt_price(sl)}` "
+            f"({sl_distance:+.2f}% from current)"
         )
 
         lines.append(
-            f"Swing: "
-            f"`{fmt_price(open_trade['swing_price'])}`"
+            f"RR: "
+            f"`1:{safe_float(open_trade.get('rr', TARGET_RR)):.2f}`"
+        )
+
+        lines.append(
+            f"Age: "
+            f"`{age_hours:.1f}h / {MAX_HOLDING_HOURS}h`"
+        )
+
+        lines.append(
+            f"1H Score: "
+            f"`{open_trade.get('score_1h', 0):.1f}/10`"
+        )
+
+        lines.append(
+            f"30m Score: "
+            f"`{open_trade.get('score_30m', 0):.1f}/10`"
+        )
+
+        lines.append(
+            f"15m Score: "
+            f"`{open_trade.get('score_15m', 0):.1f}/10`"
+        )
+
+        lines.append(
+            f"Combined: "
+            f"`{open_trade.get('combined_score', 0):.2f}/10`"
         )
 
     else:
@@ -2102,106 +3333,109 @@ def build_report(
             "None"
         )
 
+    # ========================================================
+    # NEW SIGNAL
+    # ========================================================
+
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    # --------------------------------------------------------
-    # SIGNAL
-    # --------------------------------------------------------
+    if selected_signal:
 
-    if signals:
+        signal = selected_signal
+
+        emoji = (
+            "🟢"
+            if signal["direction"] == "BUY"
+            else
+            "🔴"
+        )
 
         lines.append(
             "🚨 *NEW SIGNAL*"
         )
 
-        for signal in signals:
+        lines.append(
+            f"{emoji} *{signal['symbol']}* "
+            f"*{signal['direction']}*"
+        )
 
-            symbol = signal[
-                "symbol"
-            ]
+        lines.append(
+            f"Signal Price: "
+            f"`{fmt_price(signal['entry'])}`"
+        )
 
-            direction = signal[
-                "direction"
-            ]
+        lines.append(
+            f"Current Price: "
+            f"`{fmt_price(current_prices.get(signal['symbol'], signal['entry']))}`"
+        )
 
-            emoji = (
-                "🟢"
-                if direction == "BUY"
-                else
-                "🔴"
-            )
+        lines.append(
+            f"🎯 TP: "
+            f"`{fmt_price(signal['tp'])}`"
+        )
 
-            lines.append(
-                f"{emoji} *{symbol}* "
-                f"*{direction}*"
-            )
+        lines.append(
+            f"🛑 SL: "
+            f"`{fmt_price(signal['sl'])}`"
+        )
 
-            lines.append(
-                f"Entry: "
-                f"`{fmt_price(signal['entry'])}`"
-            )
+        lines.append(
+            f"TP %: "
+            f"`{abs(signal['tp'] - signal['entry']) / signal['entry'] * 100:.2f}%`"
+        )
 
-            lines.append(
-                f"SL: "
-                f"`{fmt_price(signal['sl'])}`"
-            )
+        lines.append(
+            f"SL %: "
+            f"`{abs(signal['sl'] - signal['entry']) / signal['entry'] * 100:.2f}%`"
+        )
 
-            lines.append(
-                f"TP: "
-                f"`{fmt_price(signal['tp'])}`"
-            )
+        lines.append(
+            f"RR: "
+            f"`1:{signal['rr']:.2f}`"
+        )
 
-            lines.append(
-                f"RR: "
-                f"`1:{signal['rr']:.2f}`"
-            )
+        lines.append(
+            f"1H: "
+            f"`{signal['score_1h']:.1f}/10`"
+        )
 
-            lines.append(
-                f"Box High: "
-                f"`{fmt_price(signal['box_high'])}`"
-            )
+        lines.append(
+            f"30m: "
+            f"`{signal['score_30m']:.1f}/10`"
+        )
 
-            lines.append(
-                f"Box Low: "
-                f"`{fmt_price(signal['box_low'])}`"
-            )
+        lines.append(
+            f"15m: "
+            f"`{signal['score_15m']:.1f}/10`"
+        )
 
-            lines.append(
-                f"Box Width: "
-                f"`{fmt_price(signal['box_width'])}`"
-            )
+        lines.append(
+            f"🏆 Combined Score: "
+            f"`{signal['combined_score']:.2f}/10`"
+        )
 
-            lines.append(
-                f"Cross: "
-                f"`{signal['cross_direction']}`"
-            )
+        lines.append(
+            f"ATR 5m: "
+            f"`{fmt_price(signal['atr_5m'])}`"
+        )
 
-            lines.append(
-                f"Cross Time: "
-                f"`{format_time(signal['cross_time'])}`"
-            )
+        lines.append(
+            f"Distance Tenkan: "
+            f"`{signal['distance_tenkan_atr']:.2f} ATR`"
+        )
 
-            lines.append(
-                f"Breakout: "
-                f"`{format_time(signal['breakout_time'])}`"
-            )
+        lines.append(
+            f"Distance Kijun: "
+            f"`{signal['distance_kijun_atr']:.2f} ATR`"
+        )
 
-            lines.append(
-                f"Swing: "
-                f"`{signal['swing_type']}` "
-                f"`{fmt_price(signal['swing_price'])}`"
-            )
-
-            lines.append(
-                f"Volume Ratio: "
-                f"`{signal.get('volume_ratio', 1.0):.2f}x`"
-            )
-
-            lines.append(
-                "━━━━━━━━━━━━━━━━━━"
-            )
+        lines.append(
+            f"Swing: "
+            f"`{signal['swing_type']}` "
+            f"`{fmt_price(signal['swing_price'])}`"
+        )
 
     else:
 
@@ -2209,13 +3443,22 @@ def build_report(
             "🔎 *NEW SIGNAL*"
         )
 
-        lines.append(
-            "No fresh breakout."
-        )
+        if open_trade:
 
-    # --------------------------------------------------------
-    # SCAN SUMMARY
-    # --------------------------------------------------------
+            lines.append(
+                "⛔ Signal locked: "
+                "one trade is already open."
+            )
+
+        else:
+
+            lines.append(
+                "No valid MTF setup."
+            )
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
@@ -2227,76 +3470,81 @@ def build_report(
     )
 
     lines.append(
-        f"🎯 Signals: "
-        f"`{len(signals)}`"
+        f"🎯 New Signal: "
+        f"`{1 if selected_signal else 0}`"
     )
 
     lines.append(
-        "⚠️ Signal simulator only"
+        f"🔒 Max Open: "
+        f"`{MAX_OPEN_TRADES}`"
     )
 
-    return "\n".join(lines)
+    lines.append(
+        "⚠️ Virtual signal simulator only"
+    )
+
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
-# MAIN ANALYSIS
+# MAIN
 # ============================================================
 
 def main():
 
-    print("=" * 70)
+    print("=" * 75)
 
     print(
-        "KRAKEN FUTURES PRICE ACTION SCANNER"
+        "KRAKEN FUTURES ICHIMOKU MTF SCANNER"
     )
 
-    print("=" * 70)
+    print("=" * 75)
 
     print(
-        "Provider: Kraken Futures"
-    )
-
-    print(
-        f"Timeframe: {TIMEFRAME.upper()}"
+        f"TOP SYMBOLS: {TOP_SYMBOLS}"
     )
 
     print(
-        f"Top: {TOP_SYMBOLS}"
+        "1H  = Trend"
     )
 
     print(
-        f"Tenkan: {TENKAN_PERIOD}"
+        "30m = Confirmation"
     )
 
     print(
-        f"Kijun: {KIJUN_PERIOD}"
+        "15m = Pullback"
     )
 
     print(
-        f"Box: {BOX_PERIOD} candles"
+        "5m  = Entry Trigger"
     )
 
     print(
-        "Swing: "
-        f"{SWING_LEFT} left + "
-        f"{SWING_RIGHT} right"
+        f"RR = 1:{TARGET_RR}"
     )
 
     print(
-        f"TP: {TP_BOX_PERCENT * 100:.0f}% Box"
+        f"Max Holding = "
+        f"{MAX_HOLDING_HOURS}h"
     )
 
     print(
-        f"Max Open: {MAX_OPEN_TRADES}"
+        f"Max Open Trades = "
+        f"{MAX_OPEN_TRADES}"
     )
 
-    print("=" * 70)
+    print("=" * 75)
 
-    # --------------------------------------------------------
-    # TOP SYMBOLS
-    # --------------------------------------------------------
+    # ========================================================
+    # TOP 100
+    # ========================================================
 
-    top_symbols = get_top_symbols()
+    top_symbols = (
+        get_top_symbols()
+    )
 
     if not top_symbols:
 
@@ -2304,12 +3552,59 @@ def main():
             "No eligible Kraken perpetuals found."
         )
 
-    # --------------------------------------------------------
+    # ========================================================
+    # OPEN TRADE SYMBOL
+    # ========================================================
+
+    existing_trade = (
+        get_open_trade()
+    )
+
+    # If an open trade is no longer
+    # inside TOP 100, add it temporarily.
+    if existing_trade:
+
+        open_symbol = (
+            existing_trade[
+                "symbol"
+            ]
+        )
+
+        known_symbols = {
+            x["symbol"]
+            for x in top_symbols
+        }
+
+        if open_symbol not in known_symbols:
+
+            print(
+                "[INFO] Open trade symbol "
+                "not in current TOP 100. "
+                "Adding it for management:"
+                f" {open_symbol}"
+            )
+
+            top_symbols.append({
+                "symbol":
+                    open_symbol,
+                "pair":
+                    "",
+                "volume_quote":
+                    0,
+                "mark_price":
+                    0,
+                "ticker":
+                    {},
+                "instrument":
+                    {}
+            })
+
+    # ========================================================
     # CANDLES
-    # --------------------------------------------------------
+    # ========================================================
 
     candles_by_symbol = (
-        fetch_top_candles(
+        fetch_all_candles(
             top_symbols
         )
     )
@@ -2317,45 +3612,38 @@ def main():
     if not candles_by_symbol:
 
         raise RuntimeError(
-            "No candle data received from Kraken."
+            "No candle data received."
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # CURRENT PRICES
-    # --------------------------------------------------------
+    # ========================================================
 
-    current_prices = {}
+    all_tickers = (
+        get_futures_tickers()
+    )
 
-    for item in top_symbols:
-
-        symbol = item[
-            "symbol"
-        ]
-
-        price = safe_float(
-            item.get(
-                "mark_price",
-                0
-            )
+    current_prices = (
+        get_current_prices(
+            top_symbols,
+            all_tickers
         )
+    )
 
-        if price > 0:
-            current_prices[
-                symbol
-            ] = price
+    # ========================================================
+    # MANAGE OPEN TRADE FIRST
+    # ========================================================
 
-    # --------------------------------------------------------
-    # MANAGE EXISTING TRADE FIRST
-    # --------------------------------------------------------
-
-    closed_trade = update_open_trade(
-        candles_by_symbol
+    closed_trade = (
+        update_open_trade(
+            candles_by_symbol
+        )
     )
 
     if closed_trade:
 
         print(
-            "[INFO] Existing trade closed:"
+            "[INFO] Open trade closed:"
         )
 
         print(
@@ -2366,35 +3654,50 @@ def main():
             )
         )
 
-    # --------------------------------------------------------
-    # CHECK MAX OPEN
-    # --------------------------------------------------------
+    # ========================================================
+    # CHECK OPEN TRADE
+    # ========================================================
 
-    open_trade = get_open_trade()
+    open_trade = (
+        get_open_trade()
+    )
 
-    signals = []
+    selected_signal = None
+
+    # ========================================================
+    # ONLY SCAN IF NO OPEN TRADE
+    # ========================================================
 
     if open_trade:
 
         print(
-            "[INFO] One trade is already open."
+            "[INFO] TRADE LOCK ACTIVE"
         )
 
         print(
-            f"[INFO] "
+            f"[INFO] Open: "
             f"{open_trade['symbol']} "
             f"{open_trade['direction']}"
+        )
+
+        print(
+            "[INFO] No new signal will be generated."
         )
 
     else:
 
         print(
-            "[INFO] No open trade. "
-            "Scanning for new signal..."
+            "[INFO] No open trade."
         )
 
+        print(
+            "[INFO] Scanning all symbols..."
+        )
+
+        candidates = []
+
         # ----------------------------------------------------
-        # Analyze symbols
+        # Analyze TOP 100
         # ----------------------------------------------------
 
         for item in top_symbols:
@@ -2403,41 +3706,48 @@ def main():
                 "symbol"
             ]
 
-            candles = candles_by_symbol.get(
-                symbol,
-                []
+            symbol_data = (
+                candles_by_symbol.get(
+                    symbol,
+                    {}
+                )
             )
 
-            if not candles:
+            if not symbol_data:
                 continue
 
             try:
 
-                signal = analyze_symbol(
-                    symbol,
-                    candles
+                signal = (
+                    analyze_symbol(
+                        symbol,
+                        symbol_data
+                    )
                 )
 
-                if not signal:
+                if signal is None:
                     continue
 
-                # ------------------------------------------------
-                # Volume ratio
-                # ------------------------------------------------
-
-                breakout_index = signal[
-                    "breakout_index"
-                ]
-
+                # Volume rank
                 signal[
-                    "volume_ratio"
-                ] = volume_ratio(
-                    candles,
-                    breakout_index
+                    "volume_quote"
+                ] = safe_float(
+                    item.get(
+                        "volume_quote",
+                        0
+                    )
                 )
 
-                signals.append(
+                candidates.append(
                     signal
+                )
+
+                print(
+                    "[CANDIDATE] "
+                    f"{symbol} "
+                    f"{signal['direction']} "
+                    f"Score="
+                    f"{signal['combined_score']:.2f}"
                 )
 
             except Exception as e:
@@ -2447,88 +3757,168 @@ def main():
                     f"{symbol}: {e}"
                 )
 
-        # ----------------------------------------------------
-        # Only ONE signal allowed
-        # ----------------------------------------------------
+        # ====================================================
+        # SELECT ONLY BEST SIGNAL
+        # ====================================================
 
-        if signals:
+        if candidates:
 
-            # Prefer the freshest breakout.
-            signals.sort(
-                key=lambda x:
-                    x["breakout_time"],
+            # Highest combined MTF score first.
+            # Then freshest signal.
+            # Then volume.
+            candidates.sort(
+                key=lambda x: (
+                    x["combined_score"],
+                    -x["signal_age_minutes"],
+                    math.log10(
+                        max(
+                            x.get(
+                                "volume_quote",
+                                1
+                            ),
+                            1
+                        )
+                    )
+                ),
                 reverse=True
             )
 
-            selected = signals[0]
-
-            signals = [
-                selected
-            ]
-
-            # ------------------------------------------------
-            # Open virtual trade
-            # ------------------------------------------------
-
-            trade = dict(
-                selected
-            )
-
-            trade[
-                "opened_at"
-            ] = utc_timestamp()
-
-            trade[
-                "last_checked_candle"
-            ] = selected[
-                "breakout_time"
-            ]
-
-            STATE[
-                "open_trade"
-            ] = trade
-
-            STATE[
-                "last_signal_key"
-            ] = selected[
-                "signal_key"
-            ]
-
-            save_json(
-                STATE_FILE,
-                STATE
+            selected_signal = (
+                candidates[0]
             )
 
             print(
-                "[SIGNAL] "
-                f"{selected['symbol']} "
-                f"{selected['direction']}"
+                "=" * 75
+            )
+
+            print(
+                "[BEST SIGNAL]"
+            )
+
+            print(
+                f"Symbol: "
+                f"{selected_signal['symbol']}"
+            )
+
+            print(
+                f"Direction: "
+                f"{selected_signal['direction']}"
+            )
+
+            print(
+                f"Combined Score: "
+                f"{selected_signal['combined_score']:.2f}/10"
+            )
+
+            print(
+                f"1H: "
+                f"{selected_signal['score_1h']:.1f}"
+            )
+
+            print(
+                f"30m: "
+                f"{selected_signal['score_30m']:.1f}"
+            )
+
+            print(
+                f"15m: "
+                f"{selected_signal['score_15m']:.1f}"
             )
 
             print(
                 f"Entry: "
-                f"{fmt_price(selected['entry'])}"
+                f"{fmt_price(selected_signal['entry'])}"
             )
 
             print(
                 f"SL: "
-                f"{fmt_price(selected['sl'])}"
+                f"{fmt_price(selected_signal['sl'])}"
             )
 
             print(
                 f"TP: "
-                f"{fmt_price(selected['tp'])}"
+                f"{fmt_price(selected_signal['tp'])}"
             )
+
+            print(
+                f"RR: "
+                f"1:{selected_signal['rr']:.2f}"
+            )
+
+            print(
+                "=" * 75
+            )
+
+            # ------------------------------------------------
+            # Duplicate protection
+            # ------------------------------------------------
+
+            last_signal_key = STATE.get(
+                "last_signal_key"
+            )
+
+            if (
+                last_signal_key ==
+                selected_signal[
+                    "signal_key"
+                ]
+            ):
+
+                print(
+                    "[INFO] Duplicate signal "
+                    "blocked."
+                )
+
+                selected_signal = None
+
+            else:
+
+                # ------------------------------------------------
+                # OPEN VIRTUAL TRADE
+                # ------------------------------------------------
+
+                trade = dict(
+                    selected_signal
+                )
+
+                trade[
+                    "opened_at"
+                ] = utc_timestamp()
+
+                trade[
+                    "last_checked_candle"
+                ] = selected_signal[
+                    "signal_time"
+                ]
+
+                STATE[
+                    "open_trade"
+                ] = trade
+
+                STATE[
+                    "last_signal_key"
+                ] = selected_signal[
+                    "signal_key"
+                ]
+
+                save_json(
+                    STATE_FILE,
+                    STATE
+                )
+
+                print(
+                    "[INFO] Virtual trade opened."
+                )
 
         else:
 
             print(
-                "[INFO] No fresh signal."
+                "[INFO] No valid signal."
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SAVE LAST CHECK
-    # --------------------------------------------------------
+    # ========================================================
 
     STATE[
         "last_checked"
@@ -2544,31 +3934,36 @@ def main():
         HISTORY
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # TELEGRAM
-    # --------------------------------------------------------
+    # ========================================================
 
     report = build_report(
         top_symbols,
-        signals,
-        current_prices
+        selected_signal,
+        current_prices,
+        closed_trade
     )
 
     send_telegram(
         report
     )
 
-    print("=" * 70)
+    # ========================================================
+    # FINAL
+    # ========================================================
+
+    print("=" * 75)
 
     print(
         "SCAN COMPLETE"
     )
 
-    print("=" * 70)
+    print("=" * 75)
 
 
 # ============================================================
-# FATAL ERROR HANDLER
+# FATAL ERROR
 # ============================================================
 
 if __name__ == "__main__":
@@ -2579,13 +3974,13 @@ if __name__ == "__main__":
 
     except Exception as e:
 
-        print("=" * 70)
+        print("=" * 75)
 
         print(
             "FATAL SCANNER ERROR"
         )
 
-        print("=" * 70)
+        print("=" * 75)
 
         print(
             str(e)
@@ -2593,12 +3988,8 @@ if __name__ == "__main__":
 
         traceback.print_exc()
 
-        error_text = (
-            f"{type(e).__name__}: {e}"
-        )
-
         send_telegram_error(
-            error_text
+            f"{type(e).__name__}: {e}"
         )
 
         raise
