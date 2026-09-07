@@ -1,28 +1,28 @@
 {
   "open": {
-    "DASH/USDT_BUY_1788748800000": {
-      "trade_id": "DASH/USDT_BUY_1788748800000",
-      "symbol": "DASH/USDT",
-      "exchange_symbol": "DASH/USD:USD",
-      "side": "BUY",
-      "entry": 71.67,
-      "sl": 69.9621,
-      "tp": 73.3779,
-      "risk_pct": 2.441,
+    "BTC/USDT_SELL_1788752100000": {
+      "trade_id": "BTC/USDT_SELL_1788752100000",
+      "symbol": "BTC/USDT",
+      "exchange_symbol": "BTC/USD:USD",
+      "side": "SELL",
+      "entry": 79659.0,
+      "sl": 79835.0,
+      "tp": 79483.0,
+      "risk_pct": 0.22,
       "score": 100,
       "reasons": [
-        "Bullish Structure",
+        "Bearish Structure",
         "BOS",
         "Pullback",
-        "Bullish Engulfing",
-        "Bullish Momentum",
-        "Volume 2.6x"
+        "Bearish Engulfing",
+        "Bearish Momentum",
+        "Volume 1.2x"
       ],
-      "atr": 0.569286,
-      "opened_at": "2026-09-07T02:45:19.254042+00:00",
-      "opened_at_tehran": "1404/10/17 06:15:19",
-      "entry_candle": "2026-09-07T02:40:00+00:00",
-      "entry_candle_timestamp": 1788748800000
+      "atr": 158.929,
+      "opened_at": "2026-09-07T03:41:32.588685+00:00",
+      "opened_at_tehran": "1404/10/17 07:11:32",
+      "entry_candle": "2026-09-07T03:35:00+00:00",
+      "entry_candle_timestamp": 1788752100000
     }
   },
   "last_signals": {
@@ -44,6 +44,11 @@
     "DASH/USD:USD": {
       "timestamp": 1788748800000,
       "side": "BUY",
+      "score": 100
+    },
+    "BTC/USD:USD": {
+      "timestamp": 1788752100000,
+      "side": "SELL",
       "score": 100
     }
   }

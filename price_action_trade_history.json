@@ -91,5 +91,36 @@
     "closed_at": "2026-09-07T02:45:19.253942+00:00",
     "closed_at_tehran": "1404/10/17 06:15:19",
     "exit_candle_close": 2527.4
+  },
+  {
+    "trade_id": "DASH/USDT_BUY_1788748800000",
+    "symbol": "DASH/USDT",
+    "exchange_symbol": "DASH/USD:USD",
+    "side": "BUY",
+    "entry": 71.67,
+    "sl": 69.9621,
+    "tp": 73.3779,
+    "risk_pct": 2.441,
+    "score": 100,
+    "reasons": [
+      "Bullish Structure",
+      "BOS",
+      "Pullback",
+      "Bullish Engulfing",
+      "Bullish Momentum",
+      "Volume 2.6x"
+    ],
+    "atr": 0.569286,
+    "opened_at": "2026-09-07T02:45:19.254042+00:00",
+    "opened_at_tehran": "1404/10/17 06:15:19",
+    "entry_candle": "2026-09-07T02:40:00+00:00",
+    "entry_candle_timestamp": 1788748800000,
+    "status": "LOSS",
+    "exit": 69.9621,
+    "pnl_pct": -2.383,
+    "r": -1.0,
+    "closed_at": "2026-09-07T03:41:32.588552+00:00",
+    "closed_at_tehran": "1404/10/17 07:11:32",
+    "exit_candle_close": 69.91
   }
 ]
