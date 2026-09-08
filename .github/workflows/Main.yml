@@ -1,4 +1,4 @@
-name: Binance Futures Price Action Scanner
+name: Kraken Futures Ichimoku Scanner
 
 on:
   schedule:
@@ -10,7 +10,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: binance-futures-price-action-scanner
+  group: kraken-futures-ichimoku-scanner
   cancel-in-progress: false
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
 
@@ -50,91 +50,87 @@ jobs:
 
       - name: Install Dependencies
         run: |
+          echo "=========================================="
+          echo "INSTALLING DEPENDENCIES"
+          echo "=========================================="
+
           python -m pip install --upgrade pip
           pip install requests
 
           python -c "import requests; print('requests OK:', requests.__version__)"
 
+          echo "=========================================="
+
 
       # ============================================================
-      # CHECK FILES
+      # CHECK SCANNER
       # ============================================================
 
       - name: Check Scanner
         run: |
+
           echo "=========================================="
-          echo "CHECKING SCANNER"
+          echo "CHECKING KRAKEN ICHIMOKU SCANNER"
           echo "=========================================="
 
+          echo "Working directory:"
           pwd
+
+          echo ""
+          echo "Repository files:"
           ls -la
 
-          test -f scanner.py
+          echo ""
+          echo "Checking scanner.py..."
+
+          if [ ! -f scanner.py ]; then
+            echo "ERROR: scanner.py not found."
+            exit 1
+          fi
 
           python -m py_compile scanner.py
 
-          echo "scanner.py syntax OK"
+          echo "scanner.py syntax OK."
 
-          echo "=========================================="
-          echo "CHECKING PERSISTENT STATE"
-          echo "=========================================="
+          echo ""
+          echo "Checking state files..."
 
-          if [ -f binance_price_action_state.json ]; then
+          if [ -f ichimoku_state.json ]; then
             echo "State file FOUND:"
-            ls -lh binance_price_action_state.json
+            ls -lh ichimoku_state.json
           else
             echo "State file NOT FOUND."
-            echo "This is the first run or the file has not been created yet."
+            echo "This is the first run."
           fi
 
-          if [ -f binance_price_action_trade_history.json ]; then
+          if [ -f ichimoku_trade_history.json ]; then
             echo "Trade history FOUND:"
-            ls -lh binance_price_action_trade_history.json
+            ls -lh ichimoku_trade_history.json
           else
             echo "Trade history NOT FOUND."
-            echo "This is the first run or the file has not been created yet."
+            echo "This is the first run."
           fi
 
+          echo ""
+          echo "=========================================="
+          echo "CHECK COMPLETE"
+          echo "=========================================="
+
 
       # ============================================================
-      # RUN SCANNER
+      # CHECK SECRETS
       # ============================================================
 
-      - name: Run Scanner
+      - name: Check Secrets
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-          COINAPI_KEY: ${{ secrets.COINAPI_KEY }}
-
-          PYTHONUNBUFFERED: "1"
-
         run: |
 
           echo "=========================================="
-          echo "BINANCE FUTURES PRICE ACTION SCANNER"
+          echo "CHECKING REQUIRED SECRETS"
           echo "=========================================="
-
-          echo "Exchange: Binance USD-M Futures"
-          echo "Data Provider: CoinAPI"
-          echo "Timeframe: 5m CLOSED"
-          echo "TOP: 30"
-
-          echo "Tenkan: 9"
-          echo "Kijun: 26"
-
-          echo "Box: 26 candles"
-          echo "Swing: 2 + 2"
-
-          echo "TP: 50% Box"
-          echo "Max Open: 1"
-
-          echo "=========================================="
-
-          if [ -z "$COINAPI_KEY" ]; then
-            echo "ERROR: COINAPI_KEY is not configured."
-            exit 1
-          fi
 
           if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
             echo "ERROR: TELEGRAM_BOT_TOKEN is not configured."
@@ -146,11 +142,69 @@ jobs:
             exit 1
           fi
 
-          echo "Required secrets detected."
+          echo "TELEGRAM_BOT_TOKEN: OK"
+          echo "TELEGRAM_CHAT_ID: OK"
+
+          echo "No CoinAPI key required."
+          echo "No Binance API key required."
 
           echo "=========================================="
-          echo "STARTING SCANNER"
+          echo "SECRETS CHECK OK"
           echo "=========================================="
+
+
+      # ============================================================
+      # RUN SCANNER
+      # ============================================================
+
+      - name: Run Kraken Ichimoku Scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          PYTHONUNBUFFERED: "1"
+
+        run: |
+
+          echo "============================================================"
+          echo "KRAKEN FUTURES ICHIMOKU SCANNER"
+          echo "============================================================"
+
+          echo "Exchange: Kraken Futures"
+          echo "Data Source: Kraken Futures API"
+
+          echo "Timeframe: 5m CLOSED"
+
+          echo "Trend: 1H"
+          echo "Confirmation: 30m"
+          echo "Pullback: 15m"
+          echo "Trigger: 5m"
+
+          echo "TOP: 100"
+
+          echo "Tenkan: 9"
+          echo "Kijun: 26"
+          echo "Senkou B: 52"
+          echo "Displacement: 26"
+
+          echo "Max Open: 4"
+          echo "Max Long: 2"
+          echo "Max Short: 2"
+
+          echo "Minimum Risk: 0.50%"
+          echo "Risk/Reward: 1:1"
+
+          echo "Timeout: 4 hours"
+
+          echo "Kraken Resolutions:"
+          echo "  1h"
+          echo "  30m"
+          echo "  15m"
+          echo "  5m"
+
+          echo "============================================================"
+          echo "STARTING SCANNER"
+          echo "============================================================"
 
           set -o pipefail
 
@@ -158,24 +212,24 @@ jobs:
 
           EXIT_CODE=${PIPESTATUS[0]}
 
-          echo "=========================================="
+          echo "============================================================"
           echo "SCANNER EXIT CODE: $EXIT_CODE"
-          echo "=========================================="
+          echo "============================================================"
 
           exit $EXIT_CODE
 
 
       # ============================================================
-      # SHOW ERROR LOG
+      # SHOW LOG ON FAILURE
       # ============================================================
 
       - name: Show Scanner Log On Failure
         if: failure()
         run: |
 
-          echo "=========================================="
-          echo "FULL SCANNER ERROR LOG"
-          echo "=========================================="
+          echo "============================================================"
+          echo "FULL KRAKEN SCANNER ERROR LOG"
+          echo "============================================================"
 
           if [ -f scanner_output.log ]; then
             cat scanner_output.log
@@ -183,59 +237,79 @@ jobs:
             echo "scanner_output.log was not created."
           fi
 
-          echo "=========================================="
+          echo ""
+          echo "============================================================"
+          echo "REPOSITORY FILES"
+          echo "============================================================"
 
           ls -la
 
+          echo ""
+          echo "============================================================"
+
 
       # ============================================================
-      # SHOW STATE AFTER SCANNER
+      # VERIFY STATE
       # ============================================================
 
       - name: Verify Scanner State
         if: always()
         run: |
 
-          echo "=========================================="
+          echo "============================================================"
           echo "STATE AFTER SCANNER"
-          echo "=========================================="
+          echo "============================================================"
 
-          if [ -f binance_price_action_state.json ]; then
+          if [ -f ichimoku_state.json ]; then
+
             echo "STATE FILE:"
-            ls -lh binance_price_action_state.json
-            echo "------------------------------------------"
-            cat binance_price_action_state.json
+            ls -lh ichimoku_state.json
+
+            echo "------------------------------------------------------------"
+
+            cat ichimoku_state.json
+
           else
-            echo "WARNING: State file does not exist."
+
+            echo "WARNING: ichimoku_state.json does not exist."
+
           fi
 
-          echo "=========================================="
+          echo ""
+          echo "============================================================"
 
-          if [ -f binance_price_action_trade_history.json ]; then
+          if [ -f ichimoku_trade_history.json ]; then
+
             echo "TRADE HISTORY:"
-            ls -lh binance_price_action_trade_history.json
-            echo "------------------------------------------"
-            cat binance_price_action_trade_history.json
+            ls -lh ichimoku_trade_history.json
+
+            echo "------------------------------------------------------------"
+
+            cat ichimoku_trade_history.json
+
           else
-            echo "WARNING: Trade history file does not exist."
+
+            echo "WARNING: ichimoku_trade_history.json does not exist."
+
           fi
 
-          echo "=========================================="
+          echo ""
+          echo "============================================================"
 
 
       # ============================================================
-      # SAVE LOG / STATE AS ARTIFACT
+      # SAVE LOG + STATE AS ARTIFACT
       # ============================================================
 
-      - name: Save Scanner Log
+      - name: Save Kraken Scanner Artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: binance-scanner-log-${{ github.run_number }}
+          name: kraken-ichimoku-scanner-${{ github.run_number }}
           path: |
             scanner_output.log
-            binance_price_action_state.json
-            binance_price_action_trade_history.json
+            ichimoku_state.json
+            ichimoku_trade_history.json
           if-no-files-found: ignore
           retention-days: 7
 
@@ -248,37 +322,56 @@ jobs:
         if: always()
         run: |
 
-          echo "=========================================="
-          echo "SAVING SCANNER STATE"
-          echo "=========================================="
+          echo "============================================================"
+          echo "SAVING KRAKEN SCANNER STATE"
+          echo "============================================================"
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          echo ""
           echo "Current branch:"
           git branch --show-current
 
+          echo ""
           echo "Repository status BEFORE commit:"
           git status --short
 
+          echo ""
+          echo "Adding state files..."
+
           # --------------------------------------------------------
-          # Add state/history files
+          # Add state
           # --------------------------------------------------------
 
-          if [ -f binance_price_action_state.json ]; then
-            git add binance_price_action_state.json
+          if [ -f ichimoku_state.json ]; then
+
+            git add ichimoku_state.json
+
+            echo "Added ichimoku_state.json"
+
           fi
 
-          if [ -f binance_price_action_trade_history.json ]; then
-            git add binance_price_action_trade_history.json
+          # --------------------------------------------------------
+          # Add history
+          # --------------------------------------------------------
+
+          if [ -f ichimoku_trade_history.json ]; then
+
+            git add ichimoku_trade_history.json
+
+            echo "Added ichimoku_trade_history.json"
+
           fi
 
+          echo ""
           echo "Repository status AFTER git add:"
           git status --short
 
-          # --------------------------------------------------------
-          # Commit changes
-          # --------------------------------------------------------
+          echo ""
+          echo "============================================================"
+          echo "COMMIT CHECK"
+          echo "============================================================"
 
           if git diff --cached --quiet; then
 
@@ -286,14 +379,15 @@ jobs:
 
           else
 
+            echo "State changes detected."
+
             git commit \
-              -m "Update Binance futures scanner state [skip ci]"
+              -m "Update Kraken Ichimoku scanner state [skip ci]"
 
             echo "State committed."
 
-            # ------------------------------------------------------
-            # Push changes
-            # ------------------------------------------------------
+            echo ""
+            echo "Pushing state to GitHub..."
 
             git push
 
@@ -301,6 +395,7 @@ jobs:
 
           fi
 
-          echo "=========================================="
+          echo ""
+          echo "============================================================"
           echo "STATE SAVE COMPLETE"
-          echo "=========================================="
+          echo "============================================================"
