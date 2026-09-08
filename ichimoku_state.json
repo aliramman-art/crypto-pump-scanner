@@ -69,6 +69,29 @@
       ],
       "opened_at": "2026-09-08T14:36:51.094045+00:00",
       "status": "OPEN"
+    },
+    {
+      "symbol": "PF_INJUSD",
+      "side": "LONG",
+      "entry": 6.51,
+      "sl": 6.18089,
+      "tp": 6.83911,
+      "risk": 0.32911,
+      "reward": 0.32911,
+      "risk_pct": 5.055453149001536,
+      "rr": 1.0,
+      "score": 100,
+      "trigger": 6,
+      "s1": 10.0,
+      "s30": 6.0,
+      "s15": 10.0,
+      "s5": 6.0,
+      "atr": 0.06114285714285713,
+      "pullback_patterns": [
+        "Morning Star"
+      ],
+      "opened_at": "2026-09-08T14:53:13.606123+00:00",
+      "status": "OPEN"
     }
   ]
 }
