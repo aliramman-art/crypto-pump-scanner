@@ -9,9 +9,14 @@ on:
 permissions:
   contents: write
 
+# ============================================================
+# PREVENT OVERLAPPING RUNS
+# ============================================================
+
 concurrency:
   group: kraken-futures-ichimoku-scanner
-  cancel-in-progress: false
+  cancel-in-progress: true
+
 
 jobs:
 
@@ -23,9 +28,9 @@ jobs:
 
     steps:
 
-      # ============================================================
+      # ========================================================
       # CHECKOUT
-      # ============================================================
+      # ========================================================
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,9 +39,9 @@ jobs:
           persist-credentials: true
 
 
-      # ============================================================
+      # ========================================================
       # PYTHON
-      # ============================================================
+      # ========================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -44,17 +49,19 @@ jobs:
           python-version: "3.11"
 
 
-      # ============================================================
+      # ========================================================
       # INSTALL DEPENDENCIES
-      # ============================================================
+      # ========================================================
 
       - name: Install Dependencies
         run: |
+
           echo "=========================================="
           echo "INSTALLING DEPENDENCIES"
           echo "=========================================="
 
           python -m pip install --upgrade pip
+
           pip install requests
 
           python -c "import requests; print('requests OK:', requests.__version__)"
@@ -62,9 +69,9 @@ jobs:
           echo "=========================================="
 
 
-      # ============================================================
+      # ========================================================
       # CHECK SCANNER
-      # ============================================================
+      # ========================================================
 
       - name: Check Scanner
         run: |
@@ -84,8 +91,11 @@ jobs:
           echo "Checking scanner.py..."
 
           if [ ! -f scanner.py ]; then
+
             echo "ERROR: scanner.py not found."
+
             exit 1
+
           fi
 
           python -m py_compile scanner.py
@@ -96,20 +106,30 @@ jobs:
           echo "Checking state files..."
 
           if [ -f ichimoku_state.json ]; then
+
             echo "State file FOUND:"
+
             ls -lh ichimoku_state.json
+
           else
+
             echo "State file NOT FOUND."
-            echo "This is the first run."
+
           fi
 
+
           if [ -f ichimoku_trade_history.json ]; then
+
             echo "Trade history FOUND:"
+
             ls -lh ichimoku_trade_history.json
+
           else
+
             echo "Trade history NOT FOUND."
-            echo "This is the first run."
+
           fi
+
 
           echo ""
           echo "=========================================="
@@ -117,13 +137,16 @@ jobs:
           echo "=========================================="
 
 
-      # ============================================================
+      # ========================================================
       # CHECK SECRETS
-      # ============================================================
+      # ========================================================
 
       - name: Check Secrets
+
         env:
+
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
         run: |
@@ -132,34 +155,49 @@ jobs:
           echo "CHECKING REQUIRED SECRETS"
           echo "=========================================="
 
+
           if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
+
             echo "ERROR: TELEGRAM_BOT_TOKEN is not configured."
+
             exit 1
+
           fi
+
 
           if [ -z "$TELEGRAM_CHAT_ID" ]; then
+
             echo "ERROR: TELEGRAM_CHAT_ID is not configured."
+
             exit 1
+
           fi
 
+
           echo "TELEGRAM_BOT_TOKEN: OK"
+
           echo "TELEGRAM_CHAT_ID: OK"
 
           echo "No CoinAPI key required."
+
           echo "No Binance API key required."
+
 
           echo "=========================================="
           echo "SECRETS CHECK OK"
           echo "=========================================="
 
 
-      # ============================================================
+      # ========================================================
       # RUN SCANNER
-      # ============================================================
+      # ========================================================
 
       - name: Run Kraken Ichimoku Scanner
+
         env:
+
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
           PYTHONUNBUFFERED: "1"
@@ -171,40 +209,47 @@ jobs:
           echo "============================================================"
 
           echo "Exchange: Kraken Futures"
+
           echo "Data Source: Kraken Futures API"
 
           echo "Timeframe: 5m CLOSED"
 
           echo "Trend: 1H"
+
           echo "Confirmation: 30m"
+
           echo "Pullback: 15m"
+
           echo "Trigger: 5m"
 
           echo "TOP: 100"
 
           echo "Tenkan: 9"
+
           echo "Kijun: 26"
+
           echo "Senkou B: 52"
+
           echo "Displacement: 26"
 
           echo "Max Open: 4"
+
           echo "Max Long: 2"
+
           echo "Max Short: 2"
 
           echo "Minimum Risk: 0.50%"
+
           echo "Risk/Reward: 1:1"
 
           echo "Timeout: 4 hours"
 
-          echo "Kraken Resolutions:"
-          echo "  1h"
-          echo "  30m"
-          echo "  15m"
-          echo "  5m"
+          echo "============================================================"
+
+          echo "STARTING SCANNER"
 
           echo "============================================================"
-          echo "STARTING SCANNER"
-          echo "============================================================"
+
 
           set -o pipefail
 
@@ -212,57 +257,78 @@ jobs:
 
           EXIT_CODE=${PIPESTATUS[0]}
 
+
           echo "============================================================"
+
           echo "SCANNER EXIT CODE: $EXIT_CODE"
+
           echo "============================================================"
+
 
           exit $EXIT_CODE
 
 
-      # ============================================================
+      # ========================================================
       # SHOW LOG ON FAILURE
-      # ============================================================
+      # ========================================================
 
       - name: Show Scanner Log On Failure
+
         if: failure()
+
         run: |
 
           echo "============================================================"
+
           echo "FULL KRAKEN SCANNER ERROR LOG"
+
           echo "============================================================"
+
 
           if [ -f scanner_output.log ]; then
+
             cat scanner_output.log
+
           else
+
             echo "scanner_output.log was not created."
+
           fi
 
+
           echo ""
+
           echo "============================================================"
+
           echo "REPOSITORY FILES"
+
           echo "============================================================"
+
 
           ls -la
 
-          echo ""
-          echo "============================================================"
 
-
-      # ============================================================
+      # ========================================================
       # VERIFY STATE
-      # ============================================================
+      # ========================================================
 
       - name: Verify Scanner State
+
         if: always()
+
         run: |
 
           echo "============================================================"
+
           echo "STATE AFTER SCANNER"
+
           echo "============================================================"
+
 
           if [ -f ichimoku_state.json ]; then
 
             echo "STATE FILE:"
+
             ls -lh ichimoku_state.json
 
             echo "------------------------------------------------------------"
@@ -275,12 +341,16 @@ jobs:
 
           fi
 
+
           echo ""
+
           echo "============================================================"
+
 
           if [ -f ichimoku_trade_history.json ]; then
 
             echo "TRADE HISTORY:"
+
             ls -lh ichimoku_trade_history.json
 
             echo "------------------------------------------------------------"
@@ -293,56 +363,83 @@ jobs:
 
           fi
 
+
           echo ""
+
           echo "============================================================"
 
 
-      # ============================================================
+      # ========================================================
       # SAVE LOG + STATE AS ARTIFACT
-      # ============================================================
+      # ========================================================
 
       - name: Save Kraken Scanner Artifacts
+
         if: always()
+
         uses: actions/upload-artifact@v4
+
         with:
+
           name: kraken-ichimoku-scanner-${{ github.run_number }}
+
           path: |
+
             scanner_output.log
+
             ichimoku_state.json
+
             ichimoku_trade_history.json
+
           if-no-files-found: ignore
+
           retention-days: 7
 
 
-      # ============================================================
+      # ========================================================
       # SAVE STATE TO GITHUB
-      # ============================================================
+      # ========================================================
 
       - name: Save Scanner State
+
         if: always()
+
         run: |
 
           echo "============================================================"
+
           echo "SAVING KRAKEN SCANNER STATE"
+
           echo "============================================================"
 
+
           git config user.name "github-actions[bot]"
+
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+
           echo ""
+
           echo "Current branch:"
+
           git branch --show-current
 
+
           echo ""
+
           echo "Repository status BEFORE commit:"
+
           git status --short
 
+
           echo ""
+
           echo "Adding state files..."
 
-          # --------------------------------------------------------
-          # Add state
-          # --------------------------------------------------------
+
+          # ------------------------------------------------------
+          # ADD STATE
+          # ------------------------------------------------------
 
           if [ -f ichimoku_state.json ]; then
 
@@ -352,9 +449,10 @@ jobs:
 
           fi
 
-          # --------------------------------------------------------
-          # Add history
-          # --------------------------------------------------------
+
+          # ------------------------------------------------------
+          # ADD HISTORY
+          # ------------------------------------------------------
 
           if [ -f ichimoku_trade_history.json ]; then
 
@@ -364,14 +462,22 @@ jobs:
 
           fi
 
-          echo ""
-          echo "Repository status AFTER git add:"
-          git status --short
 
           echo ""
+
+          echo "Repository status AFTER git add:"
+
+          git status --short
+
+
+          echo ""
+
           echo "============================================================"
+
           echo "COMMIT CHECK"
+
           echo "============================================================"
+
 
           if git diff --cached --quiet; then
 
@@ -381,21 +487,31 @@ jobs:
 
             echo "State changes detected."
 
+
             git commit \
               -m "Update Kraken Ichimoku scanner state [skip ci]"
 
+
             echo "State committed."
 
+
             echo ""
+
             echo "Pushing state to GitHub..."
 
+
             git push
+
 
             echo "State successfully pushed to GitHub."
 
           fi
 
+
           echo ""
+
           echo "============================================================"
+
           echo "STATE SAVE COMPLETE"
+
           echo "============================================================"
