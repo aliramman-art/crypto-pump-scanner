@@ -44,29 +44,6 @@
       "status": "OPEN"
     },
     {
-      "symbol": "PF_CRVUSD",
-      "side": "SHORT",
-      "entry": 0.3619,
-      "sl": 0.365169,
-      "tp": 0.358631,
-      "risk": 0.003269000000000022,
-      "reward": 0.003269000000000022,
-      "risk_pct": 0.9032882011605476,
-      "rr": 1.0,
-      "score": 100,
-      "trigger": 6,
-      "s1": -6.0,
-      "s30": -10.0,
-      "s15": -10.0,
-      "s5": -3.0,
-      "atr": 0.0006857142857142816,
-      "pullback_patterns": [
-        "Bearish Engulfing"
-      ],
-      "opened_at": "2026-09-08T08:18:44.318412+00:00",
-      "status": "OPEN"
-    },
-    {
       "symbol": "PF_VETUSD",
       "side": "LONG",
       "entry": 0.007529,
