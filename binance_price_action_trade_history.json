@@ -1,1 +1,26 @@
-[]
+[
+  {
+    "id": "PF_CRVUSD|SHORT|1788839700",
+    "symbol": "PF_CRVUSD",
+    "direction": "SHORT",
+    "entry": 0.3639,
+    "sl": 0.3659,
+    "tp": 0.3619,
+    "risk_percent": 0.5496,
+    "score": 90.5,
+    "score_1h": -10,
+    "score_30m": -10,
+    "score_15m": 6,
+    "trigger": 9,
+    "opened_at": "2026-09-08T04:04:44.607405+00:00",
+    "opened_timestamp": 1788840284,
+    "entry_candle_time": 1788839700,
+    "status": "CLOSED",
+    "exit": 0.3619,
+    "closed_at": "2026-09-08T04:17:30.271834+00:00",
+    "closed_timestamp": 1788841050,
+    "close_reason": "TP",
+    "result": "WIN",
+    "pnl_percent": 0.5496
+  }
+]
