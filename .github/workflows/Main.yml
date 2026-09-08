@@ -31,6 +31,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
 
 
       # ============================================================
@@ -56,15 +57,16 @@ jobs:
 
 
       # ============================================================
-      # CHECK SCANNER
+      # CHECK FILES
       # ============================================================
 
       - name: Check Scanner
         run: |
           echo "=========================================="
-          echo "CHECKING scanner.py"
+          echo "CHECKING SCANNER"
           echo "=========================================="
 
+          pwd
           ls -la
 
           test -f scanner.py
@@ -72,6 +74,26 @@ jobs:
           python -m py_compile scanner.py
 
           echo "scanner.py syntax OK"
+
+          echo "=========================================="
+          echo "CHECKING PERSISTENT STATE"
+          echo "=========================================="
+
+          if [ -f binance_price_action_state.json ]; then
+            echo "State file FOUND:"
+            ls -lh binance_price_action_state.json
+          else
+            echo "State file NOT FOUND."
+            echo "This is the first run or the file has not been created yet."
+          fi
+
+          if [ -f binance_price_action_trade_history.json ]; then
+            echo "Trade history FOUND:"
+            ls -lh binance_price_action_trade_history.json
+          else
+            echo "Trade history NOT FOUND."
+            echo "This is the first run or the file has not been created yet."
+          fi
 
 
       # ============================================================
@@ -83,7 +105,6 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-          # CoinAPI
           COINAPI_KEY: ${{ secrets.COINAPI_KEY }}
 
           PYTHONUNBUFFERED: "1"
@@ -112,7 +133,6 @@ jobs:
 
           if [ -z "$COINAPI_KEY" ]; then
             echo "ERROR: COINAPI_KEY is not configured."
-            echo "Please add COINAPI_KEY to GitHub Secrets."
             exit 1
           fi
 
@@ -169,6 +189,41 @@ jobs:
 
 
       # ============================================================
+      # SHOW STATE AFTER SCANNER
+      # ============================================================
+
+      - name: Verify Scanner State
+        if: always()
+        run: |
+
+          echo "=========================================="
+          echo "STATE AFTER SCANNER"
+          echo "=========================================="
+
+          if [ -f binance_price_action_state.json ]; then
+            echo "STATE FILE:"
+            ls -lh binance_price_action_state.json
+            echo "------------------------------------------"
+            cat binance_price_action_state.json
+          else
+            echo "WARNING: State file does not exist."
+          fi
+
+          echo "=========================================="
+
+          if [ -f binance_price_action_trade_history.json ]; then
+            echo "TRADE HISTORY:"
+            ls -lh binance_price_action_trade_history.json
+            echo "------------------------------------------"
+            cat binance_price_action_trade_history.json
+          else
+            echo "WARNING: Trade history file does not exist."
+          fi
+
+          echo "=========================================="
+
+
+      # ============================================================
       # SAVE LOG / STATE AS ARTIFACT
       # ============================================================
 
@@ -176,12 +231,13 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: binance-scanner-log
+          name: binance-scanner-log-${{ github.run_number }}
           path: |
             scanner_output.log
             binance_price_action_state.json
             binance_price_action_trade_history.json
           if-no-files-found: ignore
+          retention-days: 7
 
 
       # ============================================================
@@ -192,13 +248,37 @@ jobs:
         if: always()
         run: |
 
+          echo "=========================================="
+          echo "SAVING SCANNER STATE"
+          echo "=========================================="
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add \
-            binance_price_action_state.json \
-            binance_price_action_trade_history.json \
-            || true
+          echo "Current branch:"
+          git branch --show-current
+
+          echo "Repository status BEFORE commit:"
+          git status --short
+
+          # --------------------------------------------------------
+          # Add state/history files
+          # --------------------------------------------------------
+
+          if [ -f binance_price_action_state.json ]; then
+            git add binance_price_action_state.json
+          fi
+
+          if [ -f binance_price_action_trade_history.json ]; then
+            git add binance_price_action_trade_history.json
+          fi
+
+          echo "Repository status AFTER git add:"
+          git status --short
+
+          # --------------------------------------------------------
+          # Commit changes
+          # --------------------------------------------------------
 
           if git diff --cached --quiet; then
 
@@ -207,8 +287,20 @@ jobs:
           else
 
             git commit \
-              -m "Update Binance futures scanner state"
+              -m "Update Binance futures scanner state [skip ci]"
+
+            echo "State committed."
+
+            # ------------------------------------------------------
+            # Push changes
+            # ------------------------------------------------------
 
             git push
 
+            echo "State successfully pushed to GitHub."
+
           fi
+
+          echo "=========================================="
+          echo "STATE SAVE COMPLETE"
+          echo "=========================================="
