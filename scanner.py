@@ -1,6 +1,8 @@
 # ============================================================
-# KRAKEN FUTURES ICHIMOKU TOP RANKER v13.1
+# KRAKEN FUTURES ICHIMOKU TOP RANKER v13.2
 # ============================================================
+# FIXED TRADE STATE + CLOSED CANDLE EXIT TRACKING
+#
 # Kraken Futures
 # TOP 100 USD perpetual markets
 #
@@ -20,12 +22,15 @@
 #   max 2 LONG
 #   max 2 SHORT
 #
+# IMPORTANT:
+# State and history JSON files MUST be committed by GitHub Actions
+# so open trades survive between workflow runs.
+#
 # ============================================================
 
 import os
 import json
 import time
-import math
 import requests
 
 from datetime import datetime, timezone
@@ -40,10 +45,16 @@ BASE_URL = "https://futures.kraken.com"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-STRATEGY_VERSION = "v13.1"
+STRATEGY_VERSION = "v13.2"
 
+# Keep same filenames so v13.1 state can be migrated.
 STATE_FILE = "ichimoku_state_v13_1.json"
 HISTORY_FILE = "ichimoku_trade_history_v13_1.json"
+
+SUPPORTED_OLD_VERSIONS = {
+    "v13.1",
+    "v13.2",
+}
 
 
 # ============================================================
@@ -126,7 +137,7 @@ SESSION = requests.Session()
 
 SESSION.headers.update(
     {
-        "User-Agent": "Kraken-Ichimoku-v13.1"
+        "User-Agent": "Kraken-Ichimoku-v13.2"
     }
 )
 
@@ -136,9 +147,11 @@ SESSION.headers.update(
 # ============================================================
 
 def http_get(path, params=None):
+
     url = BASE_URL + path
 
     try:
+
         response = SESSION.get(
             url,
             params=params,
@@ -151,7 +164,9 @@ def http_get(path, params=None):
 
     except Exception as e:
 
-        print(f"[HTTP ERROR] {path} -> {e}")
+        print(
+            f"[HTTP ERROR] {path} -> {e}"
+        )
 
         return None
 
@@ -161,23 +176,49 @@ def http_get(path, params=None):
 # ============================================================
 
 def now_ts():
+
     return int(time.time())
 
 
 def utc_now():
+
     return datetime.now(timezone.utc)
 
 
 def iso_now():
-    return utc_now().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    return utc_now().strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+
+
+def timestamp_to_iso(ts):
+
+    try:
+
+        return datetime.fromtimestamp(
+            int(ts),
+            timezone.utc,
+        ).strftime(
+            "%Y-%m-%d %H:%M:%S UTC"
+        )
+
+    except Exception:
+
+        return iso_now()
 
 
 # ============================================================
 # JSON
 # ============================================================
 
-def load_json_file(filename, default):
+def load_json_file(
+    filename,
+    default,
+):
+
     if not os.path.exists(filename):
+
         return default
 
     try:
@@ -192,12 +233,18 @@ def load_json_file(filename, default):
 
     except Exception as e:
 
-        print(f"[JSON LOAD ERROR] {filename}: {e}")
+        print(
+            f"[JSON LOAD ERROR] "
+            f"{filename}: {e}"
+        )
 
         return default
 
 
-def save_json_file(filename, data):
+def save_json_file(
+    filename,
+    data,
+):
 
     tmp_file = filename + ".tmp"
 
@@ -225,12 +272,20 @@ def save_json_file(filename, data):
 
     except Exception as e:
 
-        print(f"[JSON SAVE ERROR] {filename}: {e}")
+        print(
+            f"[JSON SAVE ERROR] "
+            f"{filename}: {e}"
+        )
 
         try:
 
-            if os.path.exists(tmp_file):
-                os.remove(tmp_file)
+            if os.path.exists(
+                tmp_file
+            ):
+
+                os.remove(
+                    tmp_file
+                )
 
         except Exception:
             pass
@@ -251,20 +306,14 @@ def default_state():
     }
 
 
-def load_state():
+def normalize_trade_state(
+    state
+):
 
-    state = load_json_file(
-        STATE_FILE,
-        None,
-    )
-
-    if not isinstance(state, dict):
-
-        return default_state()
-
-    if state.get("strategy_version") != STRATEGY_VERSION:
-
-        print("[STATE] Version mismatch -> starting fresh state")
+    if not isinstance(
+        state,
+        dict,
+    ):
 
         return default_state()
 
@@ -274,6 +323,128 @@ def load_state():
     ):
 
         state["open_trades"] = []
+
+    # --------------------------------------------------------
+    # Normalize every open trade
+    # --------------------------------------------------------
+
+    normalized = []
+
+    for trade in state["open_trades"]:
+
+        if not isinstance(
+            trade,
+            dict,
+        ):
+
+            continue
+
+        if not trade.get("symbol"):
+
+            continue
+
+        if not trade.get("direction"):
+
+            continue
+
+        # Old trades remain OPEN unless explicitly closed.
+        if not trade.get("status"):
+
+            trade["status"] = "OPEN"
+
+        if trade.get("status") != "OPEN":
+
+            continue
+
+        # Ensure tracking fields exist.
+        trade.setdefault(
+            "last_price",
+            trade.get("entry", 0),
+        )
+
+        trade.setdefault(
+            "pnl_pct",
+            0.0,
+        )
+
+        trade.setdefault(
+            "opened_at",
+            now_ts(),
+        )
+
+        trade.setdefault(
+            "opened_at_iso",
+            timestamp_to_iso(
+                trade["opened_at"]
+            ),
+        )
+
+        trade.setdefault(
+            "signal_candle_time",
+            trade.get(
+                "opened_at",
+                0,
+            ),
+        )
+
+        trade.setdefault(
+            "last_checked_candle",
+            trade.get(
+                "signal_candle_time",
+                0,
+            ),
+        )
+
+        normalized.append(
+            trade
+        )
+
+    state["open_trades"] = normalized
+
+    state["strategy_version"] = STRATEGY_VERSION
+    state["updated_at"] = iso_now()
+
+    return state
+
+
+def load_state():
+
+    state = load_json_file(
+        STATE_FILE,
+        None,
+    )
+
+    if not isinstance(
+        state,
+        dict,
+    ):
+
+        print(
+            "[STATE] No valid state -> fresh state"
+        )
+
+        return default_state()
+
+    version = state.get(
+        "strategy_version"
+    )
+
+    if version not in SUPPORTED_OLD_VERSIONS:
+
+        print(
+            "[STATE] Unknown version -> "
+            "normalizing existing state"
+        )
+
+    else:
+
+        print(
+            f"[STATE] Loading {version} state"
+        )
+
+    state = normalize_trade_state(
+        state
+    )
 
     return state
 
@@ -291,6 +462,65 @@ def default_history():
     }
 
 
+def deduplicate_history(
+    trades
+):
+
+    result = []
+
+    seen = set()
+
+    for trade in trades:
+
+        if not isinstance(
+            trade,
+            dict,
+        ):
+
+            continue
+
+        trade_id = trade.get("id")
+
+        if not trade_id:
+
+            trade_id = (
+                str(
+                    trade.get(
+                        "symbol",
+                        "",
+                    )
+                )
+                + "_"
+                + str(
+                    trade.get(
+                        "direction",
+                        "",
+                    )
+                )
+                + "_"
+                + str(
+                    trade.get(
+                        "signal_candle_time",
+                        "",
+                    )
+                )
+            )
+
+        if trade_id in seen:
+
+            continue
+
+        seen.add(
+            trade_id
+        )
+
+        result.append(
+            trade
+        )
+
+    return result
+
+
 def load_history():
 
     history = load_json_file(
@@ -298,13 +528,10 @@ def load_history():
         None,
     )
 
-    if not isinstance(history, dict):
-
-        return default_history()
-
-    if history.get("strategy_version") != STRATEGY_VERSION:
-
-        print("[HISTORY] Version mismatch -> starting fresh history")
+    if not isinstance(
+        history,
+        dict,
+    ):
 
         return default_history()
 
@@ -319,54 +546,29 @@ def load_history():
         history["trades"]
     )
 
+    # Do NOT erase old history just because
+    # strategy version changed.
+    history["strategy_version"] = STRATEGY_VERSION
+    history["updated_at"] = iso_now()
+
     return history
 
 
-# ============================================================
-# HISTORY DEDUPLICATION
-# ============================================================
-
-def deduplicate_history(trades):
-
-    result = []
-
-    seen = set()
-
-    for trade in trades:
-
-        if not isinstance(trade, dict):
-            continue
-
-        trade_id = trade.get("id")
-
-        if not trade_id:
-
-            trade_id = (
-                str(trade.get("symbol", ""))
-                + "_"
-                + str(trade.get("direction", ""))
-                + "_"
-                + str(trade.get("signal_candle_time", ""))
-            )
-
-        if trade_id in seen:
-            continue
-
-        seen.add(trade_id)
-
-        result.append(trade)
-
-    return result
-
-
-def history_contains_trade(history, trade):
+def history_contains_trade(
+    history,
+    trade,
+):
 
     trade_id = trade.get("id")
 
     if not trade_id:
+
         return False
 
-    for item in history.get("trades", []):
+    for item in history.get(
+        "trades",
+        [],
+    ):
 
         if item.get("id") == trade_id:
 
@@ -375,7 +577,10 @@ def history_contains_trade(history, trade):
     return False
 
 
-def append_history_once(history, trade):
+def append_history_once(
+    history,
+    trade,
+):
 
     if history_contains_trade(
         history,
@@ -410,7 +615,10 @@ def get_instruments():
 
         return []
 
-    if isinstance(data, dict):
+    if isinstance(
+        data,
+        dict,
+    ):
 
         for key in (
             "instruments",
@@ -425,7 +633,10 @@ def get_instruments():
 
                 return data[key]
 
-    if isinstance(data, list):
+    if isinstance(
+        data,
+        list,
+    ):
 
         return data
 
@@ -446,7 +657,10 @@ def get_tickers():
 
         return []
 
-    if isinstance(data, dict):
+    if isinstance(
+        data,
+        dict,
+    ):
 
         for key in (
             "tickers",
@@ -461,7 +675,10 @@ def get_tickers():
 
                 return data[key]
 
-    if isinstance(data, list):
+    if isinstance(
+        data,
+        list,
+    ):
 
         return data
 
@@ -469,22 +686,30 @@ def get_tickers():
 
 
 # ============================================================
-# SYMBOL NORMALIZATION
+# SYMBOL
 # ============================================================
 
-def normalize_symbol(symbol):
+def normalize_symbol(
+    symbol
+):
 
     if not symbol:
+
         return ""
 
-    return str(symbol).strip()
+    return str(
+        symbol
+    ).strip()
 
 
 # ============================================================
-# NUMBER HELPERS
+# NUMBER
 # ============================================================
 
-def safe_float(value, default=0.0):
+def safe_float(
+    value,
+    default=0.0,
+):
 
     try:
 
@@ -513,6 +738,7 @@ def build_market_metadata():
             ticker,
             dict,
         ):
+
             continue
 
         symbol = normalize_symbol(
@@ -521,10 +747,9 @@ def build_market_metadata():
             or ticker.get("instrument")
         )
 
-        if not symbol:
-            continue
+        if symbol:
 
-        ticker_map[symbol] = ticker
+            ticker_map[symbol] = ticker
 
     markets = []
 
@@ -534,6 +759,7 @@ def build_market_metadata():
             instrument,
             dict,
         ):
+
             continue
 
         symbol = normalize_symbol(
@@ -543,12 +769,13 @@ def build_market_metadata():
         )
 
         if not symbol:
+
             continue
 
         upper_symbol = symbol.upper()
 
         # ----------------------------------------------------
-        # PERPETUAL FILTER
+        # PERPETUAL
         # ----------------------------------------------------
 
         is_perpetual = (
@@ -558,11 +785,15 @@ def build_market_metadata():
         )
 
         if not is_perpetual:
+
             continue
 
-        ticker = ticker_map.get(symbol)
+        ticker = ticker_map.get(
+            symbol
+        )
 
         if not ticker:
+
             continue
 
         # ----------------------------------------------------
@@ -591,6 +822,7 @@ def build_market_metadata():
         )
 
         if volume < MIN_24H_VOLUME:
+
             continue
 
         # ----------------------------------------------------
@@ -605,6 +837,7 @@ def build_market_metadata():
         )
 
         if last_price <= 0:
+
             continue
 
         # ----------------------------------------------------
@@ -673,19 +906,28 @@ def build_market_metadata():
 
 
 # ============================================================
-# TICK SIZE ROUNDING
+# TICK ROUNDING
 # ============================================================
 
-def round_to_tick(price, tick_size):
+def round_to_tick(
+    price,
+    tick_size,
+):
 
-    price = safe_float(price)
+    price = safe_float(
+        price
+    )
 
-    tick_size = safe_float(tick_size)
+    tick_size = safe_float(
+        tick_size
+    )
 
     if price <= 0:
+
         return price
 
     if tick_size <= 0:
+
         return price
 
     steps = round(
@@ -696,10 +938,12 @@ def round_to_tick(price, tick_size):
 
 
 # ============================================================
-# CANDLES
+# CANDLE PARSER
 # ============================================================
 
-def parse_candle(item):
+def parse_candle(
+    item
+):
 
     if isinstance(
         item,
@@ -739,10 +983,13 @@ def parse_candle(item):
             or 0
         )
 
-    elif isinstance(
-        item,
-        list,
-    ) and len(item) >= 5:
+    elif (
+        isinstance(
+            item,
+            list,
+        )
+        and len(item) >= 5
+    ):
 
         ts = item[0]
         open_price = item[1]
@@ -762,9 +1009,10 @@ def parse_candle(item):
 
     try:
 
-        ts = float(ts)
+        ts = float(
+            ts
+        )
 
-        # Kraken timestamps can be milliseconds
         if ts > 10_000_000_000:
 
             ts /= 1000.0
@@ -783,6 +1031,10 @@ def parse_candle(item):
         return None
 
 
+# ============================================================
+# CANDLES
+# ============================================================
+
 def get_candles(
     symbol,
     resolution,
@@ -795,7 +1047,9 @@ def get_candles(
         f"{resolution}"
     )
 
-    data = http_get(path)
+    data = http_get(
+        path
+    )
 
     if not data:
 
@@ -845,9 +1099,12 @@ def get_candles(
 
     for item in raw:
 
-        candle = parse_candle(item)
+        candle = parse_candle(
+            item
+        )
 
         if not candle:
+
             continue
 
         # ----------------------------------------------------
@@ -862,7 +1119,9 @@ def get_candles(
 
             continue
 
-        candles.append(candle)
+        candles.append(
+            candle
+        )
 
     candles.sort(
         key=lambda x: x["time"]
@@ -886,7 +1145,10 @@ def calculate_atr(
 
     trs = []
 
-    for i in range(1, len(candles)):
+    for i in range(
+        1,
+        len(candles),
+    ):
 
         current = candles[i]
         previous = candles[i - 1]
@@ -906,22 +1168,29 @@ def calculate_atr(
             ),
         )
 
-        trs.append(tr)
+        trs.append(
+            tr
+        )
 
     if len(trs) < period:
 
         return 0.0
 
-    return sum(
-        trs[-period:]
-    ) / period
+    return (
+        sum(
+            trs[-period:]
+        )
+        / period
+    )
 
 
 # ============================================================
 # ICHIMOKU
 # ============================================================
 
-def ichimoku_values(candles):
+def ichimoku_values(
+    candles
+):
 
     required = (
         SENKOU_B
@@ -1018,7 +1287,9 @@ def ichimoku_values(candles):
 # ICHIMOKU SCORE
 # ============================================================
 
-def ichimoku_score(candles):
+def ichimoku_score(
+    candles
+):
 
     values = ichimoku_values(
         candles
@@ -1044,10 +1315,6 @@ def ichimoku_score(candles):
 
     score = 0
 
-    # --------------------------------------------------------
-    # PRICE VS CLOUD
-    # --------------------------------------------------------
-
     if price > cloud_top:
 
         score += 3
@@ -1055,10 +1322,6 @@ def ichimoku_score(candles):
     elif price < cloud_bottom:
 
         score -= 3
-
-    # --------------------------------------------------------
-    # TENKAN VS KIJUN
-    # --------------------------------------------------------
 
     if tenkan > kijun:
 
@@ -1068,10 +1331,6 @@ def ichimoku_score(candles):
 
         score -= 2
 
-    # --------------------------------------------------------
-    # CLOSE VS KIJUN
-    # --------------------------------------------------------
-
     if price > kijun:
 
         score += 2
@@ -1080,10 +1339,6 @@ def ichimoku_score(candles):
 
         score -= 2
 
-    # --------------------------------------------------------
-    # CLOSE VS TENKAN
-    # --------------------------------------------------------
-
     if price > tenkan:
 
         score += 1
@@ -1091,10 +1346,6 @@ def ichimoku_score(candles):
     elif price < tenkan:
 
         score -= 1
-
-    # --------------------------------------------------------
-    # CLOUD DIRECTION
-    # --------------------------------------------------------
 
     if span_a > span_b:
 
@@ -1119,7 +1370,9 @@ def ichimoku_score(candles):
 # CANDLE STRUCTURE
 # ============================================================
 
-def candle_structure(candle):
+def candle_structure(
+    candle
+):
 
     open_price = candle["open"]
     high = candle["high"]
@@ -1151,22 +1404,18 @@ def candle_structure(candle):
         - low
     )
 
-    bullish = close > open_price
-
-    bearish = close < open_price
-
     return {
         "body": body,
         "range": candle_range,
         "upper_wick": upper_wick,
         "lower_wick": lower_wick,
-        "bullish": bullish,
-        "bearish": bearish,
+        "bullish": close > open_price,
+        "bearish": close < open_price,
     }
 
 
 # ============================================================
-# REVERSAL PATTERN
+# REVERSAL PATTERNS
 # ============================================================
 
 def is_bullish_engulfing(
@@ -1203,13 +1452,16 @@ def is_bearish_engulfing(
     )
 
 
-def is_bullish_pinbar(candle):
+def is_bullish_pinbar(
+    candle
+):
 
     s = candle_structure(
         candle
     )
 
     if s["range"] <= 0:
+
         return False
 
     return (
@@ -1223,13 +1475,16 @@ def is_bullish_pinbar(candle):
     )
 
 
-def is_bearish_pinbar(candle):
+def is_bearish_pinbar(
+    candle
+):
 
     s = candle_structure(
         candle
     )
 
     if s["range"] <= 0:
+
         return False
 
     return (
@@ -1253,7 +1508,6 @@ def reversal_pattern(
         return False
 
     previous = candles[-2]
-
     current = candles[-1]
 
     if direction == "LONG":
@@ -1310,13 +1564,7 @@ def five_minute_pullback(
         return None
 
     tenkan = ichi["tenkan"]
-
     kijun = ichi["kijun"]
-
-    # --------------------------------------------------------
-    # LAST CLOSED CANDLE = TRIGGER
-    # PREVIOUS MAX 2 CANDLES = PULLBACK
-    # --------------------------------------------------------
 
     trigger = candles[-1]
 
@@ -1326,8 +1574,8 @@ def five_minute_pullback(
             len(candles)
             - 1
             - PULLBACK_MAX_AGE,
-        )
-        : -1
+        ):
+        -1
     ]
 
     if not previous_candidates:
@@ -1345,7 +1593,6 @@ def five_minute_pullback(
     for candle in previous_candidates:
 
         low = candle["low"]
-
         high = candle["high"]
 
         touch_tenkan = (
@@ -1389,7 +1636,6 @@ def five_minute_pullback(
         ):
 
             touched = True
-
             pullback_candle = candle
 
     if not touched:
@@ -1403,10 +1649,6 @@ def five_minute_pullback(
     ):
 
         return None
-
-    # --------------------------------------------------------
-    # TRIGGER
-    # --------------------------------------------------------
 
     ts = candle_structure(
         trigger
@@ -1487,23 +1729,18 @@ def five_minute_pullback(
         )
 
     if not direction_ok:
-
         return None
 
     if not recovery:
-
         return None
 
     if not reclaim:
-
         return None
 
     if not rejection:
-
         return None
 
     if not structure_break:
-
         return None
 
     return {
@@ -1542,32 +1779,21 @@ def calculate_trigger_score(
 
     score = 0
 
-    # Fresh pullback
     score += 1
 
-    # Reversal pattern
     if pullback["reversal"]:
-
         score += 2
 
-    # Rejection
     if pullback["rejection"]:
-
         score += 1
 
-    # Reclaim
     if pullback["reclaim"]:
-
         score += 1
 
-    # Structure break
     if pullback["structure_break"]:
-
         score += 2
 
-    # Body
     if pullback["body_ok"]:
-
         score += 1
 
     return min(
@@ -1604,17 +1830,13 @@ def trend_structure(
     if direction == "LONG":
 
         return (
-            highs[-1]
-            >= highs[-3]
-            and lows[-1]
-            >= lows[-3]
+            highs[-1] >= highs[-3]
+            and lows[-1] >= lows[-3]
         )
 
     return (
-        highs[-1]
-        <= highs[-3]
-        and lows[-1]
-        <= lows[-3]
+        highs[-1] <= highs[-3]
+        and lows[-1] <= lows[-3]
     )
 
 
@@ -1664,7 +1886,6 @@ def final_rank_score(
     trigger_score,
 ):
 
-    # Trend contribution
     trend_component = (
         max(
             0,
@@ -1674,7 +1895,6 @@ def final_rank_score(
         * 35.0
     )
 
-    # 30M confirmation
     confirmation_component = (
         max(
             0,
@@ -1684,7 +1904,6 @@ def final_rank_score(
         * 25.0
     )
 
-    # 15M structure
     structure_component = (
         max(
             0,
@@ -1694,14 +1913,12 @@ def final_rank_score(
         * 20.0
     )
 
-    # Trigger
     trigger_component = (
         trigger_score
         / 10.0
         * 15.0
     )
 
-    # 5M
     five_component = (
         max(
             0,
@@ -1745,11 +1962,10 @@ def structural_levels(
     if len(candles_15m) < 4:
         return None
 
-    recent_5m = candles_5m[-10:]
-
-    recent_15m = candles_15m[-4:]
-
     entry = candles_5m[-1]["close"]
+
+    recent_5m = candles_5m[-10:]
+    recent_15m = candles_15m[-4:]
 
     if direction == "LONG":
 
@@ -1766,19 +1982,12 @@ def structural_levels(
 
         sl = structural_low
 
-        risk = (
-            entry
-            - sl
-        )
+        risk = entry - sl
 
         if risk <= 0:
-
             return None
 
-        tp = (
-            entry
-            + risk * RR
-        )
+        tp = entry + risk * RR
 
     else:
 
@@ -1795,19 +2004,12 @@ def structural_levels(
 
         sl = structural_high
 
-        risk = (
-            sl
-            - entry
-        )
+        risk = sl - entry
 
         if risk <= 0:
-
             return None
 
-        tp = (
-            entry
-            - risk * RR
-        )
+        tp = entry - risk * RR
 
     entry = round_to_tick(
         entry,
@@ -1823,10 +2025,6 @@ def structural_levels(
         tp,
         tick_size,
     )
-
-    # --------------------------------------------------------
-    # FINAL VALIDATION
-    # --------------------------------------------------------
 
     if direction == "LONG":
 
@@ -1869,7 +2067,9 @@ def structural_levels(
 # MTF DATA
 # ============================================================
 
-def get_mtf_data(symbol):
+def get_mtf_data(
+    symbol
+):
 
     candles_5m = get_candles(
         symbol,
@@ -1942,7 +2142,7 @@ def get_mtf_data(symbol):
 
 
 # ============================================================
-# DIAGNOSTIC COUNTERS
+# DIAGNOSTICS
 # ============================================================
 
 def new_diagnostics():
@@ -2030,7 +2230,6 @@ def analyze_candidate(
         )
 
         if not pullback:
-
             return None
 
         diagnostics[
@@ -2042,7 +2241,6 @@ def analyze_candidate(
         )
 
         if trigger_score < MIN_TRIGGER_SCORE:
-
             return None
 
         diagnostics[
@@ -2050,7 +2248,6 @@ def analyze_candidate(
         ] += 1
 
         if trend_score < 5:
-
             return None
 
         diagnostics[
@@ -2066,7 +2263,6 @@ def analyze_candidate(
         )
 
         if rank < MIN_SCORE:
-
             return None
 
         diagnostics[
@@ -2096,7 +2292,6 @@ def analyze_candidate(
         )
 
         if not pullback:
-
             return None
 
         diagnostics[
@@ -2108,7 +2303,6 @@ def analyze_candidate(
         )
 
         if trigger_score < MIN_TRIGGER_SCORE:
-
             return None
 
         diagnostics[
@@ -2116,7 +2310,6 @@ def analyze_candidate(
         ] += 1
 
         if trend_score > -5:
-
             return None
 
         diagnostics[
@@ -2132,7 +2325,6 @@ def analyze_candidate(
         )
 
         if rank < MIN_SCORE:
-
             return None
 
         diagnostics[
@@ -2144,7 +2336,7 @@ def analyze_candidate(
         return None
 
     # ========================================================
-    # STRUCTURAL LEVELS
+    # LEVELS
     # ========================================================
 
     levels = structural_levels(
@@ -2155,7 +2347,6 @@ def analyze_candidate(
     )
 
     if not levels:
-
         return None
 
     diagnostics[
@@ -2222,7 +2413,9 @@ def analyze_candidate(
 # SETUP ID
 # ============================================================
 
-def setup_key(candidate):
+def setup_key(
+    candidate
+):
 
     return candidate["id"]
 
@@ -2251,7 +2444,7 @@ def count_direction_trades(
 # ============================================================
 
 def create_trade(
-    candidate,
+    candidate
 ):
 
     return {
@@ -2288,9 +2481,16 @@ def create_trade(
         "s5": candidate["s5"],
 
         "opened_at": now_ts(),
+
         "opened_at_iso": iso_now(),
 
         "signal_candle_time": candidate[
+            "signal_candle_time"
+        ],
+
+        # NEW:
+        # Last closed candle checked for exit.
+        "last_checked_candle": candidate[
             "signal_candle_time"
         ],
 
@@ -2317,7 +2517,9 @@ def calculate_pnl_pct(
         trade.get("entry")
     )
 
-    price = safe_float(price)
+    price = safe_float(
+        price
+    )
 
     if entry <= 0 or price <= 0:
 
@@ -2382,19 +2584,46 @@ def check_closed_candle_exit(
         )
     )
 
+    last_checked = int(
+        trade.get(
+            "last_checked_candle",
+            signal_time,
+        )
+    )
+
     direction = trade.get(
         "direction"
     )
 
+    # --------------------------------------------------------
+    # ONLY NEW CLOSED CANDLES
+    # --------------------------------------------------------
+
     relevant = [
         c
         for c in candles
-        if c["time"] > signal_time
+        if (
+            c["time"] > signal_time
+            and c["time"] > last_checked
+        )
     ]
 
     if not relevant:
 
-        return None
+        return {
+            "status": "NO_EXIT",
+            "last_checked_candle": (
+                last_checked
+            ),
+        }
+
+    # --------------------------------------------------------
+    # PROCESS CHRONOLOGICALLY
+    # --------------------------------------------------------
+
+    relevant.sort(
+        key=lambda x: x["time"]
+    )
 
     for candle in relevant:
 
@@ -2422,28 +2651,22 @@ def check_closed_candle_exit(
                 hit_tp = True
 
         # ----------------------------------------------------
-        # BOTH LEVELS IN SAME CANDLE
+        # BOTH LEVELS SAME CANDLE
         # ----------------------------------------------------
 
         if hit_sl and hit_tp:
 
             return {
                 "status": "AMBIGUOUS",
-                "exit_price": candle[
-                    "close"
-                ],
-                "exit_time": candle[
-                    "time"
-                ],
-                "exit_time_iso": (
-                    datetime.fromtimestamp(
-                        candle["time"],
-                        timezone.utc,
-                    ).strftime(
-                        "%Y-%m-%d %H:%M:%S UTC"
-                    )
+                "exit_price": candle["close"],
+                "exit_time": candle["time"],
+                "exit_time_iso": timestamp_to_iso(
+                    candle["time"]
                 ),
                 "reason": "AMBIGUOUS",
+                "last_checked_candle": candle[
+                    "time"
+                ],
             }
 
         # ----------------------------------------------------
@@ -2455,18 +2678,14 @@ def check_closed_candle_exit(
             return {
                 "status": "TP",
                 "exit_price": tp,
-                "exit_time": candle[
-                    "time"
-                ],
-                "exit_time_iso": (
-                    datetime.fromtimestamp(
-                        candle["time"],
-                        timezone.utc,
-                    ).strftime(
-                        "%Y-%m-%d %H:%M:%S UTC"
-                    )
+                "exit_time": candle["time"],
+                "exit_time_iso": timestamp_to_iso(
+                    candle["time"]
                 ),
                 "reason": "TP",
+                "last_checked_candle": candle[
+                    "time"
+                ],
             }
 
         # ----------------------------------------------------
@@ -2478,21 +2697,26 @@ def check_closed_candle_exit(
             return {
                 "status": "SL",
                 "exit_price": sl,
-                "exit_time": candle[
-                    "time"
-                ],
-                "exit_time_iso": (
-                    datetime.fromtimestamp(
-                        candle["time"],
-                        timezone.utc,
-                    ).strftime(
-                        "%Y-%m-%d %H:%M:%S UTC"
-                    )
+                "exit_time": candle["time"],
+                "exit_time_iso": timestamp_to_iso(
+                    candle["time"]
                 ),
                 "reason": "SL",
+                "last_checked_candle": candle[
+                    "time"
+                ],
             }
 
-    return None
+    # --------------------------------------------------------
+    # NO EXIT, BUT CANDLES WERE CHECKED
+    # --------------------------------------------------------
+
+    return {
+        "status": "NO_EXIT",
+        "last_checked_candle": relevant[
+            -1
+        ]["time"],
+    }
 
 
 # ============================================================
@@ -2519,6 +2743,10 @@ def monitor_open_trades(
 
     remaining = []
 
+    # --------------------------------------------------------
+    # TICKERS
+    # --------------------------------------------------------
+
     tickers = get_tickers()
 
     ticker_map = {}
@@ -2529,6 +2757,7 @@ def monitor_open_trades(
             ticker,
             dict,
         ):
+
             continue
 
         symbol = normalize_symbol(
@@ -2543,11 +2772,32 @@ def monitor_open_trades(
                 symbol
             ] = ticker
 
+    # --------------------------------------------------------
+    # EACH OPEN TRADE
+    # --------------------------------------------------------
+
     for trade in open_trades:
 
         symbol = trade.get(
             "symbol"
         )
+
+        if not symbol:
+
+            print(
+                "[STATE WARNING] "
+                "Trade without symbol kept."
+            )
+
+            remaining.append(
+                trade
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # GET 5M CLOSED CANDLES
+        # ----------------------------------------------------
 
         candles = get_candles(
             symbol,
@@ -2555,51 +2805,142 @@ def monitor_open_trades(
             120,
         )
 
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # API FAILURE MUST NEVER DELETE TRADE.
+        # ----------------------------------------------------
+
+        if not candles:
+
+            print(
+                f"[MONITOR] "
+                f"{symbol}: candle data unavailable "
+                f"-> KEEP OPEN"
+            )
+
+            ticker = ticker_map.get(
+                symbol
+            )
+
+            if ticker:
+
+                live_price = safe_float(
+                    ticker.get("last")
+                    or ticker.get("lastPrice")
+                    or ticker.get("price")
+                    or ticker.get("markPrice")
+                )
+
+                if live_price > 0:
+
+                    trade["last_price"] = (
+                        live_price
+                    )
+
+                    trade["pnl_pct"] = (
+                        calculate_pnl_pct(
+                            trade,
+                            live_price,
+                        )
+                    )
+
+                    changed = True
+
+            remaining.append(
+                trade
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # CHECK EXIT
+        # ----------------------------------------------------
+
         result = check_closed_candle_exit(
             trade,
             candles,
         )
 
+        if not result:
+
+            result = {
+                "status": "NO_EXIT"
+            }
+
+        result_status = result.get(
+            "status"
+        )
+
         # ----------------------------------------------------
-        # CLOSED
+        # EXIT FOUND
         # ----------------------------------------------------
 
-        if result:
+        if result_status in (
+            "TP",
+            "SL",
+            "AMBIGUOUS",
+        ):
 
-            exit_price = result[
-                "exit_price"
-            ]
+            exit_price = safe_float(
+                result.get(
+                    "exit_price"
+                )
+            )
 
             pnl = calculate_pnl_pct(
                 trade,
                 exit_price,
             )
 
-            trade["status"] = result[
-                "status"
-            ]
+            trade["status"] = (
+                result_status
+            )
 
-            trade["exit_reason"] = result[
-                "reason"
-            ]
+            trade["exit_reason"] = (
+                result.get(
+                    "reason",
+                    result_status,
+                )
+            )
 
             trade["exit_price"] = (
                 exit_price
             )
 
-            trade["exit_time"] = result[
-                "exit_time"
-            ]
+            trade["exit_time"] = (
+                result.get(
+                    "exit_time",
+                    now_ts(),
+                )
+            )
 
-            trade["exit_time_iso"] = result[
-                "exit_time_iso"
-            ]
+            trade["exit_time_iso"] = (
+                result.get(
+                    "exit_time_iso",
+                    iso_now(),
+                )
+            )
 
             trade["pnl_pct"] = pnl
 
             trade["last_price"] = (
                 exit_price
             )
+
+            trade["last_checked_candle"] = (
+                result.get(
+                    "last_checked_candle",
+                    trade.get(
+                        "last_checked_candle",
+                        0,
+                    ),
+                )
+            )
+
+            # ------------------------------------------------
+            # CRITICAL:
+            # WRITE TO HISTORY BEFORE REMOVING FROM STATE.
+            # ------------------------------------------------
 
             append_history_once(
                 history,
@@ -2615,12 +2956,46 @@ def monitor_open_trades(
             print(
                 "[CLOSED]",
                 symbol,
-                trade.get("direction"),
-                result["status"],
+                trade.get(
+                    "direction"
+                ),
+                result_status,
                 f"{pnl:+.2f}%",
+                result.get(
+                    "exit_time_iso",
+                    "",
+                ),
             )
 
+            # Do NOT add to remaining.
             continue
+
+        # ----------------------------------------------------
+        # UPDATE LAST CHECKED CANDLE
+        # ----------------------------------------------------
+
+        last_checked = result.get(
+            "last_checked_candle"
+        )
+
+        if last_checked:
+
+            if int(
+                last_checked
+            ) > int(
+                trade.get(
+                    "last_checked_candle",
+                    0,
+                )
+            ):
+
+                trade[
+                    "last_checked_candle"
+                ] = int(
+                    last_checked
+                )
+
+                changed = True
 
         # ----------------------------------------------------
         # LIVE PRICE
@@ -2652,6 +3027,8 @@ def monitor_open_trades(
                     )
                 )
 
+                changed = True
+
         # ----------------------------------------------------
         # TIMEOUT
         # ----------------------------------------------------
@@ -2676,16 +3053,28 @@ def monitor_open_trades(
             exit_price = safe_float(
                 trade.get(
                     "last_price",
-                    trade.get("entry"),
+                    trade.get(
+                        "entry"
+                    ),
                 )
             )
+
+            if exit_price <= 0:
+
+                exit_price = safe_float(
+                    trade.get(
+                        "entry"
+                    )
+                )
 
             pnl = calculate_pnl_pct(
                 trade,
                 exit_price,
             )
 
-            trade["status"] = "TIMEOUT"
+            trade["status"] = (
+                "TIMEOUT"
+            )
 
             trade["exit_reason"] = (
                 "TIMEOUT"
@@ -2719,19 +3108,37 @@ def monitor_open_trades(
             print(
                 "[TIMEOUT]",
                 symbol,
-                trade.get("direction"),
+                trade.get(
+                    "direction"
+                ),
                 f"{pnl:+.2f}%",
             )
 
             continue
 
+        # ----------------------------------------------------
+        # STILL OPEN
+        # ----------------------------------------------------
+
         remaining.append(
             trade
         )
 
+    # --------------------------------------------------------
+    # STATE UPDATE
+    # --------------------------------------------------------
+
     state["open_trades"] = remaining
 
+    state["strategy_version"] = (
+        STRATEGY_VERSION
+    )
+
     state["updated_at"] = iso_now()
+
+    history["strategy_version"] = (
+        STRATEGY_VERSION
+    )
 
     history["updated_at"] = iso_now()
 
@@ -2801,7 +3208,9 @@ def scan_markets(
         key=lambda x: (
             x["score"],
             x["trigger_score"],
-            abs(x["trend_score"]),
+            abs(
+                x["trend_score"]
+            ),
         ),
         reverse=True,
     )
@@ -2850,7 +3259,9 @@ def open_candidates(
 
     for candidate in candidates:
 
-        if len(open_trades) >= MAX_OPEN_TRADES:
+        if len(
+            open_trades
+        ) >= MAX_OPEN_TRADES:
 
             break
 
@@ -2926,7 +3337,9 @@ def open_candidates(
             f"Trigger={candidate['trigger_score']}",
         )
 
-    state["open_trades"] = open_trades
+    state["open_trades"] = (
+        open_trades
+    )
 
     state["updated_at"] = iso_now()
 
@@ -2938,7 +3351,7 @@ def open_candidates(
 # ============================================================
 
 def calculate_performance(
-    history,
+    history
 ):
 
     trades = [
@@ -2956,7 +3369,9 @@ def calculate_performance(
         )
     ]
 
-    total = len(trades)
+    total = len(
+        trades
+    )
 
     wins = sum(
         1
@@ -3029,7 +3444,7 @@ def calculate_performance(
 # ============================================================
 
 def format_trade(
-    trade,
+    trade
 ):
 
     direction = trade.get(
@@ -3068,7 +3483,7 @@ def format_trade(
 # ============================================================
 
 def send_telegram(
-    text,
+    text
 ):
 
     if not TELEGRAM_BOT_TOKEN:
@@ -3163,7 +3578,7 @@ def build_report(
     )
 
     # ========================================================
-    # OPEN TRADES
+    # OPEN
     # ========================================================
 
     lines.append(
@@ -3275,6 +3690,13 @@ def build_report(
                 f"{trade.get('direction')} "
                 f"{status} "
                 f"{pnl:+.2f}%"
+            )
+
+            lines.append(
+                f"Exit: "
+                f"{trade.get('exit_price')} "
+                f"@ "
+                f"{trade.get('exit_time_iso')}"
             )
 
     # ========================================================
@@ -3469,7 +3891,7 @@ def main():
     print("=" * 70)
 
     # ========================================================
-    # LOAD STATE
+    # LOAD
     # ========================================================
 
     state = load_state()
@@ -3487,24 +3909,39 @@ def main():
     )
 
     # ========================================================
-    # MONITOR OPEN TRADES
+    # CRITICAL:
+    # MONITOR BEFORE SCANNING
     # ========================================================
 
-    changed, closed_this_run = monitor_open_trades(
-        state,
-        history,
+    changed, closed_this_run = (
+        monitor_open_trades(
+            state,
+            history,
+        )
     )
 
-    # Save immediately after monitoring.
-    # This is important so closed trades are not lost.
-    save_json_file(
+    # --------------------------------------------------------
+    # SAVE IMMEDIATELY
+    # --------------------------------------------------------
+
+    state_saved = save_json_file(
         STATE_FILE,
         state,
     )
 
-    save_json_file(
+    history_saved = save_json_file(
         HISTORY_FILE,
         history,
+    )
+
+    print(
+        f"[STATE SAVE] "
+        f"{state_saved}"
+    )
+
+    print(
+        f"[HISTORY SAVE] "
+        f"{history_saved}"
     )
 
     # ========================================================
@@ -3535,7 +3972,7 @@ def main():
         return
 
     print(
-        f"[INFO] TOP {len(markets)}:"
+        f"[INFO] TOP {len(markets)}"
     )
 
     # ========================================================
@@ -3617,21 +4054,31 @@ def main():
     )
 
     # ========================================================
-    # SAVE
+    # SAVE AFTER OPENING
     # ========================================================
 
     state["updated_at"] = iso_now()
 
     history["updated_at"] = iso_now()
 
-    save_json_file(
+    state_saved = save_json_file(
         STATE_FILE,
         state,
     )
 
-    save_json_file(
+    history_saved = save_json_file(
         HISTORY_FILE,
         history,
+    )
+
+    print(
+        f"[FINAL STATE SAVE] "
+        f"{state_saved}"
+    )
+
+    print(
+        f"[FINAL HISTORY SAVE] "
+        f"{history_saved}"
     )
 
     # ========================================================
@@ -3722,6 +4169,11 @@ def main():
     print(
         f"TIMEOUT: "
         f"{performance['timeouts']}"
+    )
+
+    print(
+        f"AMBIGUOUS: "
+        f"{performance['ambiguous']}"
     )
 
     print(
