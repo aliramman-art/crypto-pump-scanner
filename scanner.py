@@ -1,5 +1,5 @@
 # ============================================================
-# KRAKEN FUTURES ICHIMOKU TOP RANKER v11.1
+# KRAKEN FUTURES ICHIMOKU TOP RANKER v11.2
 # ============================================================
 #
 # TOP 100 MARKET SCANNER
@@ -33,8 +33,12 @@
 #   TELEGRAM_CHAT_ID
 #
 # FILES:
-#   ichimoku_state.json
-#   ichimoku_trade_history.json
+#   binance_price_action_state.json
+#   binance_price_action_trade_history.json
+#
+# NOTE:
+#   File names intentionally match main.yml so GitHub Actions
+#   commits and persists them between workflow runs.
 #
 # ============================================================
 
@@ -70,8 +74,10 @@ TELEGRAM_URL = (
     "https://api.telegram.org/bot{token}/sendMessage"
 )
 
-STATE_FILE = "ichimoku_state.json"
-HISTORY_FILE = "ichimoku_trade_history.json"
+# IMPORTANT:
+# These names MUST match main.yml
+STATE_FILE = "binance_price_action_state.json"
+HISTORY_FILE = "binance_price_action_trade_history.json"
 
 TOP_MARKETS = 100
 
@@ -91,7 +97,7 @@ REQUEST_TIMEOUT = 20
 
 TELEGRAM_MAX_LENGTH = 3900
 
-PULLBACK_ATR_MULTIPLIER = 1.5
+PRICE_DECIMALS = 8
 
 
 # ============================================================
@@ -101,7 +107,7 @@ PULLBACK_ATR_MULTIPLIER = 1.5
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 KrakenIchimokuScanner/11.1"
+    "User-Agent": "Mozilla/5.0 KrakenIchimokuScanner/11.2"
 })
 
 
@@ -154,15 +160,39 @@ def safe_float(value, default=None):
         return default
 
 
+def normalize_timestamp(value):
+
+    """
+    Kraken normally returns seconds.
+    If milliseconds are returned, convert to seconds.
+    """
+
+    timestamp = safe_float(value)
+
+    if timestamp is None:
+        return None
+
+    if timestamp > 100000000000:
+        timestamp /= 1000.0
+
+    return int(timestamp)
+
+
 def round_price(value):
 
     if value is None:
         return None
 
-    return round(
-        float(value),
-        4
-    )
+    try:
+
+        return round(
+            float(value),
+            PRICE_DECIMALS
+        )
+
+    except Exception:
+
+        return None
 
 
 def format_price(value):
@@ -170,11 +200,22 @@ def format_price(value):
     if value is None:
         return "-"
 
-    return (
-        f"{float(value):.4f}"
-        .rstrip("0")
-        .rstrip(".")
-    )
+    try:
+
+        text = (
+            f"{float(value):.{PRICE_DECIMALS}f}"
+            .rstrip("0")
+            .rstrip(".")
+        )
+
+        if text in ("", "-0"):
+            return "0"
+
+        return text
+
+    except Exception:
+
+        return "-"
 
 
 def clamp(value, low, high):
@@ -197,6 +238,7 @@ def load_json(
     try:
 
         if not os.path.exists(filename):
+
             return default
 
         with open(
@@ -205,7 +247,9 @@ def load_json(
             encoding="utf-8"
         ) as f:
 
-            return json.load(f)
+            data = json.load(f)
+
+        return data
 
     except Exception as e:
 
@@ -224,23 +268,39 @@ def save_json(
 
     tmp = filename + ".tmp"
 
-    with open(
-        tmp,
-        "w",
-        encoding="utf-8"
-    ) as f:
+    try:
 
-        json.dump(
-            data,
-            f,
-            ensure_ascii=False,
-            indent=2
+        with open(
+            tmp,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            json.dump(
+                data,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(
+            tmp,
+            filename
         )
 
-    os.replace(
-        tmp,
-        filename
-    )
+    except Exception:
+
+        if os.path.exists(tmp):
+
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
+
+        raise
 
 
 # ============================================================
@@ -258,29 +318,46 @@ def load_state():
         state,
         dict
     ):
+
+        print(
+            "[WARN] Invalid state format. "
+            "Using empty state."
+        )
+
         state = {}
 
-    if "open_trades" not in state:
-
-        state["open_trades"] = []
+    open_trades = state.get(
+        "open_trades",
+        []
+    )
 
     if not isinstance(
-        state["open_trades"],
+        open_trades,
         list
     ):
 
-        state["open_trades"] = []
+        print(
+            "[WARN] Invalid open_trades. "
+            "Resetting only open_trades."
+        )
 
-    if "history" not in state:
+        open_trades = []
 
-        state["history"] = []
+    state["open_trades"] = open_trades
+
+    state_history = state.get(
+        "history",
+        []
+    )
 
     if not isinstance(
-        state["history"],
+        state_history,
         list
     ):
 
-        state["history"] = []
+        state_history = []
+
+    state["history"] = state_history
 
     return state
 
@@ -290,6 +367,13 @@ def load_state():
 # ============================================================
 
 def save_state(state):
+
+    if not isinstance(
+        state,
+        dict
+    ):
+
+        state = {}
 
     state["updated_at"] = now_iso()
 
@@ -317,6 +401,11 @@ def load_history(
         list
     ):
 
+        print(
+            "[WARN] Invalid history file. "
+            "Ignoring invalid content."
+        )
+
         file_history = []
 
     state_history = []
@@ -339,7 +428,7 @@ def load_history(
             state_history = []
 
     # --------------------------------------------------------
-    # MERGE HISTORY FROM BOTH SOURCES
+    # MERGE BOTH HISTORY SOURCES
     # --------------------------------------------------------
 
     merged = {}
@@ -353,6 +442,7 @@ def load_history(
             trade,
             dict
         ):
+
             continue
 
         trade_id_value = trade.get(
@@ -360,10 +450,11 @@ def load_history(
         )
 
         if not trade_id_value:
+
             continue
 
         merged[
-            trade_id_value
+            str(trade_id_value)
         ] = trade
 
     history = list(
@@ -372,8 +463,11 @@ def load_history(
 
     history.sort(
         key=lambda x:
-            x.get(
-                "closed_timestamp",
+            safe_float(
+                x.get(
+                    "closed_timestamp",
+                    0
+                ),
                 0
             )
     )
@@ -386,6 +480,13 @@ def load_history(
 # ============================================================
 
 def save_history(history):
+
+    if not isinstance(
+        history,
+        list
+    ):
+
+        history = []
 
     save_json(
         HISTORY_FILE,
@@ -414,7 +515,9 @@ def http_get(
 
             response.raise_for_status()
 
-            return response.json()
+            data = response.json()
+
+            return data
 
         except Exception as e:
 
@@ -449,9 +552,23 @@ def get_markets():
         []
     )
 
+    if not isinstance(
+        instruments,
+        list
+    ):
+
+        return []
+
     result = []
 
     for item in instruments:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+
+            continue
 
         symbol = (
             item.get("symbol")
@@ -484,7 +601,9 @@ def get_markets():
             symbol
         )
 
-    return result
+    return list(
+        dict.fromkeys(result)
+    )
 
 
 # ============================================================
@@ -505,9 +624,23 @@ def get_tickers():
         []
     )
 
+    if not isinstance(
+        tickers,
+        list
+    ):
+
+        return {}
+
     result = {}
 
     for item in tickers:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+
+            continue
 
         symbol = (
             item.get("symbol")
@@ -517,36 +650,49 @@ def get_tickers():
         if not symbol:
             continue
 
-        price = (
-            safe_float(
-                item.get("last")
+        price = None
+
+        for key in (
+            "last",
+            "markPrice",
+            "price"
+        ):
+
+            candidate = safe_float(
+                item.get(key)
             )
-            or
-            safe_float(
-                item.get("markPrice")
-            )
-            or
-            safe_float(
-                item.get("price")
-            )
-        )
+
+            if candidate is not None:
+
+                price = candidate
+
+                break
 
         if price is None:
             continue
 
-        volume = (
-            safe_float(
-                item.get("vol24h")
-            )
-            or
-            safe_float(
-                item.get("volume24h")
-            )
-            or
-            0
-        )
+        volume = None
 
-        result[symbol] = {
+        for key in (
+            "vol24h",
+            "volume24h",
+            "volume"
+        ):
+
+            candidate = safe_float(
+                item.get(key)
+            )
+
+            if candidate is not None:
+
+                volume = candidate
+
+                break
+
+        if volume is None:
+            volume = 0
+
+        result[str(symbol)] = {
 
             "price":
                 price,
@@ -615,6 +761,11 @@ def get_top_markets():
     )
 
     print(
+        f"[INFO] Markets with ticker: "
+        f"{len(ranked)}"
+    )
+
+    print(
         f"[INFO] Scanning TOP "
         f"{len(top)}"
     )
@@ -649,6 +800,13 @@ def get_candles(
         or []
     )
 
+    if not isinstance(
+        raw,
+        list
+    ):
+
+        return []
+
     candles = []
 
     for item in raw:
@@ -660,47 +818,90 @@ def get_candles(
 
             continue
 
-        timestamp = (
-            item.get("time")
-            or
-            item.get("timestamp")
-            or
-            item.get("ts")
-        )
+        timestamp = None
 
-        open_price = (
-            item.get("open")
-            or
-            item.get("o")
-        )
+        for key in (
+            "time",
+            "timestamp",
+            "ts"
+        ):
 
-        high = (
-            item.get("high")
-            or
-            item.get("h")
-        )
+            if item.get(key) is not None:
 
-        low = (
-            item.get("low")
-            or
-            item.get("l")
-        )
+                timestamp = (
+                    item.get(key)
+                )
 
-        close = (
-            item.get("close")
-            or
-            item.get("c")
-        )
+                break
 
-        volume = (
-            item.get("volume")
-            or
-            item.get("v")
-            or
-            0
-        )
+        open_price = None
 
-        timestamp = safe_float(
+        for key in (
+            "open",
+            "o"
+        ):
+
+            if item.get(key) is not None:
+
+                open_price = (
+                    item.get(key)
+                )
+
+                break
+
+        high = None
+
+        for key in (
+            "high",
+            "h"
+        ):
+
+            if item.get(key) is not None:
+
+                high = item.get(key)
+
+                break
+
+        low = None
+
+        for key in (
+            "low",
+            "l"
+        ):
+
+            if item.get(key) is not None:
+
+                low = item.get(key)
+
+                break
+
+        close = None
+
+        for key in (
+            "close",
+            "c"
+        ):
+
+            if item.get(key) is not None:
+
+                close = item.get(key)
+
+                break
+
+        volume = None
+
+        for key in (
+            "volume",
+            "v"
+        ):
+
+            if item.get(key) is not None:
+
+                volume = item.get(key)
+
+                break
+
+        timestamp = normalize_timestamp(
             timestamp
         )
 
@@ -735,10 +936,20 @@ def get_candles(
 
             continue
 
+        if (
+            high < low
+            or
+            open_price <= 0
+            or
+            close <= 0
+        ):
+
+            continue
+
         candles.append({
 
             "time":
-                int(timestamp),
+                timestamp,
 
             "open":
                 open_price,
@@ -755,6 +966,27 @@ def get_candles(
             "volume":
                 volume
         })
+
+    candles.sort(
+        key=lambda x:
+            x["time"]
+    )
+
+    # --------------------------------------------------------
+    # REMOVE DUPLICATE CANDLES
+    # --------------------------------------------------------
+
+    unique = {}
+
+    for candle in candles:
+
+        unique[
+            candle["time"]
+        ] = candle
+
+    candles = list(
+        unique.values()
+    )
 
     candles.sort(
         key=lambda x:
@@ -785,17 +1017,23 @@ def get_candles(
         300
     )
 
-    if candles:
+    current_time = unix_now()
+
+    while candles:
 
         last = candles[-1]
 
         if (
             last["time"]
             + duration
-            > unix_now()
+            > current_time
         ):
 
-            candles = candles[:-1]
+            candles.pop()
+
+        else:
+
+            break
 
     return candles[
         -CANDLE_LIMIT:
@@ -853,6 +1091,9 @@ def calculate_atr(
         trs.append(
             tr
         )
+
+    if not trs:
+        return None
 
     return (
         sum(
@@ -1102,13 +1343,13 @@ def ichimoku_score(
 
             score -= 2
 
-    score = clamp(
-        score,
-        -10,
-        10
+    return int(
+        clamp(
+            score,
+            -10,
+            10
+        )
     )
-
-    return score
 
 
 # ============================================================
@@ -1580,10 +1821,6 @@ def calculate_trade_levels(
         * 100
     )
 
-    # --------------------------------------------------------
-    # HARD 0.50% FILTER
-    # --------------------------------------------------------
-
     if (
         risk_percent
         < MIN_RISK_PERCENT
@@ -1983,6 +2220,13 @@ def symbol_open(
 
     return any(
 
+        isinstance(
+            x,
+            dict
+        )
+
+        and
+
         x.get("symbol")
         == symbol
 
@@ -1999,6 +2243,13 @@ def direction_counts(
     short_count = 0
 
     for trade in open_trades:
+
+        if not isinstance(
+            trade,
+            dict
+        ):
+
+            continue
 
         if trade.get(
             "direction"
@@ -2037,6 +2288,13 @@ def already_traded(
     )
 
     for item in history:
+
+        if not isinstance(
+            item,
+            dict
+        ):
+
+            continue
 
         if (
             item.get("id")
@@ -2102,17 +2360,7 @@ def close_trade(
 
     elif reason == "TIMEOUT":
 
-        if pnl > 0:
-
-            result = "WIN"
-
-        elif pnl < 0:
-
-            result = "LOSS"
-
-        else:
-
-            result = "BREAKEVEN"
+        result = "TIMEOUT"
 
     else:
 
@@ -2178,7 +2426,7 @@ def monitor_open_trades(
 
     history_ids = {
 
-        x.get("id")
+        str(x.get("id"))
 
         for x in history
 
@@ -2216,14 +2464,18 @@ def monitor_open_trades(
         )
 
         # ----------------------------------------------------
-        # NO PRICE DATA
-        # NEVER DELETE TRADE
+        # NEVER DELETE TRADE BECAUSE OF MISSING PRICE
         # ----------------------------------------------------
 
         if not ticker:
 
             remaining.append(
                 trade
+            )
+
+            print(
+                f"[WARN] No ticker for "
+                f"{symbol}. Trade kept open."
             )
 
             continue
@@ -2238,19 +2490,41 @@ def monitor_open_trades(
                 trade
             )
 
+            print(
+                f"[WARN] No valid price for "
+                f"{symbol}. Trade kept open."
+            )
+
             continue
 
-        direction = trade[
-            "direction"
-        ]
+        try:
 
-        sl = float(
-            trade["sl"]
-        )
+            direction = trade[
+                "direction"
+            ]
 
-        tp = float(
-            trade["tp"]
-        )
+            sl = float(
+                trade["sl"]
+            )
+
+            tp = float(
+                trade["tp"]
+            )
+
+        except Exception as e:
+
+            print(
+                f"[WARN] Invalid trade "
+                f"data for {symbol}: {e}"
+            )
+
+            # IMPORTANT:
+            # Do not silently delete malformed trade.
+            remaining.append(
+                trade
+            )
+
+            continue
 
         reason = None
 
@@ -2266,31 +2540,44 @@ def monitor_open_trades(
 
                 reason = "SL"
 
-                # Exact SL
+                # Exact SL level
                 exit_price = sl
 
             elif price >= tp:
 
                 reason = "TP"
 
-                # Exact TP
+                # Exact TP level
                 exit_price = tp
 
-        else:
+        elif direction == "SHORT":
 
             if price >= sl:
 
                 reason = "SL"
 
-                # Exact SL
+                # Exact SL level
                 exit_price = sl
 
             elif price <= tp:
 
                 reason = "TP"
 
-                # Exact TP
+                # Exact TP level
                 exit_price = tp
+
+        else:
+
+            print(
+                f"[WARN] Unknown direction "
+                f"for {symbol}. Trade kept."
+            )
+
+            remaining.append(
+                trade
+            )
+
+            continue
 
         # ----------------------------------------------------
         # TIMEOUT
@@ -2330,17 +2617,13 @@ def monitor_open_trades(
 
         if reason:
 
-            # ------------------------------------------------
-            # NEVER DUPLICATE
-            # ------------------------------------------------
-
             if (
 
                 trade_id_value
 
                 and
 
-                trade_id_value
+                str(trade_id_value)
                 in history_ids
 
             ):
@@ -2370,7 +2653,7 @@ def monitor_open_trades(
             if trade_id_value:
 
                 history_ids.add(
-                    trade_id_value
+                    str(trade_id_value)
                 )
 
             print(
@@ -2388,10 +2671,6 @@ def monitor_open_trades(
             )
 
         else:
-
-            # ------------------------------------------------
-            # STILL OPEN
-            # ------------------------------------------------
 
             remaining.append(
                 trade
@@ -2506,9 +2785,7 @@ def scan_symbol(
     except Exception as e:
 
         print(
-
-            f"[WARN] "
-            f"{symbol}: {e}"
+            f"[WARN] {symbol}: {e}"
         )
 
         return []
@@ -2557,6 +2834,11 @@ def scan_all_markets(
             open_trades,
             symbol
         ):
+
+            print(
+                f"[SKIP] {symbol} "
+                f"already open"
+            )
 
             continue
 
@@ -2611,7 +2893,9 @@ def scan_all_markets(
 
             x["score_30m"],
 
-            x["trigger"]
+            x["trigger"],
+
+            x["risk_score"]
         ),
 
         reverse=True
@@ -2635,7 +2919,9 @@ def scan_all_markets(
                 x["score_30m"]
             ),
 
-            x["trigger"]
+            x["trigger"],
+
+            x["risk_score"]
         ),
 
         reverse=True
@@ -2775,9 +3061,13 @@ def live_trade(
 
         return None
 
-    price = ticker[
-        "price"
-    ]
+    price = safe_float(
+        ticker.get("price")
+    )
+
+    if price is None:
+
+        return None
 
     entry = float(
         trade["entry"]
@@ -2875,7 +3165,14 @@ def performance(
 
         for x in history
 
-        if x.get(
+        if isinstance(
+            x,
+            dict
+        )
+
+        and
+
+        x.get(
             "result"
         ) == "WIN"
     )
@@ -2886,20 +3183,16 @@ def performance(
 
         for x in history
 
-        if x.get(
+        if isinstance(
+            x,
+            dict
+        )
+
+        and
+
+        x.get(
             "result"
         ) == "LOSS"
-    )
-
-    breakeven = sum(
-
-        1
-
-        for x in history
-
-        if x.get(
-            "result"
-        ) == "BREAKEVEN"
     )
 
     timeout = sum(
@@ -2908,25 +3201,65 @@ def performance(
 
         for x in history
 
-        if x.get(
-            "close_reason"
-        ) == "TIMEOUT"
+        if isinstance(
+            x,
+            dict
+        )
+
+        and
+
+        (
+            x.get(
+                "result"
+            )
+            == "TIMEOUT"
+
+            or
+
+            x.get(
+                "close_reason"
+            )
+            == "TIMEOUT"
+        )
     )
 
-    pnl = sum(
+    breakeven = sum(
 
-        safe_float(
+        1
+
+        for x in history
+
+        if isinstance(
+            x,
+            dict
+        )
+
+        and
+
+        x.get(
+            "result"
+        ) == "BREAKEVEN"
+    )
+
+    pnl = 0.0
+
+    for x in history:
+
+        if not isinstance(
+            x,
+            dict
+        ):
+
+            continue
+
+        pnl += safe_float(
 
             x.get(
                 "pnl_percent"
             ),
 
             0
-
         )
-
-        for x in history
-    )
 
     decided = (
 
@@ -2994,7 +3327,7 @@ def build_report(
     lines.append(
 
         f"🕐 "
-        f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        f"{now_utc().strftime('%Y-%m-%d %H:%M:%S')} UTC"
     )
 
     lines.append(
@@ -3283,23 +3616,17 @@ def send_telegram(
     if not TELEGRAM_BOT_TOKEN:
 
         raise RuntimeError(
-
-            "TELEGRAM_BOT_TOKEN "
-            "is missing"
+            "TELEGRAM_BOT_TOKEN is missing"
         )
 
     if not TELEGRAM_CHAT_ID:
 
         raise RuntimeError(
-
-            "TELEGRAM_CHAT_ID "
-            "is missing"
+            "TELEGRAM_CHAT_ID is missing"
         )
 
     url = TELEGRAM_URL.format(
-
-        token=
-            TELEGRAM_BOT_TOKEN
+        token=TELEGRAM_BOT_TOKEN
     )
 
     chunks = split_message(
@@ -3391,7 +3718,7 @@ def main():
     )
 
     print(
-        "KRAKEN FUTURES ICHIMOKU TOP RANKER v11.1"
+        "KRAKEN FUTURES ICHIMOKU TOP RANKER v11.2"
     )
 
     print(
@@ -3400,6 +3727,10 @@ def main():
 
     print(
         "MINIMUM RISK = 0.50%"
+    )
+
+    print(
+        "PERSISTENT STATE + HISTORY ENABLED"
     )
 
     print(
@@ -3517,13 +3848,11 @@ def main():
         )
 
         print(
-
             f"[RANKING] LONG candidates: "
             f"{len(long_candidates)}"
         )
 
         print(
-
             f"[RANKING] SHORT candidates: "
             f"{len(short_candidates)}"
         )
@@ -3617,7 +3946,7 @@ def main():
             )
 
             # ------------------------------------------------
-            # FINAL SAFETY CHECK
+            # FINAL SYMBOL CHECK
             # ------------------------------------------------
 
             if symbol_open(
@@ -3640,6 +3969,13 @@ def main():
 
             if any(
 
+                isinstance(
+                    x,
+                    dict
+                )
+
+                and
+
                 x.get("id")
                 == trade["id"]
 
@@ -3657,6 +3993,13 @@ def main():
 
             if any(
 
+                isinstance(
+                    x,
+                    dict
+                )
+
+                and
+
                 x.get("id")
                 == trade["id"]
 
@@ -3672,6 +4015,60 @@ def main():
 
                 continue
 
+            # ------------------------------------------------
+            # HARD LIMIT SAFETY
+            # ------------------------------------------------
+
+            if (
+                len(open_trades)
+                >= MAX_OPEN_TRADES
+            ):
+
+                print(
+                    "[SKIP] Maximum open "
+                    "trade limit reached."
+                )
+
+                break
+
+            longs, shorts = (
+                direction_counts(
+                    open_trades
+                )
+            )
+
+            if (
+                trade["direction"]
+                == "LONG"
+                and
+                longs >= MAX_LONG_TRADES
+            ):
+
+                print(
+                    f"[SKIP] LONG limit reached: "
+                    f"{trade['symbol']}"
+                )
+
+                continue
+
+            if (
+                trade["direction"]
+                == "SHORT"
+                and
+                shorts >= MAX_SHORT_TRADES
+            ):
+
+                print(
+                    f"[SKIP] SHORT limit reached: "
+                    f"{trade['symbol']}"
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # OPEN
+            # ------------------------------------------------
+
             open_trades.append(
                 trade
             )
@@ -3684,11 +4081,11 @@ def main():
                 f"Score="
                 f"{trade['score']:.2f} "
                 f"Entry="
-                f"{trade['entry']} "
+                f"{format_price(trade['entry'])} "
                 f"SL="
-                f"{trade['sl']} "
+                f"{format_price(trade['sl'])} "
                 f"TP="
-                f"{trade['tp']} "
+                f"{format_price(trade['tp'])} "
                 f"Risk="
                 f"{trade['risk_percent']:.2f}%"
             )
@@ -3708,28 +4105,41 @@ def main():
     )
 
     # IMPORTANT:
-    # History is also stored INSIDE state.
-    # This protects history if the separate file
-    # is missing or accidentally reset.
-
+    # Keep history inside state as well.
     state["history"] = history
 
     state["history_count"] = len(
         history
     )
 
+    state["open_trade_count"] = len(
+        open_trades
+    )
+
     state["last_run"] = now_iso()
 
     # --------------------------------------------------------
-    # SAVE BOTH
+    # SAVE HISTORY FIRST
     # --------------------------------------------------------
 
     save_history(
         history
     )
 
+    print(
+        "[STATE] Trade history saved."
+    )
+
+    # --------------------------------------------------------
+    # SAVE COMPLETE STATE
+    # --------------------------------------------------------
+
     save_state(
         state
+    )
+
+    print(
+        "[STATE] Complete state saved."
     )
 
     print("")
@@ -3753,6 +4163,16 @@ def main():
     )
 
     print(
+        f"State file: "
+        f"{STATE_FILE}"
+    )
+
+    print(
+        f"History file: "
+        f"{HISTORY_FILE}"
+    )
+
+    print(
         "============================================================"
     )
 
@@ -3771,7 +4191,9 @@ def main():
 
     print("")
 
-    print(report)
+    print(
+        report
+    )
 
     print("")
 
