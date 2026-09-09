@@ -1,50 +1,31 @@
-name: Telegram Listener
-
-on:
-  workflow_dispatch:
-
-jobs:
-  listener:
-    runs-on: ubuntu-latest
-
-    timeout-minutes: 350
-
-    steps:
-
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Check files
-        run: |
-          echo "======================================"
-          echo "Repository files:"
-          ls -la
-          echo "======================================"
-          echo "Python version:"
-          python --version
-          echo "======================================"
-
-      - name: Start Telegram Listener
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python listener.py
-
-      - name: Restart Listener
-        if: always()
-        run: |
-          echo "Listener stopped."
-          echo "Waiting 10 seconds before restart..."
-          sleep 10
-          echo "Restart is handled by GitHub Actions workflow."
+        - name: Start Telegram Listener
+          env:
+            TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+            TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+            PYTHONUNBUFFERED: "1"
+          run: |
+            echo "===== STARTING LISTENER ====="
+            echo "Python:"
+            python --version
+            echo "Current directory:"
+            pwd
+            echo "Files:"
+            ls -la
+            echo "Checking listener.py:"
+            test -f listener.py && echo "listener.py FOUND" || echo "listener.py NOT FOUND"
+            echo "Checking requirements.txt:"
+            test -f requirements.txt && echo "requirements.txt FOUND" || echo "requirements.txt NOT FOUND"
+            echo "Checking Telegram token:"
+            if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+              echo "TELEGRAM_BOT_TOKEN = SET"
+            else
+              echo "TELEGRAM_BOT_TOKEN = MISSING"
+            fi
+            echo "Checking Chat ID:"
+            if [ -n "$TELEGRAM_CHAT_ID" ]; then
+              echo "TELEGRAM_CHAT_ID = SET"
+            else
+              echo "TELEGRAM_CHAT_ID = MISSING"
+            fi
+            echo "===== RUNNING LISTENER ====="
+            python -u listener.py
