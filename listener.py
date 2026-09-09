@@ -1,182 +1,107 @@
 # ============================================================
-# KRAKEN FUTURES ICHIMOKU INDEPENDENT TELEGRAM LISTENER v1.0
+# KRAKEN FUTURES ICHIMOKU TELEGRAM LIVE LISTENER v2.0
 # ============================================================
 #
 # PURPOSE:
-#   Independent real-time analysis listener.
+#   Independent real-time Telegram analysis engine
+#
+# COMMAND:
+#   تحلیل btc
+#   تحلیل BTC
+#   تحلیل BTC ETH SOL XRP
+#   /check BTC
+#   /check BTC ETH SOL XRP
 #
 # IMPORTANT:
-#   This file DOES NOT import scanner.py
-#   This file DOES NOT depend on scanner.py
-#   This file DOES NOT open trades
-#   This file DOES NOT modify scanner state/history
-#
-# TELEGRAM COMMANDS:
-#
-#   تحلیل BTC
-#   تحلیل ETH
-#   تحلیل BTC ETH SOL XRP
-#
-#   /check BTC
-#   /check ETH
-#   /check BTC ETH SOL
-#
-#   تحلیل@BotName BTC
+#   - DOES NOT IMPORT scanner.py
+#   - DOES NOT OPEN TRADES
+#   - DOES NOT MODIFY trade state
+#   - DOES NOT MODIFY trade history
+#   - DIRECT KRAKEN FUTURES API
+#   - CLOSED CANDLES ONLY
 #
 # STRATEGY:
-#
 #   1H  = Trend
 #   30M = Confirmation / Lock
 #   15M = Pullback Structure
 #   5M  = Pullback + Reversal Trigger
 #
-# CLOSED CANDLES ONLY
-#
 # ============================================================
 
 import os
+import re
 import json
 import time
 import math
 import traceback
-import requests
-
 from datetime import datetime, timezone
 
+import requests
+
 
 # ============================================================
-# CONFIG
+# CONFIGURATION
 # ============================================================
 
-BASE_URL = "https://futures.kraken.com"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-INSTRUMENTS_URL = (
-    BASE_URL +
-    "/derivatives/api/v3/instruments"
+KRAKEN_BASE = "https://futures.kraken.com"
+KRAKEN_API = f"{KRAKEN_BASE}/derivatives/api/v3"
+KRAKEN_CHART_API = f"{KRAKEN_BASE}/api/charts/v1/trade"
+
+TELEGRAM_API = (
+    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
+    if TELEGRAM_BOT_TOKEN
+    else ""
 )
 
-TICKERS_URL = (
-    BASE_URL +
-    "/derivatives/api/v3/tickers"
-)
-
-CHART_URL = (
-    BASE_URL +
-    "/api/charts/v1/trade/{symbol}/{resolution}"
-)
-
-
-VERSION = "Independent Listener v1.0"
-
-
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-TELEGRAM_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN",
-    ""
-).strip()
-
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    ""
-).strip()
-
-TELEGRAM_TIMEOUT = 30
-
-TELEGRAM_RETRIES = 3
-
-TELEGRAM_MAX_LENGTH = 4000
-
-
-# ============================================================
-# KRAKEN
-# ============================================================
+OFFSET_FILE = "telegram_listener_offset.json"
 
 REQUEST_TIMEOUT = 20
 
-REQUEST_RETRIES = 3
+POLL_TIMEOUT = 25
 
-REQUEST_SLEEP = 0.10
+MAX_SYMBOLS_PER_COMMAND = 5
 
 
 # ============================================================
-# STRATEGY
+# ICHIMOKU
+# ============================================================
+
+TENKAN_PERIOD = 9
+KIJUN_PERIOD = 26
+SENKOU_B_PERIOD = 52
+
+
+# ============================================================
+# STRATEGY THRESHOLDS
 # ============================================================
 
 MIN_1H_SCORE = 4
-
 MIN_30M_SCORE = 3
-
 MIN_15M_SCORE = 2
-
 MIN_5M_SCORE = 2
 
 MIN_TRIGGER_SCORE = 7
-
-MIN_FINAL_SCORE = 78.0
-
-
-# ============================================================
-# PULLBACK
-# ============================================================
-
-PULLBACK_TOUCH_ATR = 0.35
-
-PULLBACK_MAX_DISTANCE_ATR = 1.50
+MIN_SCORE = 78.0
 
 PULLBACK_MAX_AGE = 2
-
-
-# ============================================================
-# CANDLE QUALITY
-# ============================================================
+PULLBACK_TOUCH_ATR = 0.35
+PULLBACK_MAX_DISTANCE_ATR = 1.50
 
 MIN_TRIGGER_BODY_ATR = 0.10
-
 MIN_REJECTION_WICK_RATIO = 0.35
 
-
-# ============================================================
-# STOP
-# ============================================================
-
 MIN_STOP_PCT = 0.50
-
 MAX_STOP_PCT = 2.00
 
 RR = 1.0
 
+STRUCTURE_LOOKBACK_5M = 10
+STRUCTURE_LOOKBACK_15M = 4
 
-# ============================================================
-# TIMEFRAMES
-# ============================================================
-
-TF_5M = "5m"
-
-TF_15M = "15m"
-
-TF_30M = "30m"
-
-TF_1H = "1h"
-
-
-RESOLUTION_SECONDS = {
-
-    "1m": 60,
-
-    "5m": 300,
-
-    "15m": 900,
-
-    "30m": 1800,
-
-    "1h": 3600,
-
-    "4h": 14400,
-
-}
+STRUCTURE_ATR_BUFFER = 0.10
 
 
 # ============================================================
@@ -185,301 +110,326 @@ RESOLUTION_SECONDS = {
 
 SESSION = requests.Session()
 
-SESSION.headers.update({
-    "User-Agent":
-        "Kraken-Independent-Ichimoku-Listener/1.0"
-})
+SESSION.headers.update(
+    {
+        "User-Agent": "Kraken-Ichi-Live-Listener/2.0",
+        "Accept": "application/json",
+    }
+)
 
 
 # ============================================================
-# BASIC
+# BASIC HELPERS
 # ============================================================
 
-def now_utc():
-
-    return datetime.now(
-        timezone.utc
-    )
+def utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def safe_float(
-    value,
-    default=0.0
-):
-
+def safe_float(value, default=0.0):
     try:
         return float(value)
-
     except Exception:
         return default
 
 
-def clamp(
-    value,
-    low,
-    high
-):
+def clamp(value, low, high):
+    return max(low, min(high, value))
 
-    return max(
-        low,
-        min(high, value)
+
+def fmt_price(price):
+    if price is None:
+        return "-"
+
+    price = float(price)
+
+    if price >= 1000:
+        return f"{price:,.2f}"
+
+    if price >= 1:
+        return f"{price:,.4f}"
+
+    if price >= 0.01:
+        return f"{price:,.6f}"
+
+    if price >= 0.0001:
+        return f"{price:,.8f}"
+
+    return f"{price:.10f}"
+
+
+def fmt_pct(value):
+    if value is None:
+        return "-"
+
+    return f"{float(value):+.2f}%"
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def telegram_request(method, params=None, timeout=30):
+    if not TELEGRAM_API:
+        raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured.")
+
+    url = f"{TELEGRAM_API}/{method}"
+
+    response = SESSION.get(
+        url,
+        params=params or {},
+        timeout=timeout,
     )
 
+    response.raise_for_status()
 
-def fmt_price(value):
+    data = response.json()
 
-    value = safe_float(value)
+    if not data.get("ok"):
+        raise RuntimeError(
+            f"Telegram API error: {data}"
+        )
 
-    if value >= 1000:
-        return f"{value:.2f}"
-
-    if value >= 100:
-        return f"{value:.3f}"
-
-    if value >= 10:
-        return f"{value:.4f}"
-
-    if value >= 1:
-        return f"{value:.5f}"
-
-    if value >= 0.1:
-        return f"{value:.6f}"
-
-    if value >= 0.01:
-        return f"{value:.7f}"
-
-    return f"{value:.8f}"
+    return data
 
 
-# ============================================================
-# SYMBOL
-# ============================================================
+def send_telegram(text, chat_id=None):
+    target = chat_id or TELEGRAM_CHAT_ID
 
-def normalize_symbol(
-    symbol
-):
-
-    q = str(
-        symbol or ""
-    ).strip().upper()
-
-    q = (
-        q
-        .replace("$", "")
-        .replace(",", "")
-        .replace("/", "")
-    )
-
-    if q in (
-        "BTC",
-        "XBT",
-        "BTCUSD",
-        "XBTUSD",
-        "PF_BTCUSD",
-        "PF_XBTUSD",
-    ):
-
-        return "PF_XBTUSD"
-
-    if q.startswith("PF_"):
-
-        return q
-
-    if q.endswith("USD"):
-
-        return "PF_" + q
-
-    return "PF_" + q + "USD"
-
-
-def display_symbol(
-    symbol
-):
-
-    symbol = str(
-        symbol or ""
-    ).upper()
-
-    if symbol.startswith("PF_"):
-
-        symbol = symbol[3:]
-
-    if symbol in (
-        "XBTUSD",
-        "XBT",
-    ):
-
-        return "BTC"
-
-    if symbol.endswith("USD"):
-
-        symbol = symbol[:-3]
-
-    return symbol
-
-
-# ============================================================
-# HTTP GET
-# ============================================================
-
-def http_get(
-    url,
-    params=None
-):
-
-    last_error = None
-
-    for attempt in range(
-        1,
-        REQUEST_RETRIES + 1
-    ):
-
-        try:
-
-            response = SESSION.get(
-                url,
-                params=params,
-                timeout=REQUEST_TIMEOUT
-            )
-
-            response.raise_for_status()
-
-            data = response.json()
-
-            time.sleep(
-                REQUEST_SLEEP
-            )
-
-            return data
-
-        except Exception as e:
-
-            last_error = e
-
-            print(
-                f"[KRAKEN ERROR] "
-                f"{attempt}/{REQUEST_RETRIES} "
-                f"{url} | {e}"
-            )
-
-            if attempt < REQUEST_RETRIES:
-
-                time.sleep(
-                    attempt * 1.5
-                )
-
-    raise RuntimeError(
-        "Kraken request failed: "
-        f"{last_error}"
-    )
-
-
-# ============================================================
-# TIMESTAMP
-# ============================================================
-
-def normalize_timestamp(
-    value
-):
+    if not target:
+        print("ERROR: TELEGRAM_CHAT_ID is not configured.")
+        return False
 
     try:
+        telegram_request(
+            "sendMessage",
+            {
+                "chat_id": target,
+                "text": text,
+                "disable_web_page_preview": True,
+            },
+            timeout=30,
+        )
 
-        ts = float(value)
+        return True
 
-        if ts > 10_000_000_000:
+    except Exception as exc:
+        print(f"Telegram send error: {exc}")
+        return False
 
-            ts /= 1000
 
-        return int(ts)
+# ============================================================
+# TELEGRAM OFFSET
+# ============================================================
+
+def load_offset():
+    if not os.path.exists(OFFSET_FILE):
+        return 0
+
+    try:
+        with open(
+            OFFSET_FILE,
+            "r",
+            encoding="utf-8",
+        ) as f:
+            data = json.load(f)
+
+        return int(data.get("offset", 0))
 
     except Exception:
-
         return 0
+
+
+def save_offset(offset):
+    temp_file = f"{OFFSET_FILE}.tmp"
+
+    try:
+        with open(
+            temp_file,
+            "w",
+            encoding="utf-8",
+        ) as f:
+            json.dump(
+                {
+                    "offset": int(offset),
+                    "updated": utc_now(),
+                },
+                f,
+                indent=2,
+            )
+
+        os.replace(temp_file, OFFSET_FILE)
+
+    except Exception as exc:
+        print(f"Offset save error: {exc}")
+
+
+# ============================================================
+# KRAKEN API
+# ============================================================
+
+def kraken_get(url, params=None):
+    response = SESSION.get(
+        url,
+        params=params or {},
+        timeout=REQUEST_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if isinstance(data, dict):
+        if data.get("result") == "error":
+            raise RuntimeError(str(data))
+
+        if data.get("error"):
+            raise RuntimeError(str(data))
+
+    return data
 
 
 # ============================================================
 # INSTRUMENTS
 # ============================================================
 
-def get_instruments():
+_INSTRUMENT_CACHE = None
 
-    data = http_get(
-        INSTRUMENTS_URL
+
+def get_instruments():
+    global _INSTRUMENT_CACHE
+
+    if _INSTRUMENT_CACHE is not None:
+        return _INSTRUMENT_CACHE
+
+    data = kraken_get(
+        f"{KRAKEN_API}/instruments"
     )
 
-    if isinstance(
-        data,
-        dict
-    ):
+    instruments = data.get("instruments", [])
 
-        return (
-            data.get("instruments")
-            or data.get("data")
-            or []
+    if not instruments:
+        raise RuntimeError(
+            "Kraken instruments list is empty."
         )
 
-    if isinstance(
-        data,
-        list
-    ):
+    _INSTRUMENT_CACHE = instruments
 
-        return data
-
-    return []
+    return instruments
 
 
 # ============================================================
-# FIND MARKET
+# SYMBOL NORMALIZATION
 # ============================================================
 
-def find_market(
-    requested_symbol
-):
+SYMBOL_ALIASES = {
+    "BTC": "PF_XBTUSD",
+    "XBT": "PF_XBTUSD",
+    "BTCUSD": "PF_XBTUSD",
+    "XBTUSD": "PF_XBTUSD",
 
-    target = normalize_symbol(
-        requested_symbol
-    )
+    "ETH": "PF_ETHUSD",
+    "ETHUSD": "PF_ETHUSD",
+
+    "SOL": "PF_SOLUSD",
+    "SOLUSD": "PF_SOLUSD",
+
+    "XRP": "PF_XRPUSD",
+    "XRPUSD": "PF_XRPUSD",
+
+    "DOGE": "PF_DOGEUSD",
+    "DOGEUSD": "PF_DOGEUSD",
+
+    "ADA": "PF_ADAUSD",
+    "ADAUSD": "PF_ADAUSD",
+
+    "SUI": "PF_SUIUSD",
+    "SUIUSD": "PF_SUIUSD",
+
+    "AVAX": "PF_AVAXUSD",
+    "AVAXUSD": "PF_AVAXUSD",
+
+    "LINK": "PF_LINKUSD",
+    "LINKUSD": "PF_LINKUSD",
+
+    "DOT": "PF_DOTUSD",
+    "DOTUSD": "PF_DOTUSD",
+
+    "TRX": "PF_TRXUSD",
+    "TRXUSD": "PF_TRXUSD",
+
+    "LTC": "PF_LTCUSD",
+    "LTCUSD": "PF_LTCUSD",
+
+    "BCH": "PF_BCHUSD",
+    "BCHUSD": "PF_BCHUSD",
+}
+
+
+def normalize_symbol(symbol):
+    symbol = symbol.upper().strip()
+
+    if symbol in SYMBOL_ALIASES:
+        return SYMBOL_ALIASES[symbol]
+
+    if symbol.startswith("PF_"):
+        return symbol
+
+    return f"PF_{symbol}USD"
+
+
+def display_symbol(symbol):
+    symbol = symbol.upper()
+
+    if symbol == "PF_XBTUSD":
+        return "BTC"
+
+    if symbol.startswith("PF_"):
+        value = symbol[3:]
+
+        if value.endswith("USD"):
+            value = value[:-3]
+
+        return value
+
+    return symbol
+
+
+def find_market(symbol):
+    normalized = normalize_symbol(symbol)
 
     instruments = get_instruments()
 
+    exact = None
+
     for item in instruments:
-
-        if not isinstance(
-            item,
-            dict
-        ):
-            continue
-
-        symbol = str(
+        name = str(
             item.get("symbol")
             or item.get("instrument")
+            or item.get("name")
             or ""
-        )
+        ).upper()
 
-        if (
-            symbol.upper()
-            != target.upper()
-        ):
-            continue
+        if name == normalized:
+            exact = item
+            break
 
-        if not symbol.upper().startswith(
-            "PF_"
-        ):
-            continue
+    if exact:
+        return exact
 
-        return {
-            "symbol": symbol,
+    # fallback
+    wanted = normalized.replace("PF_", "")
 
-            "tick_size":
-                safe_float(
-                    item.get("tickSize")
-                    or item.get("tick_size")
-                    or item.get(
-                        "priceIncrement"
-                    ),
-                    0.0
-                ),
-        }
+    for item in instruments:
+        name = str(
+            item.get("symbol")
+            or item.get("instrument")
+            or item.get("name")
+            or ""
+        ).upper()
+
+        if name.replace("PF_", "") == wanted:
+            return item
 
     return None
 
@@ -488,366 +438,255 @@ def find_market(
 # CANDLES
 # ============================================================
 
-def get_candles(
-    symbol,
-    resolution,
-    limit=250
-):
+RESOLUTION_MAP = {
+    "5m": "5",
+    "15m": "15",
+    "30m": "30",
+    "1h": "60",
+}
 
-    url = CHART_URL.format(
-        symbol=symbol,
-        resolution=resolution
+
+def get_candles(symbol, timeframe, limit=180):
+    resolution = RESOLUTION_MAP[timeframe]
+
+    url = (
+        f"{KRAKEN_CHART_API}/"
+        f"{symbol}/{resolution}"
     )
 
-    data = http_get(
-        url,
-        params={
-            "from": 0,
-            "to": int(
-                time.time()
-            ),
-        }
-    )
-
-    if isinstance(
-        data,
-        dict
-    ):
-
-        rows = (
-            data.get("candles")
-            or data.get("data")
-            or []
-        )
-
-    elif isinstance(
-        data,
-        list
-    ):
-
-        rows = data
-
-    else:
-
-        rows = []
+    data = kraken_get(url)
 
     candles = []
 
-    for row in rows:
+    raw = data.get("candles", [])
 
+    for c in raw:
         try:
+            ts = int(
+                c.get("time")
+                or c.get("timestamp")
+                or c.get("t")
+            )
 
-            if isinstance(
-                row,
-                dict
+            o = safe_float(
+                c.get("open", c.get("o"))
+            )
+
+            h = safe_float(
+                c.get("high", c.get("h"))
+            )
+
+            l = safe_float(
+                c.get("low", c.get("l"))
+            )
+
+            close = safe_float(
+                c.get("close", c.get("c"))
+            )
+
+            volume = safe_float(
+                c.get("volume", c.get("v"))
+            )
+
+            if not all(
+                [
+                    ts > 0,
+                    o > 0,
+                    h > 0,
+                    l > 0,
+                    close > 0,
+                ]
             ):
+                continue
 
-                t = (
-                    row.get("time")
-                    or row.get("timestamp")
-                )
-
-                o = (
-                    row.get("open")
-                    or row.get("o")
-                )
-
-                h = (
-                    row.get("high")
-                    or row.get("h")
-                )
-
-                l = (
-                    row.get("low")
-                    or row.get("l")
-                )
-
-                c = (
-                    row.get("close")
-                    or row.get("c")
-                )
-
-                v = (
-                    row.get("volume")
-                    or row.get("v")
-                    or 0
-                )
-
-            else:
-
-                if len(row) < 5:
-                    continue
-
-                t = row[0]
-
-                o = row[1]
-
-                h = row[2]
-
-                l = row[3]
-
-                c = row[4]
-
-                v = (
-                    row[5]
-                    if len(row) > 5
-                    else 0
-                )
-
-            candles.append({
-
-                "time":
-                    normalize_timestamp(t),
-
-                "open":
-                    safe_float(o),
-
-                "high":
-                    safe_float(h),
-
-                "low":
-                    safe_float(l),
-
-                "close":
-                    safe_float(c),
-
-                "volume":
-                    safe_float(v),
-
-            })
+            candles.append(
+                {
+                    "time": ts,
+                    "open": o,
+                    "high": h,
+                    "low": l,
+                    "close": close,
+                    "volume": volume,
+                }
+            )
 
         except Exception:
-
             continue
 
     candles.sort(
         key=lambda x: x["time"]
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # CLOSED CANDLES ONLY
-    # ========================================================
+    # --------------------------------------------------------
 
-    now_ts = int(
-        time.time()
-    )
+    interval_seconds = {
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+    }[timeframe]
 
-    seconds = RESOLUTION_SECONDS.get(
-        resolution,
-        300
-    )
+    now_ts = int(time.time())
 
-    closed = []
-
-    for candle in candles:
-
-        if (
-            candle["time"]
-            + seconds
-            <= now_ts
-        ):
-
-            closed.append(
-                candle
-            )
+    closed = [
+        c
+        for c in candles
+        if c["time"] + interval_seconds <= now_ts
+    ]
 
     return closed[-limit:]
 
 
 # ============================================================
-# CANDLE HELPERS
+# TICKER
 # ============================================================
 
-def candle_range(c):
-
-    return max(
-        c["high"] - c["low"],
-        1e-12
+def get_ticker(symbol):
+    data = kraken_get(
+        f"{KRAKEN_API}/tickers"
     )
 
+    tickers = data.get("tickers", [])
 
-def candle_body(c):
+    for ticker in tickers:
+        name = str(
+            ticker.get("symbol")
+            or ticker.get("instrument")
+            or ticker.get("name")
+            or ""
+        ).upper()
 
-    return abs(
-        c["close"]
-        - c["open"]
-    )
+        if name == symbol.upper():
+            return ticker
 
-
-def upper_wick(c):
-
-    return (
-        c["high"]
-        - max(
-            c["open"],
-            c["close"]
-        )
-    )
+    return None
 
 
-def lower_wick(c):
+def get_current_price(symbol, candles=None):
+    ticker = get_ticker(symbol)
 
-    return (
-        min(
-            c["open"],
-            c["close"]
-        )
-        - c["low"]
-    )
+    if ticker:
+        for key in [
+            "last",
+            "lastPrice",
+            "price",
+            "markPrice",
+            "mark",
+        ]:
+            if key in ticker:
+                value = safe_float(
+                    ticker.get(key)
+                )
 
+                if value > 0:
+                    return value
 
-def bullish(c):
+    if candles:
+        return candles[-1]["close"]
 
-    return c["close"] > c["open"]
-
-
-def bearish(c):
-
-    return c["close"] < c["open"]
+    return None
 
 
 # ============================================================
 # ATR
 # ============================================================
 
-def calculate_atr(
-    candles,
-    period=14
-):
-
+def calculate_atr(candles, period=14):
     if len(candles) < period + 1:
-
-        return 0.0
+        return None
 
     trs = []
 
-    for i in range(
-        1,
-        len(candles)
-    ):
-
-        cur = candles[i]
-
-        prev = candles[i - 1]
+    for i in range(1, len(candles)):
+        current = candles[i]
+        previous = candles[i - 1]
 
         tr = max(
-
-            cur["high"]
-            - cur["low"],
-
+            current["high"] - current["low"],
             abs(
-                cur["high"]
-                - prev["close"]
+                current["high"]
+                - previous["close"]
             ),
-
             abs(
-                cur["low"]
-                - prev["close"]
+                current["low"]
+                - previous["close"]
             ),
-
         )
 
         trs.append(tr)
 
     if len(trs) < period:
+        return None
 
-        return 0.0
-
-    return (
-        sum(
-            trs[-period:]
-        )
-        / period
-    )
+    return sum(trs[-period:]) / period
 
 
 # ============================================================
 # ICHIMOKU
 # ============================================================
 
-def ichimoku(
-    candles
-):
+def midpoint(candles):
+    if not candles:
+        return None
 
-    if len(candles) < 52:
+    high = max(
+        x["high"] for x in candles
+    )
 
-        raise RuntimeError(
-            "Not enough candles for Ichimoku"
-        )
+    low = min(
+        x["low"] for x in candles
+    )
 
-    highs = [
-        c["high"]
-        for c in candles
-    ]
+    return (high + low) / 2.0
 
-    lows = [
-        c["low"]
-        for c in candles
-    ]
 
-    closes = [
-        c["close"]
-        for c in candles
-    ]
+def calculate_ichimoku(candles):
+    if len(candles) < SENKOU_B_PERIOD:
+        return None
 
-    tenkan = (
+    tenkan = midpoint(
+        candles[-TENKAN_PERIOD:]
+    )
 
-        max(highs[-9:])
-        +
-        min(lows[-9:])
+    kijun = midpoint(
+        candles[-KIJUN_PERIOD:]
+    )
 
-    ) / 2
+    span_b = midpoint(
+        candles[-SENKOU_B_PERIOD:]
+    )
 
-    kijun = (
-
-        max(highs[-26:])
-        +
-        min(lows[-26:])
-
-    ) / 2
-
+    # Same logical cloud scoring used by v14.1.
+    # Current Span A / Span B are used for scoring.
     span_a = (
-        tenkan
-        + kijun
-    ) / 2
+        (tenkan + kijun) / 2.0
+        if tenkan is not None
+        and kijun is not None
+        else None
+    )
 
-    span_b = (
-
-        max(highs[-52:])
-        +
-        min(lows[-52:])
-
-    ) / 2
-
-    price = closes[-1]
+    close = candles[-1]["close"]
 
     cloud_top = max(
         span_a,
-        span_b
+        span_b,
     )
 
     cloud_bottom = min(
         span_a,
-        span_b
+        span_b,
     )
 
     return {
-
-        "price": price,
-
         "tenkan": tenkan,
-
         "kijun": kijun,
-
         "span_a": span_a,
-
         "span_b": span_b,
-
         "cloud_top": cloud_top,
-
-        "cloud_bottom":
-            cloud_bottom,
-
+        "cloud_bottom": cloud_bottom,
+        "close": close,
     }
 
 
@@ -855,327 +694,114 @@ def ichimoku(
 # ICHIMOKU SCORE
 # ============================================================
 
-def ichimoku_score(
-    candles
-):
+def ichimoku_score(candles):
+    ichi = calculate_ichimoku(candles)
 
-    info = ichimoku(
-        candles
-    )
+    if ichi is None:
+        return None
 
-    price = info["price"]
-
-    tenkan = info["tenkan"]
-
-    kijun = info["kijun"]
+    close = ichi["close"]
+    tenkan = ichi["tenkan"]
+    kijun = ichi["kijun"]
+    span_a = ichi["span_a"]
+    span_b = ichi["span_b"]
 
     score = 0
+    reasons = []
 
     # --------------------------------------------------------
-    # Price vs cloud
+    # PRICE VS CLOUD = +/-4
     # --------------------------------------------------------
 
-    if price > info["cloud_top"]:
-
+    if close > ichi["cloud_top"]:
         score += 4
+        reasons.append("+4 Price above cloud")
 
-    elif price < info["cloud_bottom"]:
-
+    elif close < ichi["cloud_bottom"]:
         score -= 4
+        reasons.append("-4 Price below cloud")
+
+    else:
+        reasons.append("0 Price inside cloud")
 
     # --------------------------------------------------------
-    # Price vs Kijun
+    # PRICE VS KIJUN = +/-2
     # --------------------------------------------------------
 
-    if price > kijun:
-
+    if close > kijun:
         score += 2
+        reasons.append("+2 Price > Kijun")
 
-    elif price < kijun:
-
+    elif close < kijun:
         score -= 2
+        reasons.append("-2 Price < Kijun")
 
     # --------------------------------------------------------
-    # Tenkan vs Kijun
+    # TENKAN VS KIJUN = +/-2
     # --------------------------------------------------------
 
     if tenkan > kijun:
-
         score += 2
+        reasons.append("+2 Tenkan > Kijun")
 
     elif tenkan < kijun:
-
         score -= 2
+        reasons.append("-2 Tenkan < Kijun")
 
     # --------------------------------------------------------
-    # Cloud direction
+    # SPAN A VS SPAN B = +/-2
     # --------------------------------------------------------
 
-    if info["span_a"] > info["span_b"]:
-
+    if span_a > span_b:
         score += 2
+        reasons.append("+2 Span A > Span B")
 
-    elif info["span_a"] < info["span_b"]:
-
+    elif span_a < span_b:
         score -= 2
+        reasons.append("-2 Span A < Span B")
 
-    score = int(
-        clamp(
-            score,
-            -10,
-            10
+    return {
+        "score": score,
+        "ichimoku": ichi,
+        "reasons": reasons,
+    }
+
+
+# ============================================================
+# CANDLE HELPERS
+# ============================================================
+
+def candle_body(candle):
+    return abs(
+        candle["close"]
+        - candle["open"]
+    )
+
+
+def candle_range(candle):
+    return (
+        candle["high"]
+        - candle["low"]
+    )
+
+
+def upper_wick(candle):
+    return (
+        candle["high"]
+        - max(
+            candle["open"],
+            candle["close"],
         )
     )
 
-    info["score"] = score
 
-    return score, info
-
-
-# ============================================================
-# REVERSAL PATTERNS
-# ============================================================
-
-def bullish_engulfing(
-    a,
-    b
-):
-
+def lower_wick(candle):
     return (
-
-        bearish(a)
-
-        and bullish(b)
-
-        and b["open"] <= a["close"]
-
-        and b["close"] >= a["open"]
-
-    )
-
-
-def bearish_engulfing(
-    a,
-    b
-):
-
-    return (
-
-        bullish(a)
-
-        and bearish(b)
-
-        and b["open"] >= a["close"]
-
-        and b["close"] <= a["open"]
-
-    )
-
-
-def hammer(c):
-
-    body = max(
-        candle_body(c),
-        candle_range(c) * 0.02
-    )
-
-    return (
-
-        lower_wick(c)
-        >= body * 2
-
-        and upper_wick(c)
-        <= body * 0.8
-
-        and (
-            body
-            / candle_range(c)
-        ) <= 0.45
-
-    )
-
-
-def shooting_star(c):
-
-    body = max(
-        candle_body(c),
-        candle_range(c) * 0.02
-    )
-
-    return (
-
-        upper_wick(c)
-        >= body * 2
-
-        and lower_wick(c)
-        <= body * 0.8
-
-        and (
-            body
-            / candle_range(c)
-        ) <= 0.45
-
-    )
-
-
-def bullish_pin_bar(c):
-
-    r = candle_range(c)
-
-    return (
-
-        lower_wick(c)
-        >= r * 0.55
-
-        and upper_wick(c)
-        <= r * 0.20
-
-        and candle_body(c)
-        <= r * 0.35
-
-    )
-
-
-def bearish_pin_bar(c):
-
-    r = candle_range(c)
-
-    return (
-
-        upper_wick(c)
-        >= r * 0.55
-
-        and lower_wick(c)
-        <= r * 0.20
-
-        and candle_body(c)
-        <= r * 0.35
-
-    )
-
-
-def get_reversal_patterns(
-    side,
-    candles
-):
-
-    if len(candles) < 3:
-
-        return []
-
-    cur = candles[-1]
-
-    prev = candles[-2]
-
-    patterns = []
-
-    if side == "LONG":
-
-        if bullish_engulfing(
-            prev,
-            cur
-        ):
-
-            patterns.append(
-                "Bullish Engulfing"
-            )
-
-        if (
-            hammer(cur)
-            and bullish(cur)
-        ):
-
-            patterns.append(
-                "Hammer"
-            )
-
-        if bullish_pin_bar(cur):
-
-            patterns.append(
-                "Bullish Pin Bar"
-            )
-
-    else:
-
-        if bearish_engulfing(
-            prev,
-            cur
-        ):
-
-            patterns.append(
-                "Bearish Engulfing"
-            )
-
-        if (
-            shooting_star(cur)
-            and bearish(cur)
-        ):
-
-            patterns.append(
-                "Shooting Star"
-            )
-
-        if bearish_pin_bar(cur):
-
-            patterns.append(
-                "Bearish Pin Bar"
-            )
-
-    return patterns
-
-
-# ============================================================
-# STRUCTURE
-# ============================================================
-
-def structure_ok(
-    side,
-    candles,
-    lookback=6
-):
-
-    if len(candles) < lookback + 2:
-
-        return False
-
-    window = candles[
-        -(lookback + 1):
-    ]
-
-    highs = [
-        c["high"]
-        for c in window
-    ]
-
-    lows = [
-        c["low"]
-        for c in window
-    ]
-
-    if side == "LONG":
-
-        return (
-
-            highs[-1]
-            >= max(highs[:-1])
-
-            or
-
-            lows[-1]
-            > min(lows[:-1])
-
+        min(
+            candle["open"],
+            candle["close"],
         )
-
-    return (
-
-        lows[-1]
-        <= min(lows[:-1])
-
-        or
-
-        highs[-1]
-        < max(highs[:-1])
-
+        - candle["low"]
     )
 
 
@@ -1183,370 +809,274 @@ def structure_ok(
 # PULLBACK ANALYSIS
 # ============================================================
 
-def analyze_pullback(
-    side,
-    candles
-):
+def analyze_pullback(candles, side):
+    result = {
+        "valid": False,
+        "touch": False,
+        "touch_age": None,
+        "distance_atr": None,
+        "reversal": False,
+        "reclaim": False,
+        "structure": False,
+        "body_ok": False,
+        "reason": "",
+    }
 
-    if len(candles) < 20:
+    if len(candles) < 30:
+        result["reason"] = "Not enough 5m candles."
+        return result
 
-        return {
-            "valid": False,
-            "reason":
-                "Not enough 5M candles",
-            "touch": False,
-            "reversal": False,
-            "reclaim": False,
-            "structure": False,
-            "body_ok": False,
-            "rejection": False,
-            "age": 999,
-            "distance_atr": 999,
-        }
+    current = candles[-1]
 
-    atr5 = calculate_atr(
-        candles,
-        14
-    )
+    atr = calculate_atr(candles, 14)
 
-    if atr5 <= 0:
+    if atr is None or atr <= 0:
+        result["reason"] = "ATR unavailable."
+        return result
 
-        return {
-            "valid": False,
-            "reason": "Invalid ATR",
-            "touch": False,
-            "reversal": False,
-            "reclaim": False,
-            "structure": False,
-            "body_ok": False,
-            "rejection": False,
-            "age": 999,
-            "distance_atr": 999,
-        }
+    ichi = calculate_ichimoku(candles)
 
-    info = ichimoku(
-        candles
-    )
+    if ichi is None:
+        result["reason"] = "Ichimoku unavailable."
+        return result
 
-    tenkan = info["tenkan"]
-
-    kijun = info["kijun"]
-
-    cur = candles[-1]
-
-    prev = candles[-2]
-
-    prev2 = candles[-3]
+    tenkan = ichi["tenkan"]
+    kijun = ichi["kijun"]
 
     # --------------------------------------------------------
-    # Detect recent touch
+    # Find recent touch
     # --------------------------------------------------------
-
-    touch = False
 
     touch_index = None
 
-    for back in range(
-        1,
-        PULLBACK_MAX_AGE + 2
+    search_start = max(
+        0,
+        len(candles) - PULLBACK_MAX_AGE - 1,
+    )
+
+    for i in range(
+        search_start,
+        len(candles),
     ):
-
-        if len(candles) <= back:
-
-            continue
-
-        c = candles[-1 - back]
+        c = candles[i]
 
         if side == "LONG":
+            levels = [
+                tenkan,
+                kijun,
+                ichi["cloud_top"],
+            ]
 
-            d1 = abs(
-                c["low"]
-                - tenkan
-            )
-
-            d2 = abs(
-                c["low"]
-                - kijun
+            touched = any(
+                abs(c["low"] - level)
+                <= atr * PULLBACK_TOUCH_ATR
+                or (
+                    c["low"]
+                    <= level
+                    <= c["high"]
+                )
+                for level in levels
+                if level is not None
             )
 
         else:
+            levels = [
+                tenkan,
+                kijun,
+                ichi["cloud_bottom"],
+            ]
 
-            d1 = abs(
-                c["high"]
-                - tenkan
+            touched = any(
+                abs(c["high"] - level)
+                <= atr * PULLBACK_TOUCH_ATR
+                or (
+                    c["low"]
+                    <= level
+                    <= c["high"]
+                )
+                for level in levels
+                if level is not None
             )
 
-            d2 = abs(
-                c["high"]
-                - kijun
-            )
-
-        distance = min(
-            d1,
-            d2
-        )
-
-        if distance <= (
-            atr5
-            * PULLBACK_TOUCH_ATR
-        ):
-
-            touch = True
-
-            touch_index = (
-                len(candles)
-                - 1
-                - back
-            )
-
-            break
-
-    # --------------------------------------------------------
-    # Current distance from Tenkan/Kijun
-    # --------------------------------------------------------
-
-    if side == "LONG":
-
-        current_distance = min(
-
-            abs(
-                cur["close"]
-                - tenkan
-            ),
-
-            abs(
-                cur["close"]
-                - kijun
-            )
-
-        )
-
-    else:
-
-        current_distance = min(
-
-            abs(
-                cur["close"]
-                - tenkan
-            ),
-
-            abs(
-                cur["close"]
-                - kijun
-            )
-
-        )
-
-    distance_atr = (
-        current_distance
-        / atr5
-    )
-
-    # --------------------------------------------------------
-    # Pullback age
-    # --------------------------------------------------------
+        if touched:
+            touch_index = i
 
     if touch_index is None:
+        result["reason"] = "No fresh pullback touch."
+        return result
 
-        age = 999
+    touch_age = (
+        len(candles)
+        - 1
+        - touch_index
+    )
 
-    else:
+    result["touch"] = True
+    result["touch_age"] = touch_age
 
-        age = (
-            len(candles)
-            - 1
-            - touch_index
+    if touch_age > PULLBACK_MAX_AGE:
+        result["reason"] = (
+            f"Pullback too old: {touch_age} candles."
         )
+        return result
 
     # --------------------------------------------------------
-    # Reversal candle
+    # Distance from relevant level
     # --------------------------------------------------------
 
     if side == "LONG":
-
-        reversal = bullish(cur)
+        levels = [
+            tenkan,
+            kijun,
+            ichi["cloud_top"],
+        ]
 
     else:
+        levels = [
+            tenkan,
+            kijun,
+            ichi["cloud_bottom"],
+        ]
 
-        reversal = bearish(cur)
+    relevant_levels = [
+        x for x in levels
+        if x is not None
+    ]
+
+    distance = min(
+        abs(current["close"] - level)
+        for level in relevant_levels
+    )
+
+    distance_atr = distance / atr
+
+    result["distance_atr"] = distance_atr
+
+    if distance_atr > PULLBACK_MAX_DISTANCE_ATR:
+        result["reason"] = (
+            f"Pullback too far: "
+            f"{distance_atr:.2f} ATR."
+        )
+        return result
 
     # --------------------------------------------------------
-    # Rejection
+    # Reversal
     # --------------------------------------------------------
+
+    body = candle_body(current)
+    rng = candle_range(current)
+
+    if rng <= 0:
+        result["reason"] = "Invalid trigger candle."
+        return result
 
     if side == "LONG":
+        bullish = current["close"] > current["open"]
 
         rejection = (
-            lower_wick(prev)
-            >= candle_range(prev)
-            * MIN_REJECTION_WICK_RATIO
+            lower_wick(current) / rng
+            >= MIN_REJECTION_WICK_RATIO
         )
+
+        reversal = bullish or rejection
 
     else:
+        bearish = current["close"] < current["open"]
 
         rejection = (
-            upper_wick(prev)
-            >= candle_range(prev)
-            * MIN_REJECTION_WICK_RATIO
+            upper_wick(current) / rng
+            >= MIN_REJECTION_WICK_RATIO
         )
+
+        reversal = bearish or rejection
+
+    result["reversal"] = reversal
+
+    if not reversal:
+        result["reason"] = "No reversal candle."
+        return result
 
     # --------------------------------------------------------
     # Reclaim
     # --------------------------------------------------------
 
     if side == "LONG":
-
         reclaim = (
-            cur["close"] > tenkan
-            or cur["close"] > kijun
+            current["close"] > tenkan
+            and current["close"] > kijun
         )
-
     else:
-
         reclaim = (
-            cur["close"] < tenkan
-            or cur["close"] < kijun
+            current["close"] < tenkan
+            and current["close"] < kijun
         )
+
+    result["reclaim"] = reclaim
 
     # --------------------------------------------------------
     # Structure
     # --------------------------------------------------------
 
-    structure = structure_ok(
-        side,
-        candles
-    )
+    lookback = candles[
+        max(
+            0,
+            len(candles)
+            - STRUCTURE_LOOKBACK_5M,
+        ):
+    ]
+
+    previous = candles[-2]
+
+    if side == "LONG":
+        structure = (
+            current["close"]
+            > previous["high"]
+            or current["high"]
+            > previous["high"]
+        )
+    else:
+        structure = (
+            current["close"]
+            < previous["low"]
+            or current["low"]
+            < previous["low"]
+        )
+
+    result["structure"] = structure
 
     # --------------------------------------------------------
-    # Candle body
+    # Body quality
     # --------------------------------------------------------
 
     body_ok = (
-        candle_body(cur)
-        >= atr5
-        * MIN_TRIGGER_BODY_ATR
+        body
+        >= atr * MIN_TRIGGER_BODY_ATR
     )
 
+    result["body_ok"] = body_ok
+
     # --------------------------------------------------------
-    # Fresh distance
+    # Final pullback validity
     # --------------------------------------------------------
 
-    distance_ok = (
-        distance_atr
+    result["valid"] = (
+        result["touch"]
+        and result["touch_age"]
+        <= PULLBACK_MAX_AGE
+        and result["distance_atr"]
         <= PULLBACK_MAX_DISTANCE_ATR
+        and result["reversal"]
+        and result["body_ok"]
     )
 
-    # --------------------------------------------------------
-    # Fresh age
-    # --------------------------------------------------------
-
-    age_ok = (
-        age <= PULLBACK_MAX_AGE
-    )
-
-    # --------------------------------------------------------
-    # Final pullback
-    # --------------------------------------------------------
-
-    valid = (
-
-        touch
-
-        and age_ok
-
-        and distance_ok
-
-        and reversal
-
-        and reclaim
-
-        and structure
-
-        and body_ok
-
-    )
-
-    # --------------------------------------------------------
-    # Reason
-    # --------------------------------------------------------
-
-    if not touch:
-
-        reason = (
-            "No fresh Tenkan/Kijun touch"
-        )
-
-    elif not age_ok:
-
-        reason = (
-            f"Pullback too old "
-            f"({age} candles)"
-        )
-
-    elif not distance_ok:
-
-        reason = (
-            f"Price too far from "
-            f"Tenkan/Kijun "
-            f"({distance_atr:.2f} ATR)"
-        )
-
-    elif not reversal:
-
-        reason = (
-            "5M reversal candle "
-            "not confirmed"
-        )
-
-    elif not reclaim:
-
-        reason = (
-            "Tenkan/Kijun reclaim "
-            "not confirmed"
-        )
-
-    elif not structure:
-
-        reason = (
-            "5M structure break "
-            "not confirmed"
-        )
-
-    elif not body_ok:
-
-        reason = (
-            "Trigger candle body "
-            "too weak"
-        )
-
+    if result["valid"]:
+        result["reason"] = "Valid pullback."
     else:
+        result["reason"] = (
+            "Pullback incomplete."
+        )
 
-        reason = "Pullback valid"
-
-    return {
-
-        "valid": valid,
-
-        "reason": reason,
-
-        "touch": touch,
-
-        "reversal": reversal,
-
-        "reclaim": reclaim,
-
-        "structure": structure,
-
-        "body_ok": body_ok,
-
-        "rejection": rejection,
-
-        "age": age,
-
-        "distance_atr":
-            distance_atr,
-
-    }
+    return result
 
 
 # ============================================================
@@ -1554,66 +1084,128 @@ def analyze_pullback(
 # ============================================================
 
 def calculate_trigger_score(
-    side,
     candles,
-    pb
+    side,
+    pullback,
 ):
+    if not pullback["valid"]:
+        return {
+            "score": 0,
+            "reasons": [
+                "Pullback invalid"
+            ],
+        }
 
-    if not pb.get(
-        "valid"
-    ):
-
-        return 0
-
-    if len(candles) < 3:
-
-        return 0
-
-    cur = candles[-1]
-
-    prev = candles[-2]
+    current = candles[-1]
+    previous = candles[-2]
 
     score = 0
+    reasons = []
 
-    if pb.get("touch"):
-
-        score += 1
-
-    if pb.get("reversal"):
-
+    # Fresh touch
+    if pullback["touch"]:
         score += 2
+        reasons.append("+2 Fresh touch")
 
-    if pb.get("rejection"):
-
-        score += 1
-
-    if pb.get("reclaim"):
-
-        score += 1
-
-    if pb.get("structure"):
-
+    # Reversal
+    if pullback["reversal"]:
         score += 2
+        reasons.append("+2 Reversal")
 
-    if pb.get("body_ok"):
+    # Rejection
+    rng = candle_range(current)
 
+    if rng > 0:
+        if side == "LONG":
+            rejection_ratio = (
+                lower_wick(current) / rng
+            )
+        else:
+            rejection_ratio = (
+                upper_wick(current) / rng
+            )
+
+        if (
+            rejection_ratio
+            >= MIN_REJECTION_WICK_RATIO
+        ):
+            score += 1
+            reasons.append(
+                "+1 Rejection wick"
+            )
+
+    # Reclaim
+    if pullback["reclaim"]:
+        score += 2
+        reasons.append("+2 Reclaim")
+
+    # Structure
+    if pullback["structure"]:
         score += 1
+        reasons.append("+1 Structure")
+
+    # Body
+    if pullback["body_ok"]:
+        score += 1
+        reasons.append("+1 Body quality")
+
+    # Previous candle break
+    if side == "LONG":
+        if current["close"] > previous["high"]:
+            score += 1
+            reasons.append(
+                "+1 Close > previous high"
+            )
+    else:
+        if current["close"] < previous["low"]:
+            score += 1
+            reasons.append(
+                "+1 Close < previous low"
+            )
+
+    return {
+        "score": min(score, 10),
+        "reasons": reasons,
+    }
+
+
+# ============================================================
+# 15M STRUCTURE
+# ============================================================
+
+def check_15m_structure(candles, side):
+    if len(candles) < 10:
+        return False
+
+    recent = candles[
+        -STRUCTURE_LOOKBACK_15M:
+    ]
 
     if side == "LONG":
+        return (
+            recent[-1]["close"]
+            >= recent[0]["close"]
+        )
 
-        if cur["close"] > prev["high"]:
+    return (
+        recent[-1]["close"]
+        <= recent[0]["close"]
+    )
 
-            score += 2
 
-    else:
+# ============================================================
+# SCORE TO PERCENT
+# ============================================================
 
-        if cur["close"] < prev["low"]:
+def normalized_score(score):
+    if score is None:
+        return 0.0
 
-            score += 2
-
-    return min(
-        score,
-        10
+    # -10 to +10 -> 0 to 100
+    return (
+        (score + 10.0)
+        / 20.0
+        * 100.0
     )
 
 
@@ -1621,914 +1213,734 @@ def calculate_trigger_score(
 # FINAL SCORE
 # ============================================================
 
-def final_score(
+def calculate_final_score(
+    score_1h,
+    score_30m,
+    score_15m,
+    score_5m,
+    trigger_score,
     side,
-    scores,
-    trigger
 ):
+    # --------------------------------------------------------
+    # Same weighted architecture as v14.1:
+    #
+    # 1H      = 35
+    # 30M     = 25
+    # 15M     = 20
+    # Trigger = 15
+    # 5M      = 5
+    # --------------------------------------------------------
 
-    sign = (
-        1
-        if side == "LONG"
-        else -1
+    def directional(score):
+        if side == "LONG":
+            return max(score, 0)
+        return max(-score, 0)
+
+    s1 = directional(score_1h)
+    s30 = directional(score_30m)
+    s15 = directional(score_15m)
+    s5 = directional(score_5m)
+
+    final = (
+        (s1 / 10.0) * 35.0
+        + (s30 / 10.0) * 25.0
+        + (s15 / 10.0) * 20.0
+        + (trigger_score / 10.0) * 15.0
+        + (s5 / 10.0) * 5.0
     )
 
-    s1 = scores["1h"]
-
-    s30 = scores["30m"]
-
-    s15 = scores["15m"]
-
-    s5 = scores["5m"]
-
-    trend = (
-
-        max(
-            sign * s1,
-            0
-        )
-        / 10
-        * 35
-
-    )
-
-    confirm = (
-
-        max(
-            sign * s30,
-            0
-        )
-        / 10
-        * 25
-
-    )
-
-    structure = (
-
-        max(
-            sign * s15,
-            0
-        )
-        / 10
-        * 20
-
-    )
-
-    trigger_part = (
-
-        trigger
-        / 10
-        * 15
-
-    )
-
-    five = (
-
-        max(
-            sign * s5,
-            0
-        )
-        / 10
-        * 5
-
-    )
-
-    return round(
-        clamp(
-            trend
-            + confirm
-            + structure
-            + trigger_part
-            + five,
-            0,
-            100
-        ),
-        1
+    return clamp(
+        final,
+        0.0,
+        100.0,
     )
 
 
 # ============================================================
-# TICK SIZE
+# STOP / TARGET
 # ============================================================
 
-def round_to_tick(
-    price,
-    tick_size
-):
-
-    if tick_size <= 0:
-
-        if price >= 1000:
-            return round(price, 2)
-
-        if price >= 100:
-            return round(price, 3)
-
-        if price >= 10:
-            return round(price, 4)
-
-        if price >= 1:
-            return round(price, 5)
-
-        if price >= 0.1:
-            return round(price, 6)
-
-        if price >= 0.01:
-            return round(price, 7)
-
-        return round(price, 8)
-
-    return round(
-        math.floor(
-            price
-            / tick_size
-            + 0.5
-        )
-        * tick_size,
-        12
-    )
-
-
-# ============================================================
-# SL / TP
-# ============================================================
-
-def calculate_levels(
+def calculate_trade_levels(
+    candles_5m,
+    candles_15m,
     side,
-    entry,
-    c5,
-    c15,
-    tick_size
 ):
+    if len(candles_5m) < 10:
+        return None
 
-    atr5 = calculate_atr(
-        c5,
-        14
+    if len(candles_15m) < 4:
+        return None
+
+    entry = candles_5m[-1]["close"]
+
+    atr = calculate_atr(
+        candles_5m,
+        14,
     )
 
-    if atr5 <= 0:
+    if atr is None or atr <= 0:
+        return None
 
-        raise RuntimeError(
-            "Invalid ATR"
-        )
-
-    recent5 = c5[-10:]
-
-    recent15 = c15[-4:]
-
-    combined = (
-        recent5
-        + recent15
+    low_5m = min(
+        x["low"]
+        for x in candles_5m[
+            -STRUCTURE_LOOKBACK_5M:
+        ]
     )
 
-    if side == "LONG":
-
-        structural = (
-
-            min(
-                c["low"]
-                for c in combined
-            )
-
-            - atr5 * 0.10
-
-        )
-
-    else:
-
-        structural = (
-
-            max(
-                c["high"]
-                for c in combined
-            )
-
-            + atr5 * 0.10
-
-        )
-
-    entry_r = round_to_tick(
-        entry,
-        tick_size
+    high_5m = max(
+        x["high"]
+        for x in candles_5m[
+            -STRUCTURE_LOOKBACK_5M:
+        ]
     )
 
-    sl = round_to_tick(
-        structural,
-        tick_size
+    low_15m = min(
+        x["low"]
+        for x in candles_15m[
+            -STRUCTURE_LOOKBACK_15M:
+        ]
+    )
+
+    high_15m = max(
+        x["high"]
+        for x in candles_15m[
+            -STRUCTURE_LOOKBACK_15M:
+        ]
     )
 
     if side == "LONG":
-
-        risk = (
-            entry_r
-            - sl
+        structure_low = min(
+            low_5m,
+            low_15m,
         )
+
+        sl = (
+            structure_low
+            - atr * STRUCTURE_ATR_BUFFER
+        )
+
+        if sl >= entry:
+            return None
+
+        risk = entry - sl
+
+        tp = entry + risk * RR
 
     else:
-
-        risk = (
-            sl
-            - entry_r
+        structure_high = max(
+            high_5m,
+            high_15m,
         )
 
-    if risk <= 0:
-
-        raise RuntimeError(
-            "Invalid structural risk"
+        sl = (
+            structure_high
+            + atr * STRUCTURE_ATR_BUFFER
         )
 
-    risk_pct = (
-        risk
-        / entry_r
-        * 100
+        if sl <= entry:
+            return None
+
+        risk = sl - entry
+
+        tp = entry - risk * RR
+
+    stop_pct = (
+        abs(entry - sl)
+        / entry
+        * 100.0
     )
-
-    # --------------------------------------------------------
-    # Minimum stop
-    # --------------------------------------------------------
-
-    if risk_pct < MIN_STOP_PCT:
-
-        min_distance = (
-
-            entry_r
-            * MIN_STOP_PCT
-            / 100
-
-        )
-
-        if side == "LONG":
-
-            sl = round_to_tick(
-                entry_r
-                - min_distance,
-                tick_size
-            )
-
-        else:
-
-            sl = round_to_tick(
-                entry_r
-                + min_distance,
-                tick_size
-            )
-
-        if side == "LONG":
-
-            risk = (
-                entry_r
-                - sl
-            )
-
-        else:
-
-            risk = (
-                sl
-                - entry_r
-            )
-
-        risk_pct = (
-            risk
-            / entry_r
-            * 100
-        )
-
-    # --------------------------------------------------------
-    # Maximum stop
-    # --------------------------------------------------------
-
-    if risk_pct > MAX_STOP_PCT:
-
-        raise RuntimeError(
-            f"Stop too wide: "
-            f"{risk_pct:.2f}%"
-        )
-
-    # --------------------------------------------------------
-    # TP
-    # --------------------------------------------------------
-
-    if side == "LONG":
-
-        tp = round_to_tick(
-            entry_r
-            + risk * RR,
-            tick_size
-        )
-
-    else:
-
-        tp = round_to_tick(
-            entry_r
-            - risk * RR,
-            tick_size
-        )
-
-    return (
-        entry_r,
-        sl,
-        tp,
-        risk_pct
-    )
-
-
-# ============================================================
-# COMPLETE SYMBOL ANALYSIS
-# ============================================================
-
-def analyze_symbol(
-    requested_symbol
-):
-
-    market = find_market(
-        requested_symbol
-    )
-
-    if not market:
-
-        raise RuntimeError(
-            f"Kraken symbol not found: "
-            f"{requested_symbol}"
-        )
-
-    symbol = market["symbol"]
-
-    print(
-        f"[ANALYZE] "
-        f"{symbol}"
-    )
-
-    # --------------------------------------------------------
-    # Download MTF candles directly
-    # --------------------------------------------------------
-
-    c1 = get_candles(
-        symbol,
-        TF_1H,
-        180
-    )
-
-    c30 = get_candles(
-        symbol,
-        TF_30M,
-        180
-    )
-
-    c15 = get_candles(
-        symbol,
-        TF_15M,
-        180
-    )
-
-    c5 = get_candles(
-        symbol,
-        TF_5M,
-        250
-    )
-
-    lengths = {
-
-        "1H": len(c1),
-
-        "30M": len(c30),
-
-        "15M": len(c15),
-
-        "5M": len(c5),
-
-    }
-
-    if min(lengths.values()) < 60:
-
-        raise RuntimeError(
-            "Not enough CLOSED candles: "
-            f"{lengths}"
-        )
-
-    # --------------------------------------------------------
-    # Ichimoku
-    # --------------------------------------------------------
-
-    s1, i1 = ichimoku_score(
-        c1
-    )
-
-    s30, i30 = ichimoku_score(
-        c30
-    )
-
-    s15, i15 = ichimoku_score(
-        c15
-    )
-
-    s5, i5 = ichimoku_score(
-        c5
-    )
-
-    scores = {
-
-        "1h": s1,
-
-        "30m": s30,
-
-        "15m": s15,
-
-        "5m": s5,
-
-    }
-
-    results = {}
-
-    # ========================================================
-    # LONG
-    # ========================================================
-
-    long_pb = analyze_pullback(
-        "LONG",
-        c5
-    )
-
-    long_trigger = calculate_trigger_score(
-        "LONG",
-        c5,
-        long_pb
-    )
-
-    long_score = final_score(
-        "LONG",
-        scores,
-        long_trigger
-    )
-
-    long_reasons = []
-
-    if s1 < MIN_1H_SCORE:
-
-        long_reasons.append(
-            f"1H {s1:+d} "
-            f"< +{MIN_1H_SCORE}"
-        )
-
-    if s30 < MIN_30M_SCORE:
-
-        long_reasons.append(
-            f"30M Lock {s30:+d} "
-            f"< +{MIN_30M_SCORE}"
-        )
-
-    if s15 < MIN_15M_SCORE:
-
-        long_reasons.append(
-            f"15M {s15:+d} "
-            f"< +{MIN_15M_SCORE}"
-        )
-
-    if s5 < MIN_5M_SCORE:
-
-        long_reasons.append(
-            f"5M {s5:+d} "
-            f"< +{MIN_5M_SCORE}"
-        )
-
-    if not long_pb["touch"]:
-
-        long_reasons.append(
-            "No fresh pullback touch"
-        )
-
-    if long_pb["age"] > PULLBACK_MAX_AGE:
-
-        long_reasons.append(
-            f"Pullback age "
-            f"{long_pb['age']}"
-        )
 
     if (
-        long_pb["distance_atr"]
-        > PULLBACK_MAX_DISTANCE_ATR
+        stop_pct < MIN_STOP_PCT
+        or stop_pct > MAX_STOP_PCT
     ):
-
-        long_reasons.append(
-            f"Distance "
-            f"{long_pb['distance_atr']:.2f} ATR"
-        )
-
-    if not long_pb["reversal"]:
-
-        long_reasons.append(
-            "No bullish 5M reversal"
-        )
-
-    if not long_pb["reclaim"]:
-
-        long_reasons.append(
-            "No Tenkan/Kijun reclaim"
-        )
-
-    if not long_pb["structure"]:
-
-        long_reasons.append(
-            "5M structure break absent"
-        )
-
-    if not long_pb["body_ok"]:
-
-        long_reasons.append(
-            "5M trigger body weak"
-        )
-
-    if long_trigger < MIN_TRIGGER_SCORE:
-
-        long_reasons.append(
-            f"Trigger "
-            f"{long_trigger}/10"
-        )
-
-    if long_score < MIN_FINAL_SCORE:
-
-        long_reasons.append(
-            f"Score "
-            f"{long_score:.1f}"
-        )
-
-    long_valid = (
-        len(long_reasons) == 0
-    )
-
-    long_levels = None
-
-    if long_valid:
-
-        try:
-
-            long_levels = calculate_levels(
-                "LONG",
-                c5[-1]["close"],
-                c5,
-                c15,
-                market["tick_size"]
-            )
-
-        except Exception as e:
-
-            long_valid = False
-
-            long_reasons.append(
-                f"SL/TP: {e}"
-            )
-
-    results["LONG"] = {
-
-        "score": long_score,
-
-        "trigger": long_trigger,
-
-        "pullback": long_pb,
-
-        "patterns":
-            get_reversal_patterns(
-                "LONG",
-                c5
+        return {
+            "valid": False,
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "stop_pct": stop_pct,
+            "reason": (
+                f"SL {stop_pct:.2f}% "
+                f"outside "
+                f"{MIN_STOP_PCT:.2f}%"
+                f"-"
+                f"{MAX_STOP_PCT:.2f}%"
             ),
-
-        "reasons":
-            long_reasons,
-
-        "valid":
-            long_valid,
-
-        "levels":
-            long_levels,
-
-    }
-
-    # ========================================================
-    # SHORT
-    # ========================================================
-
-    short_pb = analyze_pullback(
-        "SHORT",
-        c5
-    )
-
-    short_trigger = calculate_trigger_score(
-        "SHORT",
-        c5,
-        short_pb
-    )
-
-    short_score = final_score(
-        "SHORT",
-        scores,
-        short_trigger
-    )
-
-    short_reasons = []
-
-    if s1 > -MIN_1H_SCORE:
-
-        short_reasons.append(
-            f"1H {s1:+d} "
-            f"> -{MIN_1H_SCORE}"
-        )
-
-    if s30 > -MIN_30M_SCORE:
-
-        short_reasons.append(
-            f"30M Lock {s30:+d} "
-            f"> -{MIN_30M_SCORE}"
-        )
-
-    if s15 > -MIN_15M_SCORE:
-
-        short_reasons.append(
-            f"15M {s15:+d} "
-            f"> -{MIN_15M_SCORE}"
-        )
-
-    if s5 > -MIN_5M_SCORE:
-
-        short_reasons.append(
-            f"5M {s5:+d} "
-            f"> -{MIN_5M_SCORE}"
-        )
-
-    if not short_pb["touch"]:
-
-        short_reasons.append(
-            "No fresh pullback touch"
-        )
-
-    if short_pb["age"] > PULLBACK_MAX_AGE:
-
-        short_reasons.append(
-            f"Pullback age "
-            f"{short_pb['age']}"
-        )
-
-    if (
-        short_pb["distance_atr"]
-        > PULLBACK_MAX_DISTANCE_ATR
-    ):
-
-        short_reasons.append(
-            f"Distance "
-            f"{short_pb['distance_atr']:.2f} ATR"
-        )
-
-    if not short_pb["reversal"]:
-
-        short_reasons.append(
-            "No bearish 5M reversal"
-        )
-
-    if not short_pb["reclaim"]:
-
-        short_reasons.append(
-            "No Tenkan/Kijun reclaim"
-        )
-
-    if not short_pb["structure"]:
-
-        short_reasons.append(
-            "5M structure break absent"
-        )
-
-    if not short_pb["body_ok"]:
-
-        short_reasons.append(
-            "5M trigger body weak"
-        )
-
-    if short_trigger < MIN_TRIGGER_SCORE:
-
-        short_reasons.append(
-            f"Trigger "
-            f"{short_trigger}/10"
-        )
-
-    if short_score < MIN_FINAL_SCORE:
-
-        short_reasons.append(
-            f"Score "
-            f"{short_score:.1f}"
-        )
-
-    short_valid = (
-        len(short_reasons) == 0
-    )
-
-    short_levels = None
-
-    if short_valid:
-
-        try:
-
-            short_levels = calculate_levels(
-                "SHORT",
-                c5[-1]["close"],
-                c5,
-                c15,
-                market["tick_size"]
-            )
-
-        except Exception as e:
-
-            short_valid = False
-
-            short_reasons.append(
-                f"SL/TP: {e}"
-            )
-
-    results["SHORT"] = {
-
-        "score": short_score,
-
-        "trigger": short_trigger,
-
-        "pullback": short_pb,
-
-        "patterns":
-            get_reversal_patterns(
-                "SHORT",
-                c5
-            ),
-
-        "reasons":
-            short_reasons,
-
-        "valid":
-            short_valid,
-
-        "levels":
-            short_levels,
-
-    }
-
-    # ========================================================
-    # BEST SIDE
-    # ========================================================
-
-    valid_sides = []
-
-    if results["LONG"]["valid"]:
-
-        valid_sides.append(
-            results["LONG"]
-        )
-
-    if results["SHORT"]["valid"]:
-
-        valid_sides.append(
-            results["SHORT"]
-        )
-
-    if valid_sides:
-
-        best = max(
-            valid_sides,
-            key=lambda x:
-                x["score"]
-        )
-
-        verdict = best
-
-    else:
-
-        best = max(
-            (
-                results["LONG"],
-                results["SHORT"]
-            ),
-            key=lambda x:
-                x["score"]
-        )
-
-        verdict = None
+        }
 
     return {
-
-        "symbol": symbol,
-
-        "display":
-            display_symbol(symbol),
-
-        "scores":
-            scores,
-
-        "infos": {
-
-            "1h": i1,
-
-            "30m": i30,
-
-            "15m": i15,
-
-            "5m": i5,
-
-        },
-
-        "candles": {
-
-            "1h":
-                c1[-1]["time"],
-
-            "30m":
-                c30[-1]["time"],
-
-            "15m":
-                c15[-1]["time"],
-
-            "5m":
-                c5[-1]["time"],
-
-        },
-
-        "long":
-            results["LONG"],
-
-        "short":
-            results["SHORT"],
-
-        "verdict":
-            verdict,
-
-        "best":
-            best,
-
+        "valid": True,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp,
+        "stop_pct": stop_pct,
+        "risk": risk,
     }
 
 
 # ============================================================
-# DIRECTION
+# SIDE ANALYSIS
 # ============================================================
 
-def direction(
-    score
+def analyze_side(
+    side,
+    candles_1h,
+    candles_30m,
+    candles_15m,
+    candles_5m,
 ):
+    r1 = ichimoku_score(candles_1h)
+    r30 = ichimoku_score(candles_30m)
+    r15 = ichimoku_score(candles_15m)
+    r5 = ichimoku_score(candles_5m)
 
-    if score >= 4:
+    if not all(
+        [
+            r1,
+            r30,
+            r15,
+            r5,
+        ]
+    ):
+        return {
+            "side": side,
+            "valid": False,
+            "reason": "Insufficient Ichimoku data.",
+            "score_1h": 0,
+            "score_30m": 0,
+            "score_15m": 0,
+            "score_5m": 0,
+            "trigger_score": 0,
+            "final_score": 0,
+        }
 
-        return "BULLISH 🟢"
+    score_1h = r1["score"]
+    score_30m = r30["score"]
+    score_15m = r15["score"]
+    score_5m = r5["score"]
 
-    if score <= -4:
+    # --------------------------------------------------------
+    # Directional thresholds
+    # --------------------------------------------------------
 
-        return "BEARISH 🔴"
+    if side == "LONG":
+        trend_ok = (
+            score_1h >= MIN_1H_SCORE
+        )
 
-    return "NEUTRAL 🟡"
+        lock_ok = (
+            score_30m >= MIN_30M_SCORE
+        )
+
+        structure_ok = (
+            score_15m >= MIN_15M_SCORE
+        )
+
+        trigger_ichi_ok = (
+            score_5m >= MIN_5M_SCORE
+        )
+
+    else:
+        trend_ok = (
+            score_1h <= -MIN_1H_SCORE
+        )
+
+        lock_ok = (
+            score_30m <= -MIN_30M_SCORE
+        )
+
+        structure_ok = (
+            score_15m <= -MIN_15M_SCORE
+        )
+
+        trigger_ichi_ok = (
+            score_5m <= -MIN_5M_SCORE
+        )
+
+    pullback = analyze_pullback(
+        candles_5m,
+        side,
+    )
+
+    trigger = calculate_trigger_score(
+        candles_5m,
+        side,
+        pullback,
+    )
+
+    trigger_score = trigger["score"]
+
+    structure_15m = check_15m_structure(
+        candles_15m,
+        side,
+    )
+
+    final = calculate_final_score(
+        score_1h,
+        score_30m,
+        score_15m,
+        score_5m,
+        trigger_score,
+        side,
+    )
+
+    trigger_ok = (
+        trigger_score
+        >= MIN_TRIGGER_SCORE
+    )
+
+    # --------------------------------------------------------
+    # All strategy gates
+    # --------------------------------------------------------
+
+    valid = (
+        trend_ok
+        and lock_ok
+        and structure_ok
+        and trigger_ichi_ok
+        and structure_15m
+        and trigger_ok
+        and final >= MIN_SCORE
+        and pullback["valid"]
+    )
+
+    failures = []
+
+    if not trend_ok:
+        failures.append(
+            f"1H score {score_1h}"
+        )
+
+    if not lock_ok:
+        failures.append(
+            f"30M score {score_30m}"
+        )
+
+    if not structure_ok:
+        failures.append(
+            f"15M score {score_15m}"
+        )
+
+    if not trigger_ichi_ok:
+        failures.append(
+            f"5M score {score_5m}"
+        )
+
+    if not structure_15m:
+        failures.append(
+            "15M structure"
+        )
+
+    if not pullback["valid"]:
+        failures.append(
+            "5M pullback"
+        )
+
+    if not trigger_ok:
+        failures.append(
+            f"Trigger {trigger_score}/10"
+        )
+
+    if final < MIN_SCORE:
+        failures.append(
+            f"Final {final:.1f}/100"
+        )
+
+    return {
+        "side": side,
+        "valid": valid,
+
+        "score_1h": score_1h,
+        "score_30m": score_30m,
+        "score_15m": score_15m,
+        "score_5m": score_5m,
+
+        "trigger_score": trigger_score,
+        "final_score": final,
+
+        "trend_ok": trend_ok,
+        "lock_ok": lock_ok,
+        "structure_ok": structure_ok,
+        "trigger_ichi_ok": trigger_ichi_ok,
+        "structure_15m": structure_15m,
+        "trigger_ok": trigger_ok,
+
+        "pullback": pullback,
+        "trigger": trigger,
+
+        "failures": failures,
+
+        "levels": None,
+    }
 
 
-def cloud_status(
-    info
-):
+# ============================================================
+# SYMBOL ANALYSIS
+# ============================================================
 
-    price = info["price"]
+def analyze_symbol(user_symbol):
+    requested = user_symbol.upper().strip()
 
-    if price > info["cloud_top"]:
+    market = find_market(requested)
 
-        return "ABOVE 🟢"
+    if not market:
+        return {
+            "symbol": requested,
+            "error": (
+                f"Kraken Futures market "
+                f"not found for {requested}."
+            ),
+        }
 
-    if price < info["cloud_bottom"]:
+    symbol = str(
+        market.get("symbol")
+        or market.get("instrument")
+        or market.get("name")
+    ).upper()
 
-        return "BELOW 🔴"
+    print(
+        f"[{utc_now()}] "
+        f"Analyzing {display_symbol(symbol)} "
+        f"({symbol})"
+    )
 
-    return "INSIDE 🟡"
+    candles_1h = get_candles(
+        symbol,
+        "1h",
+        180,
+    )
+
+    candles_30m = get_candles(
+        symbol,
+        "30m",
+        180,
+    )
+
+    candles_15m = get_candles(
+        symbol,
+        "15m",
+        180,
+    )
+
+    candles_5m = get_candles(
+        symbol,
+        "5m",
+        180,
+    )
+
+    minimums = {
+        "1H": 60,
+        "30M": 60,
+        "15M": 60,
+        "5M": 60,
+    }
+
+    if len(candles_1h) < minimums["1H"]:
+        return {
+            "symbol": symbol,
+            "error": "Not enough 1H candles.",
+        }
+
+    if len(candles_30m) < minimums["30M"]:
+        return {
+            "symbol": symbol,
+            "error": "Not enough 30M candles.",
+        }
+
+    if len(candles_15m) < minimums["15M"]:
+        return {
+            "symbol": symbol,
+            "error": "Not enough 15M candles.",
+        }
+
+    if len(candles_5m) < minimums["5M"]:
+        return {
+            "symbol": symbol,
+            "error": "Not enough 5M candles.",
+        }
+
+    r1 = ichimoku_score(
+        candles_1h
+    )
+
+    r30 = ichimoku_score(
+        candles_30m
+    )
+
+    r15 = ichimoku_score(
+        candles_15m
+    )
+
+    r5 = ichimoku_score(
+        candles_5m
+    )
+
+    long_result = analyze_side(
+        "LONG",
+        candles_1h,
+        candles_30m,
+        candles_15m,
+        candles_5m,
+    )
+
+    short_result = analyze_side(
+        "SHORT",
+        candles_1h,
+        candles_30m,
+        candles_15m,
+        candles_5m,
+    )
+
+    # --------------------------------------------------------
+    # Select best side
+    # --------------------------------------------------------
+
+    candidates = [
+        long_result,
+        short_result,
+    ]
+
+    valid_candidates = [
+        x
+        for x in candidates
+        if x["valid"]
+    ]
+
+    if valid_candidates:
+        winner = max(
+            valid_candidates,
+            key=lambda x: x["final_score"],
+        )
+
+        verdict = winner["side"]
+
+        levels = calculate_trade_levels(
+            candles_5m,
+            candles_15m,
+            verdict,
+        )
+
+        winner["levels"] = levels
+
+        if not levels or not levels.get("valid"):
+            winner["valid"] = False
+
+            if levels:
+                winner["failures"].append(
+                    levels.get(
+                        "reason",
+                        "Invalid SL",
+                    )
+                )
+
+            verdict = "NO TRADE"
+
+    else:
+        winner = max(
+            candidates,
+            key=lambda x: x["final_score"],
+        )
+
+        verdict = "NO TRADE"
+
+    current_price = get_current_price(
+        symbol,
+        candles_5m,
+    )
+
+    # --------------------------------------------------------
+    # Last CLOSED 5m candle
+    # --------------------------------------------------------
+
+    last_5m = candles_5m[-1]
+
+    last_closed_time = datetime.fromtimestamp(
+        last_5m["time"],
+        tz=timezone.utc,
+    ).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+
+    return {
+        "symbol": symbol,
+        "display": display_symbol(symbol),
+
+        "current_price": current_price,
+
+        "last_closed_time": last_closed_time,
+
+        "candles": {
+            "1h": len(candles_1h),
+            "30m": len(candles_30m),
+            "15m": len(candles_15m),
+            "5m": len(candles_5m),
+        },
+
+        "scores": {
+            "1h": r1["score"],
+            "30m": r30["score"],
+            "15m": r15["score"],
+            "5m": r5["score"],
+        },
+
+        "ichimoku_5m": r5["ichimoku"],
+
+        "LONG": long_result,
+        "SHORT": short_result,
+
+        "winner": winner,
+        "verdict": verdict,
+    }
 
 
 # ============================================================
 # REPORT
 # ============================================================
 
-def generate_report(
-    result
-):
+def pass_mark(value):
+    return "✅" if value else "❌"
 
-    symbol = result["display"]
 
-    scores = result["scores"]
+def score_text(score):
+    if score > 0:
+        return f"+{score}"
 
-    infos = result["infos"]
+    return str(score)
 
-    long_r = result["long"]
 
-    short_r = result["short"]
+def build_side_report(result, side):
+    r = result[side]
 
-    verdict = result["verdict"]
-
-    best = result["best"]
+    pb = r["pullback"]
 
     lines = []
 
     lines.append(
-        "🔎 ابرشکن ۱۰۰ | تحلیل مستقل"
+        f"{'🟢' if side == 'LONG' else '🔴'} {side}"
     )
 
     lines.append(
-        f"🤖 {VERSION}"
+        f"1H:  {score_text(r['score_1h'])}/10 "
+        f"{pass_mark(r['trend_ok'])}"
     )
 
     lines.append(
-        "━━━━━━━━━━━━━━━━━━"
+        f"30M: {score_text(r['score_30m'])}/10 "
+        f"{pass_mark(r['lock_ok'])}"
+    )
+
+    lines.append(
+        f"15M: {score_text(r['score_15m'])}/10 "
+        f"{pass_mark(r['structure_ok'])}"
+    )
+
+    lines.append(
+        f"5M:  {score_text(r['score_5m'])}/10 "
+        f"{pass_mark(r['trigger_ichi_ok'])}"
+    )
+
+    lines.append(
+        f"Pullback: "
+        f"{pass_mark(pb['valid'])}"
+    )
+
+    if pb.get("touch_age") is not None:
+        lines.append(
+            f"  Touch age: "
+            f"{pb['touch_age']} candle(s)"
+        )
+
+    if pb.get("distance_atr") is not None:
+        lines.append(
+            f"  Distance: "
+            f"{pb['distance_atr']:.2f} ATR"
+        )
+
+    lines.append(
+        f"  Reversal: "
+        f"{pass_mark(pb['reversal'])}"
+    )
+
+    lines.append(
+        f"  Reclaim: "
+        f"{pass_mark(pb['reclaim'])}"
+    )
+
+    lines.append(
+        f"  Structure: "
+        f"{pass_mark(pb['structure'])}"
+    )
+
+    lines.append(
+        f"  Body: "
+        f"{pass_mark(pb['body_ok'])}"
+    )
+
+    lines.append(
+        f"Trigger: "
+        f"{r['trigger_score']}/10 "
+        f"{pass_mark(r['trigger_ok'])}"
+    )
+
+    lines.append(
+        f"15M Structure: "
+        f"{pass_mark(r['structure_15m'])}"
+    )
+
+    lines.append(
+        f"Final Score: "
+        f"{r['final_score']:.1f}/100 "
+        f"{pass_mark(r['final_score'] >= MIN_SCORE)}"
+    )
+
+    if not r["valid"] and r["failures"]:
+        lines.append(
+            "Reasons: "
+            + ", ".join(
+                r["failures"][:6]
+            )
+        )
+
+    return "\n".join(lines)
+
+
+def generate_report(result):
+    if result.get("error"):
+        return (
+            "❌ KRAKEN ANALYSIS ERROR\n\n"
+            f"Symbol: {result.get('symbol')}\n"
+            f"Error: {result['error']}"
+        )
+
+    symbol = result["display"]
+    price = result["current_price"]
+
+    scores = result["scores"]
+    ichi = result["ichimoku_5m"]
+
+    verdict = result["verdict"]
+
+    if verdict == "LONG":
+        verdict_text = "🟢 LONG"
+    elif verdict == "SHORT":
+        verdict_text = "🔴 SHORT"
+    else:
+        verdict_text = "⚪ NO TRADE"
+
+    lines = []
+
+    lines.append(
+        "📡 KRAKEN FUTURES LIVE ANALYSIS"
+    )
+
+    lines.append(
+        "🤖 ICHIMOKU MTF v14.1"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
@@ -2536,820 +1948,329 @@ def generate_report(
     )
 
     lines.append(
-        "⚡ تحلیل مستقیم از Kraken"
+        f"💰 Price: {fmt_price(price)}"
     )
 
     lines.append(
-        "⏱ فقط کندل‌های بسته‌شده"
+        f"🕐 Analysis: {utc_now()}"
     )
 
     lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    # --------------------------------------------------------
-    # MTF
-    # --------------------------------------------------------
-
-    lines.append(
-        "📊 MTF ICHIMOKU"
+        f"⏱ Last CLOSED 5M: "
+        f"{result['last_closed_time']}"
     )
 
     lines.append(
-        f"1H  : "
-        f"{direction(scores['1h'])} "
-        f"{scores['1h']:+d}/10"
+        "━━━━━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
-        f"30M : "
-        f"{direction(scores['30m'])} "
-        f"{scores['30m']:+d}/10"
+        "📊 MTF SCORES"
     )
 
     lines.append(
-        f"15M : "
-        f"{direction(scores['15m'])} "
-        f"{scores['15m']:+d}/10"
+        f"1H  Trend: "
+        f"{score_text(scores['1h'])}/10"
     )
 
     lines.append(
-        f"5M  : "
-        f"{direction(scores['5m'])} "
-        f"{scores['5m']:+d}/10"
+        f"30M Lock: "
+        f"{score_text(scores['30m'])}/10"
     )
 
     lines.append(
-        "━━━━━━━━━━━━━━━━━━"
+        f"15M Structure: "
+        f"{score_text(scores['15m'])}/10"
     )
 
-    # --------------------------------------------------------
-    # 5M ICHIMOKU
-    # --------------------------------------------------------
+    lines.append(
+        f"5M Trigger: "
+        f"{score_text(scores['5m'])}/10"
+    )
 
-    i5 = infos["5m"]
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
 
     lines.append(
         "☁️ 5M ICHIMOKU"
     )
 
     lines.append(
-        f"Price : "
-        f"{fmt_price(i5['price'])}"
+        f"Price:  {fmt_price(ichi['close'])}"
     )
 
     lines.append(
-        f"Tenkan: "
-        f"{fmt_price(i5['tenkan'])}"
+        f"Tenkan: {fmt_price(ichi['tenkan'])}"
     )
 
     lines.append(
-        f"Kijun : "
-        f"{fmt_price(i5['kijun'])}"
+        f"Kijun:  {fmt_price(ichi['kijun'])}"
     )
 
     lines.append(
-        f"Cloud : "
-        f"{fmt_price(i5['cloud_bottom'])}"
+        f"Span A: {fmt_price(ichi['span_a'])}"
+    )
+
+    lines.append(
+        f"Span B: {fmt_price(ichi['span_b'])}"
+    )
+
+    lines.append(
+        f"Cloud: "
+        f"{fmt_price(ichi['cloud_bottom'])}"
         f" - "
-        f"{fmt_price(i5['cloud_top'])}"
+        f"{fmt_price(ichi['cloud_top'])}"
     )
 
     lines.append(
-        f"Position: "
-        f"{cloud_status(i5)}"
+        "━━━━━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    # ========================================================
-    # LONG
-    # ========================================================
-
-    lines.append(
-        "🟢 LONG CHECK"
+        build_side_report(
+            result,
+            "LONG",
+        )
     )
 
     lines.append(
-        f"1H Trend    : "
-        f"{long_r['score']:.1f}/100"
+        "━━━━━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
-        f"Trigger     : "
-        f"{long_r['trigger']}/10"
-    )
-
-    pb = long_r["pullback"]
-
-    lines.append(
-        f"Pullback    : "
-        f"{'✅' if pb['valid'] else '❌'}"
+        build_side_report(
+            result,
+            "SHORT",
+        )
     )
 
     lines.append(
-        f"Touch       : "
-        f"{'✅' if pb['touch'] else '❌'}"
+        "━━━━━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
-        f"Reversal    : "
-        f"{'✅' if pb['reversal'] else '❌'}"
+        f"🎯 VERDICT: {verdict_text}"
     )
 
-    lines.append(
-        f"Reclaim     : "
-        f"{'✅' if pb['reclaim'] else '❌'}"
-    )
+    winner = result["winner"]
 
-    lines.append(
-        f"Structure   : "
-        f"{'✅' if pb['structure'] else '❌'}"
-    )
+    if verdict in ("LONG", "SHORT"):
+        levels = winner.get("levels")
 
-    lines.append(
-        f"Body        : "
-        f"{'✅' if pb['body_ok'] else '❌'}"
-    )
-
-    lines.append(
-        f"Distance    : "
-        f"{pb['distance_atr']:.2f} ATR"
-    )
-
-    lines.append(
-        f"Score       : "
-        f"{long_r['score']:.1f}/100"
-    )
-
-    if long_r["patterns"]:
-
-        lines.append(
-            "🔄 "
-            + ", ".join(
-                long_r["patterns"]
+        if levels and levels.get("valid"):
+            lines.append(
+                ""
             )
-        )
 
-    if long_r["valid"]:
+            lines.append(
+                f"📌 ENTRY: "
+                f"{fmt_price(levels['entry'])}"
+            )
 
-        lines.append(
-            "✅ LONG VALID"
-        )
+            lines.append(
+                f"🛑 SL: "
+                f"{fmt_price(levels['sl'])} "
+                f"({levels['stop_pct']:.2f}%)"
+            )
+
+            lines.append(
+                f"🎯 TP: "
+                f"{fmt_price(levels['tp'])}"
+            )
+
+            lines.append(
+                f"⚖️ RR: 1:{RR:.1f}"
+            )
 
     else:
-
         lines.append(
-            "❌ LONG rejected:"
-        )
-
-        for reason in long_r[
-            "reasons"
-        ][:5]:
-
-            lines.append(
-                f"• {reason}"
-            )
-
-    # ========================================================
-    # SHORT
-    # ========================================================
-
-    lines.append(
-        "────────────"
-    )
-
-    lines.append(
-        "🔴 SHORT CHECK"
-    )
-
-    lines.append(
-        f"Trigger     : "
-        f"{short_r['trigger']}/10"
-    )
-
-    pb = short_r["pullback"]
-
-    lines.append(
-        f"Pullback    : "
-        f"{'✅' if pb['valid'] else '❌'}"
-    )
-
-    lines.append(
-        f"Touch       : "
-        f"{'✅' if pb['touch'] else '❌'}"
-    )
-
-    lines.append(
-        f"Reversal    : "
-        f"{'✅' if pb['reversal'] else '❌'}"
-    )
-
-    lines.append(
-        f"Reclaim     : "
-        f"{'✅' if pb['reclaim'] else '❌'}"
-    )
-
-    lines.append(
-        f"Structure   : "
-        f"{'✅' if pb['structure'] else '❌'}"
-    )
-
-    lines.append(
-        f"Body        : "
-        f"{'✅' if pb['body_ok'] else '❌'}"
-    )
-
-    lines.append(
-        f"Distance    : "
-        f"{pb['distance_atr']:.2f} ATR"
-    )
-
-    lines.append(
-        f"Score       : "
-        f"{short_r['score']:.1f}/100"
-    )
-
-    if short_r["patterns"]:
-
-        lines.append(
-            "🔄 "
-            + ", ".join(
-                short_r["patterns"]
-            )
-        )
-
-    if short_r["valid"]:
-
-        lines.append(
-            "✅ SHORT VALID"
-        )
-
-    else:
-
-        lines.append(
-            "❌ SHORT rejected:"
-        )
-
-        for reason in short_r[
-            "reasons"
-        ][:5]:
-
-            lines.append(
-                f"• {reason}"
-            )
-
-    # ========================================================
-    # VERDICT
-    # ========================================================
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    if verdict is not None:
-
-        side = verdict.get(
-            "side",
-            "LONG"
-        )
-
-        # Since side isn't stored in result,
-        # identify it from object identity/content.
-        if verdict is long_r:
-
-            side = "LONG"
-
-        else:
-
-            side = "SHORT"
-
-        emoji = (
-            "🟢"
-            if side == "LONG"
-            else "🔴"
+            ""
         )
 
         lines.append(
-            f"🎯 VERDICT: "
-            f"{emoji} {side}"
+            "ℹ️ No valid setup met "
+            "all strategy conditions."
         )
-
-        lines.append(
-            f"Confidence: "
-            f"{verdict['score']:.1f}/100"
-        )
-
-        levels = verdict.get(
-            "levels"
-        )
-
-        if levels:
-
-            entry, sl, tp, risk_pct = (
-                levels
-            )
-
-            lines.append(
-                f"Entry: "
-                f"{fmt_price(entry)}"
-            )
-
-            lines.append(
-                f"SL: "
-                f"{fmt_price(sl)} "
-                f"({risk_pct:.2f}%)"
-            )
-
-            lines.append(
-                f"TP: "
-                f"{fmt_price(tp)}"
-            )
-
-            lines.append(
-                f"RR: "
-                f"{RR:.1f}:1"
-            )
-
-        lines.append(
-            "⚠️ این فقط تحلیل است."
-        )
-
-        lines.append(
-            "🚫 هیچ معامله‌ای باز نمی‌شود."
-        )
-
-    else:
-
-        lines.append(
-            "⛔ VERDICT: NO TRADE"
-        )
-
-        if best is long_r:
-
-            side = "LONG"
-
-        else:
-
-            side = "SHORT"
-
-        lines.append(
-            f"بهترین سمت: "
-            f"{side} "
-            f"{best['score']:.1f}/100"
-        )
-
-        lines.append(
-            "علت اصلی:"
-        )
-
-        for reason in best[
-            "reasons"
-        ][:7]:
-
-            lines.append(
-                f"• {reason}"
-            )
 
     lines.append(
-        "━━━━━━━━━━━━━━━━━━"
+        "━━━━━━━━━━━━━━━━━━━━"
     )
 
     lines.append(
-        f"🕐 "
-        f"{now_utc().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        "🔒 CLOSED CANDLES ONLY"
+    )
+
+    lines.append(
+        "🧠 Analysis only"
+    )
+
+    lines.append(
+        "🚫 No trade was opened."
     )
 
     return "\n".join(lines)
 
 
 # ============================================================
-# TELEGRAM SEND
-# ============================================================
-
-def split_message(
-    message
-):
-
-    if len(message) <= TELEGRAM_MAX_LENGTH:
-
-        return [message]
-
-    chunks = []
-
-    remaining = message
-
-    while len(remaining) > TELEGRAM_MAX_LENGTH:
-
-        cut = remaining.rfind(
-            "\n",
-            0,
-            TELEGRAM_MAX_LENGTH
-        )
-
-        if cut <= 0:
-
-            cut = TELEGRAM_MAX_LENGTH
-
-        chunks.append(
-            remaining[:cut]
-        )
-
-        remaining = remaining[
-            cut:
-        ].lstrip()
-
-    if remaining:
-
-        chunks.append(
-            remaining
-        )
-
-    return chunks
-
-
-def send_telegram(
-    text,
-    chat_id=None
-):
-
-    if not TELEGRAM_TOKEN:
-
-        print(
-            "[TELEGRAM ERROR] "
-            "TELEGRAM_BOT_TOKEN missing"
-        )
-
-        return False
-
-    target_chat = (
-        chat_id
-        or TELEGRAM_CHAT_ID
-    )
-
-    if not target_chat:
-
-        print(
-            "[TELEGRAM ERROR] "
-            "TELEGRAM_CHAT_ID missing"
-        )
-
-        return False
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/sendMessage"
-    )
-
-    success = True
-
-    for chunk in split_message(text):
-
-        sent = False
-
-        for attempt in range(
-            1,
-            TELEGRAM_RETRIES + 1
-        ):
-
-            try:
-
-                response = SESSION.post(
-
-                    url,
-
-                    json={
-
-                        "chat_id":
-                            target_chat,
-
-                        "text":
-                            chunk,
-
-                        "disable_web_page_preview":
-                            True,
-
-                    },
-
-                    timeout=REQUEST_TIMEOUT
-
-                )
-
-                data = response.json()
-
-                if (
-                    response.ok
-                    and data.get("ok")
-                ):
-
-                    sent = True
-
-                    break
-
-                print(
-                    f"[TELEGRAM ERROR] "
-                    f"{data}"
-                )
-
-                if attempt < TELEGRAM_RETRIES:
-
-                    time.sleep(2)
-
-            except Exception as e:
-
-                print(
-                    f"[TELEGRAM ERROR] "
-                    f"{e}"
-                )
-
-                if attempt < TELEGRAM_RETRIES:
-
-                    time.sleep(2)
-
-        if not sent:
-
-            success = False
-
-    return success
-
-
-# ============================================================
-# TELEGRAM GET ME
-# ============================================================
-
-def get_bot_info():
-
-    if not TELEGRAM_TOKEN:
-
-        return None
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/getMe"
-    )
-
-    try:
-
-        response = SESSION.get(
-            url,
-            timeout=REQUEST_TIMEOUT
-        )
-
-        data = response.json()
-
-        if data.get("ok"):
-
-            return data.get(
-                "result"
-            )
-
-    except Exception as e:
-
-        print(
-            f"[TELEGRAM] getMe error: {e}"
-        )
-
-    return None
-
-
-# ============================================================
-# TELEGRAM UPDATES
-# ============================================================
-
-def get_updates(
-    offset
-):
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_TOKEN}/getUpdates"
-    )
-
-    response = SESSION.get(
-
-        url,
-
-        params={
-
-            "offset":
-                offset,
-
-            "timeout":
-                TELEGRAM_TIMEOUT,
-
-            "allowed_updates":
-                json.dumps(
-                    ["message"]
-                ),
-
-        },
-
-        timeout=TELEGRAM_TIMEOUT + 10
-
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    if not data.get("ok"):
-
-        raise RuntimeError(
-            str(data)
-        )
-
-    return data.get(
-        "result",
-        []
-    )
-
-
-# ============================================================
 # COMMAND PARSER
 # ============================================================
 
-def parse_command(
-    text
-):
-
+def parse_command(text):
     if not text:
-
         return []
 
     text = text.strip()
 
-    if not text:
+    # Remove bot mention from commands such as:
+    # /check@MyBot BTC
+    text = re.sub(
+        r"@\w+",
+        "",
+        text,
+    )
 
-        return []
+    # Normalize Persian/English spacing
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
 
     parts = text.split()
 
     if not parts:
-
         return []
 
-    command = parts[0].lower()
+    first = parts[0].lower()
 
-    # --------------------------------------------------------
-    # Persian
-    # --------------------------------------------------------
-
-    valid = False
-
-    if command in (
+    command_words = {
         "تحلیل",
         "/تحلیل",
-    ):
-
-        valid = True
-
-    # --------------------------------------------------------
-    # English
-    # --------------------------------------------------------
-
-    if command in (
         "analysis",
         "/analysis",
         "check",
         "/check",
-    ):
+    }
 
-        valid = True
-
-    # --------------------------------------------------------
-    # @BotName
-    # --------------------------------------------------------
-
-    if command.startswith(
-        "تحلیل@"
-    ):
-
-        valid = True
-
-    if command.startswith(
-        "/تحلیل@"
-    ):
-
-        valid = True
-
-    if command.startswith(
-        "/check@"
-    ):
-
-        valid = True
-
-    if command.startswith(
-        "analysis@"
-    ):
-
-        valid = True
-
-    if not valid:
-
+    if first not in command_words:
         return []
 
     symbols = []
 
-    for item in parts[1:]:
+    for token in parts[1:]:
+        token = token.strip()
 
-        item = (
-            item
-            .replace(",", "")
-            .replace("$", "")
-            .strip()
+        token = token.replace(
+            ",",
+            "",
         )
 
-        if item:
+        token = token.upper()
 
-            symbols.append(
-                item.upper()
-            )
+        if not token:
+            continue
 
-    return symbols[:5]
+        # Don't accept obvious command tokens
+        if token.startswith("/"):
+            continue
+
+        symbols.append(token)
+
+    return symbols[:MAX_SYMBOLS_PER_COMMAND]
 
 
 # ============================================================
-# PROCESS MESSAGE
+# HELP
 # ============================================================
 
-def process_message(
-    message
-):
-
-    if not isinstance(
-        message,
-        dict
-    ):
-
-        return
-
-    chat = message.get(
-        "chat",
-        {}
+def help_message():
+    return (
+        "📘 KRAKEN LIVE ANALYSIS\n\n"
+        "فرمان‌ها:\n\n"
+        "تحلیل btc\n"
+        "تحلیل BTC ETH SOL\n"
+        "/check BTC\n"
+        "/check BTC ETH SOL XRP\n\n"
+        "سیستم:\n"
+        "1H = Trend\n"
+        "30M = Lock\n"
+        "15M = Pullback Structure\n"
+        "5M = Reversal Trigger\n\n"
+        "⚠️ تحلیل مستقل از scanner.py\n"
+        "🚫 بدون باز کردن معامله"
     )
 
-    chat_id = chat.get(
-        "id"
+
+# ============================================================
+# UPDATE HANDLER
+# ============================================================
+
+def process_update(update):
+    message = update.get("message")
+
+    if not message:
+        return
+
+    chat = message.get("chat", {})
+
+    chat_id = str(
+        chat.get("id", "")
     )
 
     text = message.get(
         "text",
-        ""
+        "",
     )
 
     if not text:
-
         return
 
     print(
-        "------------------------------------------------------------"
+        f"[{utc_now()}] "
+        f"Telegram message from "
+        f"{chat_id}: {text}"
     )
 
-    print(
-        f"[TELEGRAM] "
-        f"chat={chat_id} "
-        f"text={text!r}"
-    )
+    # --------------------------------------------------------
+    # Optional chat restriction
+    # --------------------------------------------------------
 
-    symbols = parse_command(
-        text
-    )
+    if TELEGRAM_CHAT_ID:
+        if chat_id != str(
+            TELEGRAM_CHAT_ID
+        ):
+            print(
+                "Ignoring message from "
+                f"unauthorized chat: {chat_id}"
+            )
+            return
+
+    symbols = parse_command(text)
 
     if not symbols:
+        if text.strip().lower() in {
+            "/start",
+            "/help",
+            "help",
+            "راهنما",
+        }:
+            send_telegram(
+                help_message(),
+                chat_id,
+            )
 
         return
 
     # --------------------------------------------------------
-    # Security
-    # --------------------------------------------------------
-
-    if (
-        TELEGRAM_CHAT_ID
-        and
-        str(chat_id)
-        != str(TELEGRAM_CHAT_ID)
-    ):
-
-        print(
-            f"[SECURITY] "
-            f"Unauthorized chat: "
-            f"{chat_id}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # Immediate response
+    # Acknowledge
     # --------------------------------------------------------
 
     send_telegram(
-        "⏳ تحلیل دریافت شد\n"
-        f"🪙 {', '.join(symbols)}\n"
-        "⚡ در حال بررسی مستقیم Kraken...\n"
-        "1H → 30M → 15M → 5M",
-        chat_id
+        "⏳ در حال دریافت داده مستقیم "
+        "از Kraken Futures...\n"
+        f"🔎 {', '.join(symbols)}",
+        chat_id,
     )
 
     # --------------------------------------------------------
@@ -3357,9 +2278,7 @@ def process_message(
     # --------------------------------------------------------
 
     for symbol in symbols:
-
         try:
-
             result = analyze_symbol(
                 symbol
             )
@@ -3370,54 +2289,129 @@ def process_message(
 
             send_telegram(
                 report,
-                chat_id
+                chat_id,
             )
 
-        except Exception as e:
-
+        except Exception as exc:
             print(
-                f"[ANALYSIS ERROR] "
-                f"{symbol}: {e}"
+                f"Analysis error for "
+                f"{symbol}: {exc}"
             )
 
             traceback.print_exc()
 
             send_telegram(
-
-                "❌ خطا در تحلیل\n"
-                f"🪙 {symbol}\n"
-                f"Reason: {e}",
-
-                chat_id
-
+                "❌ خطا در تحلیل "
+                f"{symbol}\n\n"
+                f"{type(exc).__name__}: "
+                f"{exc}",
+                chat_id,
             )
 
 
 # ============================================================
-# MAIN LISTENER LOOP
+# TELEGRAM POLLING
 # ============================================================
 
-def main():
+def get_updates(offset):
+    return telegram_request(
+        "getUpdates",
+        {
+            "offset": offset,
+            "timeout": POLL_TIMEOUT,
+            "allowed_updates": json.dumps(
+                ["message"]
+            ),
+        },
+        timeout=POLL_TIMEOUT + 10,
+    )
 
+
+# ============================================================
+# WEBHOOK CHECK
+# ============================================================
+
+def check_webhook():
+    try:
+        data = telegram_request(
+            "getWebhookInfo",
+            timeout=20,
+        )
+
+        result = data.get(
+            "result",
+            {},
+        )
+
+        url = result.get(
+            "url",
+            "",
+        )
+
+        if url:
+            print(
+                "⚠️ Telegram webhook is active:"
+            )
+
+            print(url)
+
+            print(
+                "Deleting webhook so "
+                "getUpdates can work..."
+            )
+
+            telegram_request(
+                "deleteWebhook",
+                {
+                    "drop_pending_updates": False
+                },
+                timeout=20,
+            )
+
+            print(
+                "Webhook deleted."
+            )
+
+        else:
+            print(
+                "Telegram webhook: NONE"
+            )
+
+    except Exception as exc:
+        print(
+            f"Webhook check warning: {exc}"
+        )
+
+
+# ============================================================
+# STARTUP
+# ============================================================
+
+def startup_check():
+    print()
+    print(
+        "============================================================"
+    )
+    print(
+        "KRAKEN FUTURES ICHIMOKU TELEGRAM"
+    )
+    print(
+        "LIVE LISTENER v2.0"
+    )
     print(
         "============================================================"
     )
 
     print(
-        "KRAKEN FUTURES "
-        "INDEPENDENT ICHIMOKU LISTENER"
+        f"Time: {utc_now()}"
     )
 
     print(
-        VERSION
+        "Mode: INDEPENDENT"
     )
 
     print(
-        "============================================================"
-    )
-
-    print(
-        "scanner.py dependency: NONE"
+        "Scanner dependency: NONE"
     )
 
     print(
@@ -3425,63 +2419,104 @@ def main():
     )
 
     print(
-        "Analysis: DIRECT KRAKEN API"
+        "State modification: DISABLED"
+    )
+
+    print(
+        "History modification: DISABLED"
+    )
+
+    print(
+        "Candles: CLOSED ONLY"
+    )
+
+    print(
+        "Strategy: Ichimoku MTF v14.1"
+    )
+
+    print(
+        "1H = Trend"
+    )
+
+    print(
+        "30M = Lock"
+    )
+
+    print(
+        "15M = Pullback Structure"
+    )
+
+    print(
+        "5M = Reversal Trigger"
     )
 
     print(
         "============================================================"
     )
 
-    if not TELEGRAM_TOKEN:
-
-        print(
-            "[FATAL] "
-            "TELEGRAM_BOT_TOKEN is missing."
+    if not TELEGRAM_BOT_TOKEN:
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN "
+            "is not configured."
         )
 
-        return
-
-    bot = get_bot_info()
-
-    if bot:
-
+    if not TELEGRAM_CHAT_ID:
         print(
-            f"[TELEGRAM] "
-            f"Connected: "
-            f"@{bot.get('username', 'unknown')}"
+            "⚠️ TELEGRAM_CHAT_ID is not "
+            "configured. Listener will "
+            "accept messages from any chat."
         )
 
-    else:
+    me = telegram_request(
+        "getMe",
+        timeout=20,
+    )
 
-        print(
-            "[WARNING] "
-            "Could not verify bot."
-        )
-
-    # --------------------------------------------------------
-    # Offset
-    # --------------------------------------------------------
-
-    offset = 0
-
-    print(
-        "[LISTENER] Waiting for commands..."
+    bot = me.get(
+        "result",
+        {},
     )
 
     print(
-        "Examples:"
+        "Telegram bot:"
+        f" @{bot.get('username', 'unknown')}"
     )
 
     print(
-        "  تحلیل BTC"
+        "Telegram connection: OK"
+    )
+
+    check_webhook()
+
+    print(
+        "============================================================"
+    )
+
+
+# ============================================================
+# MAIN LOOP
+# ============================================================
+
+def main():
+    startup_check()
+
+    offset = load_offset()
+
+    print(
+        f"Telegram offset: {offset}"
+    )
+
+    print()
+    print(
+        "🚀 LISTENER IS RUNNING"
     )
 
     print(
-        "  تحلیل BTC ETH SOL"
+        "Waiting for Telegram commands..."
     )
 
     print(
-        "  /check BTC"
+        "Example: تحلیل btc"
     )
 
     print(
@@ -3489,56 +2524,68 @@ def main():
     )
 
     while True:
-
         try:
-
             updates = get_updates(
                 offset
             )
 
-            for update in updates:
-
+            for update in updates.get(
+                "result",
+                [],
+            ):
                 update_id = update.get(
                     "update_id"
                 )
 
-                if update_id is not None:
+                if update_id is None:
+                    continue
 
-                    offset = (
-                        int(update_id)
-                        + 1
-                    )
+                next_offset = (
+                    update_id + 1
+                )
 
                 try:
-
-                    process_message(
-                        update.get(
-                            "message"
-                        )
+                    process_update(
+                        update
                     )
 
-                except Exception as e:
-
+                except Exception as exc:
                     print(
-                        f"[MESSAGE ERROR] "
-                        f"{e}"
+                        "Update processing error:"
+                        f" {exc}"
                     )
 
                     traceback.print_exc()
 
+                # ------------------------------------------------
+                # Save offset AFTER processing
+                # ------------------------------------------------
+
+                offset = next_offset
+
+                save_offset(
+                    offset
+                )
+
         except KeyboardInterrupt:
-
+            print()
             print(
-                "\n[STOP] Listener stopped."
+                "Listener stopped by user."
             )
-
             break
 
-        except Exception as e:
-
+        except requests.exceptions.RequestException as exc:
             print(
-                f"[LISTENER ERROR] "
-                f"{e}"
+                f"[{utc_now()}] "
+                f"Network error: {exc}"
+            )
+
+            time.sleep(5)
+
+        except Exception as exc:
+            print(
+                f"[{utc_now()}] "
+                f"Listener error: {exc}"
             )
 
             traceback.print_exc()
@@ -3551,5 +2598,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
