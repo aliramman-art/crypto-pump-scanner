@@ -1,5 +1,5 @@
 # ============================================================
-# KRAKEN FUTURES ICHIMOKU TOP RANKER v14.1
+# KRAKEN FUTURES ICHIMOKU TOP RANKER v14.2
 # ============================================================
 # Kraken Futures
 #
@@ -23,17 +23,19 @@
 # /check:
 #   - Analysis only
 #   - DOES NOT open trade
-#   - Shows LONG / SHORT / NO TRADE
 #
-# v14.1 FIXES:
-#   - BTC -> XBT mapping
-#   - Telegram offset persistence
-#   - Better Telegram diagnostics
-#   - /check@BotName support
-#   - Multiple symbol check
-#   - Scan statistics
-#   - Telegram state saved by workflow
-#   - Better error reporting
+# v14.2 CHANGES:
+#   - Softer signal thresholds
+#   - MIN SCORE 78 -> 70
+#   - TRIGGER 7 -> 6
+#   - 1H 4 -> 3
+#   - 30M 3 -> 2
+#   - 15M remains 2
+#   - 5M 2 -> 1
+#   - Best LONG/SHORT side selection
+#   - TOP 5 rejected candidates with reasons
+#   - Better scan diagnostics
+#   - Listener NOT included
 # ============================================================
 
 import os
@@ -57,7 +59,7 @@ TICKERS_URL = BASE_URL + "/derivatives/api/v3/tickers"
 
 CHART_URL = BASE_URL + "/api/charts/v1/trade/{symbol}/{resolution}"
 
-STRATEGY_VERSION = "v14.1"
+STRATEGY_VERSION = "v14.2"
 
 
 # ============================================================
@@ -147,18 +149,39 @@ MAX_STOP_PCT = 2.00
 # ============================================================
 # SIGNAL QUALITY
 # ============================================================
+#
+# SOFTER v14.2 SETTINGS
+#
+# Old:
+#   SCORE   = 78
+#   TRIGGER = 7
+#   1H      = 4
+#   30M     = 3
+#   15M     = 2
+#   5M      = 2
+#
+# New:
+#   SCORE   = 70
+#   TRIGGER = 6
+#   1H      = 3
+#   30M     = 2
+#   15M     = 2
+#   5M      = 1
+#
+# Core 5M pullback/reversal filters remain active.
+# ============================================================
 
-MIN_SCORE = 78.0
+MIN_SCORE = 70.0
 
-MIN_TRIGGER_SCORE = 7
+MIN_TRIGGER_SCORE = 6
 
-MIN_1H_SCORE = 4.0
+MIN_1H_SCORE = 3.0
 
-MIN_30M_SCORE = 3.0
+MIN_30M_SCORE = 2.0
 
 MIN_15M_SCORE = 2.0
 
-MIN_5M_SCORE = 2.0
+MIN_5M_SCORE = 1.0
 
 
 # ============================================================
@@ -229,7 +252,7 @@ RESOLUTION_SECONDS = {
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Kraken-Ichi-Scanner/14.1"
+    "User-Agent": "Kraken-Ichi-Scanner/14.2"
 })
 
 
@@ -325,11 +348,6 @@ def normalize_symbol_query(query):
         return ""
 
     q = q.replace("$", "").replace(",", "")
-
-    # --------------------------------------------------------
-    # Bitcoin aliases
-    # Kraken Futures normally uses XBTUSD.
-    # --------------------------------------------------------
 
     if q in (
         "BTC",
@@ -969,10 +987,6 @@ def find_market(
             ):
                 return market
 
-    # --------------------------------------------------------
-    # Direct lookup outside TOP 100
-    # --------------------------------------------------------
-
     instruments = get_instruments()
 
     for item in instruments:
@@ -1133,9 +1147,7 @@ def get_candles(
         key=lambda x: x["time"]
     )
 
-    # --------------------------------------------------------
     # CLOSED CANDLES ONLY
-    # --------------------------------------------------------
 
     now_ts = int(time.time())
 
@@ -2344,106 +2356,105 @@ def analyze_side_diagnostic(
 
 
 # ============================================================
-# CANDIDATE
+# MAKE CANDIDATE FROM VALID RESULT
 # ============================================================
 
-def analyze_candidate(market):
+def make_candidate(
+    market,
+    result,
+    analysis
+):
 
     symbol = market["symbol"]
 
-    analysis = mtf_analysis(
-        symbol
-    )
-
     c5 = analysis["5m"]["candles"]
-
-    c15 = analysis["15m"]["candles"]
 
     signal_candle_time = c5[-1]["time"]
 
-    for side in (
-        "LONG",
-        "SHORT"
-    ):
+    levels = result["levels"]
 
-        result = analyze_side_diagnostic(
-            side,
-            analysis,
-            market
-        )
+    if not levels:
+        return None
 
-        if result["reasons"]:
-            continue
+    (
+        entry_r,
+        sl,
+        tp,
+        risk,
+        reward,
+        risk_pct
+    ) = levels
 
-        levels = result["levels"]
+    side = result["side"]
 
-        (
-            entry_r,
-            sl,
-            tp,
-            risk,
-            reward,
-            risk_pct
-        ) = levels
+    setup_key = (
+        f"{symbol}|"
+        f"{side}|"
+        f"{signal_candle_time}"
+    )
 
-        setup_key = (
-            f"{symbol}|"
-            f"{side}|"
+    timestamp = now_iso()
+
+    return {
+        "id": (
+            f"{symbol}-"
+            f"{side}-"
             f"{signal_candle_time}"
-        )
-
-        timestamp = now_iso()
-
-        return {
-            "id": (
-                f"{symbol}-"
-                f"{side}-"
-                f"{signal_candle_time}"
-            ),
-            "setup_key": setup_key,
-            "symbol": symbol,
-            "side": side,
-            "entry": entry_r,
-            "sl": sl,
-            "tp": tp,
-            "risk": risk,
-            "reward": reward,
-            "risk_pct": risk_pct,
-            "rr": RR,
-            "score": result["score"],
-            "trigger": result["trigger"],
-            "trend": result["s1"],
-            "reversal": (
-                result["s5"]
-                - result["s30"]
-            ),
-            "s1h": result["s1"],
-            "s30": result["s30"],
-            "s15": result["s15"],
-            "s5": result["s5"],
-            "pullback_patterns":
-                result["patterns"],
-            "signal_candle_time":
-                signal_candle_time,
-            "opened_at": timestamp,
-            "opened_at_iso": timestamp,
-            "last_checked_candle":
-                signal_candle_time,
-            "status": "OPEN",
-            "last_price": entry_r,
-            "pnl_pct": 0.0,
-            "strategy_version":
-                STRATEGY_VERSION,
-        }
-
-    return None
+        ),
+        "setup_key": setup_key,
+        "symbol": symbol,
+        "side": side,
+        "entry": entry_r,
+        "sl": sl,
+        "tp": tp,
+        "risk": risk,
+        "reward": reward,
+        "risk_pct": risk_pct,
+        "rr": RR,
+        "score": result["score"],
+        "trigger": result["trigger"],
+        "trend": result["s1"],
+        "reversal": (
+            result["s5"]
+            - result["s30"]
+        ),
+        "s1h": result["s1"],
+        "s30": result["s30"],
+        "s15": result["s15"],
+        "s5": result["s5"],
+        "pullback_patterns":
+            result["patterns"],
+        "signal_candle_time":
+            signal_candle_time,
+        "opened_at": timestamp,
+        "opened_at_iso": timestamp,
+        "last_checked_candle":
+            signal_candle_time,
+        "status": "OPEN",
+        "last_price": entry_r,
+        "pnl_pct": 0.0,
+        "strategy_version":
+            STRATEGY_VERSION,
+    }
 
 
 # ============================================================
-# CHECK SYMBOL
+# CANDIDATE ANALYSIS
+# ============================================================
+#
+# IMPORTANT:
+# v14.1 returned the first valid side.
+# That could favor LONG simply because LONG was checked first.
+#
+# v14.2:
+#   - Analyze BOTH sides.
+#   - If both are valid, select the higher score.
 # ============================================================
 
-def check_symbol(market):
+def analyze_candidate(
+    market,
+    return_diagnostic=False
+):
 
     symbol = market["symbol"]
 
@@ -2462,6 +2473,100 @@ def check_symbol(market):
         analysis,
         market
     )
+
+    valid_long = not bool(
+        long_result["reasons"]
+    )
+
+    valid_short = not bool(
+        short_result["reasons"]
+    )
+
+    valid_results = []
+
+    if valid_long:
+        valid_results.append(
+            long_result
+        )
+
+    if valid_short:
+        valid_results.append(
+            short_result
+        )
+
+    if valid_results:
+
+        best = max(
+            valid_results,
+            key=lambda x: (
+                x["score"],
+                x["trigger"]
+            )
+        )
+
+        candidate = make_candidate(
+            market,
+            best,
+            analysis
+        )
+
+        if return_diagnostic:
+
+            return {
+                "candidate": candidate,
+                "best_rejected": None,
+                "long": long_result,
+                "short": short_result,
+                "analysis": analysis,
+            }
+
+        return candidate
+
+    # --------------------------------------------------------
+    # No valid side.
+    # Pick the strongest rejected side for diagnostics.
+    # --------------------------------------------------------
+
+    best_rejected = max(
+        [
+            long_result,
+            short_result
+        ],
+        key=lambda x: (
+            x["score"],
+            x["trigger"]
+        )
+    )
+
+    if return_diagnostic:
+
+        return {
+            "candidate": None,
+            "best_rejected": best_rejected,
+            "long": long_result,
+            "short": short_result,
+            "analysis": analysis,
+        }
+
+    return None
+
+
+# ============================================================
+# CHECK SYMBOL
+# ============================================================
+
+def check_symbol(market):
+
+    diagnostic = analyze_candidate(
+        market,
+        return_diagnostic=True
+    )
+
+    analysis = diagnostic["analysis"]
+
+    long_result = diagnostic["long"]
+
+    short_result = diagnostic["short"]
 
     valid_long = not bool(
         long_result["reasons"]
@@ -2498,7 +2603,7 @@ def check_symbol(market):
         )
 
     return {
-        "symbol": symbol,
+        "symbol": market["symbol"],
         "analysis": analysis,
         "long": long_result,
         "short": short_result,
@@ -2906,6 +3011,91 @@ def generate_check_message(result):
 
 
 # ============================================================
+# TOP 5 REJECTED FORMAT
+# ============================================================
+
+def generate_rejected_summary(
+    rejected
+):
+
+    if not rejected:
+        return []
+
+    rejected = sorted(
+        rejected,
+        key=lambda x: (
+            x.get("score", 0),
+            x.get("trigger", 0)
+        ),
+        reverse=True
+    )
+
+    lines = []
+
+    lines.append(
+        "❌ TOP 5 REJECTED"
+    )
+
+    lines.append(
+        "──────────────────"
+    )
+
+    for idx, item in enumerate(
+        rejected[:5],
+        start=1
+    ):
+
+        symbol = display_symbol(
+            item.get("symbol")
+        )
+
+        side = item.get(
+            "side",
+            "?"
+        )
+
+        score = safe_float(
+            item.get("score")
+        )
+
+        trigger = safe_float(
+            item.get("trigger")
+        )
+
+        lines.append(
+            f"{idx}. {symbol} "
+            f"{'🟢' if side == 'LONG' else '🔴'} "
+            f"{side} | "
+            f"Score {score:.1f} | "
+            f"Trig {trigger:.0f}/10"
+        )
+
+        reasons = item.get(
+            "reasons",
+            []
+        )
+
+        if reasons:
+
+            # Show only the most important reason.
+            lines.append(
+                f"   ↳ {reasons[0]}"
+            )
+
+        else:
+
+            lines.append(
+                "   ↳ Rejected"
+            )
+
+    lines.append(
+        "──────────────────"
+    )
+
+    return lines
+
+
+# ============================================================
 # SCAN ALL
 # ============================================================
 
@@ -2923,6 +3113,8 @@ def scan_all_markets(
     }
 
     candidates = []
+
+    rejected = []
 
     scanned = 0
 
@@ -2954,9 +3146,18 @@ def scan_all_markets(
 
         try:
 
-            candidate = analyze_candidate(
-                market
+            diagnostic = analyze_candidate(
+                market,
+                return_diagnostic=True
             )
+
+            candidate = diagnostic[
+                "candidate"
+            ]
+
+            best_rejected = diagnostic[
+                "best_rejected"
+            ]
 
             if candidate:
 
@@ -2975,6 +3176,20 @@ def scan_all_markets(
 
                 no_signal += 1
 
+                if best_rejected:
+
+                    rejected.append({
+                        "symbol": symbol,
+                        "side": best_rejected["side"],
+                        "score": best_rejected["score"],
+                        "trigger": best_rejected["trigger"],
+                        "reasons": best_rejected["reasons"],
+                        "s1": best_rejected["s1"],
+                        "s30": best_rejected["s30"],
+                        "s15": best_rejected["s15"],
+                        "s5": best_rejected["s5"],
+                    })
+
                 print(
                     f"[{idx}/{len(markets)}] "
                     f"{symbol} -> no signal"
@@ -2989,8 +3204,53 @@ def scan_all_markets(
                 f"{symbol}: {e}"
             )
 
+    # --------------------------------------------------------
+    # TOP 5 rejected
+    # --------------------------------------------------------
+
+    rejected.sort(
+        key=lambda x: (
+            x.get("score", 0),
+            x.get("trigger", 0)
+        ),
+        reverse=True
+    )
+
+    print(
+        "============================================================"
+    )
+
+    print(
+        "[TOP 5 REJECTED]"
+    )
+
+    for idx, item in enumerate(
+        rejected[:5],
+        start=1
+    ):
+
+        print(
+            f"{idx}. "
+            f"{display_symbol(item['symbol'])} "
+            f"{item['side']} "
+            f"Score={item['score']:.1f} "
+            f"Trigger={item['trigger']}/10"
+        )
+
+        if item["reasons"]:
+
+            print(
+                f"   Reason: "
+                f"{item['reasons'][0]}"
+            )
+
+    print(
+        "============================================================"
+    )
+
     return {
         "candidates": candidates,
+        "rejected": rejected,
         "scanned": scanned,
         "no_signal": no_signal,
         "failed": failed,
@@ -4044,11 +4304,6 @@ def parse_check_command(text):
 
     command = parts[0].lower()
 
-    # --------------------------------------------------------
-    # /check
-    # /check@BotName
-    # --------------------------------------------------------
-
     if command == "/check":
 
         symbols = parts[1:]
@@ -4153,10 +4408,6 @@ def process_telegram_commands(
                 text
             )
 
-            # ------------------------------------------------
-            # Unknown message
-            # ------------------------------------------------
-
             if not symbols:
 
                 if update_id is not None:
@@ -4166,10 +4417,6 @@ def process_telegram_commands(
                     )
 
                 continue
-
-            # ------------------------------------------------
-            # Security
-            # ------------------------------------------------
 
             if (
                 allowed_chat
@@ -4192,10 +4439,6 @@ def process_telegram_commands(
 
                 continue
 
-            # ------------------------------------------------
-            # Immediate acknowledgement
-            # ------------------------------------------------
-
             send_telegram(
                 "⏳ CHECK RECEIVED\n"
                 f"Analyzing: "
@@ -4203,10 +4446,6 @@ def process_telegram_commands(
                 "Please wait...",
                 chat_id_override=chat_id
             )
-
-            # ------------------------------------------------
-            # Analyze symbols
-            # ------------------------------------------------
 
             for raw_symbol in symbols:
 
@@ -4259,10 +4498,6 @@ def process_telegram_commands(
                         f"Reason: {e}",
                         chat_id_override=chat_id
                     )
-
-            # ------------------------------------------------
-            # SAVE OFFSET AFTER PROCESSING
-            # ------------------------------------------------
 
             if update_id is not None:
 
@@ -4379,6 +4614,25 @@ def generate_report(
         lines.append(
             f"🚀 Selected: "
             f"{scan_stats.get('selected_count', 0)}"
+        )
+
+        lines.append(
+            "━━━━━━━━━━━━━━━━━━"
+        )
+
+        # ----------------------------------------------------
+        # TOP 5 REJECTED
+        # ----------------------------------------------------
+
+        rejected = scan_stats.get(
+            "rejected",
+            []
+        )
+
+        lines.extend(
+            generate_rejected_summary(
+                rejected
+            )
         )
 
         lines.append(
@@ -4552,6 +4806,16 @@ def generate_report(
     )
 
     lines.append(
+        f"🎯 Signal Threshold: "
+        f"{MIN_SCORE:.0f}/100"
+    )
+
+    lines.append(
+        f"⚡ Trigger Threshold: "
+        f"{MIN_TRIGGER_SCORE}/10"
+    )
+
+    lines.append(
         f"💾 State: {STATE_FILE}"
     )
 
@@ -4709,6 +4973,16 @@ def main():
         f"{MAX_STOP_PCT:.2f}%"
     )
 
+    print(
+        f"THRESHOLDS | "
+        f"SCORE>={MIN_SCORE:.0f} | "
+        f"TRIGGER>={MIN_TRIGGER_SCORE} | "
+        f"1H>={MIN_1H_SCORE:.0f} | "
+        f"30M>={MIN_30M_SCORE:.0f} | "
+        f"15M>={MIN_15M_SCORE:.0f} | "
+        f"5M>={MIN_5M_SCORE:.0f}"
+    )
+
     # ========================================================
     # STEP 0
     # TELEGRAM
@@ -4773,10 +5047,6 @@ def main():
             f"[FATAL] "
             f"Market loading failed: {e}"
         )
-
-        # ----------------------------------------------------
-        # Even if market loading fails, tell Telegram.
-        # ----------------------------------------------------
 
         send_telegram(
             "❌ SCANNER ERROR\n"
@@ -4887,6 +5157,7 @@ def main():
 
         scan_result = {
             "candidates": [],
+            "rejected": [],
             "scanned": 0,
             "no_signal": 0,
             "failed": 0,
@@ -5030,6 +5301,11 @@ def main():
         f"Failed={scan_result['failed']} "
         f"Candidates={len(candidates)} "
         f"Selected={len(selected)}"
+    )
+
+    print(
+        f"[TOP5 REJECTED] "
+        f"{min(5, len(scan_result.get('rejected', [])))}"
     )
 
     print(
