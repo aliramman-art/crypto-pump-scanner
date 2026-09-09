@@ -1,5 +1,5 @@
 # ============================================================
-# VOLUME-KHAT 100 v2.2
+# VOLUME-KHAT 100 v2.3
 # KRAKEN FUTURES
 # TOP 100 USD PERPETUAL
 # ============================================================
@@ -28,6 +28,13 @@
 #   CLOSED SINCE PREVIOUS REPORT
 #   STATS
 #   COMPACT SCAN
+#
+# CLOSED LOGIC:
+#   Current run detects TP/SL
+#   Next run reports the closed trade
+#
+# TP = ✅
+# SL = ❌
 #
 # NO:
 #   TOP 3
@@ -85,7 +92,6 @@ ATR_PERIOD = 14
 SL_ATR_BUFFER = 0.20
 
 MIN_RR = 2.0
-
 MIN_SIGNAL_SCORE = 9
 
 DB_FILE = "volume_khat_100.db"
@@ -101,6 +107,8 @@ TELEGRAM_CHAT_ID = os.getenv(
 ).strip()
 
 MAX_TELEGRAM_LENGTH = 3900
+MAX_NEW_SIGNALS = 5
+MAX_OPEN_DISPLAY = 10
 
 TIMEOUT = 20
 
@@ -129,7 +137,7 @@ CHART_URL = (
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Volume-Khat-100/2.2"
+    "User-Agent": "Volume-Khat-100/2.3"
 })
 
 
@@ -174,17 +182,10 @@ DIAG = {
 # ============================================================
 
 def now_utc():
-
-    return datetime.now(
-        timezone.utc
-    )
+    return datetime.now(timezone.utc)
 
 
-def safe_float(
-    value,
-    default=0.0
-):
-
+def safe_float(value, default=0.0):
     try:
         return float(value)
     except Exception:
@@ -192,14 +193,10 @@ def safe_float(
 
 
 def normalize_symbol(symbol):
-
-    return str(
-        symbol or ""
-    ).strip().upper()
+    return str(symbol or "").strip().upper()
 
 
 def display_symbol(symbol):
-
     s = normalize_symbol(symbol)
 
     return (
@@ -210,7 +207,6 @@ def display_symbol(symbol):
 
 
 def is_perpetual_symbol(symbol):
-
     s = normalize_symbol(symbol)
 
     return (
@@ -223,7 +219,6 @@ def is_perpetual_symbol(symbol):
 
 
 def is_usd_symbol(symbol):
-
     s = normalize_symbol(symbol)
 
     return (
@@ -278,17 +273,12 @@ def get_instruments():
     )
 
     if isinstance(items, dict):
-
-        items = list(
-            items.values()
-        )
+        items = list(items.values())
 
     if not isinstance(items, list):
         return []
 
-    DIAG["instruments"] = len(
-        items
-    )
+    DIAG["instruments"] = len(items)
 
     return items
 
@@ -312,17 +302,12 @@ def get_tickers():
     )
 
     if isinstance(items, dict):
-
-        items = list(
-            items.values()
-        )
+        items = list(items.values())
 
     if not isinstance(items, list):
         return []
 
-    DIAG["tickers"] = len(
-        items
-    )
+    DIAG["tickers"] = len(items)
 
     return items
 
@@ -331,14 +316,9 @@ def get_tickers():
 # INSTRUMENT CHECKS
 # ============================================================
 
-def instrument_is_perpetual(
-    instrument
-):
+def instrument_is_perpetual(instrument):
 
-    if not isinstance(
-        instrument,
-        dict
-    ):
+    if not isinstance(instrument, dict):
         return False
 
     symbol = normalize_symbol(
@@ -347,10 +327,7 @@ def instrument_is_perpetual(
 
     text = " ".join(
         str(
-            instrument.get(
-                key,
-                ""
-            )
+            instrument.get(key, "")
         )
         for key in [
             "type",
@@ -364,22 +341,15 @@ def instrument_is_perpetual(
     if "perpetual" in text:
         return True
 
-    if is_perpetual_symbol(
-        symbol
-    ):
+    if is_perpetual_symbol(symbol):
         return True
 
     return False
 
 
-def instrument_is_usd(
-    instrument
-):
+def instrument_is_usd(instrument):
 
-    if not isinstance(
-        instrument,
-        dict
-    ):
+    if not isinstance(instrument, dict):
         return False
 
     fields = [
@@ -393,10 +363,7 @@ def instrument_is_usd(
 
     text = " ".join(
         str(
-            instrument.get(
-                key,
-                ""
-            )
+            instrument.get(key, "")
         ).upper()
         for key in fields
     )
@@ -412,9 +379,7 @@ def instrument_is_usd(
 # TICKER VOLUME
 # ============================================================
 
-def ticker_volume(
-    ticker
-):
+def ticker_volume(ticker):
 
     keys = [
         "vol24h",
@@ -428,9 +393,7 @@ def ticker_volume(
     for key in keys:
 
         value = safe_float(
-            ticker.get(
-                key
-            )
+            ticker.get(key)
         )
 
         if value > 0:
@@ -457,10 +420,7 @@ def get_top_markets():
         )
 
         if symbol:
-
-            instrument_map[
-                symbol
-            ] = item
+            instrument_map[symbol] = item
 
     candidates = []
 
@@ -473,43 +433,31 @@ def get_top_markets():
         if not symbol:
             continue
 
-        instrument = (
-            instrument_map.get(
-                symbol
-            )
-        )
+        instrument = instrument_map.get(symbol)
 
         perpetual = False
         usd = False
 
         if instrument:
 
-            perpetual = (
-                instrument_is_perpetual(
-                    instrument
-                )
+            perpetual = instrument_is_perpetual(
+                instrument
             )
 
-            usd = (
-                instrument_is_usd(
-                    instrument
-                )
+            usd = instrument_is_usd(
+                instrument
             )
 
         if not perpetual:
 
-            perpetual = (
-                is_perpetual_symbol(
-                    symbol
-                )
+            perpetual = is_perpetual_symbol(
+                symbol
             )
 
         if not usd:
 
-            usd = (
-                is_usd_symbol(
-                    symbol
-                )
+            usd = is_usd_symbol(
+                symbol
             )
 
         if not perpetual:
@@ -522,9 +470,7 @@ def get_top_markets():
 
         DIAG["usd_perpetual"] += 1
 
-        volume = ticker_volume(
-            ticker
-        )
+        volume = ticker_volume(ticker)
 
         if volume <= 0:
             continue
@@ -539,6 +485,9 @@ def get_top_markets():
                 ticker.get("markPrice")
             )
 
+        if price <= 0:
+            continue
+
         candidates.append({
             "symbol": symbol,
             "volume": volume,
@@ -550,13 +499,9 @@ def get_top_markets():
         reverse=True
     )
 
-    markets = candidates[
-        :TOP_N
-    ]
+    markets = candidates[:TOP_N]
 
-    DIAG["ranked"] = len(
-        markets
-    )
+    DIAG["ranked"] = len(markets)
 
     print(
         "\n=================================================="
@@ -632,9 +577,7 @@ def get_candles(
         resolution=resolution
     )
 
-    data = api_get(
-        url
-    )
+    data = api_get(url)
 
     if not data:
         return None
@@ -644,20 +587,14 @@ def get_candles(
         []
     )
 
-    if not isinstance(
-        candles,
-        list
-    ):
+    if not isinstance(candles, list):
         return None
 
     rows = []
 
     for candle in candles:
 
-        if not isinstance(
-            candle,
-            dict
-        ):
+        if not isinstance(candle, dict):
             continue
 
         t = (
@@ -710,9 +647,7 @@ def get_candles(
     if len(rows) < 35:
         return None
 
-    df = pd.DataFrame(
-        rows
-    )
+    df = pd.DataFrame(rows)
 
     df = (
         df.sort_values("time")
@@ -722,19 +657,15 @@ def get_candles(
           .reset_index(drop=True)
     )
 
-    # حذف آخرین کندل
-    # فقط کندل بسته شده استفاده می‌شود.
+    # آخرین کندل حذف می‌شود.
+    # فقط کندل بسته‌شده استفاده می‌شود.
     if len(df) > 2:
 
-        df = df.iloc[
-            :-1
-        ].copy()
+        df = df.iloc[:-1].copy()
 
     if len(df) > limit:
 
-        df = df.iloc[
-            -limit:
-        ].copy()
+        df = df.iloc[-limit:].copy()
 
     return df.reset_index(
         drop=True
@@ -760,18 +691,12 @@ def calculate_atr(
     tr = pd.concat([
         df["high"] - df["low"],
         (
-            df["high"]
-            -
-            prev_close
+            df["high"] - prev_close
         ).abs(),
         (
-            df["low"]
-            -
-            prev_close
+            df["low"] - prev_close
         ).abs()
-    ], axis=1).max(
-        axis=1
-    )
+    ], axis=1).max(axis=1)
 
     value = (
         tr.rolling(
@@ -779,18 +704,14 @@ def calculate_atr(
         ).mean().iloc[-1]
     )
 
-    return safe_float(
-        value
-    )
+    return safe_float(value)
 
 
 # ============================================================
 # 1H TREND
 # ============================================================
 
-def get_trend(
-    df
-):
+def get_trend(df):
 
     if len(df) < 50:
         return "NEUTRAL"
@@ -832,9 +753,7 @@ def get_trend(
 # SWINGS
 # ============================================================
 
-def detect_swings(
-    df
-):
+def detect_swings(df):
 
     highs = []
     lows = []
@@ -848,21 +767,21 @@ def detect_swings(
     ):
 
         left_h = h[
-            i-SWING_LEFT:i
+            i - SWING_LEFT:i
         ]
 
         right_h = h[
-            i+1:
-            i+SWING_RIGHT+1
+            i + 1:
+            i + SWING_RIGHT + 1
         ]
 
         left_l = l[
-            i-SWING_LEFT:i
+            i - SWING_LEFT:i
         ]
 
         right_l = l[
-            i+1:
-            i+SWING_RIGHT+1
+            i + 1:
+            i + SWING_RIGHT + 1
         ]
 
         if (
@@ -931,13 +850,9 @@ def project_level(
 # DYNAMIC S/R
 # ============================================================
 
-def get_dynamic_sr(
-    df
-):
+def get_dynamic_sr(df):
 
-    highs, lows = detect_swings(
-        df
-    )
+    highs, lows = detect_swings(df)
 
     index = len(df) - 1
 
@@ -975,16 +890,12 @@ def get_dynamic_sr(
     return {
         "support": support,
         "resistance": resistance,
-
         "support_distance":
             support_distance,
-
         "resistance_distance":
             resistance_distance,
-
         "support_touches":
             len(lows),
-
         "resistance_touches":
             len(highs)
     }
@@ -994,13 +905,9 @@ def get_dynamic_sr(
 # RVOL
 # ============================================================
 
-def get_rvol(
-    df
-):
+def get_rvol(df):
 
-    if len(df) < (
-        RVOL_PERIOD + 2
-    ):
+    if len(df) < RVOL_PERIOD + 2:
         return 0.0
 
     current = float(
@@ -1010,7 +917,7 @@ def get_rvol(
     baseline = float(
         df["volume"]
         .iloc[
-            -RVOL_PERIOD-1:-1
+            -RVOL_PERIOD - 1:-1
         ]
         .mean()
     )
@@ -1025,58 +932,34 @@ def get_rvol(
 # CANDLE
 # ============================================================
 
-def candle_info(
-    row
-):
+def candle_info(row):
 
-    o = float(
-        row["open"]
-    )
-
-    h = float(
-        row["high"]
-    )
-
-    l = float(
-        row["low"]
-    )
-
-    c = float(
-        row["close"]
-    )
+    o = float(row["open"])
+    h = float(row["high"])
+    l = float(row["low"])
+    c = float(row["close"])
 
     rng = max(
         h - l,
         1e-12
     )
 
-    body = abs(
-        c - o
-    )
+    body = abs(c - o)
 
     return {
         "open": o,
         "high": h,
         "low": l,
         "close": c,
-
         "range": rng,
         "body": body,
-
-        "body_ratio":
-            body / rng,
-
+        "body_ratio": body / rng,
         "upper_wick":
             h - max(o, c),
-
         "lower_wick":
             min(o, c) - l,
-
-        "bullish":
-            c > o,
-
-        "bearish":
-            c < o
+        "bullish": c > o,
+        "bearish": c < o
     }
 
 
@@ -1100,17 +983,10 @@ def detect_breakout(
         df.iloc[-2]
     )
 
-    close = current[
-        "close"
-    ]
+    close = current["close"]
 
-    resistance = sr[
-        "resistance"
-    ]
-
-    support = sr[
-        "support"
-    ]
+    resistance = sr["resistance"]
+    support = sr["support"]
 
     # LONG BREAKOUT
     if resistance is not None:
@@ -1122,11 +998,9 @@ def detect_breakout(
         if (
             close > resistance
             and
-            previous["close"]
-            <= resistance
+            previous["close"] <= resistance
             and
-            distance
-            >= BREAKOUT_MIN_DISTANCE
+            distance >= BREAKOUT_MIN_DISTANCE
             and
             current["bullish"]
             and
@@ -1150,11 +1024,9 @@ def detect_breakout(
         if (
             close < support
             and
-            previous["close"]
-            >= support
+            previous["close"] >= support
             and
-            distance
-            >= BREAKOUT_MIN_DISTANCE
+            distance >= BREAKOUT_MIN_DISTANCE
             and
             current["bearish"]
             and
@@ -1195,30 +1067,21 @@ def detect_rejection(
         1e-12
     )
 
-    resistance = sr[
-        "resistance"
-    ]
-
-    support = sr[
-        "support"
-    ]
+    resistance = sr["resistance"]
+    support = sr["support"]
 
     # RESISTANCE REJECTION
     if resistance is not None:
 
         distance = (
-            abs(
-                close - resistance
-            )
+            abs(close - resistance)
             / close
         )
 
         if (
-            distance
-            <= DYNAMIC_MAX_DISTANCE
+            distance <= DYNAMIC_MAX_DISTANCE
             and
-            c["upper_wick"]
-            >= body * 1.2
+            c["upper_wick"] >= body * 1.2
             and
             close < resistance
         ):
@@ -1233,18 +1096,14 @@ def detect_rejection(
     if support is not None:
 
         distance = (
-            abs(
-                close - support
-            )
+            abs(close - support)
             / close
         )
 
         if (
-            distance
-            <= DYNAMIC_MAX_DISTANCE
+            distance <= DYNAMIC_MAX_DISTANCE
             and
-            c["lower_wick"]
-            >= body * 1.2
+            c["lower_wick"] >= body * 1.2
             and
             close > support
         ):
@@ -1281,11 +1140,9 @@ def confirmation_5m(
         return False
 
     if side == "LONG":
-
         return c["bullish"]
 
     if side == "SHORT":
-
         return c["bearish"]
 
     return False
@@ -1312,24 +1169,14 @@ def detect_retest(
 
     for _, row in df.iloc[-3:].iterrows():
 
-        high = float(
-            row["high"]
-        )
-
-        low = float(
-            row["low"]
-        )
-
-        close = float(
-            row["close"]
-        )
+        high = float(row["high"])
+        low = float(row["low"])
+        close = float(row["close"])
 
         if side == "LONG":
 
             touched = (
-                abs(
-                    low - level
-                )
+                abs(low - level)
                 / level
                 <= tolerance
             )
@@ -1340,9 +1187,7 @@ def detect_retest(
         else:
 
             touched = (
-                abs(
-                    high - level
-                )
+                abs(high - level)
                 / level
                 <= tolerance
             )
@@ -1357,20 +1202,16 @@ def detect_retest(
 # STATIC LEVELS
 # ============================================================
 
-def cluster_levels(
-    levels
-):
+def cluster_levels(levels):
 
     if not levels:
         return []
 
-    values = sorted(
-        [
-            float(x)
-            for x in levels
-            if x > 0
-        ]
-    )
+    values = sorted([
+        float(x)
+        for x in levels
+        if x > 0
+    ])
 
     clusters = []
 
@@ -1378,9 +1219,7 @@ def cluster_levels(
 
         if not clusters:
 
-            clusters.append(
-                [value]
-            )
+            clusters.append([value])
 
             continue
 
@@ -1391,9 +1230,7 @@ def cluster_levels(
         )
 
         distance = (
-            abs(
-                value - center
-            )
+            abs(value - center)
             / center
         )
 
@@ -1413,9 +1250,7 @@ def cluster_levels(
             )
 
     return [
-        float(
-            np.mean(cluster)
-        )
+        float(np.mean(cluster))
         for cluster in clusters
     ]
 
@@ -1502,39 +1337,22 @@ def calculate_trade(
         SL_ATR_BUFFER
     )
 
-    supports = static[
-        "supports"
-    ]
-
-    resistances = static[
-        "resistances"
-    ]
+    supports = static["supports"]
+    resistances = static["resistances"]
 
     if side == "LONG":
 
         if supports:
-
             sl_base = supports[0]
-
         else:
+            sl_base = entry - atr_value
 
-            sl_base = (
-                entry - atr_value
-            )
-
-        sl = (
-            sl_base - buffer
-        )
+        sl = sl_base - buffer
 
         if sl >= entry:
+            sl = entry - atr_value
 
-            sl = (
-                entry - atr_value
-            )
-
-        risk = (
-            entry - sl
-        )
+        risk = entry - sl
 
         if risk <= 0:
             return None
@@ -1562,28 +1380,16 @@ def calculate_trade(
     else:
 
         if resistances:
-
             sl_base = resistances[0]
-
         else:
+            sl_base = entry + atr_value
 
-            sl_base = (
-                entry + atr_value
-            )
-
-        sl = (
-            sl_base + buffer
-        )
+        sl = sl_base + buffer
 
         if sl <= entry:
+            sl = entry + atr_value
 
-            sl = (
-                entry + atr_value
-            )
-
-        risk = (
-            sl - entry
-        )
+        risk = sl - entry
 
         if risk <= 0:
             return None
@@ -1638,37 +1444,26 @@ def signal_score(
 
     score = 0
 
-    # RVOL
     if rvol >= RVOL_MIN:
         score += 2
 
     if rvol >= RVOL_STRONG:
         score += 1
 
-    # Dynamic S/R touches
     touches = max(
-        dynamic[
-            "support_touches"
-        ],
-        dynamic[
-            "resistance_touches"
-        ]
+        dynamic["support_touches"],
+        dynamic["resistance_touches"]
     )
 
     if touches >= 2:
         score += 2
 
-    # Distance to dynamic level
-    level = setup.get(
-        "level"
-    )
+    level = setup.get("level")
 
     if level:
 
         distance = (
-            abs(
-                entry - level
-            )
+            abs(entry - level)
             / entry
         )
 
@@ -1689,15 +1484,12 @@ def signal_score(
     # Setup
     score += 2
 
-    # 5M confirmation
     if confirmation:
         score += 2
 
-    # Retest
     if retest:
         score += 1
 
-    # 1H trend
     if (
         side == "LONG"
         and
@@ -1714,7 +1506,6 @@ def signal_score(
 
         score += 2
 
-    # RR
     if rr >= 3.0:
         score += 2
 
@@ -1725,13 +1516,9 @@ def signal_score(
 # PROCESS MARKET
 # ============================================================
 
-def process_market(
-    market
-):
+def process_market(market):
 
-    symbol = market[
-        "symbol"
-    ]
+    symbol = market["symbol"]
 
     try:
 
@@ -1765,46 +1552,33 @@ def process_market(
 
         DIAG["data_ok"] += 1
 
-        trend = get_trend(
-            df1h
-        )
+        trend = get_trend(df1h)
 
         if trend == "BULL":
-
             DIAG["bull"] += 1
 
         elif trend == "BEAR":
-
             DIAG["bear"] += 1
 
         else:
-
             DIAG["neutral"] += 1
 
-        dynamic = get_dynamic_sr(
-            df15
-        )
+        dynamic = get_dynamic_sr(df15)
 
         if (
-            dynamic["support"]
-            is not None
+            dynamic["support"] is not None
             or
-            dynamic["resistance"]
-            is not None
+            dynamic["resistance"] is not None
         ):
 
             DIAG["dynamic_sr"] += 1
 
-        rvol = get_rvol(
-            df15
-        )
+        rvol = get_rvol(df15)
 
         if rvol >= RVOL_MIN:
-
             DIAG["rvol2"] += 1
 
         if rvol >= RVOL_STRONG:
-
             DIAG["rvol3"] += 1
 
         breakout = detect_breakout(
@@ -1825,61 +1599,36 @@ def process_market(
         )
 
         if breakout:
-
             DIAG["breakout"] += 1
 
         if rejection:
-
             DIAG["rejection"] += 1
 
-        # ----------------------------------------------------
-        # NO REAL SETUP
-        # Nothing to return.
-        # No candidates are created.
-        # ----------------------------------------------------
-
         if setup is None:
-
             return None
 
-        side = setup[
-            "side"
-        ]
+        side = setup["side"]
 
-        confirmation = (
-            confirmation_5m(
-                df5,
-                side
-            )
+        confirmation = confirmation_5m(
+            df5,
+            side
         )
 
         if confirmation:
-
-            DIAG[
-                "confirmation"
-            ] += 1
+            DIAG["confirmation"] += 1
 
         retest = False
 
-        if (
-            setup["type"]
-            ==
-            "BREAKOUT"
-        ):
+        if setup["type"] == "BREAKOUT":
 
-            retest = (
-                detect_retest(
-                    df5,
-                    setup["level"],
-                    side
-                )
+            retest = detect_retest(
+                df5,
+                setup["level"],
+                side
             )
 
             if retest:
-
-                DIAG[
-                    "retest"
-                ] += 1
+                DIAG["retest"] += 1
 
         static = get_static_sr(
             df1h,
@@ -1892,14 +1641,10 @@ def process_market(
             static["resistances"]
         ):
 
-            DIAG[
-                "static_sr"
-            ] += 1
+            DIAG["static_sr"] += 1
 
         entry = float(
-            df5[
-                "close"
-            ].iloc[-1]
+            df5["close"].iloc[-1]
         )
 
         trade = calculate_trade(
@@ -1910,7 +1655,6 @@ def process_market(
         )
 
         if trade:
-
             DIAG["rr2"] += 1
 
         score = signal_score(
@@ -1929,58 +1673,29 @@ def process_market(
             entry=entry
         )
 
-        # ----------------------------------------------------
-        # FINAL SIGNAL
-        # ----------------------------------------------------
-
         if (
             trade
             and
             confirmation
             and
-            score
-            >= MIN_SIGNAL_SCORE
+            score >= MIN_SIGNAL_SCORE
         ):
 
             return {
                 "symbol": symbol,
-
-                "display":
-                    display_symbol(
-                        symbol
-                    ),
-
+                "display": display_symbol(symbol),
                 "side": side,
-
-                "setup":
-                    setup["type"],
-
-                "entry":
-                    trade["entry"],
-
-                "sl":
-                    trade["sl"],
-
-                "tp":
-                    trade["tp"],
-
-                "rr":
-                    trade["rr"],
-
-                "atr":
-                    trade["atr"],
-
+                "setup": setup["type"],
+                "entry": trade["entry"],
+                "sl": trade["sl"],
+                "tp": trade["tp"],
+                "rr": trade["rr"],
+                "atr": trade["atr"],
                 "score": score,
-
                 "rvol": rvol,
-
                 "trend": trend,
-
-                "confirmation":
-                    confirmation,
-
-                "retest":
-                    retest
+                "confirmation": confirmation,
+                "retest": retest
             }
 
         return None
@@ -2000,9 +1715,7 @@ def process_market(
 
 def init_db():
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     cur = conn.cursor()
 
@@ -2024,30 +1737,23 @@ def init_db():
             pnl REAL,
             created_at TEXT,
             closed_at TEXT,
-            exit_reason TEXT,
+            exit_reason TEXT DEFAULT '',
             closed_reported INTEGER DEFAULT 0
         )
     """)
 
     # --------------------------------------------------------
-    # MIGRATION FOR OLD DATABASE
+    # SAFE MIGRATION
     # --------------------------------------------------------
 
-    columns = []
+    cur.execute(
+        "PRAGMA table_info(trades)"
+    )
 
-    try:
-
-        cur.execute(
-            "PRAGMA table_info(trades)"
-        )
-
-        columns = [
-            row[1]
-            for row in cur.fetchall()
-        ]
-
-    except Exception:
-        pass
+    columns = [
+        row[1]
+        for row in cur.fetchall()
+    ]
 
     if "exit_reason" not in columns:
 
@@ -2056,6 +1762,7 @@ def init_db():
             cur.execute("""
                 ALTER TABLE trades
                 ADD COLUMN exit_reason TEXT
+                DEFAULT ''
             """)
 
         except sqlite3.OperationalError:
@@ -2082,13 +1789,9 @@ def init_db():
 # CHECK OPEN SYMBOL
 # ============================================================
 
-def has_open_symbol(
-    symbol
-):
+def has_open_symbol(symbol):
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     cur = conn.cursor()
 
@@ -2112,18 +1815,11 @@ def has_open_symbol(
 # SAVE SIGNAL
 # ============================================================
 
-def save_signal(
-    signal
-):
+def save_signal(signal):
 
-    symbol = signal[
-        "symbol"
-    ]
+    symbol = signal["symbol"]
 
-    # یک معامله باز برای هر نماد
-    if has_open_symbol(
-        symbol
-    ):
+    if has_open_symbol(symbol):
 
         print(
             f"SKIP DUPLICATE OPEN: "
@@ -2132,9 +1828,7 @@ def save_signal(
 
         return False
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     cur = conn.cursor()
 
@@ -2195,14 +1889,12 @@ def save_signal(
 
 
 # ============================================================
-# PREVIOUS UNREPORTED CLOSED SIGNALS
+# PREVIOUS UNREPORTED CLOSED
 # ============================================================
 
 def get_unreported_closed():
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     cur = conn.cursor()
 
@@ -2224,7 +1916,14 @@ def get_unreported_closed():
             closed_reported,
             0
         ) = 0
-        ORDER BY closed_at ASC
+        ORDER BY
+            CASE
+                WHEN closed_at IS NULL
+                THEN 1
+                ELSE 0
+            END,
+            closed_at ASC,
+            id ASC
     """)
 
     rows = cur.fetchall()
@@ -2235,6 +1934,32 @@ def get_unreported_closed():
 
     for row in rows:
 
+        exit_reason = (
+            str(row[8] or "")
+            .strip()
+            .upper()
+        )
+
+        # ----------------------------------------------------
+        # Safety:
+        # اگر به هر دلیل exit_reason خالی باشد،
+        # از result برای تشخیص استفاده می‌کنیم.
+        # ----------------------------------------------------
+
+        if not exit_reason:
+
+            if str(
+                row[7] or ""
+            ).upper() == "WIN":
+
+                exit_reason = "TP"
+
+            elif str(
+                row[7] or ""
+            ).upper() == "LOSS":
+
+                exit_reason = "SL"
+
         closed.append({
             "id": row[0],
             "symbol": row[1],
@@ -2244,7 +1969,7 @@ def get_unreported_closed():
             "tp": safe_float(row[5]),
             "pnl": safe_float(row[6]),
             "result": row[7] or "",
-            "exit_reason": row[8] or "",
+            "exit_reason": exit_reason,
             "closed_at": row[9] or ""
         })
 
@@ -2255,13 +1980,9 @@ def get_unreported_closed():
 # UPDATE OPEN TRADES
 # ============================================================
 
-def update_open_trades(
-    price_map
-):
+def update_open_trades(price_map):
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     cur = conn.cursor()
 
@@ -2275,6 +1996,7 @@ def update_open_trades(
             tp
         FROM trades
         WHERE status = 'OPEN'
+        ORDER BY id ASC
     """)
 
     rows = cur.fetchall()
@@ -2290,20 +2012,27 @@ def update_open_trades(
         tp
     ) in rows:
 
+        symbol_normalized = normalize_symbol(
+            symbol
+        )
+
         price = price_map.get(
-            normalize_symbol(
-                symbol
-            )
+            symbol_normalized
         )
 
         if price is None:
             continue
 
-        price = safe_float(
-            price
-        )
+        price = safe_float(price)
 
         if price <= 0:
+            continue
+
+        entry = safe_float(entry)
+        sl = safe_float(sl)
+        tp = safe_float(tp)
+
+        if entry <= 0:
             continue
 
         result = None
@@ -2349,6 +2078,10 @@ def update_open_trades(
                 result = "LOSS"
                 exit_reason = "SL"
 
+        # ----------------------------------------------------
+        # CLOSE TRADE
+        # ----------------------------------------------------
+
         if result:
 
             closed_time = (
@@ -2365,6 +2098,7 @@ def update_open_trades(
                     exit_reason = ?,
                     closed_reported = 0
                 WHERE id = ?
+                AND status = 'OPEN'
             """, (
                 result,
                 pnl,
@@ -2383,7 +2117,8 @@ def update_open_trades(
             })
 
             print(
-                f"CLOSED: {symbol} "
+                f"CLOSED: "
+                f"{symbol} "
                 f"{side} "
                 f"{exit_reason} "
                 f"{pnl:+.2f}%"
@@ -2399,16 +2134,12 @@ def update_open_trades(
 # MARK CLOSED AS REPORTED
 # ============================================================
 
-def mark_closed_reported(
-    trade_ids
-):
+def mark_closed_reported(trade_ids):
 
     if not trade_ids:
         return
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     cur = conn.cursor()
 
@@ -2431,9 +2162,7 @@ def mark_closed_reported(
 # PRICE MAP
 # ============================================================
 
-def build_price_map(
-    markets
-):
+def build_price_map(markets):
 
     price_map = {}
 
@@ -2453,9 +2182,7 @@ def build_price_map(
             price > 0
         ):
 
-            price_map[
-                symbol
-            ] = price
+            price_map[symbol] = price
 
     return price_map
 
@@ -2464,13 +2191,9 @@ def build_price_map(
 # OPEN SIGNALS
 # ============================================================
 
-def get_open_trades(
-    price_map
-):
+def get_open_trades(price_map):
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     cur = conn.cursor()
 
@@ -2516,21 +2239,15 @@ def get_open_trades(
             created_at
         ) = row
 
-        entry = safe_float(
-            entry
-        )
+        entry = safe_float(entry)
 
         price = price_map.get(
-            normalize_symbol(
-                symbol
-            )
+            normalize_symbol(symbol)
         )
 
         if price is not None:
 
-            price = safe_float(
-                price
-            )
+            price = safe_float(price)
 
         else:
 
@@ -2557,19 +2274,14 @@ def get_open_trades(
         result.append({
             "id": trade_id,
             "symbol": symbol,
-            "display":
-                display_symbol(
-                    symbol
-                ),
+            "display": display_symbol(symbol),
             "side": side,
             "setup": setup,
             "entry": entry,
             "sl": safe_float(sl),
             "tp": safe_float(tp),
             "rr": safe_float(rr),
-            "score": int(
-                score or 0
-            ),
+            "score": int(score or 0),
             "rvol": safe_float(rvol),
             "trend": trend,
             "now": price,
@@ -2586,9 +2298,7 @@ def get_open_trades(
 
 def get_stats():
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     cur = conn.cursor()
 
@@ -2613,7 +2323,13 @@ def get_stats():
             ),
 
             COALESCE(
-                SUM(pnl),
+                SUM(
+                    CASE
+                        WHEN status = 'CLOSED'
+                        THEN pnl
+                        ELSE 0
+                    END
+                ),
                 0
             ),
 
@@ -2637,9 +2353,7 @@ def get_stats():
     pnl = row[3] or 0
     opened = row[4] or 0
 
-    closed = (
-        wins + losses
-    )
+    closed = wins + losses
 
     win_rate = (
         wins / closed * 100
@@ -2662,9 +2376,7 @@ def get_stats():
 # FORMAT OPEN SIGNAL
 # ============================================================
 
-def format_open_signal(
-    trade
-):
+def format_open_signal(trade):
 
     icon = (
         "🟢"
@@ -2672,21 +2384,13 @@ def format_open_signal(
         else "🔴"
     )
 
-    pnl = trade[
-        "pnl"
-    ]
+    pnl = trade["pnl"]
 
-    if pnl >= 0:
-
-        pnl_text = (
-            f"+{pnl:.2f}%"
-        )
-
-    else:
-
-        pnl_text = (
-            f"{pnl:.2f}%"
-        )
+    pnl_text = (
+        f"+{pnl:.2f}%"
+        if pnl >= 0
+        else f"{pnl:.2f}%"
+    )
 
     return (
         f"{icon} "
@@ -2701,7 +2405,7 @@ def format_open_signal(
         f"🎯 TP: "
         f"{trade['tp']:.8g}\n"
         f"📊 PnL: "
-        f"{pnl_text}\n"
+        f"{pnl_text}"
     )
 
 
@@ -2709,38 +2413,85 @@ def format_open_signal(
 # FORMAT CLOSED SIGNAL
 # ============================================================
 
-def format_closed_signal(
-    trade
-):
+def format_closed_signal(trade):
 
-    icon = (
-        "✅"
-        if trade["exit_reason"] == "TP"
-        else "❌"
+    reason = (
+        str(
+            trade.get(
+                "exit_reason",
+                ""
+            )
+        )
+        .strip()
+        .upper()
     )
 
-    pnl = trade[
-        "pnl"
-    ]
+    # --------------------------------------------------------
+    # TP = GREEN CHECK
+    # SL = RED CROSS
+    # --------------------------------------------------------
 
-    if pnl >= 0:
+    if reason == "TP":
 
-        pnl_text = (
-            f"+{pnl:.2f}%"
-        )
+        icon = "✅"
+
+    elif reason == "SL":
+
+        icon = "❌"
 
     else:
 
-        pnl_text = (
-            f"{pnl:.2f}%"
-        )
+        # Safety fallback
+        if trade.get("result") == "WIN":
+            icon = "✅"
+            reason = "TP"
+
+        else:
+            icon = "❌"
+            reason = "SL"
+
+    pnl = safe_float(
+        trade.get("pnl")
+    )
+
+    pnl_text = (
+        f"+{pnl:.2f}%"
+        if pnl >= 0
+        else f"{pnl:.2f}%"
+    )
 
     return (
         f"{icon} "
         f"{display_symbol(trade['symbol'])} "
         f"{trade['side']} "
-        f"→ {trade['exit_reason']}\n"
-        f"📊 PnL: {pnl_text}\n"
+        f"→ {reason}\n"
+        f"📊 PnL: {pnl_text}"
+    )
+
+
+# ============================================================
+# FORMAT NEW SIGNAL
+# ============================================================
+
+def format_new_signal(signal):
+
+    icon = (
+        "🟢"
+        if signal["side"] == "LONG"
+        else "🔴"
+    )
+
+    return (
+        f"{icon} "
+        f"{signal['display']} "
+        f"{signal['side']}\n"
+        f"📌 {signal['setup']} | "
+        f"⭐ {signal['score']} | "
+        f"RVOL {signal['rvol']:.2f}x | "
+        f"RR 1:{signal['rr']:.2f}\n"
+        f"💰 Entry: {signal['entry']:.8g}\n"
+        f"🛑 SL: {signal['sl']:.8g}\n"
+        f"🎯 TP: {signal['tp']:.8g}"
     )
 
 
@@ -2768,7 +2519,7 @@ def format_pipeline():
 # ============================================================
 
 def build_report(
-    signals,
+    new_signals,
     open_trades,
     closed_trades,
     elapsed
@@ -2783,7 +2534,7 @@ def build_report(
     )
 
     lines.append(
-        "📡 VOLUME-KHAT 100 v2.2"
+        "📡 VOLUME-KHAT 100 v2.3"
     )
 
     lines.append(
@@ -2805,6 +2556,56 @@ def build_report(
     )
 
     # ========================================================
+    # NEW SIGNALS
+    # ========================================================
+
+    lines.append(
+        "🚨 NEW SIGNALS"
+    )
+
+    lines.append("")
+
+    if new_signals:
+
+        shown = new_signals[
+            :MAX_NEW_SIGNALS
+        ]
+
+        for i, signal in enumerate(shown):
+
+            lines.append(
+                format_new_signal(
+                    signal
+                )
+            )
+
+            if (
+                i < len(shown) - 1
+            ):
+
+                lines.append(
+                    "━━━━━━━━━━━━━━━━━━"
+                )
+
+        if len(new_signals) > MAX_NEW_SIGNALS:
+
+            lines.append(
+                f"+ "
+                f"{len(new_signals) - MAX_NEW_SIGNALS} "
+                f"more"
+            )
+
+    else:
+
+        lines.append(
+            "❌ NONE"
+        )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    # ========================================================
     # OPEN SIGNALS
     # ========================================================
 
@@ -2816,8 +2617,12 @@ def build_report(
 
     if open_trades:
 
+        shown_open = open_trades[
+            :MAX_OPEN_DISPLAY
+        ]
+
         for i, trade in enumerate(
-            open_trades
+            shown_open
         ):
 
             lines.append(
@@ -2829,12 +2634,20 @@ def build_report(
             if (
                 i
                 <
-                len(open_trades) - 1
+                len(shown_open) - 1
             ):
 
                 lines.append(
                     "━━━━━━━━━━━━━━━━━━"
                 )
+
+        if len(open_trades) > MAX_OPEN_DISPLAY:
+
+            lines.append(
+                f"+ "
+                f"{len(open_trades) - MAX_OPEN_DISPLAY} "
+                f"more open"
+            )
 
     else:
 
@@ -2897,23 +2710,19 @@ def build_report(
     )
 
     lines.append(
-        f"Open: "
-        f"{stats['open']}"
+        f"Open: {stats['open']}"
     )
 
     lines.append(
-        f"Closed: "
-        f"{stats['closed']}"
+        f"Closed: {stats['closed']}"
     )
 
     lines.append(
-        f"Wins: "
-        f"{stats['wins']}"
+        f"Wins: {stats['wins']}"
     )
 
     lines.append(
-        f"Losses: "
-        f"{stats['losses']}"
+        f"Losses: {stats['losses']}"
     )
 
     lines.append(
@@ -2921,25 +2730,16 @@ def build_report(
         f"{stats['win_rate']:.1f}%"
     )
 
-    pnl = stats[
-        "pnl"
-    ]
+    pnl = stats["pnl"]
 
-    if pnl >= 0:
-
-        pnl_text = (
-            f"+{pnl:.2f}%"
-        )
-
-    else:
-
-        pnl_text = (
-            f"{pnl:.2f}%"
-        )
+    pnl_text = (
+        f"+{pnl:.2f}%"
+        if pnl >= 0
+        else f"{pnl:.2f}%"
+    )
 
     lines.append(
-        f"Net PnL: "
-        f"{pnl_text}"
+        f"Net PnL: {pnl_text}"
     )
 
     lines.append(
@@ -2958,15 +2758,35 @@ def build_report(
         f"⏱ {elapsed:.1f}s"
     )
 
-    text = "\n".join(
-        lines
-    )
+    text = "\n".join(lines)
+
+    # ========================================================
+    # TELEGRAM LENGTH SAFETY
+    # ========================================================
 
     if len(text) > MAX_TELEGRAM_LENGTH:
 
-        # ابتدا سعی می‌کنیم بخش Scan را نگه داریم.
+        # اول سیگنال‌های جدید حذف می‌شوند.
+        compact_lines = []
+
+        for line in lines:
+
+            if (
+                "🚨 NEW SIGNALS"
+                in line
+            ):
+                continue
+
+            compact_lines.append(line)
+
+        text = "\n".join(
+            compact_lines
+        )
+
+    if len(text) > MAX_TELEGRAM_LENGTH:
+
         text = text[
-            :MAX_TELEGRAM_LENGTH - 40
+            :MAX_TELEGRAM_LENGTH - 30
         ]
 
         text += (
@@ -2981,9 +2801,7 @@ def build_report(
 # TELEGRAM
 # ============================================================
 
-def telegram_send(
-    text
-):
+def telegram_send(text):
 
     if (
         not TELEGRAM_BOT_TOKEN
@@ -3004,14 +2822,9 @@ def telegram_send(
     )
 
     payload = {
-        "chat_id":
-            TELEGRAM_CHAT_ID,
-
-        "text":
-            text,
-
-        "disable_web_page_preview":
-            True
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True
     }
 
     try:
@@ -3059,7 +2872,7 @@ def main():
     )
 
     print(
-        "VOLUME-KHAT 100 v2.2"
+        "VOLUME-KHAT 100 v2.3"
     )
 
     print(
@@ -3070,41 +2883,56 @@ def main():
         "============================================================"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # DATABASE
-    # --------------------------------------------------------
+    # ========================================================
 
     init_db()
 
-    # --------------------------------------------------------
-    # IMPORTANT:
+    # ========================================================
+    # PREVIOUS CLOSED
     #
-    # Closed trades from the PREVIOUS execution are loaded
-    # BEFORE we update current open trades.
+    # این لیست قبل از update_open_trades گرفته می‌شود.
     #
-    # Therefore:
+    # بنابراین:
     #
-    # Run 1 -> trade reaches SL/TP
-    # Run 2 -> closed trade is reported
+    # Run N:
+    #   trade hits TP/SL
     #
-    # Exactly what was requested.
-    # --------------------------------------------------------
+    # Run N+1:
+    #   trade appears in CLOSED SINCE PREVIOUS REPORT
+    #
+    # ========================================================
 
     previous_closed = (
         get_unreported_closed()
     )
 
-    # --------------------------------------------------------
+    print(
+        f"Previous unreported closed: "
+        f"{len(previous_closed)}"
+    )
+
+    # ========================================================
     # MARKET DISCOVERY
-    # --------------------------------------------------------
+    # ========================================================
 
     markets = get_top_markets()
 
     if not markets:
 
+        # ----------------------------------------------------
+        # IMPORTANT:
+        #
+        # اگر Discovery شکست خورد،
+        # previous_closed را reported نمی‌کنیم.
+        #
+        # بنابراین در اجرای بعدی دوباره گزارش خواهد شد.
+        # ----------------------------------------------------
+
         report = (
             "🤖 VOLUME-KHAT 100\n"
-            "📡 v2.2\n"
+            "📡 VOLUME-KHAT 100 v2.3\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "❌ MARKET DISCOVERY FAILED\n"
             f"Instruments: "
@@ -3117,45 +2945,38 @@ def main():
             f"{DIAG['usd_perpetual']}\n"
             f"Ranked: "
             f"{DIAG['ranked']}\n"
+            "\n"
+            "⚠️ CLOSED SIGNALS WERE NOT MARKED AS REPORTED."
         )
 
-        print(
-            report
-        )
+        print(report)
 
-        sent = telegram_send(
-            report
-        )
-
-        # اگر ارسال موفق بود،
-        # معاملات بسته قبلی هم گزارش شده‌اند.
-        if sent and previous_closed:
-
-            mark_closed_reported([
-                x["id"]
-                for x in previous_closed
-            ])
+        telegram_send(report)
 
         return
 
-    DIAG["scanned"] = len(
-        markets
-    )
+    DIAG["scanned"] = len(markets)
 
-    # --------------------------------------------------------
+    # ========================================================
     # PRICE MAP
-    # --------------------------------------------------------
+    # ========================================================
 
     price_map = build_price_map(
         markets
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # UPDATE EXISTING OPEN TRADES
     #
-    # معاملات موجود قبل از ساخت سیگنال جدید بررسی می‌شوند.
-    # بنابراین یک سیگنال تازه همان لحظه با قیمت جاری بسته نمی‌شود.
-    # --------------------------------------------------------
+    # معاملات باز فعلی بررسی می‌شوند.
+    #
+    # اگر TP/SL بخورد:
+    #   CLOSED
+    #   exit_reason = TP/SL
+    #   closed_reported = 0
+    #
+    # اما این newly_closed در همین گزارش نشان داده نمی‌شود.
+    # ========================================================
 
     newly_closed = (
         update_open_trades(
@@ -3163,11 +2984,16 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # SCAN
-    # --------------------------------------------------------
+    print(
+        f"Newly closed this run: "
+        f"{len(newly_closed)}"
+    )
 
-    signals = []
+    # ========================================================
+    # SCAN
+    # ========================================================
+
+    raw_signals = []
 
     print(
         f"\nScanning "
@@ -3198,19 +3024,15 @@ def main():
             futures
         ):
 
-            market = futures[
-                future
-            ]
+            market = futures[future]
 
             try:
 
-                signal = (
-                    future.result()
-                )
+                signal = future.result()
 
                 if signal:
 
-                    signals.append(
+                    raw_signals.append(
                         signal
                     )
 
@@ -3222,11 +3044,11 @@ def main():
                     f"{e}"
                 )
 
-    # --------------------------------------------------------
-    # SORT SIGNALS
-    # --------------------------------------------------------
+    # ========================================================
+    # SORT
+    # ========================================================
 
-    signals.sort(
+    raw_signals.sort(
         key=lambda x: (
             x["score"],
             x["rr"],
@@ -3235,47 +3057,82 @@ def main():
         reverse=True
     )
 
-    DIAG["qualified"] = len(
-        signals
-    )
-
-    # --------------------------------------------------------
-    # SAVE QUALIFIED SIGNALS
+    # ========================================================
+    # SAVE ONLY GENUINELY NEW SIGNALS
     #
-    # همه سیگنال‌های معتبر ذخیره می‌شوند،
-    # اما برای هر نماد فقط یک OPEN مجاز است.
-    # --------------------------------------------------------
+    # یک نماد:
+    #   فقط یک OPEN trade
+    #
+    # همچنین اگر در همین اسکن چند سیگنال برای یک نماد ایجاد شد،
+    # فقط اولین/بهترین مورد ذخیره می‌شود.
+    # ========================================================
 
-    for signal in signals:
+    new_signals = []
+    seen_symbols = set()
 
-        save_signal(
+    for signal in raw_signals:
+
+        symbol = normalize_symbol(
+            signal["symbol"]
+        )
+
+        if symbol in seen_symbols:
+
+            continue
+
+        seen_symbols.add(symbol)
+
+        if has_open_symbol(symbol):
+
+            print(
+                f"SKIP EXISTING OPEN: "
+                f"{symbol}"
+            )
+
+            continue
+
+        saved = save_signal(
             signal
         )
 
-    # --------------------------------------------------------
+        if saved:
+
+            new_signals.append(
+                signal
+            )
+
+    DIAG["qualified"] = len(
+        new_signals
+    )
+
+    # ========================================================
     # OPEN TRADES AFTER SAVING
-    # --------------------------------------------------------
+    # ========================================================
 
     open_trades = get_open_trades(
         price_map
     )
 
-    # --------------------------------------------------------
-    # CLOSED REPORT
+    # ========================================================
+    # CLOSED FOR REPORT
     #
-    # فقط معاملات بسته‌شده‌ای که از اجرای قبلی هنوز گزارش نشده‌اند.
+    # بسیار مهم:
     #
-    # newly_closed در این گزارش نمایش داده نمی‌شود.
-    # این همان منطق "گزارش بعدی" است.
-    # --------------------------------------------------------
+    # فقط previous_closed
+    #
+    # newly_closed عمداً اینجا نیست.
+    #
+    # یعنی معامله‌ای که همین اجرای فعلی بسته شده،
+    # در اجرای بعدی گزارش می‌شود.
+    # ========================================================
 
     closed_for_report = (
         previous_closed
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # REPORT
-    # --------------------------------------------------------
+    # ========================================================
 
     elapsed = (
         time.time()
@@ -3284,7 +3141,7 @@ def main():
     )
 
     report = build_report(
-        signals=signals,
+        new_signals=new_signals,
         open_trades=open_trades,
         closed_trades=closed_for_report,
         elapsed=elapsed
@@ -3298,34 +3155,55 @@ def main():
         "\n"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # TELEGRAM
-    # --------------------------------------------------------
+    # ========================================================
 
     sent = telegram_send(
         report
     )
 
-    # --------------------------------------------------------
-    # IMPORTANT:
+    # ========================================================
+    # MARK PREVIOUS CLOSED AS REPORTED
     #
-    # Closed signals are marked as reported ONLY if Telegram
-    # successfully received the report.
+    # فقط در صورتی که ارسال تلگرام موفق باشد.
     #
-    # اگر تلگرام خطا بدهد، معامله بسته‌شده در اجرای بعدی
-    # دوباره گزارش خواهد شد و گم نمی‌شود.
-    # --------------------------------------------------------
+    # اگر Telegram fail شود:
+    #   closed_reported = 0
+    #
+    # و در اجرای بعدی دوباره گزارش می‌شود.
+    # ========================================================
 
     if sent and closed_for_report:
 
         mark_closed_reported([
-            x["id"]
-            for x in closed_for_report
+            trade["id"]
+            for trade in closed_for_report
         ])
 
-    # --------------------------------------------------------
+        print(
+            f"Marked as reported: "
+            f"{len(closed_for_report)}"
+        )
+
+    elif (
+        not sent
+        and
+        closed_for_report
+    ):
+
+        print(
+            "Telegram failed."
+        )
+
+        print(
+            "Closed trades remain "
+            "UNREPORTED for next run."
+        )
+
+    # ========================================================
     # CONSOLE SUMMARY
-    # --------------------------------------------------------
+    # ========================================================
 
     print(
         "============================================================"
@@ -3341,8 +3219,13 @@ def main():
     )
 
     print(
-        f"Qualified       : "
-        f"{len(signals)}"
+        f"Raw qualified   : "
+        f"{len(raw_signals)}"
+    )
+
+    print(
+        f"New signals     : "
+        f"{len(new_signals)}"
     )
 
     print(
