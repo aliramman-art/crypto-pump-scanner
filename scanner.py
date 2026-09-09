@@ -1,5 +1,5 @@
 # ============================================================
-# VOLUME-KHAT 100 v2.1
+# VOLUME-KHAT 100 v2.2
 # KRAKEN FUTURES
 # TOP 100 USD PERPETUAL
 # ============================================================
@@ -23,9 +23,15 @@
 #   RR >= 1:2
 #   Signal Score
 #
-# IF NO VALID SIGNAL:
-#   SHOW TOP 3 CANDIDATES
-#   + EXACT MISSING CONDITION
+# REPORT:
+#   OPEN SIGNALS
+#   CLOSED SINCE PREVIOUS REPORT
+#   STATS
+#   COMPACT SCAN
+#
+# NO:
+#   TOP 3
+#   CANDIDATES
 #
 # ONE-SHOT
 # FOR GITHUB ACTIONS
@@ -81,17 +87,17 @@ SL_ATR_BUFFER = 0.20
 MIN_RR = 2.0
 
 MIN_SIGNAL_SCORE = 9
-MAX_SIGNALS = 5
-TOP_COUNT = 3
 
 DB_FILE = "volume_khat_100.db"
 
 TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN", ""
+    "TELEGRAM_BOT_TOKEN",
+    ""
 ).strip()
 
 TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID", ""
+    "TELEGRAM_CHAT_ID",
+    ""
 ).strip()
 
 MAX_TELEGRAM_LENGTH = 3900
@@ -123,7 +129,7 @@ CHART_URL = (
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "Volume-Khat-100/2.1"
+    "User-Agent": "Volume-Khat-100/2.2"
 })
 
 
@@ -403,7 +409,7 @@ def instrument_is_usd(
 
 
 # ============================================================
-# VOLUME
+# TICKER VOLUME
 # ============================================================
 
 def ticker_volume(
@@ -530,9 +536,7 @@ def get_top_markets():
         if price <= 0:
 
             price = safe_float(
-                ticker.get(
-                    "markPrice"
-                )
+                ticker.get("markPrice")
             )
 
         candidates.append({
@@ -718,8 +722,8 @@ def get_candles(
           .reset_index(drop=True)
     )
 
-    # آخرین کندل حذف می‌شود
-    # تا فقط کندل بسته‌شده بررسی شود.
+    # حذف آخرین کندل
+    # فقط کندل بسته شده استفاده می‌شود.
     if len(df) > 2:
 
         df = df.iloc[
@@ -743,7 +747,7 @@ def get_candles(
 
 def calculate_atr(
     df,
-    period=14
+    period=ATR_PERIOD
 ):
 
     if len(df) < period + 2:
@@ -757,11 +761,13 @@ def calculate_atr(
         df["high"] - df["low"],
         (
             df["high"]
-            - prev_close
+            -
+            prev_close
         ).abs(),
         (
             df["low"]
-            - prev_close
+            -
+            prev_close
         ).abs()
     ], axis=1).max(
         axis=1
@@ -1106,7 +1112,7 @@ def detect_breakout(
         "support"
     ]
 
-    # LONG
+    # LONG BREAKOUT
     if resistance is not None:
 
         distance = (
@@ -1134,7 +1140,7 @@ def detect_breakout(
                 "level": resistance
             }
 
-    # SHORT
+    # SHORT BREAKOUT
     if support is not None:
 
         distance = (
@@ -1197,6 +1203,7 @@ def detect_rejection(
         "support"
     ]
 
+    # RESISTANCE REJECTION
     if resistance is not None:
 
         distance = (
@@ -1222,6 +1229,7 @@ def detect_rejection(
                 "level": resistance
             }
 
+    # SUPPORT REJECTION
     if support is not None:
 
         distance = (
@@ -1248,152 +1256,6 @@ def detect_rejection(
             }
 
     return None
-
-
-# ============================================================
-# POSSIBLE SETUP
-# برای Candidate
-# ============================================================
-
-def infer_candidate_setup(
-    df,
-    sr,
-    rvol
-):
-
-    close = float(
-        df["close"].iloc[-1]
-    )
-
-    current = candle_info(
-        df.iloc[-1]
-    )
-
-    resistance = sr[
-        "resistance"
-    ]
-
-    support = sr[
-        "support"
-    ]
-
-    options = []
-
-    # نزدیک مقاومت
-    if resistance is not None:
-
-        distance = (
-            abs(
-                close - resistance
-            )
-            / close
-        )
-
-        if distance <= 0.02:
-
-            if (
-                current["upper_wick"]
-                > current["lower_wick"]
-            ):
-
-                side = "SHORT"
-            else:
-                side = "LONG"
-
-            options.append({
-                "type": "RESISTANCE",
-                "side": side,
-                "level": resistance,
-                "distance": distance
-            })
-
-    # نزدیک حمایت
-    if support is not None:
-
-        distance = (
-            abs(
-                close - support
-            )
-            / close
-        )
-
-        if distance <= 0.02:
-
-            if (
-                current["lower_wick"]
-                > current["upper_wick"]
-            ):
-
-                side = "LONG"
-            else:
-                side = "SHORT"
-
-            options.append({
-                "type": "SUPPORT",
-                "side": side,
-                "level": support,
-                "distance": distance
-            })
-
-    # اگر هیچ سطح نزدیکی نیست،
-    # نزدیک‌ترین سطح را به عنوان Candidate می‌گیریم.
-    if not options:
-
-        levels = []
-
-        if resistance is not None:
-            levels.append(
-                (
-                    abs(
-                        close - resistance
-                    ) / close,
-                    "RESISTANCE",
-                    resistance
-                )
-            )
-
-        if support is not None:
-            levels.append(
-                (
-                    abs(
-                        close - support
-                    ) / close,
-                    "SUPPORT",
-                    support
-                )
-            )
-
-        if levels:
-
-            levels.sort(
-                key=lambda x: x[0]
-            )
-
-            distance, kind, level = (
-                levels[0]
-            )
-
-            side = (
-                "LONG"
-                if kind == "SUPPORT"
-                else "SHORT"
-            )
-
-            options.append({
-                "type": kind,
-                "side": side,
-                "level": level,
-                "distance": distance
-            })
-
-    if not options:
-        return None
-
-    options.sort(
-        key=lambda x: x["distance"]
-    )
-
-    return options[0]
 
 
 # ============================================================
@@ -1783,7 +1645,7 @@ def signal_score(
     if rvol >= RVOL_STRONG:
         score += 1
 
-    # Dynamic S/R
+    # Dynamic S/R touches
     touches = max(
         dynamic[
             "support_touches"
@@ -1796,7 +1658,7 @@ def signal_score(
     if touches >= 2:
         score += 2
 
-    # Distance
+    # Distance to dynamic level
     level = setup.get(
         "level"
     )
@@ -1835,17 +1697,19 @@ def signal_score(
     if retest:
         score += 1
 
-    # Trend
+    # 1H trend
     if (
         side == "LONG"
-        and trend == "BULL"
+        and
+        trend == "BULL"
     ):
 
         score += 2
 
     elif (
         side == "SHORT"
-        and trend == "BEAR"
+        and
+        trend == "BEAR"
     ):
 
         score += 2
@@ -1855,192 +1719,6 @@ def signal_score(
         score += 2
 
     return score
-
-
-# ============================================================
-# CANDIDATE SCORE
-# ============================================================
-
-def candidate_score(
-    side,
-    trend,
-    rvol,
-    dynamic,
-    candidate,
-    confirmation,
-    retest,
-    trade
-):
-
-    score = 0
-
-    # Volume
-    if rvol >= 1.5:
-        score += 1
-
-    if rvol >= RVOL_MIN:
-        score += 2
-
-    if rvol >= RVOL_STRONG:
-        score += 1
-
-    # Dynamic structure
-    touches = max(
-        dynamic[
-            "support_touches"
-        ],
-        dynamic[
-            "resistance_touches"
-        ]
-    )
-
-    if touches >= 2:
-        score += 2
-
-    # Near S/R
-    distance = candidate.get(
-        "distance",
-        1
-    )
-
-    if distance <= 0.005:
-        score += 2
-
-    elif distance <= 0.01:
-        score += 1
-
-    # Setup proximity
-    score += 1
-
-    # Confirmation
-    if confirmation:
-        score += 2
-
-    # Retest
-    if retest:
-        score += 1
-
-    # Trend
-    if (
-        side == "LONG"
-        and trend == "BULL"
-    ):
-
-        score += 2
-
-    elif (
-        side == "SHORT"
-        and trend == "BEAR"
-    ):
-
-        score += 2
-
-    # Trade RR
-    if trade:
-
-        rr = trade["rr"]
-
-        if rr >= 3:
-            score += 2
-
-        elif rr >= 2:
-            score += 1
-
-    return score
-
-
-# ============================================================
-# WHY NOT SIGNAL?
-# ============================================================
-
-def build_missing_reasons(
-    side,
-    trend,
-    rvol,
-    setup,
-    confirmation,
-    retest,
-    trade,
-    score
-):
-
-    reasons = []
-
-    if rvol < RVOL_MIN:
-
-        reasons.append(
-            f"RVOL {rvol:.2f}x < 2"
-        )
-
-    if setup is None:
-
-        reasons.append(
-            "Breakout/Rejection not confirmed"
-        )
-
-    if not confirmation:
-
-        reasons.append(
-            "5M confirmation missing"
-        )
-
-    if (
-        setup
-        and
-        setup["type"] == "BREAKOUT"
-        and
-        not retest
-    ):
-
-        reasons.append(
-            "Breakout retest missing"
-        )
-
-    if trade is None:
-
-        reasons.append(
-            "Static S/R cannot produce RR >= 1:2"
-        )
-
-    else:
-
-        if trade["rr"] < MIN_RR:
-
-            reasons.append(
-                f"RR 1:{trade['rr']:.2f} < 1:2"
-            )
-
-    aligned = (
-        (
-            side == "LONG"
-            and trend == "BULL"
-        )
-        or
-        (
-            side == "SHORT"
-            and trend == "BEAR"
-        )
-    )
-
-    if not aligned:
-
-        reasons.append(
-            "Counter-trend 1H"
-        )
-
-    if score < MIN_SIGNAL_SCORE:
-
-        reasons.append(
-            f"Score {score} < {MIN_SIGNAL_SCORE}"
-        )
-
-    if not reasons:
-
-        reasons.append(
-            "Waiting for final confirmation"
-        )
-
-    return reasons
 
 
 # ============================================================
@@ -2083,10 +1761,7 @@ def process_market(
             df5 is None
         ):
 
-            return {
-                "signal": None,
-                "candidate": None
-            }
+            return None
 
         DIAG["data_ok"] += 1
 
@@ -2158,230 +1833,16 @@ def process_market(
             DIAG["rejection"] += 1
 
         # ----------------------------------------------------
-        # REAL SETUP PATH
+        # NO REAL SETUP
+        # Nothing to return.
+        # No candidates are created.
         # ----------------------------------------------------
 
-        if setup:
+        if setup is None:
 
-            side = setup[
-                "side"
-            ]
+            return None
 
-            confirmation = (
-                confirmation_5m(
-                    df5,
-                    side
-                )
-            )
-
-            if confirmation:
-
-                DIAG[
-                    "confirmation"
-                ] += 1
-
-            retest = False
-
-            if (
-                setup["type"]
-                ==
-                "BREAKOUT"
-            ):
-
-                retest = (
-                    detect_retest(
-                        df5,
-                        setup["level"],
-                        side
-                    )
-                )
-
-                if retest:
-
-                    DIAG[
-                        "retest"
-                    ] += 1
-
-            static = get_static_sr(
-                df1h,
-                df15
-            )
-
-            if (
-                static["supports"]
-                or
-                static["resistances"]
-            ):
-
-                DIAG[
-                    "static_sr"
-                ] += 1
-
-            entry = float(
-                df5[
-                    "close"
-                ].iloc[-1]
-            )
-
-            trade = calculate_trade(
-                side,
-                entry,
-                df15,
-                static
-            )
-
-            if trade:
-
-                DIAG["rr2"] += 1
-
-            score = signal_score(
-                side=side,
-                trend=trend,
-                rvol=rvol,
-                dynamic=dynamic,
-                setup=setup,
-                confirmation=confirmation,
-                retest=retest,
-                rr=(
-                    trade["rr"]
-                    if trade
-                    else 0
-                ),
-                entry=entry
-            )
-
-            reasons = (
-                build_missing_reasons(
-                    side,
-                    trend,
-                    rvol,
-                    setup,
-                    confirmation,
-                    retest,
-                    trade,
-                    score
-                )
-            )
-
-            signal = None
-
-            if (
-                trade
-                and
-                confirmation
-                and
-                score
-                >= MIN_SIGNAL_SCORE
-            ):
-
-                signal = {
-                    "symbol": symbol,
-                    "display":
-                        display_symbol(
-                            symbol
-                        ),
-                    "side": side,
-                    "setup":
-                        setup["type"],
-                    "entry":
-                        trade["entry"],
-                    "sl":
-                        trade["sl"],
-                    "tp":
-                        trade["tp"],
-                    "rr":
-                        trade["rr"],
-                    "atr":
-                        trade["atr"],
-                    "score": score,
-                    "rvol": rvol,
-                    "trend": trend,
-                    "confirmation":
-                        confirmation,
-                    "retest":
-                        retest,
-                    "reasons": []
-                }
-
-                return {
-                    "signal": signal,
-                    "candidate": None
-                }
-
-            # اگر Setup وجود داشت ولی
-            # هنوز Signal نشد، Candidate بساز
-            candidate = {
-                "symbol": symbol,
-                "display":
-                    display_symbol(
-                        symbol
-                    ),
-                "side": side,
-                "setup":
-                    setup["type"],
-                "level":
-                    setup["level"],
-                "trend": trend,
-                "rvol": rvol,
-                "confirmation":
-                    confirmation,
-                "retest": retest,
-                "trade": trade,
-                "score": score,
-                "reasons": reasons
-            }
-
-            candidate["candidate_score"] = (
-                candidate_score(
-                    side,
-                    trend,
-                    rvol,
-                    dynamic,
-                    {
-                        "type":
-                            setup["type"],
-                        "side": side,
-                        "level":
-                            setup["level"],
-                        "distance":
-                            abs(
-                                entry
-                                -
-                                setup["level"]
-                            )
-                            / entry
-                    },
-                    confirmation,
-                    retest,
-                    trade
-                )
-            )
-
-            return {
-                "signal": None,
-                "candidate": candidate
-            }
-
-        # ----------------------------------------------------
-        # NO REAL SETUP YET
-        # Build early candidate.
-        # ----------------------------------------------------
-
-        possible = (
-            infer_candidate_setup(
-                df15,
-                dynamic,
-                rvol
-            )
-        )
-
-        if possible is None:
-            return {
-                "signal": None,
-                "candidate": None
-            }
-
-        side = possible[
+        side = setup[
             "side"
         ]
 
@@ -2392,12 +1853,48 @@ def process_market(
             )
         )
 
+        if confirmation:
+
+            DIAG[
+                "confirmation"
+            ] += 1
+
         retest = False
+
+        if (
+            setup["type"]
+            ==
+            "BREAKOUT"
+        ):
+
+            retest = (
+                detect_retest(
+                    df5,
+                    setup["level"],
+                    side
+                )
+            )
+
+            if retest:
+
+                DIAG[
+                    "retest"
+                ] += 1
 
         static = get_static_sr(
             df1h,
             df15
         )
+
+        if (
+            static["supports"]
+            or
+            static["resistances"]
+        ):
+
+            DIAG[
+                "static_sr"
+            ] += 1
 
         entry = float(
             df5[
@@ -2412,108 +1909,81 @@ def process_market(
             static
         )
 
-        candidate = {
-            "symbol": symbol,
-            "display":
-                display_symbol(
-                    symbol
-                ),
-            "side": side,
-            "setup":
-                possible["type"],
-            "level":
-                possible["level"],
-            "trend": trend,
-            "rvol": rvol,
-            "confirmation":
-                confirmation,
-            "retest": retest,
-            "trade": trade,
-            "score": 0,
-            "candidate_score": 0,
-            "reasons": []
-        }
+        if trade:
 
-        candidate["candidate_score"] = (
-            candidate_score(
-                side,
-                trend,
-                rvol,
-                dynamic,
-                possible,
-                confirmation,
-                retest,
-                trade
-            )
+            DIAG["rr2"] += 1
+
+        score = signal_score(
+            side=side,
+            trend=trend,
+            rvol=rvol,
+            dynamic=dynamic,
+            setup=setup,
+            confirmation=confirmation,
+            retest=retest,
+            rr=(
+                trade["rr"]
+                if trade
+                else 0
+            ),
+            entry=entry
         )
 
-        reasons = []
+        # ----------------------------------------------------
+        # FINAL SIGNAL
+        # ----------------------------------------------------
 
-        if rvol < RVOL_MIN:
-
-            reasons.append(
-                f"RVOL {rvol:.2f}x < 2"
-            )
-
-        if possible["type"] in (
-            "SUPPORT",
-            "RESISTANCE"
+        if (
+            trade
+            and
+            confirmation
+            and
+            score
+            >= MIN_SIGNAL_SCORE
         ):
 
-            reasons.append(
-                "Waiting for Breakout/Rejection"
-            )
+            return {
+                "symbol": symbol,
 
-        if not confirmation:
+                "display":
+                    display_symbol(
+                        symbol
+                    ),
 
-            reasons.append(
-                "5M confirmation missing"
-            )
+                "side": side,
 
-        if trade is None:
+                "setup":
+                    setup["type"],
 
-            reasons.append(
-                "RR >= 1:2 not available"
-            )
+                "entry":
+                    trade["entry"],
 
-        elif trade["rr"] < MIN_RR:
+                "sl":
+                    trade["sl"],
 
-            reasons.append(
-                f"RR 1:{trade['rr']:.2f} < 1:2"
-            )
+                "tp":
+                    trade["tp"],
 
-        aligned = (
-            (
-                side == "LONG"
-                and trend == "BULL"
-            )
-            or
-            (
-                side == "SHORT"
-                and trend == "BEAR"
-            )
-        )
+                "rr":
+                    trade["rr"],
 
-        if not aligned:
+                "atr":
+                    trade["atr"],
 
-            reasons.append(
-                "Counter-trend 1H"
-            )
+                "score": score,
 
-        if not reasons:
+                "rvol": rvol,
 
-            reasons.append(
-                "Waiting for final trigger"
-            )
+                "trend": trend,
 
-        candidate[
-            "reasons"
-        ] = reasons
+                "confirmation":
+                    confirmation,
 
-        return {
-            "signal": None,
-            "candidate": candidate
-        }
+                "retest":
+                    retest
+            }
+
+        return None
 
     except Exception as e:
 
@@ -2521,10 +1991,7 @@ def process_market(
             f"ERROR {symbol}: {e}"
         )
 
-        return {
-            "signal": None,
-            "candidate": None
-        }
+        return None
 
 
 # ============================================================
@@ -2556,21 +2023,114 @@ def init_db():
             result TEXT,
             pnl REAL,
             created_at TEXT,
-            closed_at TEXT
+            closed_at TEXT,
+            exit_reason TEXT,
+            closed_reported INTEGER DEFAULT 0
         )
     """)
+
+    # --------------------------------------------------------
+    # MIGRATION FOR OLD DATABASE
+    # --------------------------------------------------------
+
+    columns = []
+
+    try:
+
+        cur.execute(
+            "PRAGMA table_info(trades)"
+        )
+
+        columns = [
+            row[1]
+            for row in cur.fetchall()
+        ]
+
+    except Exception:
+        pass
+
+    if "exit_reason" not in columns:
+
+        try:
+
+            cur.execute("""
+                ALTER TABLE trades
+                ADD COLUMN exit_reason TEXT
+            """)
+
+        except sqlite3.OperationalError:
+            pass
+
+    if "closed_reported" not in columns:
+
+        try:
+
+            cur.execute("""
+                ALTER TABLE trades
+                ADD COLUMN closed_reported INTEGER
+                DEFAULT 0
+            """)
+
+        except sqlite3.OperationalError:
+            pass
 
     conn.commit()
     conn.close()
 
 
 # ============================================================
-# SAVE
+# CHECK OPEN SYMBOL
+# ============================================================
+
+def has_open_symbol(
+    symbol
+):
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM trades
+        WHERE symbol = ?
+        AND status = 'OPEN'
+    """, (
+        symbol,
+    ))
+
+    count = cur.fetchone()[0]
+
+    conn.close()
+
+    return count > 0
+
+
+# ============================================================
+# SAVE SIGNAL
 # ============================================================
 
 def save_signal(
     signal
 ):
+
+    symbol = signal[
+        "symbol"
+    ]
+
+    # یک معامله باز برای هر نماد
+    if has_open_symbol(
+        symbol
+    ):
+
+        print(
+            f"SKIP DUPLICATE OPEN: "
+            f"{symbol}"
+        )
+
+        return False
 
     conn = sqlite3.connect(
         DB_FILE
@@ -2594,9 +2154,14 @@ def save_signal(
             result,
             pnl,
             created_at,
-            closed_at
+            closed_at,
+            exit_reason,
+            closed_reported
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?
+        )
     """, (
         signal["symbol"],
         signal["side"],
@@ -2612,11 +2177,78 @@ def save_signal(
         "",
         0.0,
         now_utc().isoformat(),
-        ""
+        "",
+        "",
+        0
     ))
 
     conn.commit()
     conn.close()
+
+    print(
+        f"SAVED OPEN SIGNAL: "
+        f"{signal['symbol']} "
+        f"{signal['side']}"
+    )
+
+    return True
+
+
+# ============================================================
+# PREVIOUS UNREPORTED CLOSED SIGNALS
+# ============================================================
+
+def get_unreported_closed():
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            id,
+            symbol,
+            side,
+            entry,
+            sl,
+            tp,
+            pnl,
+            result,
+            exit_reason,
+            closed_at
+        FROM trades
+        WHERE status = 'CLOSED'
+        AND COALESCE(
+            closed_reported,
+            0
+        ) = 0
+        ORDER BY closed_at ASC
+    """)
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    closed = []
+
+    for row in rows:
+
+        closed.append({
+            "id": row[0],
+            "symbol": row[1],
+            "side": row[2],
+            "entry": safe_float(row[3]),
+            "sl": safe_float(row[4]),
+            "tp": safe_float(row[5]),
+            "pnl": safe_float(row[6]),
+            "result": row[7] or "",
+            "exit_reason": row[8] or "",
+            "closed_at": row[9] or ""
+        })
+
+    return closed
 
 
 # ============================================================
@@ -2647,6 +2279,8 @@ def update_open_trades(
 
     rows = cur.fetchall()
 
+    newly_closed = []
+
     for (
         trade_id,
         symbol,
@@ -2657,13 +2291,27 @@ def update_open_trades(
     ) in rows:
 
         price = price_map.get(
-            symbol
+            normalize_symbol(
+                symbol
+            )
         )
 
-        if not price:
+        if price is None:
+            continue
+
+        price = safe_float(
+            price
+        )
+
+        if price <= 0:
             continue
 
         result = None
+        exit_reason = None
+
+        # ----------------------------------------------------
+        # LONG
+        # ----------------------------------------------------
 
         if side == "LONG":
 
@@ -2674,10 +2322,16 @@ def update_open_trades(
             if price >= tp:
 
                 result = "WIN"
+                exit_reason = "TP"
 
             elif price <= sl:
 
                 result = "LOSS"
+                exit_reason = "SL"
+
+        # ----------------------------------------------------
+        # SHORT
+        # ----------------------------------------------------
 
         else:
 
@@ -2688,12 +2342,18 @@ def update_open_trades(
             if price <= tp:
 
                 result = "WIN"
+                exit_reason = "TP"
 
             elif price >= sl:
 
                 result = "LOSS"
+                exit_reason = "SL"
 
         if result:
+
+            closed_time = (
+                now_utc().isoformat()
+            )
 
             cur.execute("""
                 UPDATE trades
@@ -2701,17 +2361,223 @@ def update_open_trades(
                     status = 'CLOSED',
                     result = ?,
                     pnl = ?,
-                    closed_at = ?
+                    closed_at = ?,
+                    exit_reason = ?,
+                    closed_reported = 0
                 WHERE id = ?
             """, (
                 result,
                 pnl,
-                now_utc().isoformat(),
+                closed_time,
+                exit_reason,
                 trade_id
             ))
 
+            newly_closed.append({
+                "id": trade_id,
+                "symbol": symbol,
+                "side": side,
+                "pnl": pnl,
+                "result": result,
+                "exit_reason": exit_reason
+            })
+
+            print(
+                f"CLOSED: {symbol} "
+                f"{side} "
+                f"{exit_reason} "
+                f"{pnl:+.2f}%"
+            )
+
     conn.commit()
     conn.close()
+
+    return newly_closed
+
+
+# ============================================================
+# MARK CLOSED AS REPORTED
+# ============================================================
+
+def mark_closed_reported(
+    trade_ids
+):
+
+    if not trade_ids:
+        return
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cur = conn.cursor()
+
+    for trade_id in trade_ids:
+
+        cur.execute("""
+            UPDATE trades
+            SET closed_reported = 1
+            WHERE id = ?
+            AND status = 'CLOSED'
+        """, (
+            trade_id,
+        ))
+
+    conn.commit()
+    conn.close()
+
+
+# ============================================================
+# PRICE MAP
+# ============================================================
+
+def build_price_map(
+    markets
+):
+
+    price_map = {}
+
+    for market in markets:
+
+        symbol = normalize_symbol(
+            market.get("symbol")
+        )
+
+        price = safe_float(
+            market.get("price")
+        )
+
+        if (
+            symbol
+            and
+            price > 0
+        ):
+
+            price_map[
+                symbol
+            ] = price
+
+    return price_map
+
+
+# ============================================================
+# OPEN SIGNALS
+# ============================================================
+
+def get_open_trades(
+    price_map
+):
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT
+            id,
+            symbol,
+            side,
+            setup,
+            entry,
+            sl,
+            tp,
+            rr,
+            score,
+            rvol,
+            trend,
+            created_at
+        FROM trades
+        WHERE status = 'OPEN'
+        ORDER BY created_at ASC
+    """)
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    result = []
+
+    for row in rows:
+
+        (
+            trade_id,
+            symbol,
+            side,
+            setup,
+            entry,
+            sl,
+            tp,
+            rr,
+            score,
+            rvol,
+            trend,
+            created_at
+        ) = row
+
+        entry = safe_float(
+            entry
+        )
+
+        price = price_map.get(
+            normalize_symbol(
+                symbol
+            )
+        )
+
+        if price is not None:
+
+            price = safe_float(
+                price
+            )
+
+        else:
+
+            price = entry
+
+        if entry > 0:
+
+            if side == "LONG":
+
+                pnl = (
+                    price - entry
+                ) / entry * 100
+
+            else:
+
+                pnl = (
+                    entry - price
+                ) / entry * 100
+
+        else:
+
+            pnl = 0.0
+
+        result.append({
+            "id": trade_id,
+            "symbol": symbol,
+            "display":
+                display_symbol(
+                    symbol
+                ),
+            "side": side,
+            "setup": setup,
+            "entry": entry,
+            "sl": safe_float(sl),
+            "tp": safe_float(tp),
+            "rr": safe_float(rr),
+            "score": int(
+                score or 0
+            ),
+            "rvol": safe_float(rvol),
+            "trend": trend,
+            "now": price,
+            "pnl": pnl,
+            "created_at": created_at
+        })
+
+    return result
 
 
 # ============================================================
@@ -2729,24 +2595,31 @@ def get_stats():
     cur.execute("""
         SELECT
             COUNT(*),
+
             SUM(
                 CASE
-                    WHEN result='WIN'
+                    WHEN result = 'WIN'
                     THEN 1
                     ELSE 0
                 END
             ),
+
             SUM(
                 CASE
-                    WHEN result='LOSS'
+                    WHEN result = 'LOSS'
                     THEN 1
                     ELSE 0
                 END
             ),
-            COALESCE(SUM(pnl),0),
+
+            COALESCE(
+                SUM(pnl),
+                0
+            ),
+
             SUM(
                 CASE
-                    WHEN status='OPEN'
+                    WHEN status = 'OPEN'
                     THEN 1
                     ELSE 0
                 END
@@ -2780,161 +2653,113 @@ def get_stats():
         "losses": losses,
         "pnl": pnl,
         "open": opened,
+        "closed": closed,
         "win_rate": win_rate
     }
 
 
 # ============================================================
-# SIGNAL FORMAT
+# FORMAT OPEN SIGNAL
 # ============================================================
 
-def format_signal(
-    signal,
-    rank
+def format_open_signal(
+    trade
 ):
-
-    medals = {
-        1: "🥇",
-        2: "🥈",
-        3: "🥉"
-    }
-
-    medal = medals.get(
-        rank,
-        "🎯"
-    )
 
     icon = (
         "🟢"
-        if signal["side"]
-        == "LONG"
+        if trade["side"] == "LONG"
         else "🔴"
     )
 
-    retest = (
-        "✅"
-        if signal["retest"]
-        else "❌"
-    )
+    pnl = trade[
+        "pnl"
+    ]
 
-    return (
-        f"{medal} TOP {rank}\n"
-        f"🔥 {signal['display']}\n"
-        f"{icon} {signal['side']}\n"
-        f"📌 Setup: {signal['setup']}\n"
-        f"⭐ Score: {signal['score']}\n"
-        f"📊 RVOL: {signal['rvol']:.2f}x\n"
-        f"📈 1H: {signal['trend']}\n"
-        f"🔁 Retest: {retest}\n"
-        f"🎯 RR: 1:{signal['rr']:.2f}\n"
-        f"💰 Entry: {signal['entry']:.8g}\n"
-        f"🛑 SL: {signal['sl']:.8g}\n"
-        f"🎯 TP: {signal['tp']:.8g}\n"
-    )
+    if pnl >= 0:
 
-
-# ============================================================
-# CANDIDATE FORMAT
-# ============================================================
-
-def format_candidate(
-    candidate,
-    rank
-):
-
-    medals = {
-        1: "🥇",
-        2: "🥈",
-        3: "🥉"
-    }
-
-    medal = medals.get(
-        rank,
-        "🎯"
-    )
-
-    icon = (
-        "🟢"
-        if candidate["side"]
-        == "LONG"
-        else "🔴"
-    )
-
-    confirmation = (
-        "✅"
-        if candidate["confirmation"]
-        else "❌"
-    )
-
-    retest = (
-        "✅"
-        if candidate["retest"]
-        else "❌"
-    )
-
-    trade = candidate.get(
-        "trade"
-    )
-
-    if trade:
-
-        rr_text = (
-            f"1:{trade['rr']:.2f}"
-        )
-
-        entry_text = (
-            f"{trade['entry']:.8g}"
-        )
-
-        sl_text = (
-            f"{trade['sl']:.8g}"
-        )
-
-        tp_text = (
-            f"{trade['tp']:.8g}"
+        pnl_text = (
+            f"+{pnl:.2f}%"
         )
 
     else:
 
-        rr_text = "N/A"
-        entry_text = "N/A"
-        sl_text = "N/A"
-        tp_text = "N/A"
-
-    reasons = candidate.get(
-        "reasons",
-        []
-    )
-
-    reason_text = (
-        "\n".join(
-            f"• {x}"
-            for x in reasons[:4]
+        pnl_text = (
+            f"{pnl:.2f}%"
         )
-    )
 
     return (
-        f"{medal} CANDIDATE {rank}\n"
-        f"🔥 {candidate['display']}\n"
-        f"{icon} {candidate['side']}\n"
-        f"⭐ Candidate Score: "
-        f"{candidate['candidate_score']}\n"
-        f"📌 Setup: "
-        f"{candidate['setup']}\n"
-        f"📊 RVOL: "
-        f"{candidate['rvol']:.2f}x\n"
-        f"📈 1H: "
-        f"{candidate['trend']}\n"
-        f"5M Confirmation: "
-        f"{confirmation}\n"
-        f"🔁 Retest: "
-        f"{retest}\n"
-        f"🎯 RR: {rr_text}\n"
-        f"💰 Entry: {entry_text}\n"
-        f"🛑 SL: {sl_text}\n"
-        f"🎯 TP: {tp_text}\n"
-        f"⚠️ WHY NOT SIGNAL:\n"
-        f"{reason_text}\n"
+        f"{icon} "
+        f"{trade['display']} "
+        f"{trade['side']}\n"
+        f"💰 Entry: "
+        f"{trade['entry']:.8g}\n"
+        f"📍 Now: "
+        f"{trade['now']:.8g}\n"
+        f"🛑 SL: "
+        f"{trade['sl']:.8g}\n"
+        f"🎯 TP: "
+        f"{trade['tp']:.8g}\n"
+        f"📊 PnL: "
+        f"{pnl_text}\n"
+    )
+
+
+# ============================================================
+# FORMAT CLOSED SIGNAL
+# ============================================================
+
+def format_closed_signal(
+    trade
+):
+
+    icon = (
+        "✅"
+        if trade["exit_reason"] == "TP"
+        else "❌"
+    )
+
+    pnl = trade[
+        "pnl"
+    ]
+
+    if pnl >= 0:
+
+        pnl_text = (
+            f"+{pnl:.2f}%"
+        )
+
+    else:
+
+        pnl_text = (
+            f"{pnl:.2f}%"
+        )
+
+    return (
+        f"{icon} "
+        f"{display_symbol(trade['symbol'])} "
+        f"{trade['side']} "
+        f"→ {trade['exit_reason']}\n"
+        f"📊 PnL: {pnl_text}\n"
+    )
+
+
+# ============================================================
+# COMPACT PIPELINE
+# ============================================================
+
+def format_pipeline():
+
+    return (
+        "📊 SCAN\n"
+        f"Scanned: {DIAG['scanned']} | "
+        f"Data: {DIAG['data_ok']}\n"
+        f"RVOL≥2: {DIAG['rvol2']} | "
+        f"BO: {DIAG['breakout']} | "
+        f"REJ: {DIAG['rejection']}\n"
+        f"5M Confirm: {DIAG['confirmation']} | "
+        f"RR≥1:2: {DIAG['rr2']}\n"
+        f"Qualified: {DIAG['qualified']}"
     )
 
 
@@ -2944,41 +2769,12 @@ def format_candidate(
 
 def build_report(
     signals,
-    candidates,
+    open_trades,
+    closed_trades,
     elapsed
 ):
 
     stats = get_stats()
-
-    signals.sort(
-        key=lambda x: (
-            x["score"],
-            x["rr"],
-            x["rvol"]
-        ),
-        reverse=True
-    )
-
-    candidates.sort(
-        key=lambda x: (
-            x["candidate_score"],
-            x["rvol"],
-            (
-                x["trade"]["rr"]
-                if x.get("trade")
-                else 0
-            )
-        ),
-        reverse=True
-    )
-
-    top_signals = signals[
-        :TOP_COUNT
-    ]
-
-    top_candidates = candidates[
-        :TOP_COUNT
-    ]
 
     lines = []
 
@@ -2987,11 +2783,13 @@ def build_report(
     )
 
     lines.append(
-        "📡 VOLUME-KHAT 100 v2.1"
+        "📡 VOLUME-KHAT 100 v2.2"
     )
 
     lines.append(
-        f"🕐 {now_utc().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        f"🕐 "
+        f"{now_utc().strftime('%Y-%m-%d %H:%M:%S')}"
+        f" UTC"
     )
 
     lines.append(
@@ -3007,31 +2805,31 @@ def build_report(
     )
 
     # ========================================================
-    # SIGNALS
+    # OPEN SIGNALS
     # ========================================================
 
-    if top_signals:
+    lines.append(
+        "📂 OPEN SIGNALS"
+    )
 
-        lines.append(
-            "🏆 TOP 3 SIGNALS"
-        )
+    lines.append("")
 
-        lines.append("")
+    if open_trades:
 
-        for i, signal in enumerate(
-            top_signals,
-            1
+        for i, trade in enumerate(
+            open_trades
         ):
 
             lines.append(
-                format_signal(
-                    signal,
-                    i
+                format_open_signal(
+                    trade
                 )
             )
 
-            if i < len(
-                top_signals
+            if (
+                i
+                <
+                len(open_trades) - 1
             ):
 
                 lines.append(
@@ -3041,153 +2839,50 @@ def build_report(
     else:
 
         lines.append(
-            "🏆 TOP 3 SIGNALS"
+            "❌ NONE"
         )
-
-        lines.append(
-            "❌ NO VALID SIGNAL"
-        )
-
-        lines.append(
-            "━━━━━━━━━━━━━━━━━━"
-        )
-
-        lines.append(
-            "🔎 TOP 3 CANDIDATES"
-        )
-
-        lines.append("")
-
-        if top_candidates:
-
-            for i, candidate in enumerate(
-                top_candidates,
-                1
-            ):
-
-                lines.append(
-                    format_candidate(
-                        candidate,
-                        i
-                    )
-                )
-
-                if i < len(
-                    top_candidates
-                ):
-
-                    lines.append(
-                        "━━━━━━━━━━━━━━━━━━"
-                    )
-
-        else:
-
-            lines.append(
-                "❌ No suitable candidate"
-            )
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
 
     # ========================================================
-    # PIPELINE
+    # CLOSED SINCE PREVIOUS REPORT
     # ========================================================
 
     lines.append(
-        "📊 SCAN PIPELINES"
+        "📌 CLOSED SINCE PREVIOUS REPORT"
     )
 
-    lines.append(
-        f"Markets discovered: "
-        f"{DIAG['ranked']}"
-    )
+    lines.append("")
 
-    lines.append(
-        f"Scanned: "
-        f"{DIAG['scanned']}"
-    )
+    if closed_trades:
 
-    lines.append(
-        f"Data OK: "
-        f"{DIAG['data_ok']}"
-    )
+        for i, trade in enumerate(
+            closed_trades
+        ):
 
-    lines.append(
-        "1H Trend:"
-    )
+            lines.append(
+                format_closed_signal(
+                    trade
+                )
+            )
 
-    lines.append(
-        f"🟢 Bull: {DIAG['bull']}"
-    )
+            if (
+                i
+                <
+                len(closed_trades) - 1
+            ):
 
-    lines.append(
-        f"🔴 Bear: {DIAG['bear']}"
-    )
+                lines.append(
+                    "━━━━━━━━━━━━━━━━━━"
+                )
 
-    lines.append(
-        f"⚪ Neutral: {DIAG['neutral']}"
-    )
+    else:
 
-    lines.append(
-        f"Dynamic S/R: "
-        f"{DIAG['dynamic_sr']}"
-    )
-
-    lines.append(
-        f"RVOL ≥ 2: "
-        f"{DIAG['rvol2']}"
-    )
-
-    lines.append(
-        f"RVOL ≥ 3: "
-        f"{DIAG['rvol3']}"
-    )
-
-    lines.append(
-        f"Breakout: "
-        f"{DIAG['breakout']}"
-    )
-
-    lines.append(
-        f"Rejection: "
-        f"{DIAG['rejection']}"
-    )
-
-    lines.append(
-        f"5M Confirmation: "
-        f"{DIAG['confirmation']}"
-    )
-
-    lines.append(
-        f"Retest: "
-        f"{DIAG['retest']}"
-    )
-
-    lines.append(
-        f"Static S/R: "
-        f"{DIAG['static_sr']}"
-    )
-
-    lines.append(
-        f"RR ≥ 1:2: "
-        f"{DIAG['rr2']}"
-    )
-
-    lines.append(
-        f"🎯 Qualified: "
-        f"{DIAG['qualified']}"
-    )
-
-    lines.append(
-        f"🔎 Candidates: "
-        f"{len(candidates)}"
-    )
-
-    lines.append(
-        f"⏱ Scan time: "
-        f"{elapsed:.1f}s"
-    )
+        lines.append(
+            "NONE"
+        )
 
     lines.append(
         "━━━━━━━━━━━━━━━━━━"
@@ -3198,24 +2893,27 @@ def build_report(
     # ========================================================
 
     lines.append(
-        "📈 TRACKING STATS"
+        "📈 STATS"
     )
 
     lines.append(
-        f"Open: {stats['open']}"
+        f"Open: "
+        f"{stats['open']}"
     )
 
     lines.append(
         f"Closed: "
-        f"{stats['wins'] + stats['losses']}"
+        f"{stats['closed']}"
     )
 
     lines.append(
-        f"Wins: {stats['wins']}"
+        f"Wins: "
+        f"{stats['wins']}"
     )
 
     lines.append(
-        f"Losses: {stats['losses']}"
+        f"Losses: "
+        f"{stats['losses']}"
     )
 
     lines.append(
@@ -3223,9 +2921,41 @@ def build_report(
         f"{stats['win_rate']:.1f}%"
     )
 
+    pnl = stats[
+        "pnl"
+    ]
+
+    if pnl >= 0:
+
+        pnl_text = (
+            f"+{pnl:.2f}%"
+        )
+
+    else:
+
+        pnl_text = (
+            f"{pnl:.2f}%"
+        )
+
     lines.append(
         f"Net PnL: "
-        f"{stats['pnl']:.2f}%"
+        f"{pnl_text}"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    # ========================================================
+    # SCAN
+    # ========================================================
+
+    lines.append(
+        format_pipeline()
+    )
+
+    lines.append(
+        f"⏱ {elapsed:.1f}s"
     )
 
     text = "\n".join(
@@ -3234,8 +2964,9 @@ def build_report(
 
     if len(text) > MAX_TELEGRAM_LENGTH:
 
+        # ابتدا سعی می‌کنیم بخش Scan را نگه داریم.
         text = text[
-            :MAX_TELEGRAM_LENGTH - 30
+            :MAX_TELEGRAM_LENGTH - 40
         ]
 
         text += (
@@ -3275,8 +3006,10 @@ def telegram_send(
     payload = {
         "chat_id":
             TELEGRAM_CHAT_ID,
+
         "text":
             text,
+
         "disable_web_page_preview":
             True
     }
@@ -3326,7 +3059,7 @@ def main():
     )
 
     print(
-        "VOLUME-KHAT 100 v2.1"
+        "VOLUME-KHAT 100 v2.2"
     )
 
     print(
@@ -3337,7 +3070,33 @@ def main():
         "============================================================"
     )
 
+    # --------------------------------------------------------
+    # DATABASE
+    # --------------------------------------------------------
+
     init_db()
+
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Closed trades from the PREVIOUS execution are loaded
+    # BEFORE we update current open trades.
+    #
+    # Therefore:
+    #
+    # Run 1 -> trade reaches SL/TP
+    # Run 2 -> closed trade is reported
+    #
+    # Exactly what was requested.
+    # --------------------------------------------------------
+
+    previous_closed = (
+        get_unreported_closed()
+    )
+
+    # --------------------------------------------------------
+    # MARKET DISCOVERY
+    # --------------------------------------------------------
 
     markets = get_top_markets()
 
@@ -3345,7 +3104,7 @@ def main():
 
         report = (
             "🤖 VOLUME-KHAT 100\n"
-            "📡 v2.1\n"
+            "📡 v2.2\n"
             "━━━━━━━━━━━━━━━━━━\n"
             "❌ MARKET DISCOVERY FAILED\n"
             f"Instruments: "
@@ -3360,11 +3119,22 @@ def main():
             f"{DIAG['ranked']}\n"
         )
 
-        print(report)
-
-        telegram_send(
+        print(
             report
         )
+
+        sent = telegram_send(
+            report
+        )
+
+        # اگر ارسال موفق بود،
+        # معاملات بسته قبلی هم گزارش شده‌اند.
+        if sent and previous_closed:
+
+            mark_closed_reported([
+                x["id"]
+                for x in previous_closed
+            ])
 
         return
 
@@ -3372,11 +3142,36 @@ def main():
         markets
     )
 
+    # --------------------------------------------------------
+    # PRICE MAP
+    # --------------------------------------------------------
+
+    price_map = build_price_map(
+        markets
+    )
+
+    # --------------------------------------------------------
+    # UPDATE EXISTING OPEN TRADES
+    #
+    # معاملات موجود قبل از ساخت سیگنال جدید بررسی می‌شوند.
+    # بنابراین یک سیگنال تازه همان لحظه با قیمت جاری بسته نمی‌شود.
+    # --------------------------------------------------------
+
+    newly_closed = (
+        update_open_trades(
+            price_map
+        )
+    )
+
+    # --------------------------------------------------------
+    # SCAN
+    # --------------------------------------------------------
+
     signals = []
-    candidates = []
 
     print(
-        f"\nScanning {len(markets)} markets..."
+        f"\nScanning "
+        f"{len(markets)} markets..."
     )
 
     workers = min(
@@ -3409,22 +3204,14 @@ def main():
 
             try:
 
-                result = future.result()
+                signal = (
+                    future.result()
+                )
 
-                if result[
-                    "signal"
-                ]:
+                if signal:
 
                     signals.append(
-                        result["signal"]
-                    )
-
-                elif result[
-                    "candidate"
-                ]:
-
-                    candidates.append(
-                        result["candidate"]
+                        signal
                     )
 
             except Exception as e:
@@ -3435,9 +3222,9 @@ def main():
                     f"{e}"
                 )
 
-    # ========================================================
-    # QUALIFIED
-    # ========================================================
+    # --------------------------------------------------------
+    # SORT SIGNALS
+    # --------------------------------------------------------
 
     signals.sort(
         key=lambda x: (
@@ -3448,60 +3235,47 @@ def main():
         reverse=True
     )
 
-    candidates.sort(
-        key=lambda x: (
-            x["candidate_score"],
-            x["rvol"],
-            (
-                x["trade"]["rr"]
-                if x.get("trade")
-                else 0
-            )
-        ),
-        reverse=True
-    )
-
     DIAG["qualified"] = len(
         signals
     )
 
-    # ========================================================
-    # SAVE TOP SIGNALS
-    # ========================================================
+    # --------------------------------------------------------
+    # SAVE QUALIFIED SIGNALS
+    #
+    # همه سیگنال‌های معتبر ذخیره می‌شوند،
+    # اما برای هر نماد فقط یک OPEN مجاز است.
+    # --------------------------------------------------------
 
-    for signal in signals[
-        :MAX_SIGNALS
-    ]:
+    for signal in signals:
 
         save_signal(
             signal
         )
 
-    # ========================================================
-    # UPDATE OPEN TRADES
-    # ========================================================
+    # --------------------------------------------------------
+    # OPEN TRADES AFTER SAVING
+    # --------------------------------------------------------
 
-    price_map = {}
-
-    for market in markets:
-
-        if market[
-            "price"
-        ] > 0:
-
-            price_map[
-                market["symbol"]
-            ] = market[
-                "price"
-            ]
-
-    update_open_trades(
+    open_trades = get_open_trades(
         price_map
     )
 
-    # ========================================================
+    # --------------------------------------------------------
+    # CLOSED REPORT
+    #
+    # فقط معاملات بسته‌شده‌ای که از اجرای قبلی هنوز گزارش نشده‌اند.
+    #
+    # newly_closed در این گزارش نمایش داده نمی‌شود.
+    # این همان منطق "گزارش بعدی" است.
+    # --------------------------------------------------------
+
+    closed_for_report = (
+        previous_closed
+    )
+
+    # --------------------------------------------------------
     # REPORT
-    # ========================================================
+    # --------------------------------------------------------
 
     elapsed = (
         time.time()
@@ -3510,9 +3284,10 @@ def main():
     )
 
     report = build_report(
-        signals,
-        candidates,
-        elapsed
+        signals=signals,
+        open_trades=open_trades,
+        closed_trades=closed_for_report,
+        elapsed=elapsed
     )
 
     print(
@@ -3523,13 +3298,34 @@ def main():
         "\n"
     )
 
-    telegram_send(
+    # --------------------------------------------------------
+    # TELEGRAM
+    # --------------------------------------------------------
+
+    sent = telegram_send(
         report
     )
 
-    # ========================================================
+    # --------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Closed signals are marked as reported ONLY if Telegram
+    # successfully received the report.
+    #
+    # اگر تلگرام خطا بدهد، معامله بسته‌شده در اجرای بعدی
+    # دوباره گزارش خواهد شد و گم نمی‌شود.
+    # --------------------------------------------------------
+
+    if sent and closed_for_report:
+
+        mark_closed_reported([
+            x["id"]
+            for x in closed_for_report
+        ])
+
+    # --------------------------------------------------------
     # CONSOLE SUMMARY
-    # ========================================================
+    # --------------------------------------------------------
 
     print(
         "============================================================"
@@ -3550,13 +3346,18 @@ def main():
     )
 
     print(
-        f"Candidates      : "
-        f"{len(candidates)}"
+        f"Open trades     : "
+        f"{len(open_trades)}"
     )
 
     print(
-        f"Top 3 shown     : "
-        f"{min(3, len(signals) if signals else len(candidates))}"
+        f"Previous closed : "
+        f"{len(closed_for_report)}"
+    )
+
+    print(
+        f"Newly closed    : "
+        f"{len(newly_closed)}"
     )
 
     print(
