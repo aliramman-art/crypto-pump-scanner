@@ -1,34 +1,31 @@
 # ============================================================
-# TELEGRAM KRAKEN STRATEGY LISTENER v2.0
+# TELEGRAM KRAKEN FUTURES STRATEGY LISTENER v3.0
 # ============================================================
 #
-# PURPOSE:
-#   Telegram command listener for Kraken Futures strategy analysis
-#
 # COMMANDS:
+#
 #   تحلیل BTC 5m
-#   تحلیل BTC 15m
-#   تحلیل BTC 30m
-#   تحلیل BTC 1h
-#   تحلیل BTC 4h
+#   تحلیل ATOM 15m
+#   تحلیل ETH 1h
+#   تحلیل SOL 4h
 #
 #   /check BTC 15m
 #
 # STRATEGY:
-#   1. Detect valid pivots
-#   2. Determine current trend
-#   3. Detect confirmed trend break
-#   4. Wait for pullback / retest
-#   5. Confirm reversal candle
-#   6. Generate LONG / SHORT setup
-#   7. Structural SL
-#   8. RR 1:1 TP
 #
-# IMPORTANT:
-#   Only CLOSED candles are used.
+#   1. Real Kraken Futures instrument discovery
+#   2. Closed candles only
+#   3. Valid pivot detection
+#   4. Trend detection
+#   5. Trend break
+#   6. Pullback / retest
+#   7. Reversal candle confirmation
+#   8. Entry
+#   9. Structural SL
+#   10. RR 1:1 TP
 #
 # TELEGRAM:
-#   This file is the ONLY component that calls getUpdates.
+#   This file is the ONLY Telegram getUpdates listener.
 #
 # ENV:
 #   TELEGRAM_BOT_TOKEN
@@ -42,15 +39,21 @@ import os
 import time
 import traceback
 import requests
-from datetime import datetime, timezone
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+).strip()
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+).strip()
 
 KRAKEN_BASE_URL = "https://futures.kraken.com"
 
@@ -65,13 +68,10 @@ PIVOT_RIGHT = 3
 
 MAX_CANDLES = 500
 
-# Number of candles after a break in which a retest is accepted
 MAX_PULLBACK_CANDLES = 20
 
-# Small structural SL buffer
 SL_BUFFER_PERCENT = 0.001
 
-# RR
 RR = 1.0
 
 
@@ -82,8 +82,58 @@ RR = 1.0
 session = requests.Session()
 
 session.headers.update({
-    "User-Agent": "Kraken-Telegram-Strategy-Listener/2.0"
+    "User-Agent": "Kraken-Futures-Telegram-Listener/3.0",
+    "Accept": "application/json"
 })
+
+
+# ============================================================
+# TIMEFRAME
+# ============================================================
+
+TIMEFRAME_MAP = {
+    "1m": 1,
+    "5m": 5,
+    "15m": 15,
+    "30m": 30,
+    "1h": 60,
+    "4h": 240
+}
+
+
+def normalize_timeframe(tf):
+
+    tf = str(tf).strip().lower()
+
+    aliases = {
+        "1": "1m",
+        "5": "5m",
+        "15": "15m",
+        "30": "30m",
+        "60": "1h",
+        "240": "4h",
+        "60m": "1h",
+        "240m": "4h"
+    }
+
+    tf = aliases.get(tf, tf)
+
+    if tf not in TIMEFRAME_MAP:
+        raise ValueError(
+            "تایم‌فریم نامعتبر است."
+        )
+
+    return tf
+
+
+# ============================================================
+# SYMBOL CACHE
+# ============================================================
+
+INSTRUMENT_CACHE = {}
+INSTRUMENT_CACHE_TIME = 0
+
+INSTRUMENT_CACHE_SECONDS = 300
 
 
 # ============================================================
@@ -91,21 +141,34 @@ session.headers.update({
 # ============================================================
 
 def telegram_url(method):
+
     return (
-        f"https://api.telegram.org/"
+        "https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/{method}"
     )
 
 
 def send_telegram(text, chat_id=None):
+
     if not TELEGRAM_BOT_TOKEN:
-        print("ERROR: TELEGRAM_BOT_TOKEN is missing.")
+
+        print(
+            "ERROR: TELEGRAM_BOT_TOKEN missing."
+        )
+
         return False
 
-    target_chat = chat_id or TELEGRAM_CHAT_ID
+    target_chat = (
+        chat_id
+        or TELEGRAM_CHAT_ID
+    )
 
     if not target_chat:
-        print("ERROR: TELEGRAM_CHAT_ID is missing.")
+
+        print(
+            "ERROR: TELEGRAM_CHAT_ID missing."
+        )
+
         return False
 
     payload = {
@@ -127,13 +190,17 @@ def send_telegram(text, chat_id=None):
                 return True
 
             print(
-                "Telegram send error:",
+                "Telegram error:",
                 response.status_code,
-                response.text[:500]
+                response.text[:1000]
             )
 
         except Exception as e:
-            print("Telegram send exception:", repr(e))
+
+            print(
+                "Telegram send exception:",
+                repr(e)
+            )
 
         time.sleep(2)
 
@@ -160,83 +227,31 @@ def telegram_get_updates(offset=None):
     data = response.json()
 
     if not data.get("ok"):
+
         raise RuntimeError(
             f"Telegram API error: {data}"
         )
 
-    return data.get("result", [])
+    return data.get(
+        "result",
+        []
+    )
 
 
 # ============================================================
-# KRAKEN
+# KRAKEN API
 # ============================================================
 
-def normalize_symbol(symbol):
-
-    symbol = symbol.upper().strip()
-
-    symbol = symbol.replace("/", "")
-    symbol = symbol.replace("-", "")
-    symbol = symbol.replace("_", "")
-
-    if symbol.endswith("USD"):
-        return symbol[:-3] + "USD"
-
-    if symbol.endswith("USDT"):
-        return symbol[:-4] + "USD"
-
-    return symbol + "USD"
-
-
-def resolution_to_minutes(tf):
-
-    tf = tf.lower().strip()
-
-    mapping = {
-        "1m": 1,
-        "5m": 5,
-        "15m": 15,
-        "30m": 30,
-        "1h": 60,
-        "4h": 240
-    }
-
-    if tf not in mapping:
-        raise ValueError(
-            "Timeframe must be 1m, 5m, 15m, 30m, 1h or 4h."
-        )
-
-    return mapping[tf]
-
-
-def resolution_to_kraken(tf):
-
-    tf = tf.lower().strip()
-
-    mapping = {
-        "1m": 1,
-        "5m": 5,
-        "15m": 15,
-        "30m": 30,
-        "1h": 60,
-        "4h": 240
-    }
-
-    return mapping[tf]
-
-
-def get_kraken_candles(symbol, timeframe, limit=MAX_CANDLES):
-
-    symbol = normalize_symbol(symbol)
-    resolution = resolution_to_kraken(timeframe)
+def kraken_get(path, params=None):
 
     url = (
-        f"{KRAKEN_BASE_URL}/api/charts/v1/trade/"
-        f"{symbol}/{resolution}"
+        KRAKEN_BASE_URL
+        + path
     )
 
     response = session.get(
         url,
+        params=params or {},
         timeout=KRAKEN_TIMEOUT
     )
 
@@ -244,10 +259,366 @@ def get_kraken_candles(symbol, timeframe, limit=MAX_CANDLES):
 
     data = response.json()
 
-    candles = []
+    return data
 
-    # Kraken response may contain "candles"
-    # or directly return a list depending on endpoint/version.
+
+# ============================================================
+# INSTRUMENT DISCOVERY
+# ============================================================
+
+def load_instruments():
+
+    global INSTRUMENT_CACHE
+    global INSTRUMENT_CACHE_TIME
+
+    now = time.time()
+
+    if (
+        INSTRUMENT_CACHE
+        and
+        now - INSTRUMENT_CACHE_TIME
+        < INSTRUMENT_CACHE_SECONDS
+    ):
+
+        return INSTRUMENT_CACHE
+
+    data = kraken_get(
+        "/derivatives/api/v3/instruments"
+    )
+
+    instruments = (
+        data.get("instruments")
+        or data.get("result")
+        or []
+    )
+
+    if not instruments:
+
+        raise RuntimeError(
+            "Kraken returned no instruments."
+        )
+
+    cache = {}
+
+    for item in instruments:
+
+        try:
+
+            symbol = str(
+                item.get("symbol", "")
+            ).upper()
+
+            if not symbol:
+                continue
+
+            # We only want perpetual contracts
+            tradeable = item.get(
+                "tradeable",
+                True
+            )
+
+            if tradeable is False:
+                continue
+
+            contract_type = str(
+                item.get(
+                    "contractType",
+                    ""
+                )
+            ).lower()
+
+            quote_currency = str(
+                item.get(
+                    "quoteCurrency",
+                    ""
+                )
+            ).upper()
+
+            # Store every usable instrument
+            cache[symbol] = item
+
+        except Exception:
+            continue
+
+    INSTRUMENT_CACHE = cache
+    INSTRUMENT_CACHE_TIME = now
+
+    print(
+        f"Loaded Kraken instruments: {len(cache)}"
+    )
+
+    return cache
+
+
+# ============================================================
+# SYMBOL CLEANING
+# ============================================================
+
+def clean_asset_name(symbol):
+
+    symbol = (
+        str(symbol)
+        .upper()
+        .strip()
+    )
+
+    symbol = symbol.replace(
+        "/",
+        ""
+    )
+
+    symbol = symbol.replace(
+        "-",
+        ""
+    )
+
+    symbol = symbol.replace(
+        "_",
+        ""
+    )
+
+    # Remove common quote suffixes
+    for suffix in (
+        "USDT",
+        "USD",
+        "USDC"
+    ):
+
+        if symbol.endswith(suffix):
+
+            symbol = symbol[
+                :-len(suffix)
+            ]
+
+            break
+
+    return symbol
+
+
+def find_futures_symbol(user_symbol):
+
+    requested = clean_asset_name(
+        user_symbol
+    )
+
+    instruments = load_instruments()
+
+    candidates = []
+
+    # --------------------------------------------------------
+    # Exact symbol / asset matching
+    # --------------------------------------------------------
+
+    for symbol, item in instruments.items():
+
+        symbol_upper = symbol.upper()
+
+        base = str(
+            item.get(
+                "baseCurrency",
+                ""
+            )
+        ).upper()
+
+        quote = str(
+            item.get(
+                "quoteCurrency",
+                ""
+            )
+        ).upper()
+
+        pair = str(
+            item.get(
+                "pair",
+                ""
+            )
+        ).upper()
+
+        # Direct base currency match
+        if base == requested:
+
+            candidates.append(
+                (
+                    100,
+                    symbol
+                )
+            )
+
+            continue
+
+        # Pair matching
+        if clean_asset_name(pair) == requested:
+
+            candidates.append(
+                (
+                    90,
+                    symbol
+                )
+            )
+
+            continue
+
+        # Symbol matching
+        if clean_asset_name(symbol_upper) == requested:
+
+            candidates.append(
+                (
+                    80,
+                    symbol
+                )
+
+    if not candidates:
+
+        # Fallback: symbol contains asset
+        for symbol, item in instruments.items():
+
+            base = str(
+                item.get(
+                    "baseCurrency",
+                    ""
+                )
+            ).upper()
+
+            if base == requested:
+
+                candidates.append(
+                    (
+                        50,
+                        symbol
+                    )
+                )
+
+    if not candidates:
+
+        raise ValueError(
+            f"Kraken Futures symbol not found: "
+            f"{requested}"
+        )
+
+    candidates.sort(
+        key=lambda x: (
+            x[0],
+            x[1]
+        ),
+        reverse=True
+    )
+
+    selected = candidates[0][1]
+
+    print(
+        f"Symbol mapping: "
+        f"{user_symbol} -> {selected}"
+    )
+
+    return selected
+
+
+# ============================================================
+# CANDLE RESPONSE PARSER
+# ============================================================
+
+def parse_candle_item(item):
+
+    if isinstance(item, dict):
+
+        timestamp = (
+            item.get("time")
+            or item.get("timestamp")
+            or item.get("ts")
+        )
+
+        open_price = (
+            item.get("open")
+            or item.get("o")
+        )
+
+        high_price = (
+            item.get("high")
+            or item.get("h")
+        )
+
+        low_price = (
+            item.get("low")
+            or item.get("l")
+        )
+
+        close_price = (
+            item.get("close")
+            or item.get("c")
+        )
+
+        volume = (
+            item.get("volume")
+            or item.get("v")
+            or 0
+        )
+
+    elif isinstance(item, list):
+
+        if len(item) < 5:
+            return None
+
+        timestamp = item[0]
+        open_price = item[1]
+        high_price = item[2]
+        low_price = item[3]
+        close_price = item[4]
+
+        volume = (
+            item[5]
+            if len(item) > 5
+            else 0
+        )
+
+    else:
+
+        return None
+
+    try:
+
+        return {
+            "time": float(timestamp),
+            "open": float(open_price),
+            "high": float(high_price),
+            "low": float(low_price),
+            "close": float(close_price),
+            "volume": float(volume)
+        }
+
+    except Exception:
+
+        return None
+
+
+# ============================================================
+# GET CANDLES
+# ============================================================
+
+def get_kraken_candles(
+    futures_symbol,
+    timeframe,
+    limit=MAX_CANDLES
+):
+
+    timeframe = normalize_timeframe(
+        timeframe
+    )
+
+    resolution = TIMEFRAME_MAP[
+        timeframe
+    ]
+
+    path = (
+        "/api/charts/v1/trade/"
+        f"{futures_symbol}/"
+        f"{resolution}"
+    )
+
+    data = kraken_get(
+        path
+    )
+
+    raw = []
 
     if isinstance(data, dict):
 
@@ -262,122 +633,84 @@ def get_kraken_candles(symbol, timeframe, limit=MAX_CANDLES):
 
         raw = data
 
-    else:
-
-        raw = []
+    candles = []
 
     for item in raw:
 
-        try:
-
-            if isinstance(item, dict):
-
-                timestamp = (
-                    item.get("time")
-                    or item.get("timestamp")
-                    or item.get("ts")
-                )
-
-                open_price = (
-                    item.get("open")
-                    or item.get("o")
-                )
-
-                high_price = (
-                    item.get("high")
-                    or item.get("h")
-                )
-
-                low_price = (
-                    item.get("low")
-                    or item.get("l")
-                )
-
-                close_price = (
-                    item.get("close")
-                    or item.get("c")
-                )
-
-                volume = (
-                    item.get("volume")
-                    or item.get("v")
-                    or 0
-                )
-
-            else:
-
-                # Common OHLCV order:
-                # timestamp, open, high, low, close, volume
-
-                if len(item) < 5:
-                    continue
-
-                timestamp = item[0]
-                open_price = item[1]
-                high_price = item[2]
-                low_price = item[3]
-                close_price = item[4]
-
-                volume = item[5] if len(item) > 5 else 0
-
-            if timestamp is None:
-                continue
-
-            candles.append({
-                "time": float(timestamp),
-                "open": float(open_price),
-                "high": float(high_price),
-                "low": float(low_price),
-                "close": float(close_price),
-                "volume": float(volume)
-            })
-
-        except Exception:
-            continue
-
-    if not candles:
-        raise RuntimeError(
-            f"No candle data returned for {symbol} {timeframe}"
+        candle = parse_candle_item(
+            item
         )
 
-    candles.sort(key=lambda x: x["time"])
+        if candle:
 
-    # Remove duplicate timestamps
+            candles.append(
+                candle
+            )
+
+    if not candles:
+
+        raise RuntimeError(
+            "Kraken returned no candle data "
+            f"for {futures_symbol} "
+            f"{timeframe}."
+        )
+
+    # Sort
+    candles.sort(
+        key=lambda x: x["time"]
+    )
+
+    # Remove duplicates
     unique = {}
 
     for candle in candles:
-        unique[candle["time"]] = candle
 
-    candles = list(unique.values())
+        unique[
+            candle["time"]
+        ] = candle
 
-    candles.sort(key=lambda x: x["time"])
+    candles = list(
+        unique.values()
+    )
+
+    candles.sort(
+        key=lambda x: x["time"]
+    )
 
     # --------------------------------------------------------
     # CLOSED CANDLES ONLY
     # --------------------------------------------------------
 
-    minutes = resolution_to_minutes(timeframe)
+    seconds = (
+        resolution * 60
+    )
 
-    now_ts = time.time()
+    now = time.time()
 
     closed = []
 
     for candle in candles:
 
         candle_end = (
-            candle["time"] + minutes * 60
+            candle["time"]
+            + seconds
         )
 
-        if candle_end <= now_ts:
-            closed.append(candle)
+        if candle_end <= now:
+
+            closed.append(
+                candle
+            )
 
     if len(closed) > limit:
+
         closed = closed[-limit:]
 
     if len(closed) < 50:
+
         raise RuntimeError(
-            f"Not enough CLOSED candles for "
-            f"{symbol} {timeframe}: {len(closed)}"
+            f"Not enough closed candles: "
+            f"{len(closed)}"
         )
 
     return closed
@@ -387,36 +720,54 @@ def get_kraken_candles(symbol, timeframe, limit=MAX_CANDLES):
 # ATR
 # ============================================================
 
-def calculate_atr(candles, period=14):
+def calculate_atr(
+    candles,
+    period=14
+):
 
     if len(candles) < period + 1:
+
         return 0.0
 
     trs = []
 
-    for i in range(1, len(candles)):
+    for i in range(
+        1,
+        len(candles)
+    ):
 
         current = candles[i]
         previous = candles[i - 1]
 
         tr = max(
-            current["high"] - current["low"],
+            current["high"]
+            - current["low"],
+
             abs(
-                current["high"] -
-                previous["close"]
+                current["high"]
+                - previous["close"]
             ),
+
             abs(
-                current["low"] -
-                previous["close"]
+                current["low"]
+                - previous["close"]
             )
         )
 
-        trs.append(tr)
+        trs.append(
+            tr
+        )
 
     if len(trs) < period:
+
         return 0.0
 
-    return sum(trs[-period:]) / period
+    return (
+        sum(
+            trs[-period:]
+        )
+        / period
+    )
 
 
 # ============================================================
@@ -436,8 +787,8 @@ def find_pivots(candles):
         len(candles) - right
     ):
 
-        current_high = candles[i]["high"]
-        current_low = candles[i]["low"]
+        high = candles[i]["high"]
+        low = candles[i]["low"]
 
         is_high = True
         is_low = True
@@ -450,24 +801,26 @@ def find_pivots(candles):
             if j == i:
                 continue
 
-            if candles[j]["high"] >= current_high:
+            if candles[j]["high"] >= high:
+
                 is_high = False
 
-            if candles[j]["low"] <= current_low:
+            if candles[j]["low"] <= low:
+
                 is_low = False
 
         if is_high:
 
             highs.append({
                 "index": i,
-                "price": current_high
+                "price": high
             })
 
         if is_low:
 
             lows.append({
                 "index": i,
-                "price": current_low
+                "price": low
             })
 
     return highs, lows
@@ -477,9 +830,17 @@ def find_pivots(candles):
 # TREND
 # ============================================================
 
-def determine_trend(highs, lows):
+def determine_trend(
+    highs,
+    lows
+):
 
-    if len(highs) < 2 or len(lows) < 2:
+    if (
+        len(highs) < 2
+        or
+        len(lows) < 2
+    ):
+
         return "RANGE"
 
     h1 = highs[-2]["price"]
@@ -488,10 +849,20 @@ def determine_trend(highs, lows):
     l1 = lows[-2]["price"]
     l2 = lows[-1]["price"]
 
-    if h2 > h1 and l2 > l1:
+    if (
+        h2 > h1
+        and
+        l2 > l1
+    ):
+
         return "UP"
 
-    if h2 < h1 and l2 < l1:
+    if (
+        h2 < h1
+        and
+        l2 < l1
+    ):
+
         return "DOWN"
 
     return "RANGE"
@@ -501,16 +872,18 @@ def determine_trend(highs, lows):
 # BREAK DETECTION
 # ============================================================
 
-def detect_break(candles, highs, lows, trend):
+def detect_break(
+    candles,
+    highs,
+    lows,
+    trend
+):
 
-    if len(candles) < 2:
-        return None
-
-    last_index = len(candles) - 1
+    candidates = []
 
     # --------------------------------------------------------
     # UP TREND
-    # Bearish break = close below latest structural low
+    # Bearish break
     # --------------------------------------------------------
 
     if trend == "UP" and lows:
@@ -522,18 +895,21 @@ def detect_break(candles, highs, lows, trend):
             len(candles)
         ):
 
-            if candles[i]["close"] < pivot["price"]:
+            if (
+                candles[i]["close"]
+                < pivot["price"]
+            ):
 
-                return {
+                candidates.append({
                     "direction": "BEARISH",
                     "index": i,
                     "level": pivot["price"],
                     "pivot_index": pivot["index"]
-                }
+                })
 
     # --------------------------------------------------------
     # DOWN TREND
-    # Bullish break = close above latest structural high
+    # Bullish break
     # --------------------------------------------------------
 
     if trend == "DOWN" and highs:
@@ -545,224 +921,334 @@ def detect_break(candles, highs, lows, trend):
             len(candles)
         ):
 
-            if candles[i]["close"] > pivot["price"]:
+            if (
+                candles[i]["close"]
+                > pivot["price"]
+            ):
 
-                return {
+                candidates.append({
                     "direction": "BULLISH",
                     "index": i,
                     "level": pivot["price"],
                     "pivot_index": pivot["index"]
-                }
+                })
 
     # --------------------------------------------------------
     # RANGE
-    # Check latest structural break
     # --------------------------------------------------------
 
-    candidates = []
+    if trend == "RANGE":
 
-    if highs:
+        if highs:
 
-        pivot = highs[-1]
+            pivot = highs[-1]
 
-        for i in range(
-            pivot["index"] + 1,
-            len(candles)
-        ):
+            for i in range(
+                pivot["index"] + 1,
+                len(candles)
+            ):
 
-            if candles[i]["close"] > pivot["price"]:
+                if (
+                    candles[i]["close"]
+                    > pivot["price"]
+                ):
 
-                candidates.append({
-                    "direction": "BULLISH",
-                    "index": i,
-                    "level": pivot["price"],
-                    "pivot_index": pivot["index"]
-                })
+                    candidates.append({
+                        "direction": "BULLISH",
+                        "index": i,
+                        "level": pivot["price"],
+                        "pivot_index": pivot["index"]
+                    })
 
-    if lows:
+        if lows:
 
-        pivot = lows[-1]
+            pivot = lows[-1]
 
-        for i in range(
-            pivot["index"] + 1,
-            len(candles)
-        ):
+            for i in range(
+                pivot["index"] + 1,
+                len(candles)
+            ):
 
-            if candles[i]["close"] < pivot["price"]:
+                if (
+                    candles[i]["close"]
+                    < pivot["price"]
+                ):
 
-                candidates.append({
-                    "direction": "BEARISH",
-                    "index": i,
-                    "level": pivot["price"],
-                    "pivot_index": pivot["index"]
-                })
+                    candidates.append({
+                        "direction": "BEARISH",
+                        "index": i,
+                        "level": pivot["price"],
+                        "pivot_index": pivot["index"]
+                    })
 
-    if candidates:
+    if not candidates:
 
-        candidates.sort(
-            key=lambda x: x["index"]
-        )
+        return None
 
-        return candidates[-1]
+    candidates.sort(
+        key=lambda x: x["index"]
+    )
 
-    return None
+    # Most recent confirmed break
+    return candidates[-1]
 
 
 # ============================================================
-# CANDLE PATTERNS
+# CANDLE COMPONENTS
 # ============================================================
 
 def candle_parts(c):
 
-    body = abs(c["close"] - c["open"])
+    body = abs(
+        c["close"]
+        - c["open"]
+    )
 
-    total = c["high"] - c["low"]
+    total = (
+        c["high"]
+        - c["low"]
+    )
 
     upper = (
-        c["high"] -
-        max(c["open"], c["close"])
+        c["high"]
+        -
+        max(
+            c["open"],
+            c["close"]
+        )
     )
 
     lower = (
-        min(c["open"], c["close"]) -
+        min(
+            c["open"],
+            c["close"]
+        )
+        -
         c["low"]
     )
 
-    return body, total, upper, lower
-
-
-def bullish_engulfing(prev, cur):
-
     return (
-        prev["close"] < prev["open"]
-        and cur["close"] > cur["open"]
-        and cur["open"] <= prev["close"]
-        and cur["close"] >= prev["open"]
+        body,
+        total,
+        upper,
+        lower
     )
 
 
-def bearish_engulfing(prev, cur):
+# ============================================================
+# REVERSAL PATTERNS
+# ============================================================
+
+def bullish_engulfing(
+    previous,
+    current
+):
 
     return (
-        prev["close"] > prev["open"]
-        and cur["close"] < cur["open"]
-        and cur["open"] >= prev["close"]
-        and cur["close"] <= prev["open"]
+        previous["close"]
+        < previous["open"]
+        and
+        current["close"]
+        > current["open"]
+        and
+        current["open"]
+        <= previous["close"]
+        and
+        current["close"]
+        >= previous["open"]
     )
 
 
-def hammer(c, atr):
+def bearish_engulfing(
+    previous,
+    current
+):
 
-    body, total, upper, lower = candle_parts(c)
+    return (
+        previous["close"]
+        > previous["open"]
+        and
+        current["close"]
+        < current["open"]
+        and
+        current["open"]
+        >= previous["close"]
+        and
+        current["close"]
+        <= previous["open"]
+    )
+
+
+def hammer(
+    candle,
+    atr
+):
+
+    body, total, upper, lower = (
+        candle_parts(candle)
+    )
 
     if total <= 0:
         return False
 
     return (
         body >= atr * 0.05
-        and lower >= body * 2
-        and upper <= body
-        and c["close"] >= c["open"]
+        and
+        lower >= body * 2
+        and
+        upper <= body
     )
 
 
-def shooting_star(c, atr):
+def shooting_star(
+    candle,
+    atr
+):
 
-    body, total, upper, lower = candle_parts(c)
+    body, total, upper, lower = (
+        candle_parts(candle)
+    )
 
     if total <= 0:
         return False
 
     return (
         body >= atr * 0.05
-        and upper >= body * 2
-        and lower <= body
-        and c["close"] <= c["open"]
+        and
+        upper >= body * 2
+        and
+        lower <= body
     )
 
 
 def bullish_pin_bar(c):
 
-    body, total, upper, lower = candle_parts(c)
+    body, total, upper, lower = (
+        candle_parts(c)
+    )
 
     if total <= 0:
         return False
 
     return (
         lower >= body * 2
-        and lower >= upper * 1.5
+        and
+        lower >= upper * 1.5
     )
 
 
 def bearish_pin_bar(c):
 
-    body, total, upper, lower = candle_parts(c)
+    body, total, upper, lower = (
+        candle_parts(c)
+    )
 
     if total <= 0:
         return False
 
     return (
         upper >= body * 2
-        and upper >= lower * 1.5
+        and
+        upper >= lower * 1.5
     )
 
 
-def strong_bullish(c, atr):
+def strong_bullish(
+    candle,
+    atr
+):
 
-    body, total, upper, lower = candle_parts(c)
+    body, total, upper, lower = (
+        candle_parts(candle)
+    )
 
     if total <= 0:
         return False
 
     return (
-        c["close"] > c["open"]
-        and body >= atr * 0.5
-        and c["close"] >= c["high"] - total * 0.30
+        candle["close"]
+        > candle["open"]
+        and
+        body >= atr * 0.5
+        and
+        candle["close"]
+        >=
+        candle["high"]
+        -
+        total * 0.30
     )
 
 
-def strong_bearish(c, atr):
+def strong_bearish(
+    candle,
+    atr
+):
 
-    body, total, upper, lower = candle_parts(c)
+    body, total, upper, lower = (
+        candle_parts(candle)
+    )
 
     if total <= 0:
         return False
 
     return (
-        c["close"] < c["open"]
-        and body >= atr * 0.5
-        and c["close"] <= c["low"] + total * 0.30
+        candle["close"]
+        < candle["open"]
+        and
+        body >= atr * 0.5
+        and
+        candle["close"]
+        <=
+        candle["low"]
+        +
+        total * 0.30
     )
 
 
-def reversal_confirmation(candles, break_info):
+# ============================================================
+# PULLBACK + REVERSAL
+# ============================================================
 
-    break_index = break_info["index"]
-    direction = break_info["direction"]
+def reversal_confirmation(
+    candles,
+    break_info
+):
 
-    atr = calculate_atr(candles)
+    break_index = (
+        break_info["index"]
+    )
 
-    start = break_index + 1
+    direction = (
+        break_info["direction"]
+    )
 
-    if start >= len(candles):
+    level = (
+        break_info["level"]
+    )
+
+    atr = calculate_atr(
+        candles
+    )
+
+    if atr <= 0:
+
         return None
+
+    start = (
+        break_index + 1
+    )
 
     end = min(
         len(candles),
         start + MAX_PULLBACK_CANDLES
     )
 
-    # --------------------------------------------------------
-    # Look for retest and reversal
-    # --------------------------------------------------------
+    for i in range(
+        start,
+        end
+    ):
 
-    level = break_info["level"]
-
-    best = None
-
-    for i in range(start, end):
-
-        c = candles[i]
+        candle = candles[i]
 
         tolerance = max(
             atr * 0.30,
@@ -770,121 +1256,222 @@ def reversal_confirmation(candles, break_info):
         )
 
         touched = (
-            c["low"] <= level + tolerance
-            and c["high"] >= level - tolerance
+            candle["low"]
+            <= level + tolerance
+            and
+            candle["high"]
+            >= level - tolerance
         )
 
         if not touched:
             continue
 
-        pattern = None
+        previous = (
+            candles[i - 1]
+            if i > 0
+            else None
+        )
 
-        prev = candles[i - 1] if i > 0 else None
+        pattern = None
 
         if direction == "BULLISH":
 
-            if prev and bullish_engulfing(prev, c):
-                pattern = "Bullish Engulfing"
+            if (
+                previous
+                and
+                bullish_engulfing(
+                    previous,
+                    candle
+                )
+            ):
 
-            elif hammer(c, atr):
+                pattern = (
+                    "Bullish Engulfing"
+                )
+
+            elif hammer(
+                candle,
+                atr
+            ):
+
                 pattern = "Hammer"
 
-            elif bullish_pin_bar(c):
-                pattern = "Bullish Pin Bar"
+            elif bullish_pin_bar(
+                candle
+            ):
 
-            elif strong_bullish(c, atr):
-                pattern = "Strong Bullish Candle"
+                pattern = (
+                    "Bullish Pin Bar"
+                )
 
-            # Reversal candle must close back above level
-            valid_close = c["close"] > level
+            elif strong_bullish(
+                candle,
+                atr
+            ):
+
+                pattern = (
+                    "Strong Bullish Candle"
+                )
+
+            valid_close = (
+                candle["close"]
+                > level
+            )
 
         else:
 
-            if prev and bearish_engulfing(prev, c):
-                pattern = "Bearish Engulfing"
+            if (
+                previous
+                and
+                bearish_engulfing(
+                    previous,
+                    candle
+                )
+            ):
 
-            elif shooting_star(c, atr):
-                pattern = "Shooting Star"
+                pattern = (
+                    "Bearish Engulfing"
+                )
 
-            elif bearish_pin_bar(c):
-                pattern = "Bearish Pin Bar"
+            elif shooting_star(
+                candle,
+                atr
+            ):
 
-            elif strong_bearish(c, atr):
-                pattern = "Strong Bearish Candle"
+                pattern = (
+                    "Shooting Star"
+                )
 
-            # Reversal candle must close back below level
-            valid_close = c["close"] < level
+            elif bearish_pin_bar(
+                candle
+            ):
+
+                pattern = (
+                    "Bearish Pin Bar"
+                )
+
+            elif strong_bearish(
+                candle,
+                atr
+            ):
+
+                pattern = (
+                    "Strong Bearish Candle"
+                )
+
+            valid_close = (
+                candle["close"]
+                < level
+            )
 
         if pattern and valid_close:
 
-            best = {
+            return {
                 "index": i,
                 "pattern": pattern,
                 "level": level
             }
 
-    return best
+    return None
 
 
 # ============================================================
 # TRADE SETUP
 # ============================================================
 
-def build_trade_setup(candles, break_info, confirmation):
+def build_trade_setup(
+    candles,
+    break_info,
+    confirmation
+):
 
-    direction = break_info["direction"]
+    direction = (
+        break_info["direction"]
+    )
 
-    index = confirmation["index"]
+    break_index = (
+        break_info["index"]
+    )
 
-    candle = candles[index]
+    confirmation_index = (
+        confirmation["index"]
+    )
+
+    candle = candles[
+        confirmation_index
+    ]
+
+    entry = candle["close"]
 
     if direction == "BULLISH":
-
-        entry = candle["close"]
 
         structural_low = min(
             c["low"]
             for c in candles[
-                break_info["index"]: index + 1
+                break_index:
+                confirmation_index + 1
             ]
         )
 
         sl = (
-            structural_low *
-            (1 - SL_BUFFER_PERCENT)
+            structural_low
+            *
+            (
+                1
+                -
+                SL_BUFFER_PERCENT
+            )
         )
 
-        risk = entry - sl
+        risk = (
+            entry - sl
+        )
 
         if risk <= 0:
+
             return None
 
-        tp = entry + risk
+        tp = (
+            entry
+            +
+            risk * RR
+        )
 
         side = "LONG"
 
     else:
 
-        entry = candle["close"]
-
         structural_high = max(
             c["high"]
             for c in candles[
-                break_info["index"]: index + 1
+                break_index:
+                confirmation_index + 1
             ]
         )
 
         sl = (
-            structural_high *
-            (1 + SL_BUFFER_PERCENT)
+            structural_high
+            *
+            (
+                1
+                +
+                SL_BUFFER_PERCENT
+            )
         )
 
-        risk = sl - entry
+        risk = (
+            sl - entry
+        )
 
         if risk <= 0:
+
             return None
 
-        tp = entry - risk
+        tp = (
+            entry
+            -
+            risk * RR
+        )
 
         side = "SHORT"
 
@@ -894,10 +1481,12 @@ def build_trade_setup(candles, break_info, confirmation):
         "sl": sl,
         "tp": tp,
         "risk": risk,
-        "pattern": confirmation["pattern"],
-        "break_level": break_info["level"],
-        "break_index": break_info["index"],
-        "confirmation_index": confirmation["index"]
+        "pattern": confirmation[
+            "pattern"
+        ],
+        "break_level": break_info[
+            "level"
+        ]
     }
 
 
@@ -905,16 +1494,29 @@ def build_trade_setup(candles, break_info, confirmation):
 # ANALYSIS
 # ============================================================
 
-def analyze(symbol, timeframe):
+def analyze(
+    user_symbol,
+    timeframe
+):
 
-    symbol = normalize_symbol(symbol)
-
-    candles = get_kraken_candles(
-        symbol,
+    timeframe = normalize_timeframe(
         timeframe
     )
 
-    highs, lows = find_pivots(candles)
+    futures_symbol = (
+        find_futures_symbol(
+            user_symbol
+        )
+    )
+
+    candles = get_kraken_candles(
+        futures_symbol,
+        timeframe
+    )
+
+    highs, lows = find_pivots(
+        candles
+    )
 
     trend = determine_trend(
         highs,
@@ -929,31 +1531,38 @@ def analyze(symbol, timeframe):
     )
 
     result = {
-        "symbol": symbol,
+        "requested_symbol": (
+            user_symbol.upper()
+        ),
+        "kraken_symbol": futures_symbol,
         "timeframe": timeframe,
         "trend": trend,
         "candles": len(candles),
         "pivots_high": len(highs),
         "pivots_low": len(lows),
-        "break": None,
+        "break": break_info,
         "confirmation": None,
         "setup": None
     }
 
     if not break_info:
+
         return result
 
-    result["break"] = break_info
-
-    confirmation = reversal_confirmation(
-        candles,
-        break_info
+    confirmation = (
+        reversal_confirmation(
+            candles,
+            break_info
+        )
     )
 
-    if not confirmation:
-        return result
+    result[
+        "confirmation"
+    ] = confirmation
 
-    result["confirmation"] = confirmation
+    if not confirmation:
+
+        return result
 
     setup = build_trade_setup(
         candles,
@@ -961,13 +1570,15 @@ def analyze(symbol, timeframe):
         confirmation
     )
 
-    result["setup"] = setup
+    result[
+        "setup"
+    ] = setup
 
     return result
 
 
 # ============================================================
-# FORMAT REPORT
+# FORMAT PRICE
 # ============================================================
 
 def fmt_price(value):
@@ -989,176 +1600,230 @@ def fmt_price(value):
     return f"{value:.8f}"
 
 
-def trend_text(trend):
+# ============================================================
+# TREND TEXT
+# ============================================================
 
-    mapping = {
+def trend_text(
+    trend
+):
+
+    return {
         "UP": "🟢 صعودی",
         "DOWN": "🔴 نزولی",
         "RANGE": "🟡 رنج"
-    }
-
-    return mapping.get(
+    }.get(
         trend,
         trend
     )
 
 
-def build_report(result):
+# ============================================================
+# REPORT
+# ============================================================
 
-    symbol = result["symbol"]
-    timeframe = result["timeframe"]
+def build_report(
+    result
+):
+
+    symbol = result[
+        "requested_symbol"
+    ]
+
+    kraken_symbol = result[
+        "kraken_symbol"
+    ]
+
+    timeframe = result[
+        "timeframe"
+    ]
 
     lines = []
 
-    lines.append("📊 KRAKEN STRATEGY ANALYSIS")
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append(f"💰 {symbol}")
-    lines.append(f"⏱ تایم‌فریم: {timeframe}")
     lines.append(
-        f"📈 روند: {trend_text(result['trend'])}"
+        "📊 KRAKEN STRATEGY ANALYSIS"
     )
+
     lines.append(
-        f"🕯 کندل بسته‌شده: {result['candles']}"
+        "━━━━━━━━━━━━━━━━━━"
     )
+
     lines.append(
-        f"🔺 Pivot High: {result['pivots_high']}"
+        f"💰 ارز: {symbol}"
     )
+
     lines.append(
-        f"🔻 Pivot Low: {result['pivots_low']}"
+        f"🔗 Kraken: {kraken_symbol}"
     )
+
+    lines.append(
+        f"⏱ تایم‌فریم: {timeframe}"
+    )
+
+    lines.append(
+        f"📈 روند: "
+        f"{trend_text(result['trend'])}"
+    )
+
+    lines.append(
+        f"🕯 کندل بسته: "
+        f"{result['candles']}"
+    )
+
+    lines.append(
+        f"🔺 Pivot High: "
+        f"{result['pivots_high']}"
+    )
+
+    lines.append(
+        f"🔻 Pivot Low: "
+        f"{result['pivots_low']}"
+    )
+
+    # --------------------------------------------------------
+    # No break
+    # --------------------------------------------------------
 
     if not result["break"]:
 
         lines.append("")
-        lines.append("❌ شکست روند معتبر پیدا نشد.")
-        lines.append("⏳ وضعیت: NO TRADE")
+        lines.append(
+            "❌ شکست روند معتبر پیدا نشد."
+        )
+
+        lines.append(
+            "⏳ وضعیت: NO TRADE"
+        )
 
         return "\n".join(lines)
 
-    br = result["break"]
+    br = result[
+        "break"
+    ]
 
     lines.append("")
-    lines.append("⚡ TREND BREAK")
     lines.append(
-        f"نوع شکست: {br['direction']}"
-    )
-    lines.append(
-        f"سطح شکست: {fmt_price(br['level'])}"
+        "⚡ TREND BREAK"
     )
 
-    if not result["confirmation"]:
+    lines.append(
+        f"نوع: {br['direction']}"
+    )
+
+    lines.append(
+        f"سطح: "
+        f"{fmt_price(br['level'])}"
+    )
+
+    # --------------------------------------------------------
+    # No confirmation
+    # --------------------------------------------------------
+
+    if not result[
+        "confirmation"
+    ]:
 
         lines.append("")
         lines.append(
-            "⏳ پولبک/ریتست و کندل برگشتی معتبر هنوز تأیید نشده."
+            "⏳ پولبک / ریتست "
+            "و کندل برگشتی تأیید نشده."
         )
-        lines.append("وضعیت: WAIT")
+
+        lines.append(
+            "وضعیت: WAIT"
+        )
 
         return "\n".join(lines)
 
-    conf = result["confirmation"]
+    conf = result[
+        "confirmation"
+    ]
 
     lines.append("")
-    lines.append("🔄 REVERSAL CONFIRMATION")
     lines.append(
-        f"🕯 الگو: {conf['pattern']}"
-    )
-    lines.append(
-        f"📍 Retest Level: {fmt_price(conf['level'])}"
+        "🔄 REVERSAL CONFIRMATION"
     )
 
-    setup = result["setup"]
+    lines.append(
+        f"🕯 الگو: "
+        f"{conf['pattern']}"
+    )
+
+    lines.append(
+        f"📍 Retest: "
+        f"{fmt_price(conf['level'])}"
+    )
+
+    # --------------------------------------------------------
+    # No setup
+    # --------------------------------------------------------
+
+    setup = result[
+        "setup"
+    ]
 
     if not setup:
 
         lines.append("")
-        lines.append("⚠️ Setup ساخته نشد.")
-        lines.append("وضعیت: NO TRADE")
+        lines.append(
+            "⚠️ Setup معتبر ساخته نشد."
+        )
+
+        lines.append(
+            "وضعیت: NO TRADE"
+        )
 
         return "\n".join(lines)
 
-    lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    lines.append(
-        f"🚨 SIGNAL: {setup['side']}"
-    )
-    lines.append("━━━━━━━━━━━━━━━━━━")
-
-    lines.append(
-        f"🎯 Entry: {fmt_price(setup['entry'])}"
-    )
-
-    lines.append(
-        f"🛑 SL: {fmt_price(setup['sl'])}"
-    )
-
-    lines.append(
-        f"🎯 TP: {fmt_price(setup['tp'])}"
-    )
-
-    lines.append(
-        f"📐 RR: 1:{RR:.0f}"
-    )
-
-    lines.append(
-        f"🕯 Confirmation: {setup['pattern']}"
-    )
+    # --------------------------------------------------------
+    # Signal
+    # --------------------------------------------------------
 
     lines.append("")
-    lines.append("⚠️ این سیگنال بر اساس کندل‌های بسته‌شده است.")
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    lines.append(
+        f"🚨 SIGNAL: "
+        f"{setup['side']}"
+    )
+
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    lines.append(
+        f"🎯 Entry: "
+        f"{fmt_price(setup['entry'])}"
+    )
+
+    lines.append(
+        f"🛑 SL: "
+        f"{fmt_price(setup['sl'])}"
+    )
+
+    lines.append(
+        f"🎯 TP: "
+        f"{fmt_price(setup['tp'])}"
+    )
+
+    lines.append(
+        "📐 RR: 1:1"
+    )
+
+    lines.append(
+        f"🕯 Confirmation: "
+        f"{setup['pattern']}"
+    )
+
+    lines.append("")
+    lines.append(
+        "⚠️ تحلیل فقط بر اساس "
+        "کندل‌های بسته‌شده است."
+    )
 
     return "\n".join(lines)
-
-
-# ============================================================
-# COMMAND PARSER
-# ============================================================
-
-def parse_command(text):
-
-    if not text:
-        return None
-
-    text = text.strip()
-
-    # Remove multiple spaces
-    parts = text.split()
-
-    if not parts:
-        return None
-
-    # --------------------------------------------------------
-    # Persian command
-    # --------------------------------------------------------
-
-    if parts[0] == "تحلیل":
-
-        if len(parts) < 3:
-            return None
-
-        symbol = parts[1]
-        timeframe = parts[2].lower()
-
-        return symbol, timeframe
-
-    # --------------------------------------------------------
-    # English command
-    # --------------------------------------------------------
-
-    if parts[0].lower() in (
-        "/check",
-        "check"
-    ):
-
-        if len(parts) < 3:
-            return None
-
-        symbol = parts[1]
-        timeframe = parts[2].lower()
-
-        return symbol, timeframe
-
-    return None
 
 
 # ============================================================
@@ -1166,21 +1831,21 @@ def parse_command(text):
 # ============================================================
 
 HELP_TEXT = """
-🤖 KRAKEN STRATEGY BOT
+🤖 KRAKEN FUTURES STRATEGY BOT
 
 دستور تحلیل:
 
 تحلیل BTC 5m
-تحلیل BTC 15m
-تحلیل BTC 30m
-تحلیل BTC 1h
-تحلیل BTC 4h
+تحلیل ATOM 15m
+تحلیل ETH 1h
+تحلیل SOL 4h
 
 یا:
 
 /check BTC 5m
 
 تایم‌فریم‌های مجاز:
+
 1m
 5m
 15m
@@ -1189,35 +1854,95 @@ HELP_TEXT = """
 4h
 
 استراتژی:
-Pivot → Trend Break → Pullback/Retest
-→ Reversal Candle → Entry → SL → TP
 
-RR = 1:1
+Pivot
+↓
+Trend Break
+↓
+Pullback / Retest
+↓
+Reversal Candle
+↓
+Entry
+↓
+Structural SL
+↓
+RR 1:1 TP
+
+فقط کندل‌های بسته‌شده بررسی می‌شوند.
 """
+
+
+# ============================================================
+# PARSE COMMAND
+# ============================================================
+
+def parse_command(
+    text
+):
+
+    if not text:
+        return None
+
+    parts = text.strip().split()
+
+    if len(parts) < 3:
+        return None
+
+    command = parts[0].lower()
+
+    if (
+        parts[0] == "تحلیل"
+        or
+        command in (
+            "/check",
+            "check"
+        )
+    ):
+
+        symbol = parts[1].strip()
+        timeframe = parts[2].strip()
+
+        return (
+            symbol,
+            timeframe
+        )
+
+    return None
 
 
 # ============================================================
 # HANDLE MESSAGE
 # ============================================================
 
-def handle_message(message):
+def handle_message(
+    message
+):
 
-    chat = message.get("chat", {})
-
-    chat_id = str(
-        chat.get("id", "")
+    chat = message.get(
+        "chat",
+        {}
     )
 
-    text = message.get(
-        "text",
-        ""
+    chat_id = str(
+        chat.get(
+            "id",
+            ""
+        )
+    )
+
+    text = str(
+        message.get(
+            "text",
+            ""
+        )
     ).strip()
 
     if not chat_id:
         return
 
     # --------------------------------------------------------
-    # /start
+    # START / HELP
     # --------------------------------------------------------
 
     if text.lower() in (
@@ -1233,16 +1958,18 @@ def handle_message(message):
 
         return
 
-    parsed = parse_command(text)
+    parsed = parse_command(
+        text
+    )
 
     if not parsed:
 
         send_telegram(
             "❌ دستور نامعتبر.\n\n"
             "مثال:\n"
-            "تحلیل BTC 5m\n\n"
+            "تحلیل ATOM 15m\n\n"
             "یا:\n"
-            "/check BTC 15m",
+            "/check BTC 5m",
             chat_id
         )
 
@@ -1252,7 +1979,7 @@ def handle_message(message):
 
     try:
 
-        resolution_to_minutes(
+        timeframe = normalize_timeframe(
             timeframe
         )
 
@@ -1267,13 +1994,10 @@ def handle_message(message):
 
         return
 
-    # --------------------------------------------------------
-    # Processing message
-    # --------------------------------------------------------
-
     send_telegram(
-        f"🔎 در حال بررسی {symbol.upper()} "
-        f"در تایم‌فریم {timeframe} ...",
+        f"🔎 در حال بررسی "
+        f"{symbol.upper()} "
+        f"در {timeframe} ...",
         chat_id
     )
 
@@ -1293,6 +2017,61 @@ def handle_message(message):
             chat_id
         )
 
+    except ValueError as e:
+
+        print(
+            "Validation error:",
+            repr(e)
+        )
+
+        send_telegram(
+            "❌ خطای نماد / ورودی\n\n"
+            f"ارز: {symbol.upper()}\n"
+            f"تایم‌فریم: {timeframe}\n\n"
+            f"جزئیات:\n{str(e)}",
+            chat_id
+        )
+
+    except requests.exceptions.HTTPError as e:
+
+        print(
+            "Kraken HTTP error:",
+            repr(e)
+        )
+
+        status = ""
+
+        try:
+            status = (
+                f"HTTP {e.response.status_code}"
+            )
+        except Exception:
+            pass
+
+        send_telegram(
+            "🔴 خطای Kraken API\n\n"
+            f"ارز: {symbol.upper()}\n"
+            f"تایم‌فریم: {timeframe}\n"
+            f"{status}\n\n"
+            "API موقتاً پاسخ مناسب نداده است.",
+            chat_id
+        )
+
+    except requests.exceptions.RequestException as e:
+
+        print(
+            "Network/API error:",
+            repr(e)
+        )
+
+        send_telegram(
+            "🔴 خطای ارتباط با Kraken\n\n"
+            f"ارز: {symbol.upper()}\n"
+            f"تایم‌فریم: {timeframe}\n\n"
+            "اتصال قطع یا API موقتاً در دسترس نیست.",
+            chat_id
+        )
+
     except Exception as e:
 
         print(
@@ -1303,17 +2082,16 @@ def handle_message(message):
         traceback.print_exc()
 
         send_telegram(
-            "❌ خطا در تحلیل.\n\n"
+            "❌ خطای غیرمنتظره در تحلیل\n\n"
             f"ارز: {symbol.upper()}\n"
             f"تایم‌فریم: {timeframe}\n\n"
-            "ممکن است نماد در Kraken Futures "
-            "وجود نداشته باشد یا API موقتاً پاسخ ندهد.",
+            f"جزئیات:\n{str(e)[:500]}",
             chat_id
         )
 
 
 # ============================================================
-# TELEGRAM LISTENER
+# MAIN TELEGRAM LOOP
 # ============================================================
 
 def listener_loop():
@@ -1321,14 +2099,46 @@ def listener_loop():
     if not TELEGRAM_BOT_TOKEN:
 
         raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN is not configured."
+            "TELEGRAM_BOT_TOKEN تنظیم نشده."
         )
 
     print("=" * 60)
-    print("TELEGRAM LISTENER v2.0")
+    print(
+        "KRAKEN TELEGRAM LISTENER v3.0"
+    )
     print("=" * 60)
-    print("Listener started.")
-    print("Waiting for Telegram commands...")
+
+    print(
+        "Loading Kraken instruments..."
+    )
+
+    try:
+
+        instruments = load_instruments()
+
+        print(
+            f"Loaded {len(instruments)} instruments."
+        )
+
+    except Exception as e:
+
+        print(
+            "Initial instrument loading failed:",
+            repr(e)
+        )
+
+        print(
+            "Listener will retry automatically."
+        )
+
+    print(
+        "Listener started."
+    )
+
+    print(
+        "Waiting for Telegram commands..."
+    )
+
     print("=" * 60)
 
     offset = None
@@ -1349,7 +2159,9 @@ def listener_loop():
 
                 if update_id is not None:
 
-                    offset = update_id + 1
+                    offset = (
+                        update_id + 1
+                    )
 
                 message = update.get(
                     "message"
@@ -1367,20 +2179,22 @@ def listener_loop():
                 except Exception as e:
 
                     print(
-                        "Message handling error:",
+                        "Message error:",
                         repr(e)
                     )
 
                     traceback.print_exc()
 
-            # Small pause prevents excessive requests
             if not updates:
-                time.sleep(0.5)
+
+                time.sleep(
+                    0.5
+                )
 
         except requests.exceptions.Timeout:
 
             print(
-                "Telegram polling timeout. Reconnecting..."
+                "Telegram timeout. Reconnecting..."
             )
 
             time.sleep(
@@ -1390,7 +2204,11 @@ def listener_loop():
         except requests.exceptions.ConnectionError:
 
             print(
-                "Network connection error. Reconnecting..."
+                "Network connection error."
+            )
+
+            print(
+                "Reconnecting..."
             )
 
             time.sleep(
@@ -1423,10 +2241,10 @@ def listener_loop():
 
 
 # ============================================================
-# MAIN
+# AUTO RESTART
 # ============================================================
 
-if __name__ == "__main__":
+def main():
 
     while True:
 
@@ -1445,14 +2263,36 @@ if __name__ == "__main__":
         except Exception as e:
 
             print(
-                "FATAL ERROR:",
+                "=" * 60
+            )
+
+            print(
+                "FATAL ERROR"
+            )
+
+            print(
                 repr(e)
             )
 
             traceback.print_exc()
 
             print(
-                "Restarting listener in 15 seconds..."
+                "Restarting in 15 seconds..."
             )
 
-            time.sleep(15)
+            print(
+                "=" * 60
+            )
+
+            time.sleep(
+                15
+            )
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+
+    main()
