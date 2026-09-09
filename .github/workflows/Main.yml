@@ -1,29 +1,32 @@
 name: Kraken Futures Ichimoku Scanner
 
 on:
+
   schedule:
+
     - cron: "*/5 * * * *"
 
   workflow_dispatch:
 
+
 permissions:
   contents: write
+
 
 # ============================================================
 # PREVENT OVERLAPPING RUNS
 # ============================================================
-# IMPORTANT:
-# cancel-in-progress MUST be false.
-#
-# If a scan of 100 markets is still running, a new scheduled
-# run must NOT kill the current scan before it sends Telegram.
-# GitHub will keep one running job and queue the next one.
-# ============================================================
 
 concurrency:
+
   group: kraken-futures-ichimoku-scanner
+
   cancel-in-progress: false
 
+
+# ============================================================
+# JOB
+# ============================================================
 
 jobs:
 
@@ -31,38 +34,47 @@ jobs:
 
     runs-on: ubuntu-latest
 
-    # 100 markets x multiple timeframes can take some time.
     timeout-minutes: 15
+
 
     steps:
 
-      # ========================================================
+      # ======================================================
       # CHECKOUT
-      # ========================================================
+      # ======================================================
 
       - name: Checkout repository
+
         uses: actions/checkout@v4
+
         with:
+
           fetch-depth: 0
+
           persist-credentials: true
 
 
-      # ========================================================
+      # ======================================================
       # PYTHON
-      # ========================================================
+      # ======================================================
 
       - name: Setup Python
+
         uses: actions/setup-python@v5
+
         with:
+
           python-version: "3.11"
+
           cache: "pip"
 
 
-      # ========================================================
-      # INSTALL DEPENDENCIES
-      # ========================================================
+      # ======================================================
+      # DEPENDENCIES
+      # ======================================================
 
       - name: Install Dependencies
+
         run: |
 
           echo "============================================================"
@@ -74,7 +86,7 @@ jobs:
           pip install requests
 
           echo ""
-          echo "Installed requests version:"
+          echo "Requests version:"
 
           python -c "import requests; print(requests.__version__)"
 
@@ -89,11 +101,12 @@ jobs:
           echo "============================================================"
 
 
-      # ========================================================
+      # ======================================================
       # CHECK SCANNER
-      # ========================================================
+      # ======================================================
 
       - name: Check Scanner
+
         run: |
 
           echo "============================================================"
@@ -102,10 +115,12 @@ jobs:
 
           echo ""
           echo "Working directory:"
+
           pwd
 
           echo ""
           echo "Repository files:"
+
           ls -lah
 
           echo ""
@@ -132,35 +147,54 @@ jobs:
 
           echo ""
           echo "------------------------------------------------------------"
-          echo "CHECKING STATE FILE"
+          echo "CHECKING TELEGRAM OFFSET"
           echo "------------------------------------------------------------"
 
-          if [ -f ichimoku_state.json ]; then
+          if [ -f telegram_update_offset.json ]; then
 
-            echo "State file FOUND:"
-            ls -lh ichimoku_state.json
+            echo "Telegram offset FOUND:"
+
+            cat telegram_update_offset.json
 
           else
 
-            echo "State file NOT FOUND."
-            echo "Scanner will create it if necessary."
+            echo "Telegram offset NOT FOUND."
+
+            echo "It will be created by scanner.py."
 
           fi
 
           echo ""
           echo "------------------------------------------------------------"
-          echo "CHECKING TRADE HISTORY"
+          echo "CHECKING STATE"
+          echo "------------------------------------------------------------"
+
+          if [ -f ichimoku_state.json ]; then
+
+            echo "State file FOUND:"
+
+            ls -lh ichimoku_state.json
+
+          else
+
+            echo "State file NOT FOUND."
+
+          fi
+
+          echo ""
+          echo "------------------------------------------------------------"
+          echo "CHECKING HISTORY"
           echo "------------------------------------------------------------"
 
           if [ -f ichimoku_trade_history.json ]; then
 
             echo "Trade history FOUND:"
+
             ls -lh ichimoku_trade_history.json
 
           else
 
             echo "Trade history NOT FOUND."
-            echo "Scanner will create it if necessary."
 
           fi
 
@@ -170,14 +204,16 @@ jobs:
           echo "============================================================"
 
 
-      # ========================================================
-      # CHECK TELEGRAM SECRETS
-      # ========================================================
+      # ======================================================
+      # TELEGRAM SECRETS
+      # ======================================================
 
       - name: Check Telegram Secrets
 
         env:
+
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
         run: |
@@ -192,15 +228,6 @@ jobs:
           if [ -z "$TELEGRAM_BOT_TOKEN" ]; then
 
             echo "ERROR: TELEGRAM_BOT_TOKEN is NOT configured."
-            echo ""
-            echo "Go to:"
-            echo "GitHub Repository"
-            echo "-> Settings"
-            echo "-> Secrets and variables"
-            echo "-> Actions"
-            echo ""
-            echo "Required secret:"
-            echo "TELEGRAM_BOT_TOKEN"
 
             exit 1
 
@@ -215,9 +242,6 @@ jobs:
           if [ -z "$TELEGRAM_CHAT_ID" ]; then
 
             echo "ERROR: TELEGRAM_CHAT_ID is NOT configured."
-            echo ""
-            echo "Required secret:"
-            echo "TELEGRAM_CHAT_ID"
 
             exit 1
 
@@ -227,41 +251,22 @@ jobs:
 
 
           echo ""
-          echo "------------------------------------------------------------"
-          echo "API CONFIGURATION"
-          echo "------------------------------------------------------------"
-
-          echo "Exchange: Kraken Futures"
-          echo "Telegram: ENABLED"
-          echo "CoinAPI: NOT REQUIRED"
-          echo "Binance API: NOT REQUIRED"
-          echo "Kraken API Key: NOT REQUIRED"
-          echo "Kraken API Secret: NOT REQUIRED"
-
-          echo ""
           echo "============================================================"
           echo "TELEGRAM SECRETS CHECK OK"
           echo "============================================================"
 
 
-      # ========================================================
+      # ======================================================
       # RUN SCANNER
-      # ========================================================
+      # ======================================================
 
       - name: Run Kraken Ichimoku Scanner
 
         env:
 
-          # ----------------------------------------------------
-          # TELEGRAM
-          # ----------------------------------------------------
-
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
-          # ----------------------------------------------------
-          # PYTHON
-          # ----------------------------------------------------
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
 
           PYTHONUNBUFFERED: "1"
 
@@ -275,6 +280,7 @@ jobs:
           echo "System:"
           echo "GitHub Actions"
 
+          echo ""
           echo "Python:"
           python --version
 
@@ -288,7 +294,7 @@ jobs:
 
           echo ""
           echo "Strategy:"
-          echo "Ichimoku MTF"
+          echo "Ichimoku MTF v14.1"
 
           echo ""
           echo "Timeframe:"
@@ -345,15 +351,17 @@ jobs:
           echo "ENABLED"
 
           echo ""
+          echo "Telegram Commands:"
+          echo "/check ETH"
+          echo "/check BTC"
+          echo "/check BTC ETH SOL XRP"
+
+          echo ""
           echo "============================================================"
           echo "STARTING SCANNER"
           echo "============================================================"
 
           echo ""
-
-          # ----------------------------------------------------
-          # Run scanner and save complete output
-          # ----------------------------------------------------
 
           set -o pipefail
 
@@ -361,16 +369,14 @@ jobs:
 
           EXIT_CODE=${PIPESTATUS[0]}
 
-
           echo ""
+
           echo "============================================================"
           echo "SCANNER FINISHED"
           echo "============================================================"
 
           echo ""
           echo "SCANNER EXIT CODE: $EXIT_CODE"
-
-          echo ""
 
           if [ "$EXIT_CODE" -eq 0 ]; then
 
@@ -388,9 +394,9 @@ jobs:
           exit $EXIT_CODE
 
 
-      # ========================================================
-      # SHOW SCANNER LOG ON FAILURE
-      # ========================================================
+      # ======================================================
+      # FAILURE LOG
+      # ======================================================
 
       - name: Show Scanner Log On Failure
 
@@ -418,18 +424,11 @@ jobs:
 
           echo ""
           echo "============================================================"
-          echo "REPOSITORY FILES AFTER FAILURE"
-          echo "============================================================"
-
-          ls -lah
-
-          echo ""
-          echo "============================================================"
 
 
-      # ========================================================
+      # ======================================================
       # VERIFY STATE
-      # ========================================================
+      # ======================================================
 
       - name: Verify Scanner State
 
@@ -443,23 +442,36 @@ jobs:
 
           echo ""
           echo "------------------------------------------------------------"
+          echo "TELEGRAM OFFSET"
+          echo "------------------------------------------------------------"
+
+          if [ -f telegram_update_offset.json ]; then
+
+            echo "telegram_update_offset.json FOUND"
+
+            cat telegram_update_offset.json
+
+          else
+
+            echo "telegram_update_offset.json NOT FOUND"
+
+          fi
+
+
+          echo ""
+          echo "------------------------------------------------------------"
           echo "ICHIMOKU STATE"
           echo "------------------------------------------------------------"
 
           if [ -f ichimoku_state.json ]; then
 
             echo "STATE FILE FOUND:"
+
             ls -lh ichimoku_state.json
-
-            echo ""
-            echo "STATE CONTENT:"
-            echo "------------------------------------------------------------"
-
-            cat ichimoku_state.json
 
           else
 
-            echo "WARNING: ichimoku_state.json does not exist."
+            echo "ichimoku_state.json NOT FOUND"
 
           fi
 
@@ -472,17 +484,12 @@ jobs:
           if [ -f ichimoku_trade_history.json ]; then
 
             echo "TRADE HISTORY FOUND:"
+
             ls -lh ichimoku_trade_history.json
-
-            echo ""
-            echo "TRADE HISTORY CONTENT:"
-            echo "------------------------------------------------------------"
-
-            cat ichimoku_trade_history.json
 
           else
 
-            echo "WARNING: ichimoku_trade_history.json does not exist."
+            echo "ichimoku_trade_history.json NOT FOUND"
 
           fi
 
@@ -493,9 +500,9 @@ jobs:
           echo "============================================================"
 
 
-      # ========================================================
-      # SAVE LOG + STATE AS ARTIFACT
-      # ========================================================
+      # ======================================================
+      # ARTIFACTS
+      # ======================================================
 
       - name: Save Kraken Scanner Artifacts
 
@@ -515,14 +522,16 @@ jobs:
 
             ichimoku_trade_history.json
 
+            telegram_update_offset.json
+
           if-no-files-found: ignore
 
           retention-days: 7
 
 
-      # ========================================================
+      # ======================================================
       # SAVE STATE TO GITHUB
-      # ========================================================
+      # ======================================================
 
       - name: Save Scanner State
 
@@ -535,9 +544,9 @@ jobs:
           echo "============================================================"
 
 
-          # ------------------------------------------------------
+          # ----------------------------------------------------
           # GIT CONFIG
-          # ------------------------------------------------------
+          # ----------------------------------------------------
 
           git config user.name "github-actions[bot]"
 
@@ -546,101 +555,87 @@ jobs:
 
           echo ""
           echo "Current branch:"
+
           git branch --show-current
 
 
           echo ""
           echo "Repository status BEFORE commit:"
+
           git status --short
 
 
-          # ------------------------------------------------------
-          # ADD STATE FILE
-          # ------------------------------------------------------
-
-          echo ""
-          echo "------------------------------------------------------------"
-          echo "ADDING STATE FILE"
-          echo "------------------------------------------------------------"
+          # ----------------------------------------------------
+          # ADD STATE
+          # ----------------------------------------------------
 
           if [ -f ichimoku_state.json ]; then
 
             git add ichimoku_state.json
 
-            echo "Added: ichimoku_state.json"
-
-          else
-
-            echo "ichimoku_state.json not found."
+            echo "Added ichimoku_state.json"
 
           fi
 
 
-          # ------------------------------------------------------
-          # ADD HISTORY FILE
-          # ------------------------------------------------------
-
-          echo ""
-          echo "------------------------------------------------------------"
-          echo "ADDING TRADE HISTORY"
-          echo "------------------------------------------------------------"
+          # ----------------------------------------------------
+          # ADD HISTORY
+          # ----------------------------------------------------
 
           if [ -f ichimoku_trade_history.json ]; then
 
             git add ichimoku_trade_history.json
 
-            echo "Added: ichimoku_trade_history.json"
+            echo "Added ichimoku_trade_history.json"
 
-          else
+          fi
 
-            echo "ichimoku_trade_history.json not found."
+
+          # ----------------------------------------------------
+          # ADD TELEGRAM OFFSET
+          # ----------------------------------------------------
+
+          if [ -f telegram_update_offset.json ]; then
+
+            git add telegram_update_offset.json
+
+            echo "Added telegram_update_offset.json"
 
           fi
 
 
           echo ""
           echo "Repository status AFTER git add:"
+
           git status --short
 
 
-          # ------------------------------------------------------
-          # CHECK FOR CHANGES
-          # ------------------------------------------------------
-
-          echo ""
-          echo "============================================================"
-          echo "COMMIT CHECK"
-          echo "============================================================"
-
+          # ----------------------------------------------------
+          # COMMIT
+          # ----------------------------------------------------
 
           if git diff --cached --quiet; then
 
+            echo ""
             echo "No state changes to commit."
 
           else
 
-            echo "State changes detected."
-
             echo ""
-            echo "Creating commit..."
+            echo "State changes detected."
 
             git commit \
               -m "Update Kraken Ichimoku scanner state [skip ci]"
 
+            echo ""
             echo "Commit created."
 
 
-            # --------------------------------------------------
-            # PUSH WITH RETRIES
-            # --------------------------------------------------
-
-            echo ""
-            echo "============================================================"
-            echo "PUSHING STATE TO GITHUB"
-            echo "============================================================"
+            # ------------------------------------------------
+            # PUSH
+            # ------------------------------------------------
 
             PUSH_SUCCESS=false
-
 
             for ATTEMPT in 1 2 3
             do
@@ -660,7 +655,7 @@ jobs:
               else
 
                 echo ""
-                echo "Git push failed on attempt $ATTEMPT."
+                echo "Git push failed."
 
                 if [ "$ATTEMPT" -lt 3 ]; then
 
@@ -678,7 +673,7 @@ jobs:
             if [ "$PUSH_SUCCESS" = false ]; then
 
               echo ""
-              echo "ERROR: Failed to push scanner state after 3 attempts."
+              echo "ERROR: Failed to push scanner state."
 
               exit 1
 
@@ -693,9 +688,9 @@ jobs:
           echo "============================================================"
 
 
-      # ========================================================
-      # FINAL WORKFLOW SUMMARY
-      # ========================================================
+      # ======================================================
+      # FINAL SUMMARY
+      # ======================================================
 
       - name: Workflow Summary
 
@@ -725,11 +720,19 @@ jobs:
 
           echo ""
           echo "Scanner:"
-          echo "Kraken Futures Ichimoku v13.4"
+          echo "Kraken Futures Ichimoku v14.1"
 
           echo ""
           echo "Telegram:"
-          echo "Configured through GitHub Secrets"
+          echo "Enabled"
+
+          echo ""
+          echo "Telegram Offset:"
+          if [ -f telegram_update_offset.json ]; then
+            echo "telegram_update_offset.json FOUND"
+          else
+            echo "telegram_update_offset.json NOT FOUND"
+          fi
 
           echo ""
           echo "State:"
