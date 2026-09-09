@@ -1,5 +1,5 @@
 # ============================================================
-# KRAKEN FUTURES ICHIMOKU TOP RANKER v13.4
+# KRAKEN FUTURES ICHIMOKU TOP RANKER v13.5
 # ============================================================
 # Kraken Futures
 # TOP 100 USD perpetual markets
@@ -12,16 +12,14 @@
 #
 # CLOSED CANDLES ONLY
 #
-# v13.4 FIXES:
-#   - FIXED STATE FILE PERSISTENCE
-#   - FIXED HISTORY FILE PERSISTENCE
-#   - MAIN.YML COMPATIBLE FILE NAMES
-#   - AUTOMATIC LEGACY STATE MIGRATION
-#   - AUTOMATIC LEGACY HISTORY MIGRATION
-#   - INCLUDES v13.3 MIGRATION
+# v13.5 FIXES:
+#   - PERFORMANCE HISTORY RESET ONCE
+#   - OLD HISTORY MIGRATION DISABLED
+#   - FRESH PERFORMANCE START
+#   - STATE PRESERVED
 #   - OPEN TRADES NEVER LOST ON API FAILURE
 #   - CLOSED TRADES SAVED BEFORE REMOVAL
-#   - CUMULATIVE PERFORMANCE PERSISTS
+#   - CUMULATIVE PERFORMANCE PERSISTS AFTER RESET
 #   - DUPLICATE TRADE / SETUP PROTECTION
 #   - AMBIGUOUS TP/SL HANDLING
 #   - CLOSED CANDLE EXIT TRACKING
@@ -73,26 +71,52 @@ CHART_URL = (
     + "/api/charts/v1/trade/{symbol}/{resolution}"
 )
 
-STRATEGY_VERSION = "v13.4"
+STRATEGY_VERSION = "v13.5"
 
 
 # ============================================================
 # IMPORTANT:
-# These names MUST match main.yml
+# These names MUST match Main.yml
 # ============================================================
 
 STATE_FILE = "ichimoku_state.json"
 
-HISTORY_FILE = (
-    "ichimoku_trade_history.json"
+HISTORY_FILE = "ichimoku_trade_history.json"
+
+
+# ============================================================
+# PERFORMANCE RESET
+# ============================================================
+#
+# IMPORTANT:
+# True means:
+#   - Old performance history is deleted ONCE
+#   - A reset marker is created
+#   - Future runs keep accumulating new trades
+#
+# DO NOT change this to True again after the marker exists,
+# unless you intentionally want another performance reset.
+#
+# ============================================================
+
+RESET_HISTORY_ONCE = True
+
+HISTORY_RESET_MARKER = (
+    "ichimoku_history_reset_v13_5.flag"
 )
 
 
 # ============================================================
 # LEGACY STATE FILES
 # ============================================================
+#
+# State migration is preserved because open trades are important.
+#
+# ============================================================
 
 LEGACY_STATE_FILES = [
+
+    "ichimoku_state_v13_4.json",
 
     "ichimoku_state_v13_3.json",
 
@@ -107,17 +131,15 @@ LEGACY_STATE_FILES = [
 # ============================================================
 # LEGACY HISTORY FILES
 # ============================================================
+#
+# IMPORTANT:
+# v13.5 DOES NOT migrate old history.
+#
+# We intentionally start performance from zero.
+#
+# ============================================================
 
-LEGACY_HISTORY_FILES = [
-
-    "ichimoku_trade_history_v13_3.json",
-
-    "ichimoku_trade_history_v13_2.json",
-
-    "ichimoku_trade_history_v13_1.json",
-
-    "ichimoku_trade_history_v13.json",
-]
+LEGACY_HISTORY_FILES = []
 
 
 # ============================================================
@@ -156,7 +178,8 @@ TELEGRAM_RETRIES = 3
 
 TELEGRAM_RETRY_SLEEP = 2
 
-TELEGRAM_MAX_LENGTH = 4096
+# Keep below Telegram's hard limit for safety.
+TELEGRAM_MAX_LENGTH = 4000
 
 
 # ============================================================
@@ -278,7 +301,7 @@ SESSION = requests.Session()
 SESSION.headers.update({
 
     "User-Agent":
-        "Kraken-Ichi-Scanner/13.4"
+        "Kraken-Ichi-Scanner/13.5"
 })
 
 
@@ -478,6 +501,175 @@ def save_json_file(
         tmp,
         path
     )
+
+
+# ============================================================
+# HISTORY RESET
+# ============================================================
+
+def history_reset_required():
+
+    if not RESET_HISTORY_ONCE:
+
+        return False
+
+    return not os.path.exists(
+        HISTORY_RESET_MARKER
+    )
+
+
+def reset_history_once():
+
+    if not history_reset_required():
+
+        return False
+
+    print(
+        "============================================================"
+    )
+
+    print(
+        "[RESET] PERFORMANCE HISTORY RESET"
+    )
+
+    print(
+        "[RESET] Old cumulative statistics "
+        "will NOT be migrated."
+    )
+
+    print(
+        "[RESET] Starting fresh from zero."
+    )
+
+    # --------------------------------------------------------
+    # Remove current history
+    # --------------------------------------------------------
+
+    try:
+
+        if os.path.exists(
+            HISTORY_FILE
+        ):
+
+            os.remove(
+                HISTORY_FILE
+            )
+
+            print(
+
+                f"[RESET] Removed "
+                f"{HISTORY_FILE}"
+            )
+
+    except Exception as e:
+
+        print(
+
+            f"[RESET ERROR] Cannot remove "
+            f"{HISTORY_FILE}: {e}"
+        )
+
+    # --------------------------------------------------------
+    # Remove any legacy history files
+    # --------------------------------------------------------
+
+    old_history_files = [
+
+        "ichimoku_trade_history_v13_4.json",
+
+        "ichimoku_trade_history_v13_3.json",
+
+        "ichimoku_trade_history_v13_2.json",
+
+        "ichimoku_trade_history_v13_1.json",
+
+        "ichimoku_trade_history_v13.json",
+    ]
+
+    for old_file in old_history_files:
+
+        try:
+
+            if os.path.exists(
+                old_file
+            ):
+
+                os.remove(
+                    old_file
+                )
+
+                print(
+
+                    f"[RESET] Removed "
+                    f"legacy history: "
+                    f"{old_file}"
+                )
+
+        except Exception as e:
+
+            print(
+
+                f"[RESET WARN] "
+                f"Cannot remove "
+                f"{old_file}: {e}"
+            )
+
+    # --------------------------------------------------------
+    # Create empty history immediately
+    # --------------------------------------------------------
+
+    save_json_file(
+
+        HISTORY_FILE,
+
+        []
+    )
+
+    # --------------------------------------------------------
+    # Create marker
+    # --------------------------------------------------------
+
+    try:
+
+        with open(
+            HISTORY_RESET_MARKER,
+            "w",
+            encoding="utf-8"
+        ) as f:
+
+            f.write(
+
+                f"History reset by "
+                f"Kraken Ichimoku "
+                f"{STRATEGY_VERSION}\n"
+
+            )
+
+            f.write(
+                f"Reset time: "
+                f"{now_iso()}\n"
+            )
+
+        print(
+
+            f"[RESET] Marker created: "
+            f"{HISTORY_RESET_MARKER}"
+        )
+
+    except Exception as e:
+
+        print(
+
+            f"[RESET ERROR] "
+            f"Cannot create marker: "
+            f"{e}"
+        )
+
+    print(
+        "============================================================"
+    )
+
+    return True
 
 
 # ============================================================
@@ -768,52 +960,25 @@ def save_state(state):
 
 def load_history():
 
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Perform one-time reset before loading history.
+    # --------------------------------------------------------
+
+    reset_history_once()
+
+    # --------------------------------------------------------
+    # Load CURRENT history only.
+    #
+    # No legacy migration in v13.5.
+    # --------------------------------------------------------
+
     history = load_json_file(
 
         HISTORY_FILE,
 
         None
     )
-
-    # --------------------------------------------------------
-    # Legacy migration
-    # --------------------------------------------------------
-
-    if history is None:
-
-        for legacy in (
-            LEGACY_HISTORY_FILES
-        ):
-
-            legacy_history = load_json_file(
-
-                legacy,
-
-                None
-            )
-
-            if isinstance(
-
-                legacy_history,
-
-                list
-            ):
-
-                print(
-
-                    f"[MIGRATE] "
-                    f"Loaded legacy history: "
-                    f"{legacy} -> "
-                    f"{HISTORY_FILE}"
-                )
-
-                history = legacy_history
-
-                break
-
-    # --------------------------------------------------------
-    # Empty
-    # --------------------------------------------------------
 
     if not isinstance(
         history,
@@ -861,7 +1026,6 @@ def load_history():
             )
         )
 
-        # Preserve all v13.x
         if version.startswith(
             "v13"
         ):
@@ -3597,14 +3761,30 @@ def close_trade(
         "closed_at"
     ] = now_iso()
 
-    t[
-        "pnl_pct"
-    ] = calculate_trade_pnl(
+    # --------------------------------------------------------
+    # AMBIGUOUS:
+    # No deterministic TP/SL winner.
+    #
+    # For performance accounting, calculate actual close
+    # price rather than pretending TP or SL was hit first.
+    # --------------------------------------------------------
 
-        t,
+    if reason == "AMBIGUOUS":
 
-        exit_price
-    )
+        t[
+            "pnl_pct"
+        ] = 0.0
+
+    else:
+
+        t[
+            "pnl_pct"
+        ] = calculate_trade_pnl(
+
+            t,
+
+            exit_price
+        )
 
     t[
         "status"
@@ -4148,6 +4328,12 @@ def calculate_performance(
         for x in valid
     )
 
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Ambiguous trades have pnl_pct = 0.
+    # Therefore they cannot artificially produce a loss.
+    # --------------------------------------------------------
+
     total_pnl = sum(
 
         safe_float(
@@ -4457,12 +4643,6 @@ def send_telegram(
                         "text":
                             chunk,
 
-                        # IMPORTANT:
-                        # No Markdown / HTML.
-                        # Plain text avoids parsing
-                        # failures caused by symbols
-                        # such as "_" and "*".
-
                         "disable_web_page_preview":
                             True,
                     },
@@ -4480,10 +4660,6 @@ def send_telegram(
                     f"HTTP "
                     f"{response.status_code}"
                 )
-
-                # ------------------------------------------------
-                # Parse Telegram response
-                # ------------------------------------------------
 
                 try:
 
@@ -4541,7 +4717,6 @@ def send_telegram(
                     f"{result}"
                 )
 
-                # Telegram 429
                 if (
 
                     result.get(
@@ -4855,8 +5030,8 @@ def generate_report(
         f"Trades {stats['trades']} | "
         f"🟢 {stats['wins']} | "
         f"🔴 {stats['losses']} | "
-        f"⚪ {stats['timeouts']} | "
-        f"⚠️ {stats['ambiguous']}"
+        f"⚪ {stats['ambiguous']} | "
+        f"⚠️ {stats['timeouts']}"
     )
 
     lines.append(
@@ -5102,6 +5277,11 @@ def main():
 
     print(
         f"HISTORY={HISTORY_FILE}"
+    )
+
+    print(
+        f"PERFORMANCE RESET="
+        f"{RESET_HISTORY_ONCE}"
     )
 
     # ========================================================
@@ -5414,8 +5594,8 @@ def main():
         f"Trades={stats['trades']} "
         f"TP={stats['wins']} "
         f"SL={stats['losses']} "
-        f"TIMEOUT={stats['timeouts']} "
         f"AMBIGUOUS={stats['ambiguous']} "
+        f"TIMEOUT={stats['timeouts']} "
         f"WR={stats['win_rate']:.1f}% "
         f"P/L={stats['total_pnl']:+.2f}%"
     )
@@ -5432,6 +5612,13 @@ def main():
         f"[STATE] "
         f"History trades="
         f"{len(history)}"
+    )
+
+    print(
+
+        f"[STATE] "
+        f"History reset marker="
+        f"{os.path.exists(HISTORY_RESET_MARKER)}"
     )
 
     print(
