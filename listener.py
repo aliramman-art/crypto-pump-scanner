@@ -1,1714 +1,1117 @@
 # ============================================================
-# KRAKEN FUTURES PIVOT TREND REVERSAL TELEGRAM LISTENER v1.0
+# TELEGRAM KRAKEN STRATEGY LISTENER v2.0
 # ============================================================
 #
-# STRATEGY:
-#   Pivot Trend
-#   -> Trend
-#   -> Break of valid Pivot with CLOSED candle
-#   -> Pullback / Retest
-#   -> Reversal candle
-#   -> Entry
-#   -> Structural SL
-#   -> TP = RR 1:1
+# PURPOSE:
+#   Telegram command listener for Kraken Futures strategy analysis
 #
-# TELEGRAM COMMANDS:
-#
+# COMMANDS:
 #   تحلیل BTC 5m
 #   تحلیل BTC 15m
 #   تحلیل BTC 30m
 #   تحلیل BTC 1h
 #   تحلیل BTC 4h
 #
-#   /check BTC 5m
-#   /check ETH 15m
+#   /check BTC 15m
 #
-# ENVIRONMENT VARIABLES:
+# STRATEGY:
+#   1. Detect valid pivots
+#   2. Determine current trend
+#   3. Detect confirmed trend break
+#   4. Wait for pullback / retest
+#   5. Confirm reversal candle
+#   6. Generate LONG / SHORT setup
+#   7. Structural SL
+#   8. RR 1:1 TP
 #
+# IMPORTANT:
+#   Only CLOSED candles are used.
+#
+# TELEGRAM:
+#   This file is the ONLY component that calls getUpdates.
+#
+# ENV:
 #   TELEGRAM_BOT_TOKEN
 #   TELEGRAM_CHAT_ID
 #
+# REQUIREMENTS:
+#   requests
 # ============================================================
 
 import os
-import re
 import time
-import math
+import traceback
 import requests
 from datetime import datetime, timezone
+
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-BASE_URL = "https://futures.kraken.com"
-
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-REQUEST_TIMEOUT = 20
-RETRIES = 3
+KRAKEN_BASE_URL = "https://futures.kraken.com"
 
-# Pivot settings
+TELEGRAM_TIMEOUT = 35
+KRAKEN_TIMEOUT = 20
+
+POLL_RETRY_SECONDS = 5
+ERROR_RETRY_SECONDS = 10
+
 PIVOT_LEFT = 3
 PIVOT_RIGHT = 3
 
-# ATR
-ATR_PERIOD = 14
+MAX_CANDLES = 500
 
-# Pullback
-PULLBACK_ATR_MAX = 0.35
+# Number of candles after a break in which a retest is accepted
+MAX_PULLBACK_CANDLES = 20
 
-# SL buffer
-SL_BUFFER_ATR = 0.10
-
-# Minimum / maximum SL distance
-MIN_STOP_PERCENT = 0.20
-MAX_STOP_PERCENT = 3.00
+# Small structural SL buffer
+SL_BUFFER_PERCENT = 0.001
 
 # RR
 RR = 1.0
 
-# Candle quality
-MIN_BODY_ATR = 0.10
-
-# How many candles to request
-CANDLE_LIMIT = 500
 
 # ============================================================
 # SESSION
 # ============================================================
 
-SESSION = requests.Session()
+session = requests.Session()
 
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 Kraken-Pivot-Trend-Bot/1.0"
+session.headers.update({
+    "User-Agent": "Kraken-Telegram-Strategy-Listener/2.0"
 })
-
-
-# ============================================================
-# LOG
-# ============================================================
-
-def log(message):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    print(f"[{now}] {message}", flush=True)
-
-
-# ============================================================
-# HTTP
-# ============================================================
-
-def http_get(url, params=None):
-    last_error = None
-
-    for attempt in range(1, RETRIES + 1):
-        try:
-            r = SESSION.get(
-                url,
-                params=params,
-                timeout=REQUEST_TIMEOUT
-            )
-
-            r.raise_for_status()
-
-            return r.json()
-
-        except Exception as e:
-            last_error = e
-            log(f"HTTP attempt {attempt}/{RETRIES} failed: {e}")
-            time.sleep(attempt)
-
-    raise last_error
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def telegram_send(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        log("Telegram credentials are missing.")
-        print(text)
-        return False
-
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+def telegram_url(method):
+    return (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/{method}"
     )
 
+
+def send_telegram(text, chat_id=None):
+    if not TELEGRAM_BOT_TOKEN:
+        print("ERROR: TELEGRAM_BOT_TOKEN is missing.")
+        return False
+
+    target_chat = chat_id or TELEGRAM_CHAT_ID
+
+    if not target_chat:
+        print("ERROR: TELEGRAM_CHAT_ID is missing.")
+        return False
+
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": True
+        "chat_id": target_chat,
+        "text": text
     }
 
-    try:
-        r = SESSION.post(
-            url,
-            json=payload,
-            timeout=REQUEST_TIMEOUT
+    for attempt in range(3):
+
+        try:
+
+            response = session.post(
+                telegram_url("sendMessage"),
+                json=payload,
+                timeout=TELEGRAM_TIMEOUT
+            )
+
+            if response.ok:
+                return True
+
+            print(
+                "Telegram send error:",
+                response.status_code,
+                response.text[:500]
+            )
+
+        except Exception as e:
+            print("Telegram send exception:", repr(e))
+
+        time.sleep(2)
+
+    return False
+
+
+def telegram_get_updates(offset=None):
+
+    params = {
+        "timeout": TELEGRAM_TIMEOUT
+    }
+
+    if offset is not None:
+        params["offset"] = offset
+
+    response = session.get(
+        telegram_url("getUpdates"),
+        params=params,
+        timeout=TELEGRAM_TIMEOUT + 10
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    if not data.get("ok"):
+        raise RuntimeError(
+            f"Telegram API error: {data}"
         )
 
-        r.raise_for_status()
-
-        return True
-
-    except Exception as e:
-        log(f"Telegram send error: {e}")
-        return False
+    return data.get("result", [])
 
 
 # ============================================================
-# SYMBOL NORMALIZATION
+# KRAKEN
 # ============================================================
 
 def normalize_symbol(symbol):
-    """
-    Examples:
 
-    BTC
-    XBT
-    BTCUSD
-    PF_XBTUSD
-    PF_BTCUSD
+    symbol = symbol.upper().strip()
 
-    -> PF_XBTUSD
-    """
+    symbol = symbol.replace("/", "")
+    symbol = symbol.replace("-", "")
+    symbol = symbol.replace("_", "")
 
-    s = symbol.upper().strip()
+    if symbol.endswith("USD"):
+        return symbol[:-3] + "USD"
 
-    s = s.replace("/", "")
-    s = s.replace("-", "")
-    s = s.replace("_", "")
+    if symbol.endswith("USDT"):
+        return symbol[:-4] + "USD"
 
-    if s in ("BTC", "XBT", "BTCUSD", "XBTUSD"):
-        return "PF_XBTUSD"
-
-    if s.endswith("USD"):
-        base = s[:-3]
-
-        if base == "BTC":
-            base = "XBT"
-
-        return f"PF_{base}USD"
-
-    return f"PF_{s}USD"
+    return symbol + "USD"
 
 
-# ============================================================
-# TIMEFRAME
-# ============================================================
+def resolution_to_minutes(tf):
 
-TIMEFRAME_MAP = {
-    "1m": 1,
-    "5m": 5,
-    "15m": 15,
-    "30m": 30,
-    "1h": 60,
-    "4h": 240,
-    "12h": 720,
-    "1d": 1440,
-    "1w": 10080,
-}
-
-
-def normalize_timeframe(tf):
     tf = tf.lower().strip()
 
-    aliases = {
-        "5": "5m",
-        "15": "15m",
-        "30": "30m",
-        "60": "1h",
-        "1": "1m",
-        "240": "4h",
-        "4h": "4h",
-        "1hour": "1h",
-        "1hr": "1h",
-        "hour": "1h",
-        "daily": "1d",
-        "day": "1d",
+    mapping = {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "4h": 240
     }
 
-    return aliases.get(tf, tf)
+    if tf not in mapping:
+        raise ValueError(
+            "Timeframe must be 1m, 5m, 15m, 30m, 1h or 4h."
+        )
+
+    return mapping[tf]
 
 
-# ============================================================
-# KRAKEN CANDLES
-# ============================================================
+def resolution_to_kraken(tf):
 
-def get_candles(symbol, timeframe):
-    """
-    Kraken Futures chart endpoint.
+    tf = tf.lower().strip()
 
-    Returns CLOSED candles only.
-    """
+    mapping = {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "4h": 240
+    }
 
-    resolution = TIMEFRAME_MAP[timeframe]
+    return mapping[tf]
+
+
+def get_kraken_candles(symbol, timeframe, limit=MAX_CANDLES):
+
+    symbol = normalize_symbol(symbol)
+    resolution = resolution_to_kraken(timeframe)
 
     url = (
-        f"{BASE_URL}/api/charts/v1/trade/"
+        f"{KRAKEN_BASE_URL}/api/charts/v1/trade/"
         f"{symbol}/{resolution}"
     )
 
-    data = http_get(url)
+    response = session.get(
+        url,
+        timeout=KRAKEN_TIMEOUT
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
 
     candles = []
 
-    raw = data.get("candles", [])
+    # Kraken response may contain "candles"
+    # or directly return a list depending on endpoint/version.
 
-    for c in raw:
+    if isinstance(data, dict):
+
+        raw = (
+            data.get("candles")
+            or data.get("data")
+            or data.get("result")
+            or []
+        )
+
+    elif isinstance(data, list):
+
+        raw = data
+
+    else:
+
+        raw = []
+
+    for item in raw:
+
         try:
-            ts = (
-                c.get("time")
-                or c.get("timestamp")
-                or c.get("timeStamp")
-            )
 
-            o = float(c["open"])
-            h = float(c["high"])
-            l = float(c["low"])
-            close = float(c["close"])
+            if isinstance(item, dict):
 
-            volume = float(
-                c.get("volume", 0) or 0
-            )
+                timestamp = (
+                    item.get("time")
+                    or item.get("timestamp")
+                    or item.get("ts")
+                )
 
-            if ts is None:
+                open_price = (
+                    item.get("open")
+                    or item.get("o")
+                )
+
+                high_price = (
+                    item.get("high")
+                    or item.get("h")
+                )
+
+                low_price = (
+                    item.get("low")
+                    or item.get("l")
+                )
+
+                close_price = (
+                    item.get("close")
+                    or item.get("c")
+                )
+
+                volume = (
+                    item.get("volume")
+                    or item.get("v")
+                    or 0
+                )
+
+            else:
+
+                # Common OHLCV order:
+                # timestamp, open, high, low, close, volume
+
+                if len(item) < 5:
+                    continue
+
+                timestamp = item[0]
+                open_price = item[1]
+                high_price = item[2]
+                low_price = item[3]
+                close_price = item[4]
+
+                volume = item[5] if len(item) > 5 else 0
+
+            if timestamp is None:
                 continue
 
-            ts = float(ts)
-
-            # Kraken timestamps can be milliseconds
-            if ts > 10_000_000_000:
-                ts /= 1000.0
-
             candles.append({
-                "time": ts,
-                "open": o,
-                "high": h,
-                "low": l,
-                "close": close,
-                "volume": volume
+                "time": float(timestamp),
+                "open": float(open_price),
+                "high": float(high_price),
+                "low": float(low_price),
+                "close": float(close_price),
+                "volume": float(volume)
             })
 
         except Exception:
             continue
 
+    if not candles:
+        raise RuntimeError(
+            f"No candle data returned for {symbol} {timeframe}"
+        )
+
     candles.sort(key=lambda x: x["time"])
 
-    if len(candles) < 20:
-        raise RuntimeError(
-            f"Not enough candles for {symbol} {timeframe}"
-        )
+    # Remove duplicate timestamps
+    unique = {}
+
+    for candle in candles:
+        unique[candle["time"]] = candle
+
+    candles = list(unique.values())
+
+    candles.sort(key=lambda x: x["time"])
 
     # --------------------------------------------------------
     # CLOSED CANDLES ONLY
     # --------------------------------------------------------
-    now = time.time()
-    interval_seconds = resolution * 60
+
+    minutes = resolution_to_minutes(timeframe)
+
+    now_ts = time.time()
 
     closed = []
 
-    for c in candles:
-        candle_end = c["time"] + interval_seconds
+    for candle in candles:
 
-        if candle_end <= now:
-            closed.append(c)
+        candle_end = (
+            candle["time"] + minutes * 60
+        )
 
-    return closed[-CANDLE_LIMIT:]
+        if candle_end <= now_ts:
+            closed.append(candle)
+
+    if len(closed) > limit:
+        closed = closed[-limit:]
+
+    if len(closed) < 50:
+        raise RuntimeError(
+            f"Not enough CLOSED candles for "
+            f"{symbol} {timeframe}: {len(closed)}"
+        )
+
+    return closed
 
 
 # ============================================================
 # ATR
 # ============================================================
 
-def true_range(current, previous_close):
-    return max(
-        current["high"] - current["low"],
-        abs(current["high"] - previous_close),
-        abs(current["low"] - previous_close)
-    )
+def calculate_atr(candles, period=14):
 
-
-def atr(candles, period=ATR_PERIOD):
     if len(candles) < period + 1:
-        return None
+        return 0.0
 
     trs = []
 
     for i in range(1, len(candles)):
-        tr = true_range(
-            candles[i],
-            candles[i - 1]["close"]
+
+        current = candles[i]
+        previous = candles[i - 1]
+
+        tr = max(
+            current["high"] - current["low"],
+            abs(
+                current["high"] -
+                previous["close"]
+            ),
+            abs(
+                current["low"] -
+                previous["close"]
+            )
         )
 
         trs.append(tr)
 
     if len(trs) < period:
-        return None
+        return 0.0
 
     return sum(trs[-period:]) / period
 
 
 # ============================================================
-# CANDLE HELPERS
-# ============================================================
-
-def candle_body(c):
-    return abs(c["close"] - c["open"])
-
-
-def candle_range(c):
-    return c["high"] - c["low"]
-
-
-def upper_wick(c):
-    return c["high"] - max(c["open"], c["close"])
-
-
-def lower_wick(c):
-    return min(c["open"], c["close"]) - c["low"]
-
-
-def is_bullish(c):
-    return c["close"] > c["open"]
-
-
-def is_bearish(c):
-    return c["close"] < c["open"]
-
-
-# ============================================================
-# PIVOT DETECTION
+# PIVOTS
 # ============================================================
 
 def find_pivots(candles):
-    """
-    Confirmed Pivot:
 
-    Pivot High:
-        high > highs of N candles left/right
+    highs = []
+    lows = []
 
-    Pivot Low:
-        low < lows of N candles left/right
+    left = PIVOT_LEFT
+    right = PIVOT_RIGHT
 
-    IMPORTANT:
-    A pivot is only known after PIVOT_RIGHT candles have closed.
-    """
+    for i in range(
+        left,
+        len(candles) - right
+    ):
 
-    pivots = []
+        current_high = candles[i]["high"]
+        current_low = candles[i]["low"]
 
-    start = PIVOT_LEFT
-    end = len(candles) - PIVOT_RIGHT
+        is_high = True
+        is_low = True
 
-    for i in range(start, end):
+        for j in range(
+            i - left,
+            i + right + 1
+        ):
 
-        current = candles[i]
+            if j == i:
+                continue
 
-        left = candles[
-            i - PIVOT_LEFT:i
-        ]
+            if candles[j]["high"] >= current_high:
+                is_high = False
 
-        right = candles[
-            i + 1:i + 1 + PIVOT_RIGHT
-        ]
+            if candles[j]["low"] <= current_low:
+                is_low = False
 
-        left_highs = [
-            x["high"] for x in left
-        ]
+        if is_high:
 
-        right_highs = [
-            x["high"] for x in right
-        ]
-
-        left_lows = [
-            x["low"] for x in left
-        ]
-
-        right_lows = [
-            x["low"] for x in right
-        ]
-
-        pivot_high = (
-            current["high"] > max(left_highs)
-            and
-            current["high"] > max(right_highs)
-        )
-
-        pivot_low = (
-            current["low"] < min(left_lows)
-            and
-            current["low"] < min(right_lows)
-        )
-
-        if pivot_high:
-            pivots.append({
+            highs.append({
                 "index": i,
-                "type": "HIGH",
-                "price": current["high"],
-                "time": current["time"]
+                "price": current_high
             })
 
-        if pivot_low:
-            pivots.append({
+        if is_low:
+
+            lows.append({
                 "index": i,
-                "type": "LOW",
-                "price": current["low"],
-                "time": current["time"]
+                "price": current_low
             })
 
-    pivots.sort(key=lambda x: x["index"])
-
-    return pivots
-
-
-# ============================================================
-# LAST PIVOTS
-# ============================================================
-
-def last_two_pivots(pivots, pivot_type):
-    selected = [
-        p for p in pivots
-        if p["type"] == pivot_type
-    ]
-
-    if len(selected) < 2:
-        return None, None
-
-    return selected[-2], selected[-1]
+    return highs, lows
 
 
 # ============================================================
 # TREND
 # ============================================================
 
-def determine_trend(pivots):
-    """
-    UP:
-        HH + HL
+def determine_trend(highs, lows):
 
-    DOWN:
-        LH + LL
-    """
+    if len(highs) < 2 or len(lows) < 2:
+        return "RANGE"
 
-    h1, h2 = last_two_pivots(
-        pivots,
-        "HIGH"
-    )
+    h1 = highs[-2]["price"]
+    h2 = highs[-1]["price"]
 
-    l1, l2 = last_two_pivots(
-        pivots,
-        "LOW"
-    )
+    l1 = lows[-2]["price"]
+    l2 = lows[-1]["price"]
 
-    if not h1 or not h2 or not l1 or not l2:
-        return {
-            "trend": "UNKNOWN",
-            "h1": h1,
-            "h2": h2,
-            "l1": l1,
-            "l2": l2
-        }
+    if h2 > h1 and l2 > l1:
+        return "UP"
 
-    higher_high = h2["price"] > h1["price"]
-    higher_low = l2["price"] > l1["price"]
+    if h2 < h1 and l2 < l1:
+        return "DOWN"
 
-    lower_high = h2["price"] < h1["price"]
-    lower_low = l2["price"] < l1["price"]
-
-    if higher_high and higher_low:
-        trend = "UP"
-
-    elif lower_high and lower_low:
-        trend = "DOWN"
-
-    else:
-        trend = "RANGE"
-
-    return {
-        "trend": trend,
-        "h1": h1,
-        "h2": h2,
-        "l1": l1,
-        "l2": l2
-    }
-
-
-# ============================================================
-# STRUCTURE DESCRIPTION
-# ============================================================
-
-def structure_description(trend_data):
-
-    h1 = trend_data["h1"]
-    h2 = trend_data["h2"]
-
-    l1 = trend_data["l1"]
-    l2 = trend_data["l2"]
-
-    if not all([h1, h2, l1, l2]):
-        return "INSUFFICIENT DATA"
-
-    high_structure = (
-        "HH"
-        if h2["price"] > h1["price"]
-        else "LH"
-    )
-
-    low_structure = (
-        "HL"
-        if l2["price"] > l1["price"]
-        else "LL"
-    )
-
-    return f"{high_structure} + {low_structure}"
+    return "RANGE"
 
 
 # ============================================================
 # BREAK DETECTION
 # ============================================================
 
-def detect_break(
-    candles,
-    pivots,
-    trend_data,
-    atr_value
-):
-    """
-    We look for the latest confirmed structural break.
+def detect_break(candles, highs, lows, trend):
 
-    UP trend:
-        break below last valid Pivot Low
-
-    DOWN trend:
-        break above last valid Pivot High
-
-    RANGE:
-        check both directions.
-
-    Break requires CLOSED candle.
-    """
-
-    if not candles or not pivots:
+    if len(candles) < 2:
         return None
 
-    trend = trend_data["trend"]
-
-    latest = candles[-1]
+    last_index = len(candles) - 1
 
     # --------------------------------------------------------
-    # DOWN TREND -> BULLISH BREAK
+    # UP TREND
+    # Bearish break = close below latest structural low
     # --------------------------------------------------------
 
-    if trend == "DOWN":
+    if trend == "UP" and lows:
 
-        pivot = trend_data["h2"]
-
-        if pivot is None:
-            return None
+        pivot = lows[-1]
 
         for i in range(
             pivot["index"] + 1,
             len(candles)
         ):
 
-            c = candles[i]
+            if candles[i]["close"] < pivot["price"]:
 
-            if (
-                c["close"] > pivot["price"]
-            ):
                 return {
-                    "direction": "LONG",
-                    "pivot": pivot,
-                    "break_index": i,
-                    "break_candle": c,
-                    "break_price": c["close"],
-                    "atr": atr_value
+                    "direction": "BEARISH",
+                    "index": i,
+                    "level": pivot["price"],
+                    "pivot_index": pivot["index"]
                 }
 
     # --------------------------------------------------------
-    # UP TREND -> BEARISH BREAK
+    # DOWN TREND
+    # Bullish break = close above latest structural high
     # --------------------------------------------------------
 
-    if trend == "UP":
+    if trend == "DOWN" and highs:
 
-        pivot = trend_data["l2"]
-
-        if pivot is None:
-            return None
+        pivot = highs[-1]
 
         for i in range(
             pivot["index"] + 1,
             len(candles)
         ):
 
-            c = candles[i]
+            if candles[i]["close"] > pivot["price"]:
 
-            if (
-                c["close"] < pivot["price"]
-            ):
                 return {
-                    "direction": "SHORT",
-                    "pivot": pivot,
-                    "break_index": i,
-                    "break_candle": c,
-                    "break_price": c["close"],
-                    "atr": atr_value
+                    "direction": "BULLISH",
+                    "index": i,
+                    "level": pivot["price"],
+                    "pivot_index": pivot["index"]
                 }
 
     # --------------------------------------------------------
     # RANGE
+    # Check latest structural break
     # --------------------------------------------------------
 
-    if trend == "RANGE":
+    candidates = []
 
-        high_pivot = trend_data["h2"]
-        low_pivot = trend_data["l2"]
+    if highs:
 
-        candidates = []
+        pivot = highs[-1]
 
-        if high_pivot:
-            for i in range(
-                high_pivot["index"] + 1,
-                len(candles)
-            ):
-                c = candles[i]
+        for i in range(
+            pivot["index"] + 1,
+            len(candles)
+        ):
 
-                if c["close"] > high_pivot["price"]:
-                    candidates.append({
-                        "direction": "LONG",
-                        "pivot": high_pivot,
-                        "break_index": i,
-                        "break_candle": c,
-                        "break_price": c["close"],
-                        "atr": atr_value
-                    })
-                    break
+            if candles[i]["close"] > pivot["price"]:
 
-        if low_pivot:
-            for i in range(
-                low_pivot["index"] + 1,
-                len(candles)
-            ):
-                c = candles[i]
+                candidates.append({
+                    "direction": "BULLISH",
+                    "index": i,
+                    "level": pivot["price"],
+                    "pivot_index": pivot["index"]
+                })
 
-                if c["close"] < low_pivot["price"]:
-                    candidates.append({
-                        "direction": "SHORT",
-                        "pivot": low_pivot,
-                        "break_index": i,
-                        "break_candle": c,
-                        "break_price": c["close"],
-                        "atr": atr_value
-                    })
-                    break
+    if lows:
 
-        if candidates:
-            candidates.sort(
-                key=lambda x: x["break_index"]
-            )
+        pivot = lows[-1]
 
-            return candidates[-1]
+        for i in range(
+            pivot["index"] + 1,
+            len(candles)
+        ):
+
+            if candles[i]["close"] < pivot["price"]:
+
+                candidates.append({
+                    "direction": "BEARISH",
+                    "index": i,
+                    "level": pivot["price"],
+                    "pivot_index": pivot["index"]
+                })
+
+    if candidates:
+
+        candidates.sort(
+            key=lambda x: x["index"]
+        )
+
+        return candidates[-1]
 
     return None
 
 
 # ============================================================
-# REVERSAL CANDLES
+# CANDLE PATTERNS
 # ============================================================
+
+def candle_parts(c):
+
+    body = abs(c["close"] - c["open"])
+
+    total = c["high"] - c["low"]
+
+    upper = (
+        c["high"] -
+        max(c["open"], c["close"])
+    )
+
+    lower = (
+        min(c["open"], c["close"]) -
+        c["low"]
+    )
+
+    return body, total, upper, lower
+
 
 def bullish_engulfing(prev, cur):
 
     return (
-        is_bearish(prev)
-        and
-        is_bullish(cur)
-        and
-        cur["open"] <= prev["close"]
-        and
-        cur["close"] >= prev["open"]
-        and
-        candle_body(cur) > candle_body(prev) * 0.8
+        prev["close"] < prev["open"]
+        and cur["close"] > cur["open"]
+        and cur["open"] <= prev["close"]
+        and cur["close"] >= prev["open"]
     )
 
 
 def bearish_engulfing(prev, cur):
 
     return (
-        is_bullish(prev)
-        and
-        is_bearish(cur)
-        and
-        cur["open"] >= prev["close"]
-        and
-        cur["close"] <= prev["open"]
-        and
-        candle_body(cur) > candle_body(prev) * 0.8
+        prev["close"] > prev["open"]
+        and cur["close"] < cur["open"]
+        and cur["open"] >= prev["close"]
+        and cur["close"] <= prev["open"]
     )
 
 
-def hammer(c, atr_value):
+def hammer(c, atr):
 
-    r = candle_range(c)
+    body, total, upper, lower = candle_parts(c)
 
-    if r <= 0:
+    if total <= 0:
         return False
 
-    body = candle_body(c)
-    lw = lower_wick(c)
-    uw = upper_wick(c)
-
     return (
-        lw >= body * 2
-        and
-        lw > uw * 1.5
-        and
-        c["close"] > c["low"] + r * 0.55
-        and
-        body >= atr_value * MIN_BODY_ATR
+        body >= atr * 0.05
+        and lower >= body * 2
+        and upper <= body
+        and c["close"] >= c["open"]
     )
 
 
-def shooting_star(c, atr_value):
+def shooting_star(c, atr):
 
-    r = candle_range(c)
+    body, total, upper, lower = candle_parts(c)
 
-    if r <= 0:
+    if total <= 0:
         return False
 
-    body = candle_body(c)
-    uw = upper_wick(c)
-    lw = lower_wick(c)
-
     return (
-        uw >= body * 2
-        and
-        uw > lw * 1.5
-        and
-        c["close"] < c["low"] + r * 0.45
-        and
-        body >= atr_value * MIN_BODY_ATR
+        body >= atr * 0.05
+        and upper >= body * 2
+        and lower <= body
+        and c["close"] <= c["open"]
     )
 
 
-def bullish_pin_bar(c, atr_value):
+def bullish_pin_bar(c):
 
-    r = candle_range(c)
+    body, total, upper, lower = candle_parts(c)
 
-    if r <= 0:
+    if total <= 0:
         return False
 
-    body = candle_body(c)
-    lw = lower_wick(c)
+    return (
+        lower >= body * 2
+        and lower >= upper * 1.5
+    )
+
+
+def bearish_pin_bar(c):
+
+    body, total, upper, lower = candle_parts(c)
+
+    if total <= 0:
+        return False
 
     return (
-        lw >= r * 0.50
-        and
-        lw >= body * 2
-        and
+        upper >= body * 2
+        and upper >= lower * 1.5
+    )
+
+
+def strong_bullish(c, atr):
+
+    body, total, upper, lower = candle_parts(c)
+
+    if total <= 0:
+        return False
+
+    return (
         c["close"] > c["open"]
-        and
-        body >= atr_value * MIN_BODY_ATR
+        and body >= atr * 0.5
+        and c["close"] >= c["high"] - total * 0.30
     )
 
 
-def bearish_pin_bar(c, atr_value):
+def strong_bearish(c, atr):
 
-    r = candle_range(c)
+    body, total, upper, lower = candle_parts(c)
 
-    if r <= 0:
+    if total <= 0:
         return False
 
-    body = candle_body(c)
-    uw = upper_wick(c)
-
     return (
-        uw >= r * 0.50
-        and
-        uw >= body * 2
-        and
         c["close"] < c["open"]
-        and
-        body >= atr_value * MIN_BODY_ATR
+        and body >= atr * 0.5
+        and c["close"] <= c["low"] + total * 0.30
     )
 
 
-def strong_bullish(c, atr_value):
+def reversal_confirmation(candles, break_info):
 
-    r = candle_range(c)
+    break_index = break_info["index"]
+    direction = break_info["direction"]
 
-    if r <= 0:
-        return False
+    atr = calculate_atr(candles)
 
-    return (
-        is_bullish(c)
-        and
-        candle_body(c) >= atr_value * 0.50
-        and
-        c["close"] >= c["low"] + r * 0.70
-    )
+    start = break_index + 1
 
-
-def strong_bearish(c, atr_value):
-
-    r = candle_range(c)
-
-    if r <= 0:
-        return False
-
-    return (
-        is_bearish(c)
-        and
-        candle_body(c) >= atr_value * 0.50
-        and
-        c["close"] <= c["low"] + r * 0.30
-    )
-
-
-# ============================================================
-# REVERSAL ANALYSIS
-# ============================================================
-
-def detect_reversal(candles, index, direction, atr_value):
-
-    if index < 1:
-        return {
-            "valid": False,
-            "name": None
-        }
-
-    prev = candles[index - 1]
-    cur = candles[index]
-
-    if direction == "LONG":
-
-        if bullish_engulfing(prev, cur):
-            return {
-                "valid": True,
-                "name": "Bullish Engulfing"
-            }
-
-        if hammer(cur, atr_value):
-            return {
-                "valid": True,
-                "name": "Hammer"
-            }
-
-        if bullish_pin_bar(cur, atr_value):
-            return {
-                "valid": True,
-                "name": "Bullish Pin Bar"
-            }
-
-        if strong_bullish(cur, atr_value):
-            return {
-                "valid": True,
-                "name": "Strong Bullish Candle"
-            }
-
-    if direction == "SHORT":
-
-        if bearish_engulfing(prev, cur):
-            return {
-                "valid": True,
-                "name": "Bearish Engulfing"
-            }
-
-        if shooting_star(cur, atr_value):
-            return {
-                "valid": True,
-                "name": "Shooting Star"
-            }
-
-        if bearish_pin_bar(cur, atr_value):
-            return {
-                "valid": True,
-                "name": "Bearish Pin Bar"
-            }
-
-        if strong_bearish(cur, atr_value):
-            return {
-                "valid": True,
-                "name": "Strong Bearish Candle"
-            }
-
-    return {
-        "valid": False,
-        "name": None
-    }
-
-
-# ============================================================
-# PULLBACK
-# ============================================================
-
-def detect_pullback(
-    candles,
-    break_data,
-    atr_value
-):
-    """
-    After break:
-
-    LONG:
-        price returns toward broken resistance
-
-    SHORT:
-        price returns toward broken support
-    """
-
-    if not break_data:
+    if start >= len(candles):
         return None
 
-    break_index = break_data["break_index"]
+    end = min(
+        len(candles),
+        start + MAX_PULLBACK_CANDLES
+    )
 
-    pivot = break_data["pivot"]
+    # --------------------------------------------------------
+    # Look for retest and reversal
+    # --------------------------------------------------------
 
-    direction = break_data["direction"]
-
-    if break_index >= len(candles) - 1:
-        return {
-            "valid": False,
-            "reason": "Waiting for pullback"
-        }
-
-    tolerance = atr_value * PULLBACK_ATR_MAX
+    level = break_info["level"]
 
     best = None
 
-    for i in range(
-        break_index + 1,
-        len(candles)
-    ):
+    for i in range(start, end):
 
         c = candles[i]
 
-        distance = abs(
-            c["low"] - pivot["price"]
-        ) if direction == "LONG" else abs(
-            c["high"] - pivot["price"]
+        tolerance = max(
+            atr * 0.30,
+            abs(level) * 0.001
         )
 
-        # --------------------------------------------
-        # LONG RETEST
-        # --------------------------------------------
+        touched = (
+            c["low"] <= level + tolerance
+            and c["high"] >= level - tolerance
+        )
 
-        if direction == "LONG":
+        if not touched:
+            continue
 
-            touched = (
-                c["low"] <=
-                pivot["price"] + tolerance
-                and
-                c["high"] >=
-                pivot["price"] - tolerance
-            )
+        pattern = None
 
-            rejection = (
-                c["close"] > pivot["price"]
-            )
+        prev = candles[i - 1] if i > 0 else None
 
-            if touched:
+        if direction == "BULLISH":
 
-                best = {
-                    "index": i,
-                    "candle": c,
-                    "distance": distance,
-                    "touched": True,
-                    "rejection": rejection
-                }
+            if prev and bullish_engulfing(prev, c):
+                pattern = "Bullish Engulfing"
 
-        # --------------------------------------------
-        # SHORT RETEST
-        # --------------------------------------------
+            elif hammer(c, atr):
+                pattern = "Hammer"
 
-        if direction == "SHORT":
+            elif bullish_pin_bar(c):
+                pattern = "Bullish Pin Bar"
 
-            touched = (
-                c["high"] >=
-                pivot["price"] - tolerance
-                and
-                c["low"] <=
-                pivot["price"] + tolerance
-            )
+            elif strong_bullish(c, atr):
+                pattern = "Strong Bullish Candle"
 
-            rejection = (
-                c["close"] < pivot["price"]
-            )
+            # Reversal candle must close back above level
+            valid_close = c["close"] > level
 
-            if touched:
+        else:
 
-                best = {
-                    "index": i,
-                    "candle": c,
-                    "distance": distance,
-                    "touched": True,
-                    "rejection": rejection
-                }
+            if prev and bearish_engulfing(prev, c):
+                pattern = "Bearish Engulfing"
 
-    if best is None:
+            elif shooting_star(c, atr):
+                pattern = "Shooting Star"
 
-        return {
-            "valid": False,
-            "reason": "No pullback to broken Pivot"
-        }
+            elif bearish_pin_bar(c):
+                pattern = "Bearish Pin Bar"
+
+            elif strong_bearish(c, atr):
+                pattern = "Strong Bearish Candle"
+
+            # Reversal candle must close back below level
+            valid_close = c["close"] < level
+
+        if pattern and valid_close:
+
+            best = {
+                "index": i,
+                "pattern": pattern,
+                "level": level
+            }
 
     return best
 
 
 # ============================================================
-# SETUP SEARCH
+# TRADE SETUP
 # ============================================================
 
-def find_setup(
-    candles,
-    trend_data,
-    break_data,
-    atr_value
-):
+def build_trade_setup(candles, break_info, confirmation):
 
-    if not break_data:
-        return {
-            "valid": False,
-            "reason": "No confirmed Pivot break"
-        }
+    direction = break_info["direction"]
 
-    pullback = detect_pullback(
-        candles,
-        break_data,
-        atr_value
-    )
+    index = confirmation["index"]
 
-    if not pullback or not pullback.get("touched"):
-        return {
-            "valid": False,
-            "reason": "Pullback not confirmed",
-            "break": break_data,
-            "pullback": pullback
-        }
+    candle = candles[index]
 
-    pb_index = pullback["index"]
+    if direction == "BULLISH":
 
-    # --------------------------------------------------------
-    # We need a candle AFTER the pullback touch
-    # for reversal confirmation.
-    # --------------------------------------------------------
-
-    reversal_index = pb_index
-
-    reversal = detect_reversal(
-        candles,
-        reversal_index,
-        break_data["direction"],
-        atr_value
-    )
-
-    if not reversal["valid"]:
-
-        if pb_index + 1 < len(candles):
-
-            reversal_index = pb_index + 1
-
-            reversal = detect_reversal(
-                candles,
-                reversal_index,
-                break_data["direction"],
-                atr_value
-            )
-
-    if not reversal["valid"]:
-
-        return {
-            "valid": False,
-            "reason": "No valid reversal candle",
-            "break": break_data,
-            "pullback": pullback,
-            "reversal": reversal
-        }
-
-    entry_candle = candles[reversal_index]
-
-    direction = break_data["direction"]
-
-    pivot = break_data["pivot"]
-
-    # --------------------------------------------------------
-    # Find structural extreme around pullback
-    # --------------------------------------------------------
-
-    start = break_data["break_index"]
-
-    section = candles[
-        start:reversal_index + 1
-    ]
-
-    if not section:
-        return {
-            "valid": False,
-            "reason": "Invalid structural section"
-        }
-
-    if direction == "LONG":
+        entry = candle["close"]
 
         structural_low = min(
-            c["low"] for c in section
+            c["low"]
+            for c in candles[
+                break_info["index"]: index + 1
+            ]
         )
 
-        entry = entry_candle["close"]
-
         sl = (
-            structural_low
-            - atr_value * SL_BUFFER_ATR
+            structural_low *
+            (1 - SL_BUFFER_PERCENT)
         )
 
         risk = entry - sl
 
         if risk <= 0:
-            return {
-                "valid": False,
-                "reason": "Invalid LONG risk"
-            }
+            return None
 
         tp = entry + risk
 
+        side = "LONG"
+
     else:
 
+        entry = candle["close"]
+
         structural_high = max(
-            c["high"] for c in section
+            c["high"]
+            for c in candles[
+                break_info["index"]: index + 1
+            ]
         )
 
-        entry = entry_candle["close"]
-
         sl = (
-            structural_high
-            + atr_value * SL_BUFFER_ATR
+            structural_high *
+            (1 + SL_BUFFER_PERCENT)
         )
 
         risk = sl - entry
 
         if risk <= 0:
-            return {
-                "valid": False,
-                "reason": "Invalid SHORT risk"
-            }
+            return None
 
         tp = entry - risk
 
-    stop_percent = (
-        risk / entry
-    ) * 100
-
-    if stop_percent < MIN_STOP_PERCENT:
-
-        return {
-            "valid": False,
-            "reason": (
-                f"Stop too tight: "
-                f"{stop_percent:.2f}%"
-            ),
-            "break": break_data,
-            "pullback": pullback,
-            "reversal": reversal
-        }
-
-    if stop_percent > MAX_STOP_PERCENT:
-
-        return {
-            "valid": False,
-            "reason": (
-                f"Stop too wide: "
-                f"{stop_percent:.2f}%"
-            ),
-            "break": break_data,
-            "pullback": pullback,
-            "reversal": reversal
-        }
+        side = "SHORT"
 
     return {
-        "valid": True,
-        "direction": direction,
-        "pivot": pivot,
-        "break": break_data,
-        "pullback": pullback,
-        "reversal": reversal,
-        "entry_candle": entry_candle,
+        "side": side,
         "entry": entry,
         "sl": sl,
         "tp": tp,
         "risk": risk,
-        "stop_percent": stop_percent,
-        "rr": RR,
-        "structural_low": (
-            structural_low
-            if direction == "LONG"
-            else None
-        ),
-        "structural_high": (
-            structural_high
-            if direction == "SHORT"
-            else None
-        )
+        "pattern": confirmation["pattern"],
+        "break_level": break_info["level"],
+        "break_index": break_info["index"],
+        "confirmation_index": confirmation["index"]
     }
 
 
 # ============================================================
-# PRICE FORMAT
+# ANALYSIS
 # ============================================================
 
-def format_price(price):
+def analyze(symbol, timeframe):
 
-    if price is None:
-        return "-"
+    symbol = normalize_symbol(symbol)
 
-    if price >= 1000:
-        return f"{price:,.2f}"
-
-    if price >= 1:
-        return f"{price:.4f}"
-
-    if price >= 0.01:
-        return f"{price:.6f}"
-
-    if price >= 0.0001:
-        return f"{price:.8f}"
-
-    return f"{price:.10f}"
-
-
-# ============================================================
-# TIME
-# ============================================================
-
-def timeframe_label(tf):
-    return tf.upper()
-
-
-# ============================================================
-# ANALYSIS ENGINE
-# ============================================================
-
-def analyze_symbol(symbol_input, timeframe):
-
-    symbol = normalize_symbol(symbol_input)
-
-    candles = get_candles(
+    candles = get_kraken_candles(
         symbol,
         timeframe
     )
 
-    if len(candles) < 50:
-        raise RuntimeError(
-            "Not enough closed candles."
-        )
+    highs, lows = find_pivots(candles)
 
-    atr_value = atr(candles)
-
-    if atr_value is None:
-        raise RuntimeError(
-            "ATR could not be calculated."
-        )
-
-    pivots = find_pivots(candles)
-
-    if len(pivots) < 4:
-        return {
-            "valid": False,
-            "symbol_input": symbol_input.upper(),
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "reason": "Not enough confirmed Pivots",
-            "candles": len(candles),
-            "pivots": pivots
-        }
-
-    trend_data = determine_trend(pivots)
-
-    break_data = detect_break(
-        candles,
-        pivots,
-        trend_data,
-        atr_value
+    trend = determine_trend(
+        highs,
+        lows
     )
 
-    setup = find_setup(
+    break_info = detect_break(
         candles,
-        trend_data,
-        break_data,
-        atr_value
+        highs,
+        lows,
+        trend
     )
 
-    return {
-        "valid": setup.get("valid", False),
-        "symbol_input": symbol_input.upper(),
+    result = {
         "symbol": symbol,
         "timeframe": timeframe,
-        "candles": candles,
-        "pivots": pivots,
-        "atr": atr_value,
-        "trend": trend_data,
-        "structure": structure_description(
-            trend_data
-        ),
-        "break": break_data,
-        "setup": setup
+        "trend": trend,
+        "candles": len(candles),
+        "pivots_high": len(highs),
+        "pivots_low": len(lows),
+        "break": None,
+        "confirmation": None,
+        "setup": None
     }
 
+    if not break_info:
+        return result
+
+    result["break"] = break_info
+
+    confirmation = reversal_confirmation(
+        candles,
+        break_info
+    )
+
+    if not confirmation:
+        return result
+
+    result["confirmation"] = confirmation
+
+    setup = build_trade_setup(
+        candles,
+        break_info,
+        confirmation
+    )
+
+    result["setup"] = setup
+
+    return result
+
 
 # ============================================================
-# REPORT
+# FORMAT REPORT
 # ============================================================
+
+def fmt_price(value):
+
+    if value is None:
+        return "-"
+
+    value = float(value)
+
+    if value >= 1000:
+        return f"{value:,.2f}"
+
+    if value >= 1:
+        return f"{value:.4f}"
+
+    if value >= 0.01:
+        return f"{value:.6f}"
+
+    return f"{value:.8f}"
+
+
+def trend_text(trend):
+
+    mapping = {
+        "UP": "🟢 صعودی",
+        "DOWN": "🔴 نزولی",
+        "RANGE": "🟡 رنج"
+    }
+
+    return mapping.get(
+        trend,
+        trend
+    )
+
 
 def build_report(result):
 
-    symbol = result["symbol_input"]
-    tf = timeframe_label(
-        result["timeframe"]
+    symbol = result["symbol"]
+    timeframe = result["timeframe"]
+
+    lines = []
+
+    lines.append("📊 KRAKEN STRATEGY ANALYSIS")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(f"💰 {symbol}")
+    lines.append(f"⏱ تایم‌فریم: {timeframe}")
+    lines.append(
+        f"📈 روند: {trend_text(result['trend'])}"
+    )
+    lines.append(
+        f"🕯 کندل بسته‌شده: {result['candles']}"
+    )
+    lines.append(
+        f"🔺 Pivot High: {result['pivots_high']}"
+    )
+    lines.append(
+        f"🔻 Pivot Low: {result['pivots_low']}"
     )
 
-    candles_count = result.get(
-        "candles",
-        []
+    if not result["break"]:
+
+        lines.append("")
+        lines.append("❌ شکست روند معتبر پیدا نشد.")
+        lines.append("⏳ وضعیت: NO TRADE")
+
+        return "\n".join(lines)
+
+    br = result["break"]
+
+    lines.append("")
+    lines.append("⚡ TREND BREAK")
+    lines.append(
+        f"نوع شکست: {br['direction']}"
+    )
+    lines.append(
+        f"سطح شکست: {fmt_price(br['level'])}"
     )
 
-    if isinstance(candles_count, list):
-        candles_count = len(candles_count)
+    if not result["confirmation"]:
 
-    pivots = result.get("pivots", [])
-
-    trend_data = result.get("trend")
-
-    atr_value = result.get("atr")
-
-    structure = result.get(
-        "structure",
-        "UNKNOWN"
-    )
-
-    report = []
-
-    report.append(
-        f"📊 PIVOT TREND ANALYSIS"
-    )
-
-    report.append(
-        f"💰 {symbol} | {tf}"
-    )
-
-    report.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    report.append(
-        f"🕯 Closed Candles: {candles_count}"
-    )
-
-    report.append(
-        f"🔹 Confirmed Pivots: {len(pivots)}"
-    )
-
-    if atr_value:
-        report.append(
-            f"📐 ATR: {format_price(atr_value)}"
+        lines.append("")
+        lines.append(
+            "⏳ پولبک/ریتست و کندل برگشتی معتبر هنوز تأیید نشده."
         )
+        lines.append("وضعیت: WAIT")
 
-    report.append(
-        "━━━━━━━━━━━━━━━━━━"
+        return "\n".join(lines)
+
+    conf = result["confirmation"]
+
+    lines.append("")
+    lines.append("🔄 REVERSAL CONFIRMATION")
+    lines.append(
+        f"🕯 الگو: {conf['pattern']}"
+    )
+    lines.append(
+        f"📍 Retest Level: {fmt_price(conf['level'])}"
     )
 
-    # --------------------------------------------------------
-    # TREND
-    # --------------------------------------------------------
+    setup = result["setup"]
 
-    if not trend_data:
+    if not setup:
 
-        report.append(
-            "📈 TREND: UNKNOWN"
-        )
+        lines.append("")
+        lines.append("⚠️ Setup ساخته نشد.")
+        lines.append("وضعیت: NO TRADE")
 
-    else:
+        return "\n".join(lines)
 
-        trend = trend_data["trend"]
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        f"🚨 SIGNAL: {setup['side']}"
+    )
+    lines.append("━━━━━━━━━━━━━━━━━━")
 
-        if trend == "UP":
-            trend_text = "🟢 UP TREND"
-
-        elif trend == "DOWN":
-            trend_text = "🔴 DOWN TREND"
-
-        elif trend == "RANGE":
-            trend_text = "🟡 RANGE"
-
-        else:
-            trend_text = "⚪ UNKNOWN"
-
-        report.append(
-            f"📈 TREND: {trend_text}"
-        )
-
-        report.append(
-            f"Structure: {structure}"
-        )
-
-        h1 = trend_data.get("h1")
-        h2 = trend_data.get("h2")
-        l1 = trend_data.get("l1")
-        l2 = trend_data.get("l2")
-
-        if h1:
-            report.append(
-                f"Previous PH: "
-                f"{format_price(h1['price'])}"
-            )
-
-        if h2:
-            report.append(
-                f"Latest PH: "
-                f"{format_price(h2['price'])}"
-            )
-
-        if l1:
-            report.append(
-                f"Previous PL: "
-                f"{format_price(l1['price'])}"
-            )
-
-        if l2:
-            report.append(
-                f"Latest PL: "
-                f"{format_price(l2['price'])}"
-            )
-
-    report.append(
-        "━━━━━━━━━━━━━━━━━━"
+    lines.append(
+        f"🎯 Entry: {fmt_price(setup['entry'])}"
     )
 
-    # --------------------------------------------------------
-    # BREAK
-    # --------------------------------------------------------
-
-    break_data = result.get("break")
-
-    if not break_data:
-
-        report.append(
-            "💥 TREND BREAK: ❌"
-        )
-
-        report.append(
-            "Reason: No confirmed Pivot break."
-        )
-
-        report.append(
-            "━━━━━━━━━━━━━━━━━━"
-        )
-
-        report.append(
-            "⚪ RESULT: NO TRADE"
-        )
-
-        return "\n".join(report)
-
-    direction = break_data["direction"]
-
-    report.append(
-        f"💥 TREND BREAK: "
-        f"✅ {direction}"
+    lines.append(
+        f"🛑 SL: {fmt_price(setup['sl'])}"
     )
 
-    report.append(
-        f"Broken Pivot: "
-        f"{format_price(break_data['pivot']['price'])}"
+    lines.append(
+        f"🎯 TP: {fmt_price(setup['tp'])}"
     )
 
-    report.append(
-        f"Break Close: "
-        f"{format_price(break_data['break_price'])}"
+    lines.append(
+        f"📐 RR: 1:{RR:.0f}"
     )
 
-    report.append(
-        "Close Confirmation: ✅"
+    lines.append(
+        f"🕯 Confirmation: {setup['pattern']}"
     )
 
-    report.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
+    lines.append("")
+    lines.append("⚠️ این سیگنال بر اساس کندل‌های بسته‌شده است.")
 
-    # --------------------------------------------------------
-    # PULLBACK
-    # --------------------------------------------------------
-
-    setup = result.get("setup", {})
-
-    pullback = setup.get(
-        "pullback"
-    )
-
-    if not pullback:
-
-        report.append(
-            "🔄 PULLBACK: ❌"
-        )
-
-    elif pullback.get("touched"):
-
-        report.append(
-            "🔄 PULLBACK / RETEST: ✅"
-        )
-
-        report.append(
-            f"Retest Price: "
-            f"{format_price("
-                pullback['candle']['close']
-            )}"
-        )
-
-        report.append(
-            "Pivot Retest: ✅"
-        )
-
-        if pullback.get("rejection"):
-            report.append(
-                "Pivot Rejection: ✅"
-            )
-        else:
-            report.append(
-                "Pivot Rejection: ⚠️"
-            )
-
-    else:
-
-        report.append(
-            "🔄 PULLBACK: ❌"
-        )
-
-    report.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    # --------------------------------------------------------
-    # REVERSAL
-    # --------------------------------------------------------
-
-    reversal = setup.get(
-        "reversal"
-    )
-
-    if reversal and reversal.get("valid"):
-
-        report.append(
-            f"🕯 REVERSAL: ✅"
-        )
-
-        report.append(
-            f"Pattern: "
-            f"{reversal.get('name')}"
-        )
-
-    else:
-
-        report.append(
-            "🕯 REVERSAL: ❌"
-        )
-
-        reason = setup.get(
-            "reason",
-            "No valid reversal candle"
-        )
-
-        report.append(
-            f"Reason: {reason}"
-        )
-
-        report.append(
-            "━━━━━━━━━━━━━━━━━━"
-        )
-
-        report.append(
-            "⚪ RESULT: NO TRADE"
-        )
-
-        return "\n".join(report)
-
-    # --------------------------------------------------------
-    # VALID SETUP
-    # --------------------------------------------------------
-
-    if not setup.get("valid"):
-
-        report.append(
-            "━━━━━━━━━━━━━━━━━━"
-        )
-
-        report.append(
-            "⚪ RESULT: NO TRADE"
-        )
-
-        return "\n".join(report)
-
-    report.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    report.append(
-        "🚀 VALID SETUP"
-    )
-
-    if setup["direction"] == "LONG":
-        report.append(
-            "🟢 DIRECTION: LONG"
-        )
-    else:
-        report.append(
-            "🔴 DIRECTION: SHORT"
-        )
-
-    report.append(
-        f"Entry: "
-        f"{format_price(setup['entry'])}"
-    )
-
-    report.append(
-        f"SL: "
-        f"{format_price(setup['sl'])}"
-    )
-
-    report.append(
-        f"TP: "
-        f"{format_price(setup['tp'])}"
-    )
-
-    report.append(
-        f"Risk: "
-        f"{setup['stop_percent']:.2f}%"
-    )
-
-    report.append(
-        f"RR: 1:{setup['rr']:.0f}"
-    )
-
-    report.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    report.append(
-        "✅ FINAL SIGNAL"
-    )
-
-    if setup["direction"] == "LONG":
-        report.append(
-            "🟢 LONG"
-        )
-    else:
-        report.append(
-            "🔴 SHORT"
-        )
-
-    return "\n".join(report)
+    return "\n".join(lines)
 
 
 # ============================================================
-# TELEGRAM COMMAND PARSER
+# COMMAND PARSER
 # ============================================================
 
 def parse_command(text):
@@ -1718,188 +1121,86 @@ def parse_command(text):
 
     text = text.strip()
 
-    # Remove bot username if Telegram sends it
-    text = re.sub(
-        r"@\w+",
-        "",
-        text
-    ).strip()
+    # Remove multiple spaces
+    parts = text.split()
 
-    # ---------------------------------------------
-    # Persian:
-    #
-    # تحلیل BTC 15m
-    # ---------------------------------------------
+    if not parts:
+        return None
 
-    pattern_analysis = re.match(
-        r"^(?:تحلیل|تحليل)\s+"
-        r"([A-Za-z0-9_\-/]+)"
-        r"(?:\s+([A-Za-z0-9]+))?"
-        r"\s*$",
-        text,
-        re.IGNORECASE
-    )
+    # --------------------------------------------------------
+    # Persian command
+    # --------------------------------------------------------
 
-    if pattern_analysis:
+    if parts[0] == "تحلیل":
 
-        symbol = pattern_analysis.group(1)
+        if len(parts) < 3:
+            return None
 
-        tf = (
-            pattern_analysis.group(2)
-            or "15m"
-        )
+        symbol = parts[1]
+        timeframe = parts[2].lower()
 
-        tf = normalize_timeframe(tf)
+        return symbol, timeframe
 
-        if tf not in TIMEFRAME_MAP:
-            return {
-                "error":
-                    f"Timeframe not supported: {tf}"
-            }
+    # --------------------------------------------------------
+    # English command
+    # --------------------------------------------------------
 
-        return {
-            "symbol": symbol,
-            "timeframe": tf
-        }
-
-    # ---------------------------------------------
-    # /check BTC 15m
-    # ---------------------------------------------
-
-    pattern_check = re.match(
-        r"^/check\s+"
-        r"([A-Za-z0-9_\-/]+)"
-        r"(?:\s+([A-Za-z0-9]+))?"
-        r"\s*$",
-        text,
-        re.IGNORECASE
-    )
-
-    if pattern_check:
-
-        symbol = pattern_check.group(1)
-
-        tf = (
-            pattern_check.group(2)
-            or "15m"
-        )
-
-        tf = normalize_timeframe(tf)
-
-        if tf not in TIMEFRAME_MAP:
-            return {
-                "error":
-                    f"Timeframe not supported: {tf}"
-            }
-
-        return {
-            "symbol": symbol,
-            "timeframe": tf
-        }
-
-    # ---------------------------------------------
-    # HELP
-    # ---------------------------------------------
-
-    if text in (
-        "/start",
-        "/help",
-        "راهنما",
-        "کمک"
+    if parts[0].lower() in (
+        "/check",
+        "check"
     ):
-        return {
-            "help": True
-        }
+
+        if len(parts) < 3:
+            return None
+
+        symbol = parts[1]
+        timeframe = parts[2].lower()
+
+        return symbol, timeframe
 
     return None
 
 
 # ============================================================
-# TELEGRAM UPDATES
+# HELP
 # ============================================================
 
-def telegram_get_updates(offset=None):
+HELP_TEXT = """
+🤖 KRAKEN STRATEGY BOT
 
-    if not TELEGRAM_BOT_TOKEN:
-        raise RuntimeError(
-            "TELEGRAM_BOT_TOKEN is not configured."
-        )
+دستور تحلیل:
 
-    url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}/getUpdates"
-    )
+تحلیل BTC 5m
+تحلیل BTC 15m
+تحلیل BTC 30m
+تحلیل BTC 1h
+تحلیل BTC 4h
 
-    params = {
-        "timeout": 25,
-        "allowed_updates": ["message"]
-    }
+یا:
 
-    if offset is not None:
-        params["offset"] = offset
+/check BTC 5m
 
-    try:
+تایم‌فریم‌های مجاز:
+1m
+5m
+15m
+30m
+1h
+4h
 
-        r = SESSION.get(
-            url,
-            params=params,
-            timeout=35
-        )
+استراتژی:
+Pivot → Trend Break → Pullback/Retest
+→ Reversal Candle → Entry → SL → TP
 
-        r.raise_for_status()
-
-        data = r.json()
-
-        if not data.get("ok"):
-            raise RuntimeError(
-                str(data)
-            )
-
-        return data.get(
-            "result",
-            []
-        )
-
-    except Exception as e:
-
-        log(
-            f"Telegram getUpdates error: {e}"
-        )
-
-        return []
+RR = 1:1
+"""
 
 
 # ============================================================
-# HELP MESSAGE
+# HANDLE MESSAGE
 # ============================================================
 
-def help_message():
-
-    return (
-        "🤖 PIVOT TREND ANALYZER\n\n"
-        "دستور تحلیل:\n\n"
-        "تحلیل BTC 5m\n"
-        "تحلیل BTC 15m\n"
-        "تحلیل BTC 30m\n"
-        "تحلیل BTC 1h\n"
-        "تحلیل BTC 4h\n\n"
-        "یا:\n\n"
-        "/check BTC 15m\n\n"
-        "استراتژی:\n"
-        "Pivot معتبر → Trend → Break → "
-        "Pullback → Reversal → Entry → SL → TP\n\n"
-        "RR = 1:1"
-    )
-
-
-# ============================================================
-# PROCESS MESSAGE
-# ============================================================
-
-def process_message(message):
-
-    if not message:
-        return
+def handle_message(message):
 
     chat = message.get("chat", {})
 
@@ -1912,52 +1213,73 @@ def process_message(message):
         ""
     ).strip()
 
-    if not text:
+    if not chat_id:
         return
 
-    log(
-        f"Telegram message "
-        f"from {chat_id}: {text}"
-    )
+    # --------------------------------------------------------
+    # /start
+    # --------------------------------------------------------
+
+    if text.lower() in (
+        "/start",
+        "/help",
+        "help"
+    ):
+
+        send_telegram(
+            HELP_TEXT,
+            chat_id
+        )
+
+        return
 
     parsed = parse_command(text)
 
-    if parsed is None:
-        return
+    if not parsed:
 
-    if parsed.get("help"):
-
-        telegram_send(
-            help_message()
+        send_telegram(
+            "❌ دستور نامعتبر.\n\n"
+            "مثال:\n"
+            "تحلیل BTC 5m\n\n"
+            "یا:\n"
+            "/check BTC 15m",
+            chat_id
         )
 
         return
 
-    if parsed.get("error"):
+    symbol, timeframe = parsed
 
-        telegram_send(
-            "❌ "
-            + parsed["error"]
-            + "\n\n"
-            + help_message()
+    try:
+
+        resolution_to_minutes(
+            timeframe
+        )
+
+    except Exception:
+
+        send_telegram(
+            "❌ تایم‌فریم نامعتبر.\n\n"
+            "مجاز:\n"
+            "1m, 5m, 15m, 30m, 1h, 4h",
+            chat_id
         )
 
         return
 
-    symbol = parsed["symbol"]
-    timeframe = parsed["timeframe"]
+    # --------------------------------------------------------
+    # Processing message
+    # --------------------------------------------------------
 
-    telegram_send(
-        f"⏳ در حال تحلیل "
-        f"{symbol.upper()} "
-        f"{timeframe.upper()} ...\n\n"
-        f"Pivot → Trend → Break → "
-        f"Pullback → Reversal"
+    send_telegram(
+        f"🔎 در حال بررسی {symbol.upper()} "
+        f"در تایم‌فریم {timeframe} ...",
+        chat_id
     )
 
     try:
 
-        result = analyze_symbol(
+        result = analyze(
             symbol,
             timeframe
         )
@@ -1966,87 +1288,50 @@ def process_message(message):
             result
         )
 
-        telegram_send(report)
+        send_telegram(
+            report,
+            chat_id
+        )
 
     except Exception as e:
 
-        log(
-            f"Analysis error: {e}"
+        print(
+            "Analysis error:",
+            repr(e)
         )
 
-        telegram_send(
-            f"❌ خطا در تحلیل "
-            f"{symbol.upper()} "
-            f"{timeframe.upper()}\n\n"
-            f"{str(e)[:800]}"
+        traceback.print_exc()
+
+        send_telegram(
+            "❌ خطا در تحلیل.\n\n"
+            f"ارز: {symbol.upper()}\n"
+            f"تایم‌فریم: {timeframe}\n\n"
+            "ممکن است نماد در Kraken Futures "
+            "وجود نداشته باشد یا API موقتاً پاسخ ندهد.",
+            chat_id
         )
 
 
 # ============================================================
-# MAIN LOOP
+# TELEGRAM LISTENER
 # ============================================================
 
-def main():
-
-    print(
-        """
-============================================================
-KRAKEN FUTURES PIVOT TREND TELEGRAM LISTENER v1.0
-============================================================
-
-Commands:
-
-تحلیل BTC 5m
-تحلیل BTC 15m
-تحلیل BTC 30m
-تحلیل BTC 1h
-تحلیل BTC 4h
-
-/check BTC 15m
-
-Strategy:
-
-Pivot
-  ↓
-Trend
-  ↓
-Break by CLOSED candle
-  ↓
-Pullback
-  ↓
-Reversal candle
-  ↓
-Entry
-  ↓
-Structural SL
-  ↓
-RR 1:1 TP
-
-============================================================
-"""
-    )
+def listener_loop():
 
     if not TELEGRAM_BOT_TOKEN:
 
-        log(
-            "ERROR: TELEGRAM_BOT_TOKEN "
-            "is missing."
+        raise RuntimeError(
+            "TELEGRAM_BOT_TOKEN is not configured."
         )
 
-        return
-
-    if not TELEGRAM_CHAT_ID:
-
-        log(
-            "WARNING: TELEGRAM_CHAT_ID "
-            "is missing."
-        )
+    print("=" * 60)
+    print("TELEGRAM LISTENER v2.0")
+    print("=" * 60)
+    print("Listener started.")
+    print("Waiting for Telegram commands...")
+    print("=" * 60)
 
     offset = None
-
-    log(
-        "Listener started."
-    )
 
     while True:
 
@@ -2070,32 +1355,104 @@ RR 1:1 TP
                     "message"
                 )
 
-                if message:
+                if not message:
+                    continue
 
-                    process_message(
+                try:
+
+                    handle_message(
                         message
                     )
 
+                except Exception as e:
+
+                    print(
+                        "Message handling error:",
+                        repr(e)
+                    )
+
+                    traceback.print_exc()
+
+            # Small pause prevents excessive requests
+            if not updates:
+                time.sleep(0.5)
+
+        except requests.exceptions.Timeout:
+
+            print(
+                "Telegram polling timeout. Reconnecting..."
+            )
+
+            time.sleep(
+                POLL_RETRY_SECONDS
+            )
+
+        except requests.exceptions.ConnectionError:
+
+            print(
+                "Network connection error. Reconnecting..."
+            )
+
+            time.sleep(
+                ERROR_RETRY_SECONDS
+            )
+
+        except requests.exceptions.HTTPError as e:
+
+            print(
+                "Telegram HTTP error:",
+                repr(e)
+            )
+
+            time.sleep(
+                ERROR_RETRY_SECONDS
+            )
+
+        except Exception as e:
+
+            print(
+                "Listener error:",
+                repr(e)
+            )
+
+            traceback.print_exc()
+
+            time.sleep(
+                ERROR_RETRY_SECONDS
+            )
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if __name__ == "__main__":
+
+    while True:
+
+        try:
+
+            listener_loop()
+
         except KeyboardInterrupt:
 
-            log(
-                "Listener stopped."
+            print(
+                "Listener stopped manually."
             )
 
             break
 
         except Exception as e:
 
-            log(
-                f"Main loop error: {e}"
+            print(
+                "FATAL ERROR:",
+                repr(e)
             )
 
-            time.sleep(5)
+            traceback.print_exc()
 
+            print(
+                "Restarting listener in 15 seconds..."
+            )
 
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-    main()
+            time.sleep(15)
