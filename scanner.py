@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES VOLUME-KHAT 100
-# VERSION 3.5
+# VERSION 3.6
 # ============================================================
 #
 # STRATEGY:
@@ -8,18 +8,15 @@
 #   15M = SETUP
 #   5M  = CONFIRMATION / ENTRY
 #
-# CHANGES v3.5:
+# v3.6 CHANGES:
 #   - Strategy logic preserved
 #   - SL must be between 0.50% and 0.80%
-#   - SL below 0.50% -> REJECT
-#   - SL above 0.80% -> REJECT
-#   - Compact Telegram report
-#   - Only new signals
-#   - Open trades + live PnL
-#   - Win / Loss / Win Rate / Realized PnL
-#   - LONG = green emoji
-#   - SHORT = red emoji
-#   - Removed diagnostics / top candidate / closed detail
+#   - Diagnostic rejection counters
+#   - ONLY TOP CANDIDATE shown
+#   - Exact rejection reason for TOP CANDIDATE
+#   - New signals
+#   - Open trades + PnL
+#   - Performance statistics
 #
 # ============================================================
 
@@ -78,11 +75,6 @@ WICK_BODY_RATIO = 1.15
 
 ATR_PERIOD = 14
 ATR_SL_BUFFER = 0.15
-
-# ------------------------------------------------------------
-# IMPORTANT
-# SL MUST BE BETWEEN 0.50% AND 0.80%
-# ------------------------------------------------------------
 
 MIN_SL_PCT = 0.0050
 MAX_SL_PCT = 0.0080
@@ -150,7 +142,7 @@ SESSION = requests.Session()
 
 SESSION.headers.update(
     {
-        "User-Agent": "VOLUME-KHAT-100/3.5"
+        "User-Agent": "VOLUME-KHAT-100/3.6"
     }
 )
 
@@ -254,7 +246,6 @@ def http_get(
             last_error = e
 
             if attempt < retries - 1:
-
                 time.sleep(1.5)
 
     raise last_error
@@ -307,10 +298,6 @@ def init_db():
 
     conn.commit()
 
-    # --------------------------------------------------------
-    # Automatic migration
-    # --------------------------------------------------------
-
     cur.execute(
         "PRAGMA table_info(trades)"
     )
@@ -321,7 +308,6 @@ def init_db():
     }
 
     required_columns = {
-
         "symbol": "TEXT",
         "side": "TEXT",
         "setup": "TEXT",
@@ -336,15 +322,11 @@ def init_db():
         "entry_time": "TEXT",
         "exit_time": "TEXT",
         "exit_reason": "TEXT",
-        "closed_reported": (
-            "INTEGER DEFAULT 0"
-        ),
+        "closed_reported": "INTEGER DEFAULT 0",
         "created_at": "TEXT"
     }
 
-    for name, definition in (
-        required_columns.items()
-    ):
+    for name, definition in required_columns.items():
 
         if name not in columns:
 
@@ -356,11 +338,6 @@ def init_db():
                     f"{definition}"
                 )
 
-                print(
-                    f"DB migration: "
-                    f"added column {name}"
-                )
-
             except Exception as e:
 
                 print(
@@ -369,10 +346,6 @@ def init_db():
                 )
 
     conn.commit()
-
-    # --------------------------------------------------------
-    # Repair NULL closed_reported
-    # --------------------------------------------------------
 
     try:
 
@@ -388,10 +361,6 @@ def init_db():
 
     except Exception:
         pass
-
-    # --------------------------------------------------------
-    # Indexes
-    # --------------------------------------------------------
 
     try:
 
@@ -458,9 +427,7 @@ def get_open_count():
     return int(row["c"])
 
 
-def get_last_trade_for_symbol(
-    symbol
-):
+def get_last_trade_for_symbol(symbol):
 
     conn = get_db()
 
@@ -611,14 +578,10 @@ def get_top_markets():
         if not symbol:
             continue
 
-        if not symbol.startswith(
-            "PF_"
-        ):
+        if not symbol.startswith("PF_"):
             continue
 
-        if not symbol.endswith(
-            "USD"
-        ):
+        if not symbol.endswith("USD"):
             continue
 
         volume = (
@@ -629,13 +592,8 @@ def get_top_markets():
         )
 
         try:
-
-            volume = float(
-                volume
-            )
-
+            volume = float(volume)
         except Exception:
-
             volume = 0.0
 
         markets.append(
@@ -688,10 +646,7 @@ def fetch_ohlcv(
     )
 
     if not rows:
-
-        raise ValueError(
-            "No candle data"
-        )
+        raise ValueError("No candle data")
 
     parsed = []
 
@@ -699,10 +654,7 @@ def fetch_ohlcv(
 
         try:
 
-            if isinstance(
-                row,
-                dict
-            ):
+            if isinstance(row, dict):
 
                 ts = (
                     row.get("time")
@@ -741,14 +693,11 @@ def fetch_ohlcv(
                 if len(row) < 6:
                     continue
 
-                ts, o, h, l, c, v = (
-                    row[:6]
-                )
+                ts, o, h, l, c, v = row[:6]
 
             ts = float(ts)
 
             if ts > 10_000_000_000:
-
                 ts /= 1000
 
             parsed.append(
@@ -770,15 +719,11 @@ def fetch_ohlcv(
             continue
 
     if len(parsed) < 60:
-
         raise ValueError(
-            f"Insufficient candles: "
-            f"{len(parsed)}"
+            f"Insufficient candles: {len(parsed)}"
         )
 
-    df = pd.DataFrame(
-        parsed
-    )
+    df = pd.DataFrame(parsed)
 
     df = df.drop_duplicates(
         subset=["timestamp"]
@@ -790,18 +735,11 @@ def fetch_ohlcv(
         drop=True
     )
 
-    # --------------------------------------------------------
     # CLOSED CANDLES ONLY
-    # --------------------------------------------------------
-
     if len(df) > 1:
-
-        df = df.iloc[
-            :-1
-        ].copy()
+        df = df.iloc[:-1].copy()
 
     if len(df) < 60:
-
         raise ValueError(
             "Not enough CLOSED candles"
         )
@@ -822,10 +760,7 @@ def calculate_rvol(
     period=RVOL_PERIOD
 ):
 
-    volume = (
-        df["volume"]
-        .astype(float)
-    )
+    volume = df["volume"].astype(float)
 
     avg = (
         volume
@@ -839,9 +774,7 @@ def calculate_rvol(
     previous_avg = avg.iloc[-1]
 
     if (
-        not np.isfinite(
-            previous_avg
-        )
+        not np.isfinite(previous_avg)
         or previous_avg <= 0
     ):
         return 0.0
@@ -912,17 +845,9 @@ def get_trend(df):
         .mean()
     )
 
-    c = float(
-        close.iloc[-1]
-    )
-
-    s20 = float(
-        sma20.iloc[-1]
-    )
-
-    s50 = float(
-        sma50.iloc[-1]
-    )
+    c = float(close.iloc[-1])
+    s20 = float(sma20.iloc[-1])
+    s50 = float(sma50.iloc[-1])
 
     if (
         np.isfinite(c)
@@ -986,14 +911,10 @@ def detect_breakout(
     trend
 ):
 
-    if len(df15) < (
-        BREAKOUT_LOOKBACK + 2
-    ):
+    if len(df15) < BREAKOUT_LOOKBACK + 2:
         return None
 
-    rvol = calculate_rvol(
-        df15
-    )
+    rvol = calculate_rvol(df15)
 
     last = df15.iloc[-1]
 
@@ -1009,16 +930,13 @@ def detect_breakout(
         previous["low"].min()
     )
 
-    close = float(
-        last["close"]
-    )
+    close = float(last["close"])
 
     if (
         trend == "LONG"
         and close > previous_high
         and rvol >= RVOL_ABNORMAL
     ):
-
         return "BREAKOUT"
 
     if (
@@ -1026,7 +944,6 @@ def detect_breakout(
         and close < previous_low
         and rvol >= RVOL_ABNORMAL
     ):
-
         return "BREAKOUT"
 
     return None
@@ -1044,9 +961,7 @@ def detect_rejection(
     if len(df15) < 30:
         return None
 
-    rvol = calculate_rvol(
-        df15
-    )
+    rvol = calculate_rvol(df15)
 
     if rvol < RVOL_ABNORMAL:
         return None
@@ -1075,17 +990,8 @@ def detect_rejection(
         min(o, c) - l
     )
 
-    support = get_support(
-        df15
-    )
-
-    resistance = get_resistance(
-        df15
-    )
-
-    # --------------------------------------------------------
-    # LONG rejection
-    # --------------------------------------------------------
+    support = get_support(df15)
+    resistance = get_resistance(df15)
 
     if trend == "LONG":
 
@@ -1104,12 +1010,7 @@ def detect_rejection(
             and lower_wick
             >= body * WICK_BODY_RATIO
         ):
-
             return "REJECTION"
-
-    # --------------------------------------------------------
-    # SHORT rejection
-    # --------------------------------------------------------
 
     if trend == "SHORT":
 
@@ -1128,7 +1029,6 @@ def detect_rejection(
             and upper_wick
             >= body * WICK_BODY_RATIO
         ):
-
             return "REJECTION"
 
     return None
@@ -1193,17 +1093,13 @@ def confirm_5m(
     )
 
     if side == "LONG":
-
         direction_ok = c > o
-
     else:
-
         direction_ok = c < o
 
     confirmed = (
         direction_ok
-        and body_ratio
-        >= MIN_BODY_RATIO
+        and body_ratio >= MIN_BODY_RATIO
     )
 
     return (
@@ -1243,12 +1139,8 @@ def build_sl_tp(
 
     atr_values = [
         x
-        for x in [
-            atr15,
-            atr1h
-        ]
-        if np.isfinite(x)
-        and x > 0
+        for x in [atr15, atr1h]
+        if np.isfinite(x) and x > 0
     ]
 
     if not atr_values:
@@ -1258,25 +1150,13 @@ def build_sl_tp(
             "reason": "NO ATR"
         }
 
-    atr = min(
-        atr_values
-    )
+    atr = min(atr_values)
 
-    support15 = get_support(
-        df15
-    )
+    support15 = get_support(df15)
+    resistance15 = get_resistance(df15)
 
-    resistance15 = get_resistance(
-        df15
-    )
-
-    support1h = get_support(
-        df1h
-    )
-
-    resistance1h = get_resistance(
-        df1h
-    )
+    support1h = get_support(df1h)
+    resistance1h = get_resistance(df1h)
 
     # ========================================================
     # LONG
@@ -1305,10 +1185,6 @@ def build_sl_tp(
         sl = None
         sl_method = None
 
-        # ----------------------------------------------------
-        # Structural SL
-        # ----------------------------------------------------
-
         if structural_sl is not None:
 
             candidate_sl = (
@@ -1324,21 +1200,13 @@ def build_sl_tp(
                 )
 
                 if (
-                    candidate_sl_pct
-                    >= MIN_SL_PCT
-                    and
-                    candidate_sl_pct
+                    MIN_SL_PCT
+                    <= candidate_sl_pct
                     <= MAX_SL_PCT
                 ):
 
                     sl = candidate_sl
-                    sl_method = (
-                        "STRUCTURAL"
-                    )
-
-        # ----------------------------------------------------
-        # ATR fallback
-        # ----------------------------------------------------
+                    sl_method = "STRUCTURAL"
 
         if sl is None:
 
@@ -1358,10 +1226,6 @@ def build_sl_tp(
                 (entry - candidate_sl)
                 / entry
             )
-
-            # ------------------------------------------------
-            # IMPORTANT SL RANGE FILTER
-            # ------------------------------------------------
 
             if candidate_sl_pct < MIN_SL_PCT:
 
@@ -1390,10 +1254,6 @@ def build_sl_tp(
             sl = candidate_sl
             sl_method = "ATR"
 
-        # ----------------------------------------------------
-        # Final SL validation
-        # ----------------------------------------------------
-
         risk = entry - sl
 
         if risk <= 0:
@@ -1403,17 +1263,14 @@ def build_sl_tp(
                 "reason": "INVALID LONG RISK"
             }
 
-        sl_pct = (
-            risk / entry
-        )
+        sl_pct = risk / entry
 
         if sl_pct < MIN_SL_PCT:
 
             return {
                 "valid": False,
                 "reason": (
-                    f"SL "
-                    f"{sl_pct * 100:.2f}% "
+                    f"SL {sl_pct * 100:.2f}% "
                     f"< MIN "
                     f"{MIN_SL_PCT * 100:.2f}%"
                 )
@@ -1424,16 +1281,11 @@ def build_sl_tp(
             return {
                 "valid": False,
                 "reason": (
-                    f"SL "
-                    f"{sl_pct * 100:.2f}% "
+                    f"SL {sl_pct * 100:.2f}% "
                     f"> MAX "
                     f"{MAX_SL_PCT * 100:.2f}%"
                 )
             }
-
-        # ----------------------------------------------------
-        # TP
-        # ----------------------------------------------------
 
         structural_tp_candidates = [
             resistance15,
@@ -1517,10 +1369,6 @@ def build_sl_tp(
     sl = None
     sl_method = None
 
-    # --------------------------------------------------------
-    # Structural SL
-    # --------------------------------------------------------
-
     if structural_sl is not None:
 
         candidate_sl = (
@@ -1536,21 +1384,13 @@ def build_sl_tp(
             )
 
             if (
-                candidate_sl_pct
-                >= MIN_SL_PCT
-                and
-                candidate_sl_pct
+                MIN_SL_PCT
+                <= candidate_sl_pct
                 <= MAX_SL_PCT
             ):
 
                 sl = candidate_sl
-                sl_method = (
-                    "STRUCTURAL"
-                )
-
-    # --------------------------------------------------------
-    # ATR fallback
-    # --------------------------------------------------------
+                sl_method = "STRUCTURAL"
 
     if sl is None:
 
@@ -1571,17 +1411,12 @@ def build_sl_tp(
             / entry
         )
 
-        # ----------------------------------------------------
-        # IMPORTANT SL RANGE FILTER
-        # ----------------------------------------------------
-
         if candidate_sl_pct < MIN_SL_PCT:
 
             return {
                 "valid": False,
                 "reason": (
-                    f"SL "
-                    f"{candidate_sl_pct * 100:.2f}% "
+                    f"SL {candidate_sl_pct * 100:.2f}% "
                     f"< MIN "
                     f"{MIN_SL_PCT * 100:.2f}%"
                 )
@@ -1592,8 +1427,7 @@ def build_sl_tp(
             return {
                 "valid": False,
                 "reason": (
-                    f"SL "
-                    f"{candidate_sl_pct * 100:.2f}% "
+                    f"SL {candidate_sl_pct * 100:.2f}% "
                     f"> MAX "
                     f"{MAX_SL_PCT * 100:.2f}%"
                 )
@@ -1601,10 +1435,6 @@ def build_sl_tp(
 
         sl = candidate_sl
         sl_method = "ATR"
-
-    # --------------------------------------------------------
-    # Final SL validation
-    # --------------------------------------------------------
 
     risk = sl - entry
 
@@ -1615,17 +1445,14 @@ def build_sl_tp(
             "reason": "INVALID SHORT RISK"
         }
 
-    sl_pct = (
-        risk / entry
-    )
+    sl_pct = risk / entry
 
     if sl_pct < MIN_SL_PCT:
 
         return {
             "valid": False,
             "reason": (
-                f"SL "
-                f"{sl_pct * 100:.2f}% "
+                f"SL {sl_pct * 100:.2f}% "
                 f"< MIN "
                 f"{MIN_SL_PCT * 100:.2f}%"
             )
@@ -1636,16 +1463,11 @@ def build_sl_tp(
         return {
             "valid": False,
             "reason": (
-                f"SL "
-                f"{sl_pct * 100:.2f}% "
+                f"SL {sl_pct * 100:.2f}% "
                 f"> MAX "
                 f"{MAX_SL_PCT * 100:.2f}%"
             )
         }
-
-    # --------------------------------------------------------
-    # TP
-    # --------------------------------------------------------
 
     structural_tp_candidates = [
         support15,
@@ -1722,27 +1544,21 @@ def calculate_score(
         "LONG",
         "SHORT"
     ):
-
         score += 3
 
     if setup:
-
         score += 4
 
     if rvol >= RVOL_VERY_STRONG:
-
         score += 4
 
     elif rvol >= RVOL_STRONG:
-
         score += 4
 
     elif rvol >= RVOL_ABNORMAL:
-
         score += 3
 
     if confirmation:
-
         score += 4
 
     return score
@@ -1752,9 +1568,7 @@ def calculate_score(
 # COOLDOWN
 # ============================================================
 
-def cooldown_active(
-    symbol
-):
+def cooldown_active(symbol):
 
     row = get_last_trade_for_symbol(
         symbol
@@ -1875,10 +1689,6 @@ def update_open_trades():
                 last["high"]
             )
 
-            # ------------------------------------------------
-            # LONG
-            # ------------------------------------------------
-
             if side == "LONG":
 
                 if candle_low <= sl:
@@ -1890,10 +1700,6 @@ def update_open_trades():
 
                     exit_price = tp
                     reason = "TP"
-
-            # ------------------------------------------------
-            # SHORT
-            # ------------------------------------------------
 
             else:
 
@@ -2017,12 +1823,51 @@ def get_performance():
 
 
 # ============================================================
-# SCAN
+# DIAGNOSTICS
+# ============================================================
+
+def empty_diagnostics():
+
+    return {
+        "scanned": 0,
+        "trend": 0,
+        "setup": 0,
+        "confirmation": 0,
+        "score": 0,
+        "cooldown": 0,
+        "open_symbol": 0,
+        "sl_low": 0,
+        "sl_high": 0,
+        "rr": 0,
+        "other": 0,
+        "errors": 0
+    }
+
+
+# ============================================================
+# CANDIDATE RANK VALUE
+# ============================================================
+
+def candidate_rank(candidate):
+
+    return (
+        float(candidate.get("score", 0)),
+        float(candidate.get("rvol", 0)),
+        float(candidate.get("body_ratio", 0))
+    )
+
+
+# ============================================================
+# SCAN MARKETS
 # ============================================================
 
 def scan_markets():
 
     final_candidates = []
+
+    diagnostics = empty_diagnostics()
+
+    top_candidate = None
 
     try:
 
@@ -2034,7 +1879,15 @@ def scan_markets():
             f"Market list error: {e}"
         )
 
-        return final_candidates
+        diagnostics["errors"] += 1
+
+        return (
+            final_candidates,
+            diagnostics,
+            top_candidate
+        )
+
+    diagnostics["scanned"] = len(symbols)
 
     for symbol in symbols:
 
@@ -2071,14 +1924,14 @@ def scan_markets():
             # TREND
             # ------------------------------------------------
 
-            trend = get_trend(
-                df1h
-            )
+            trend = get_trend(df1h)
 
             if trend not in (
                 "LONG",
                 "SHORT"
             ):
+
+                diagnostics["trend"] += 1
                 continue
 
             # ------------------------------------------------
@@ -2091,6 +1944,8 @@ def scan_markets():
             )
 
             if not setup:
+
+                diagnostics["setup"] += 1
                 continue
 
             # ------------------------------------------------
@@ -2112,9 +1967,6 @@ def scan_markets():
                 )
             )
 
-            if not confirmed:
-                continue
-
             # ------------------------------------------------
             # SCORE
             # ------------------------------------------------
@@ -2126,16 +1978,120 @@ def scan_markets():
                 confirmed
             )
 
+            candidate_base = {
+                "symbol": symbol,
+                "side": trend,
+                "setup": setup,
+                "rvol": rvol,
+                "body_ratio": body_ratio,
+                "score": score
+            }
+
+            # ------------------------------------------------
+            # Keep strongest meaningful candidate
+            # even if later rejected
+            # ------------------------------------------------
+
+            if (
+                top_candidate is None
+                or
+                candidate_rank(candidate_base)
+                >
+                candidate_rank(top_candidate)
+            ):
+
+                top_candidate = {
+                    **candidate_base,
+                    "valid": False,
+                    "reason": "PENDING"
+                }
+
+            # ------------------------------------------------
+            # 5M confirmation rejection
+            # ------------------------------------------------
+
+            if not confirmed:
+
+                diagnostics["confirmation"] += 1
+
+                if (
+                    top_candidate
+                    and top_candidate["symbol"]
+                    == symbol
+                ):
+
+                    top_candidate["reason"] = (
+                        "5M Confirmation Failed"
+                    )
+
+                continue
+
+            # ------------------------------------------------
+            # SCORE rejection
+            # ------------------------------------------------
+
             if score < MIN_SCORE:
+
+                diagnostics["score"] += 1
+
+                if (
+                    top_candidate
+                    and top_candidate["symbol"]
+                    == symbol
+                ):
+
+                    top_candidate["reason"] = (
+                        f"Score {score} "
+                        f"< MIN {MIN_SCORE}"
+                    )
+
                 continue
 
             # ------------------------------------------------
             # COOLDOWN
             # ------------------------------------------------
 
-            if cooldown_active(
+            if cooldown_active(symbol):
+
+                diagnostics["cooldown"] += 1
+
+                if (
+                    top_candidate
+                    and top_candidate["symbol"]
+                    == symbol
+                ):
+
+                    top_candidate["reason"] = (
+                        "Cooldown Active"
+                    )
+
+                continue
+
+            # ------------------------------------------------
+            # EXISTING OPEN SYMBOL
+            # ------------------------------------------------
+
+            existing = get_last_trade_for_symbol(
                 symbol
+            )
+
+            if (
+                existing
+                and existing["status"] == "OPEN"
             ):
+
+                diagnostics["open_symbol"] += 1
+
+                if (
+                    top_candidate
+                    and top_candidate["symbol"]
+                    == symbol
+                ):
+
+                    top_candidate["reason"] = (
+                        "Already Open"
+                    )
+
                 continue
 
             # ------------------------------------------------
@@ -2164,10 +2120,69 @@ def scan_markets():
                     False
                 )
             ):
+
+                reason = (
+                    sltp.get(
+                        "reason",
+                        "SL/TP Rejected"
+                    )
+                    if sltp
+                    else
+                    "SL/TP Rejected"
+                )
+
+                if "SL" in reason:
+
+                    try:
+
+                        sl_value = float(
+                            reason
+                            .split("%")[0]
+                            .split()[-1]
+                        )
+
+                        if "< MIN" in reason:
+
+                            diagnostics["sl_low"] += 1
+
+                        elif "> MAX" in reason:
+
+                            diagnostics["sl_high"] += 1
+
+                        else:
+
+                            diagnostics["other"] += 1
+
+                    except Exception:
+
+                        diagnostics["other"] += 1
+
+                elif "RR" in reason:
+
+                    diagnostics["rr"] += 1
+
+                else:
+
+                    diagnostics["other"] += 1
+
+                if (
+                    top_candidate
+                    and top_candidate["symbol"]
+                    == symbol
+                ):
+
+                    top_candidate.update(
+                        {
+                            "entry": entry,
+                            "valid": False,
+                            "reason": reason
+                        }
+                    )
+
                 continue
 
             # ------------------------------------------------
-            # EXTRA FINAL SL RANGE CHECK
+            # FINAL SL CHECK
             # ------------------------------------------------
 
             sl_pct = float(
@@ -2175,9 +2190,55 @@ def scan_markets():
             )
 
             if sl_pct < MIN_SL_PCT:
+
+                diagnostics["sl_low"] += 1
+
+                reason = (
+                    f"SL {sl_pct * 100:.2f}% "
+                    f"< MIN "
+                    f"{MIN_SL_PCT * 100:.2f}%"
+                )
+
+                if (
+                    top_candidate
+                    and top_candidate["symbol"]
+                    == symbol
+                ):
+
+                    top_candidate.update(
+                        {
+                            "entry": entry,
+                            "valid": False,
+                            "reason": reason
+                        }
+                    )
+
                 continue
 
             if sl_pct > MAX_SL_PCT:
+
+                diagnostics["sl_high"] += 1
+
+                reason = (
+                    f"SL {sl_pct * 100:.2f}% "
+                    f"> MAX "
+                    f"{MAX_SL_PCT * 100:.2f}%"
+                )
+
+                if (
+                    top_candidate
+                    and top_candidate["symbol"]
+                    == symbol
+                ):
+
+                    top_candidate.update(
+                        {
+                            "entry": entry,
+                            "valid": False,
+                            "reason": reason
+                        }
+                    )
+
                 continue
 
             # ------------------------------------------------
@@ -2196,16 +2257,39 @@ def scan_markets():
                 "tp": sltp["tp"],
                 "rr": sltp["rr"],
                 "sl_pct": sltp["sl_pct"],
-                "sl_method": sltp[
-                    "sl_method"
-                ]
+                "sl_method": sltp["sl_method"],
+                "valid": True,
+                "reason": "VALID"
             }
 
             final_candidates.append(
                 candidate
             )
 
+            # ------------------------------------------------
+            # Update TOP CANDIDATE
+            # ------------------------------------------------
+
+            if (
+                top_candidate is None
+                or
+                candidate_rank(candidate)
+                >
+                candidate_rank(top_candidate)
+            ):
+
+                top_candidate = candidate
+
+            elif (
+                top_candidate["symbol"]
+                == symbol
+            ):
+
+                top_candidate = candidate
+
         except Exception as e:
+
+            diagnostics["errors"] += 1
 
             print(
                 f"Scan error "
@@ -2219,12 +2303,17 @@ def scan_markets():
     final_candidates.sort(
         key=lambda x: (
             x["score"],
-            x["rvol"]
+            x["rvol"],
+            x["body_ratio"]
         ),
         reverse=True
     )
 
-    return final_candidates
+    return (
+        final_candidates,
+        diagnostics,
+        top_candidate
+    )
 
 
 # ============================================================
@@ -2237,9 +2326,7 @@ def create_new_trades(
 
     created = []
 
-    current_open = (
-        get_open_count()
-    )
+    current_open = get_open_count()
 
     available_slots = max(
         0,
@@ -2248,47 +2335,27 @@ def create_new_trades(
     )
 
     if available_slots <= 0:
-
         return created
 
     for candidate in final_candidates:
 
-        if (
-            len(created)
-            >= MAX_NEW_SIGNALS
-        ):
+        if len(created) >= MAX_NEW_SIGNALS:
             break
 
-        if (
-            len(created)
-            >= available_slots
-        ):
+        if len(created) >= available_slots:
             break
 
-        symbol = candidate[
-            "symbol"
-        ]
+        symbol = candidate["symbol"]
 
-        # ----------------------------------------------------
-        # Prevent duplicate OPEN symbol
-        # ----------------------------------------------------
-
-        existing = (
-            get_last_trade_for_symbol(
-                symbol
-            )
+        existing = get_last_trade_for_symbol(
+            symbol
         )
 
         if (
             existing
-            and existing["status"]
-            == "OPEN"
+            and existing["status"] == "OPEN"
         ):
             continue
-
-        # ----------------------------------------------------
-        # Final SL protection
-        # ----------------------------------------------------
 
         sl_pct = float(
             candidate["sl_pct"]
@@ -2301,30 +2368,14 @@ def create_new_trades(
             continue
 
         insert_trade(
-            symbol=candidate[
-                "symbol"
-            ],
-            side=candidate[
-                "side"
-            ],
-            setup=candidate[
-                "setup"
-            ],
-            entry=candidate[
-                "entry"
-            ],
-            sl=candidate[
-                "sl"
-            ],
-            tp=candidate[
-                "tp"
-            ],
-            rr=candidate[
-                "rr"
-            ],
-            score=candidate[
-                "score"
-            ]
+            symbol=candidate["symbol"],
+            side=candidate["side"],
+            setup=candidate["setup"],
+            entry=candidate["entry"],
+            sl=candidate["sl"],
+            tp=candidate["tp"],
+            rr=candidate["rr"],
+            score=candidate["score"]
         )
 
         created.append(
@@ -2338,9 +2389,7 @@ def create_new_trades(
 # FORMAT NEW SIGNALS
 # ============================================================
 
-def format_signals(
-    signals
-):
+def format_signals(signals):
 
     if not signals:
 
@@ -2356,13 +2405,11 @@ def format_signals(
 
     for x in signals:
 
-        if x["side"] == "LONG":
-
-            emoji = "🟢"
-
-        else:
-
-            emoji = "🔴"
+        emoji = (
+            "🟢"
+            if x["side"] == "LONG"
+            else "🔴"
+        )
 
         lines.append("")
 
@@ -2392,8 +2439,172 @@ def format_signals(
             f"RR: 1:{x['rr']:.2f}"
         )
 
-    return "\n".join(
-        lines
+    return "\n".join(lines)
+
+
+# ============================================================
+# TOP CANDIDATE
+# ============================================================
+
+def format_top_candidate(
+    top_candidate,
+    signals
+):
+
+    if not top_candidate:
+
+        return (
+            "🏆 TOP CANDIDATE\n"
+            "No meaningful candidate found"
+        )
+
+    symbol = top_candidate["symbol"]
+    side = top_candidate["side"]
+
+    emoji = (
+        "🟢"
+        if side == "LONG"
+        else "🔴"
+    )
+
+    score = top_candidate.get(
+        "score",
+        0
+    )
+
+    reason = top_candidate.get(
+        "reason",
+        "Unknown"
+    )
+
+    # --------------------------------------------------------
+    # If it became an actual signal
+    # --------------------------------------------------------
+
+    signal_symbols = {
+        x["symbol"]
+        for x in signals
+    }
+
+    if symbol in signal_symbols:
+
+        reason = "SIGNAL ACCEPTED"
+
+    else:
+
+        # ----------------------------------------------------
+        # Valid candidate but no available slot
+        # ----------------------------------------------------
+
+        if (
+            top_candidate.get(
+                "valid",
+                False
+            )
+        ):
+
+            if (
+                get_open_count()
+                >= MAX_OPEN_TRADES
+            ):
+
+                reason = (
+                    "MAX OPEN TRADES"
+                )
+
+            else:
+
+                reason = (
+                    "NOT SELECTED"
+                )
+
+    lines = [
+        "🏆 TOP CANDIDATE",
+        f"{emoji} {symbol} {side}",
+        f"Score: {score}/15"
+    ]
+
+    if "entry" in top_candidate:
+
+        lines.append(
+            f"Entry: "
+            f"{float(top_candidate['entry']):.8f}"
+        )
+
+    if (
+        top_candidate.get("valid")
+        and "sl" in top_candidate
+    ):
+
+        lines.append(
+            f"SL: "
+            f"{float(top_candidate['sl']):.8f} "
+            f"({float(top_candidate['sl_pct']) * 100:.2f}%)"
+        )
+
+        lines.append(
+            f"TP: "
+            f"{float(top_candidate['tp']):.8f}"
+        )
+
+        lines.append(
+            f"RR: "
+            f"1:{float(top_candidate['rr']):.2f}"
+        )
+
+    if reason == "SIGNAL ACCEPTED":
+
+        lines.append(
+            "✅ ACCEPTED"
+        )
+
+    else:
+
+        lines.append(
+            "❌ REJECTED"
+        )
+
+        lines.append(
+            f"Reason: {reason}"
+        )
+
+    return "\n".join(lines)
+
+
+# ============================================================
+# DIAGNOSTICS REPORT
+# ============================================================
+
+def format_diagnostics(
+    diagnostics
+):
+
+    return (
+        "🔎 FILTER DIAGNOSTICS\n"
+        f"Scanned: "
+        f"{diagnostics['scanned']}\n"
+        f"❌ 1H Trend: "
+        f"{diagnostics['trend']}\n"
+        f"❌ 15M Setup: "
+        f"{diagnostics['setup']}\n"
+        f"❌ 5M Confirmation: "
+        f"{diagnostics['confirmation']}\n"
+        f"❌ Score < {MIN_SCORE}: "
+        f"{diagnostics['score']}\n"
+        f"❌ Cooldown: "
+        f"{diagnostics['cooldown']}\n"
+        f"❌ Already Open: "
+        f"{diagnostics['open_symbol']}\n"
+        f"❌ SL < 0.50%: "
+        f"{diagnostics['sl_low']}\n"
+        f"❌ SL > 0.80%: "
+        f"{diagnostics['sl_high']}\n"
+        f"❌ RR < 2.00: "
+        f"{diagnostics['rr']}\n"
+        f"❌ Other: "
+        f"{diagnostics['other']}\n"
+        f"⚠️ Errors: "
+        f"{diagnostics['errors']}"
     )
 
 
@@ -2420,13 +2631,8 @@ def format_open_trades():
 
     for trade in trades:
 
-        symbol = trade[
-            "symbol"
-        ]
-
-        side = trade[
-            "side"
-        ]
+        symbol = trade["symbol"]
+        side = trade["side"]
 
         entry = float(
             trade["entry"]
@@ -2461,23 +2667,11 @@ def format_open_trades():
             current
         )
 
-        # ----------------------------------------------------
-        # SIDE EMOJI
-        # LONG = GREEN
-        # SHORT = RED
-        # ----------------------------------------------------
-
-        if side == "LONG":
-
-            emoji = "🟢"
-
-        else:
-
-            emoji = "🔴"
-
-        # ----------------------------------------------------
-        # SL PERCENT
-        # ----------------------------------------------------
+        emoji = (
+            "🟢"
+            if side == "LONG"
+            else "🔴"
+        )
 
         if side == "LONG":
 
@@ -2534,9 +2728,7 @@ def format_open_trades():
             f"1:{float(trade['rr']):.2f}"
         )
 
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -2549,8 +2741,12 @@ def format_performance():
 
     return (
         "📈 PERFORMANCE\n"
-        f"✅ Wins: {p['wins']}\n"
-        f"❌ Losses: {p['losses']}\n"
+        f"Closed: "
+        f"{p['closed']}\n"
+        f"✅ Wins: "
+        f"{p['wins']}\n"
+        f"❌ Losses: "
+        f"{p['losses']}\n"
         f"🎯 Win Rate: "
         f"{p['wr']:.1f}%\n"
         f"💰 Realized PnL: "
@@ -2563,7 +2759,9 @@ def format_performance():
 # ============================================================
 
 def build_report(
-    signals
+    signals,
+    diagnostics,
+    top_candidate
 ):
 
     parts = []
@@ -2578,12 +2776,25 @@ def build_report(
 
     parts.append(
         "⚡ Kraken Futures | "
-        "5M CLOSED"
+        "5M CLOSED | TOP 100"
     )
 
     parts.append(
         format_signals(
             signals
+        )
+    )
+
+    parts.append(
+        format_top_candidate(
+            top_candidate,
+            signals
+        )
+    )
+
+    parts.append(
+        format_diagnostics(
+            diagnostics
         )
     )
 
@@ -2607,9 +2818,7 @@ def build_report(
             "⚠️ LIVE TRADING"
         )
 
-    return "\n\n".join(
-        parts
-    )
+    return "\n\n".join(parts)
 
 
 # ============================================================
@@ -2623,7 +2832,7 @@ def main():
     )
 
     print(
-        "VOLUME-KHAT 100 v3.5 START"
+        "VOLUME-KHAT 100 v3.6 START"
     )
 
     print(
@@ -2642,9 +2851,11 @@ def main():
     # 2. Scan TOP 100
     # --------------------------------------------------------
 
-    final_candidates = (
-        scan_markets()
-    )
+    (
+        final_candidates,
+        diagnostics,
+        top_candidate
+    ) = scan_markets()
 
     # --------------------------------------------------------
     # 3. Create new trades
@@ -2655,11 +2866,13 @@ def main():
     )
 
     # --------------------------------------------------------
-    # 4. Build compact report
+    # 4. Build report
     # --------------------------------------------------------
 
     report = build_report(
-        signals
+        signals,
+        diagnostics,
+        top_candidate
     )
 
     print(report)
@@ -2677,7 +2890,7 @@ def main():
     )
 
     print(
-        "VOLUME-KHAT 100 v3.5 END"
+        "VOLUME-KHAT 100 v3.6 END"
     )
 
     print(
