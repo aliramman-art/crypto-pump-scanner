@@ -1,5 +1,5 @@
 # ============================================================
-# KRAKEN FUTURES VOLUME-KHAT 100 v4.1
+# KRAKEN FUTURES VOLUME-KHAT 100 v4.2
 # ============================================================
 #
 # 1H  = TREND
@@ -8,8 +8,15 @@
 #
 # CLOSED CANDLES ONLY
 #
-# v4.1 FINAL
+# v4.2
 # ------------------------------------------------------------
+# - Based on v4.1
+# - ONLY 5M confirmation body threshold relaxed
+# - MIN_CONFIRM_BODY_RATIO: 0.30 -> 0.20
+# - Structure Break unchanged
+# - Pullback unchanged
+# - Confirmation direction unchanged
+# - Confirmation close beyond break level unchanged
 # - Robust SQLite schema migration
 # - Correct Kraken Futures candle endpoint
 # - Correct millisecond timestamp handling
@@ -17,16 +24,13 @@
 # - 5M structural SL / TP
 # - SL: 0.50% <= SL <= 1.50%
 # - TP: minimum RR 2.0
-# - 5M Structure Break
-# - 5M Pullback
-# - 5M Confirmation
 # - Duration tracking
 # - Time-profit exit:
-#       >= 2 hours AND PnL >= +1.50%
+#     >= 2 hours AND PnL >= +1.50%
 # - Max 3 open trades
 # - Max 3 new signals per run
 # - Cooldown = 3 closed 5M candles
-# - Performance reset once for v4.1
+# - Performance reset once for v4.2
 # - PAPER TRADING ONLY
 # ============================================================
 
@@ -51,6 +55,7 @@ TIMEFRAME_1H = "1h"
 OHLCV_LIMIT = 150
 REQUEST_TIMEOUT = 20
 
+
 # ------------------------------------------------------------
 # RVOL
 # ------------------------------------------------------------
@@ -60,6 +65,7 @@ RVOL_PERIOD = 20
 RVOL_ABNORMAL = 1.70
 RVOL_STRONG = 2.50
 RVOL_VERY_STRONG = 3.00
+
 
 # ------------------------------------------------------------
 # 15M SETUP
@@ -75,6 +81,7 @@ WICK_BODY_RATIO = 1.15
 
 MIN_BODY_RATIO = 0.20
 
+
 # ------------------------------------------------------------
 # 5M STRUCTURE
 # ------------------------------------------------------------
@@ -85,7 +92,11 @@ PULLBACK_TOLERANCE = 0.0030
 
 MAX_PULLBACK_CANDLES = 6
 
-MIN_CONFIRM_BODY_RATIO = 0.30
+# v4.2 ONLY CHANGE
+# v4.1 = 0.30
+# v4.2 = 0.20
+MIN_CONFIRM_BODY_RATIO = 0.20
+
 
 # ------------------------------------------------------------
 # ATR
@@ -94,6 +105,7 @@ MIN_CONFIRM_BODY_RATIO = 0.30
 ATR_PERIOD = 14
 
 ATR_SL_BUFFER = 0.15
+
 
 # ------------------------------------------------------------
 # SL / TP
@@ -104,6 +116,7 @@ MIN_SL_PCT = 0.0050
 MAX_SL_PCT = 0.0150
 
 MIN_RR = 2.0
+
 
 # ------------------------------------------------------------
 # TRADING LIMITS
@@ -117,6 +130,7 @@ MAX_NEW_SIGNALS = 3
 
 COOLDOWN_CANDLES = 3
 
+
 # ------------------------------------------------------------
 # TIME EXIT
 # ------------------------------------------------------------
@@ -127,11 +141,13 @@ TIME_EXIT_MINUTES = 120
 
 TIME_EXIT_MIN_PROFIT_PCT = 1.50
 
+
 # ------------------------------------------------------------
 # MODE
 # ------------------------------------------------------------
 
 PAPER_TRADING = True
+
 
 # ------------------------------------------------------------
 # DATABASE
@@ -139,11 +155,12 @@ PAPER_TRADING = True
 
 DB_FILE = "volume_khat_100.db"
 
-RESET_DATABASE_ON_V41_START = True
+RESET_DATABASE_ON_V42_START = True
 
-RESET_KEY = "VOLUME_KHAT_V41_RESET_DONE"
+RESET_KEY = "VOLUME_KHAT_V42_RESET_DONE"
 
-SCHEMA_VERSION = "4.1"
+SCHEMA_VERSION = "4.2"
+
 
 # ------------------------------------------------------------
 # TIMEZONE
@@ -224,18 +241,12 @@ diagnostics = {
 # ============================================================
 
 def get_connection():
-
-    conn = sqlite3.connect(
-        DB_FILE
-    )
-
+    conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
-
     return conn
 
 
 def create_trades_table(cur):
-
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS trades (
@@ -254,7 +265,6 @@ def create_trades_table(cur):
             exit_time TEXT,
 
             pnl_pct REAL,
-
             result TEXT,
             exit_reason TEXT,
 
@@ -267,7 +277,6 @@ def create_trades_table(cur):
 
 
 def create_system_meta_table(cur):
-
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS system_meta (
@@ -279,9 +288,7 @@ def create_system_meta_table(cur):
 
 
 def init_db():
-
     conn = get_connection()
-
     cur = conn.cursor()
 
     # --------------------------------------------------------
@@ -289,7 +296,6 @@ def init_db():
     # --------------------------------------------------------
 
     create_trades_table(cur)
-
     create_system_meta_table(cur)
 
     conn.commit()
@@ -319,8 +325,7 @@ def init_db():
         "result": "TEXT",
         "exit_reason": "TEXT",
         "duration_minutes": "REAL",
-        "closed_reported":
-            "INTEGER DEFAULT 0",
+        "closed_reported": "INTEGER DEFAULT 0",
     }
 
     for column, data_type in migrations.items():
@@ -328,7 +333,6 @@ def init_db():
         if column not in existing_columns:
 
             try:
-
                 cur.execute(
                     f"""
                     ALTER TABLE trades
@@ -338,8 +342,7 @@ def init_db():
                 )
 
                 print(
-                    f"DB MIGRATION: "
-                    f"added {column}"
+                    f"DB MIGRATION: added {column}"
                 )
 
             except sqlite3.OperationalError as exc:
@@ -410,14 +413,12 @@ def init_db():
     )
 
     conn.commit()
-
     conn.close()
 
 
 def get_meta(key):
 
     conn = get_connection()
-
     cur = conn.cursor()
 
     cur.execute(
@@ -434,7 +435,6 @@ def get_meta(key):
     conn.close()
 
     if row:
-
         return row["value"]
 
     return None
@@ -443,7 +443,6 @@ def get_meta(key):
 def set_meta(key, value):
 
     conn = get_connection()
-
     cur = conn.cursor()
 
     cur.execute(
@@ -459,17 +458,16 @@ def set_meta(key, value):
     )
 
     conn.commit()
-
     conn.close()
 
 
 # ============================================================
-# V4.1 RESET
+# V4.2 RESET
 # ============================================================
 
-def perform_v41_reset():
+def perform_v42_reset():
 
-    if not RESET_DATABASE_ON_V41_START:
+    if not RESET_DATABASE_ON_V42_START:
         return
 
     done = get_meta(
@@ -477,11 +475,9 @@ def perform_v41_reset():
     )
 
     if done == "1":
-
         return
 
     conn = get_connection()
-
     cur = conn.cursor()
 
     cur.execute(
@@ -489,7 +485,6 @@ def perform_v41_reset():
     )
 
     conn.commit()
-
     conn.close()
 
     set_meta(
@@ -498,7 +493,7 @@ def perform_v41_reset():
     )
 
     print(
-        "V4.1 performance reset completed."
+        "V4.2 performance reset completed."
     )
 
 
@@ -511,7 +506,7 @@ session = requests.Session()
 session.headers.update(
     {
         "User-Agent":
-            "VOLUME-KHAT-100/4.1"
+            "VOLUME-KHAT-100/4.2"
     }
 )
 
@@ -526,31 +521,25 @@ def register_ohlcv_error(
 ):
 
     diagnostics["errors"] += 1
-
     diagnostics["api_errors"] += 1
 
     if error_type == "empty":
-
         diagnostics["api_empty"] += 1
 
     elif error_type == "parse":
-
         diagnostics["api_parse_errors"] += 1
 
     if interval == TIMEFRAME_1H:
-
         diagnostics[
             "ohlcv_1h_errors"
         ] += 1
 
     elif interval == TIMEFRAME_15M:
-
         diagnostics[
             "ohlcv_15m_errors"
         ] += 1
 
     elif interval == TIMEFRAME_5M:
-
         diagnostics[
             "ohlcv_5m_errors"
         ] += 1
@@ -570,7 +559,6 @@ def fetch_ohlcv(
 
         # ----------------------------------------------------
         # Correct Kraken Futures endpoint
-        #
         # /charts/v1/trade/SYMBOL/RESOLUTION
         # ----------------------------------------------------
 
@@ -621,7 +609,6 @@ def fetch_ohlcv(
         # ----------------------------------------------------
 
         try:
-
             data = response.json()
 
         except ValueError as exc:
@@ -785,7 +772,6 @@ def fetch_ohlcv(
                     or cl is None
                     or vol is None
                 ):
-
                     continue
 
                 ts = float(ts)
@@ -796,7 +782,6 @@ def fetch_ohlcv(
                 # ------------------------------------------------
 
                 if ts > 10_000_000_000:
-
                     ts /= 1000.0
 
                 result.append(
@@ -916,10 +901,7 @@ def fetch_ohlcv(
                 + interval_seconds
             )
 
-            if (
-                now_ts
-                < candle_close_time
-            ):
+            if now_ts < candle_close_time:
 
                 result = result[:-1]
 
@@ -987,7 +969,6 @@ def calculate_rvol(
 ):
 
     if len(candles) <= period:
-
         return 0.0
 
     current_volume = (
@@ -999,7 +980,6 @@ def calculate_rvol(
     ]
 
     if not previous:
-
         return 0.0
 
     avg_volume = (
@@ -1011,7 +991,6 @@ def calculate_rvol(
     )
 
     if avg_volume <= 0:
-
         return 0.0
 
     return (
@@ -1032,7 +1011,6 @@ def calculate_atr(
     if len(candles) < (
         period + 1
     ):
-
         return 0.0
 
     trs = []
@@ -1043,7 +1021,6 @@ def calculate_atr(
     ):
 
         current = candles[i]
-
         previous = candles[i - 1]
 
         tr = max(
@@ -1064,7 +1041,6 @@ def calculate_atr(
         trs.append(tr)
 
     if len(trs) < period:
-
         return 0.0
 
     return (
@@ -1083,7 +1059,6 @@ def sma(
 ):
 
     if len(values) < period:
-
         return None
 
     return (
@@ -1096,12 +1071,9 @@ def sma(
 # 1H TREND
 # ============================================================
 
-def get_trend(
-    candles,
-):
+def get_trend(candles):
 
     if len(candles) < 50:
-
         return "NEUTRAL"
 
     closes = [
@@ -1123,7 +1095,6 @@ def get_trend(
         fast is None
         or slow is None
     ):
-
         return "NEUTRAL"
 
     last_close = closes[-1]
@@ -1132,14 +1103,12 @@ def get_trend(
         last_close > fast
         and fast > slow
     ):
-
         return "LONG"
 
     if (
         last_close < fast
         and fast < slow
     ):
-
         return "SHORT"
 
     return "NEUTRAL"
@@ -1149,14 +1118,11 @@ def get_trend(
 # 15M BREAKOUT
 # ============================================================
 
-def detect_breakout(
-    candles,
-):
+def detect_breakout(candles):
 
     if len(candles) < (
         BREAKOUT_LOOKBACK + 2
     ):
-
         return None
 
     current = candles[-1]
@@ -1214,18 +1180,15 @@ def detect_rejection(
 ):
 
     if len(candles) < (
-        SUPPORT_RESISTANCE_LOOKBACK
-        + 2
+        SUPPORT_RESISTANCE_LOOKBACK + 2
     ):
-
         return None
 
     current = candles[-1]
 
     previous = candles[
         -(
-            SUPPORT_RESISTANCE_LOOKBACK
-            + 1
+            SUPPORT_RESISTANCE_LOOKBACK + 1
         ):-1
     ]
 
@@ -1250,7 +1213,6 @@ def detect_rejection(
     )
 
     if candle_range <= 0:
-
         return None
 
     body_ratio = (
@@ -1258,7 +1220,6 @@ def detect_rejection(
     )
 
     if body_ratio < MIN_BODY_RATIO:
-
         return None
 
     upper_wick = (
@@ -1278,7 +1239,6 @@ def detect_rejection(
     )
 
     if body <= 0:
-
         return None
 
     rvol = calculate_rvol(
@@ -1290,7 +1250,6 @@ def detect_rejection(
     # --------------------------------------------------------
 
     if resistance <= 0:
-
         return None
 
     resistance_distance = (
@@ -1323,7 +1282,6 @@ def detect_rejection(
     # --------------------------------------------------------
 
     if support <= 0:
-
         return None
 
     support_distance = (
@@ -1373,7 +1331,6 @@ def detect_setup(
             breakout["side"]
             == trend_side
         ):
-
             return breakout
 
     rejection = detect_rejection(
@@ -1382,7 +1339,6 @@ def detect_setup(
     )
 
     if rejection:
-
         return rejection
 
     return None
@@ -1417,14 +1373,17 @@ def confirm_5m_structure(
 
     end = len(candles) - 1
 
+    # --------------------------------------------------------
+    # STRUCTURE BREAK
+    # --------------------------------------------------------
+
     for i in range(
         start,
         end,
     ):
 
         previous = candles[
-            i
-            - STRUCTURE_LOOKBACK_5M:i
+            i - STRUCTURE_LOOKBACK_5M:i
         ]
 
         current = candles[i]
@@ -1446,10 +1405,7 @@ def confirm_5m_structure(
         ):
 
             break_index = i
-
-            break_level = (
-                previous_high
-            )
+            break_level = previous_high
 
         elif (
             side == "SHORT"
@@ -1458,10 +1414,7 @@ def confirm_5m_structure(
         ):
 
             break_index = i
-
-            break_level = (
-                previous_low
-            )
+            break_level = previous_low
 
     if break_index is None:
 
@@ -1472,7 +1425,7 @@ def confirm_5m_structure(
         return None
 
     # --------------------------------------------------------
-    # Pullback
+    # PULLBACK
     # --------------------------------------------------------
 
     pullback_index = None
@@ -1514,7 +1467,6 @@ def confirm_5m_structure(
             ):
 
                 pullback_index = i
-
                 break
 
         else:
@@ -1541,7 +1493,6 @@ def confirm_5m_structure(
             ):
 
                 pullback_index = i
-
                 break
 
     if pullback_index is None:
@@ -1553,7 +1504,7 @@ def confirm_5m_structure(
         return None
 
     # --------------------------------------------------------
-    # Confirmation candle
+    # CONFIRMATION CANDLE
     # --------------------------------------------------------
 
     confirmation = candles[-1]
@@ -1591,6 +1542,15 @@ def confirm_5m_structure(
         body / candle_range
     )
 
+    # --------------------------------------------------------
+    # v4.2 CHANGE
+    #
+    # v4.1 = 0.30
+    # v4.2 = 0.20
+    #
+    # Everything else remains unchanged.
+    # --------------------------------------------------------
+
     if (
         body_ratio
         < MIN_CONFIRM_BODY_RATIO
@@ -1601,6 +1561,10 @@ def confirm_5m_structure(
         ] += 1
 
         return None
+
+    # --------------------------------------------------------
+    # LONG CONFIRMATION
+    # --------------------------------------------------------
 
     if side == "LONG":
 
@@ -1624,6 +1588,10 @@ def confirm_5m_structure(
             ] += 1
 
             return None
+
+    # --------------------------------------------------------
+    # SHORT CONFIRMATION
+    # --------------------------------------------------------
 
     else:
 
@@ -1697,7 +1665,6 @@ def calculate_5m_structural_sl(
     )
 
     if atr <= 0:
-
         return None
 
     section = candles[
@@ -1706,14 +1673,12 @@ def calculate_5m_structural_sl(
     ]
 
     if not section:
-
         return None
 
     if (
         structure["break_level"]
         <= 0
     ):
-
         return None
 
     if side == "LONG":
@@ -1757,13 +1722,11 @@ def build_sl_tp(
         entry <= 0
         or sl <= 0
     ):
-
         return None
 
     if side == "LONG":
 
         if sl >= entry:
-
             return None
 
         risk = (
@@ -1778,7 +1741,6 @@ def build_sl_tp(
     elif side == "SHORT":
 
         if sl <= entry:
-
             return None
 
         risk = (
@@ -1791,7 +1753,6 @@ def build_sl_tp(
         )
 
     else:
-
         return None
 
     sl_pct = (
@@ -1831,7 +1792,6 @@ def build_sl_tp(
     )
 
     if risk_distance <= 0:
-
         return None
 
     rr = (
@@ -1868,7 +1828,10 @@ def calculate_score(
 
     score = 0
 
+    # --------------------------------------------------------
     # 1H
+    # --------------------------------------------------------
+
     if trend_side in (
         "LONG",
         "SHORT",
@@ -1876,12 +1839,18 @@ def calculate_score(
 
         score += 3
 
+    # --------------------------------------------------------
     # 15M
+    # --------------------------------------------------------
+
     if setup is not None:
 
         score += 4
 
+    # --------------------------------------------------------
     # 5M RVOL
+    # --------------------------------------------------------
+
     if (
         rvol_5m
         >= RVOL_VERY_STRONG
@@ -1903,9 +1872,11 @@ def calculate_score(
 
         score += 3
 
+    # --------------------------------------------------------
     # 5M confirmation
-    if structure_ok:
+    # --------------------------------------------------------
 
+    if structure_ok:
         score += 4
 
     return min(
@@ -1983,7 +1954,6 @@ def get_top_markets():
                 ticker,
                 dict,
             ):
-
                 continue
 
             symbol = ticker.get(
@@ -1991,7 +1961,6 @@ def get_top_markets():
             )
 
             if not symbol:
-
                 continue
 
             if not (
@@ -2002,7 +1971,6 @@ def get_top_markets():
                     "USD"
                 )
             ):
-
                 continue
 
             volume = (
@@ -2099,7 +2067,6 @@ def get_current_price(
             tickers,
             list,
         ):
-
             return None
 
         for ticker in tickers:
@@ -2108,14 +2075,12 @@ def get_current_price(
                 ticker,
                 dict,
             ):
-
                 continue
 
             if (
                 ticker.get("symbol")
                 != symbol
             ):
-
                 continue
 
             price = (
@@ -2129,7 +2094,6 @@ def get_current_price(
             )
 
             if price is None:
-
                 continue
 
             return float(price)
@@ -2157,7 +2121,6 @@ def get_current_price(
 def get_open_trades():
 
     conn = get_connection()
-
     cur = conn.cursor()
 
     cur.execute(
@@ -2193,7 +2156,6 @@ def calculate_duration_minutes(
 ):
 
     if not entry_time:
-
         return 0.0
 
     try:
@@ -2230,7 +2192,6 @@ def format_duration(
 ):
 
     if minutes is None:
-
         return "N/A"
 
     minutes = int(
@@ -2269,7 +2230,6 @@ def calculate_pnl_pct(
 ):
 
     if entry <= 0:
-
         return 0.0
 
     if side == "LONG":
@@ -2302,7 +2262,6 @@ def close_trade(
 ):
 
     conn = get_connection()
-
     cur = conn.cursor()
 
     cur.execute(
@@ -2319,7 +2278,6 @@ def close_trade(
     if trade is None:
 
         conn.close()
-
         return
 
     pnl_pct = calculate_pnl_pct(
@@ -2370,7 +2328,6 @@ def close_trade(
     )
 
     conn.commit()
-
     conn.close()
 
 
@@ -2385,7 +2342,6 @@ def update_open_trades():
     for trade in trades:
 
         symbol = trade["symbol"]
-
         side = trade["side"]
 
         entry = float(
@@ -2405,7 +2361,6 @@ def update_open_trades():
         )
 
         if current is None:
-
             continue
 
         pnl = calculate_pnl_pct(
@@ -2499,7 +2454,6 @@ def is_in_cooldown(
 ):
 
     conn = get_connection()
-
     cur = conn.cursor()
 
     cur.execute(
@@ -2522,7 +2476,6 @@ def is_in_cooldown(
         not row
         or not row["exit_time"]
     ):
-
         return False
 
     try:
@@ -2574,7 +2527,6 @@ def create_trade(
 ):
 
     conn = get_connection()
-
     cur = conn.cursor()
 
     entry_time = (
@@ -2606,7 +2558,6 @@ def create_trade(
     )
 
     conn.commit()
-
     conn.close()
 
 
@@ -2617,7 +2568,6 @@ def create_trade(
 def get_performance():
 
     conn = get_connection()
-
     cur = conn.cursor()
 
     cur.execute(
@@ -2647,7 +2597,6 @@ def get_performance():
             ) AS pnl
 
         FROM trades
-
         WHERE exit_time IS NOT NULL
         """
     )
@@ -2682,11 +2631,8 @@ def get_performance():
     conn.close()
 
     total = row["total"] or 0
-
     wins = row["wins"] or 0
-
     losses = row["losses"] or 0
-
     pnl = row["pnl"] or 0.0
 
     if total > 0:
@@ -2702,26 +2648,13 @@ def get_performance():
         win_rate = 0.0
 
     return {
-        "open":
-            open_count,
-
-        "closed":
-            total,
-
-        "wins":
-            wins,
-
-        "losses":
-            losses,
-
-        "win_rate":
-            win_rate,
-
-        "pnl":
-            pnl,
-
-        "time_exits":
-            time_exits,
+        "open": open_count,
+        "closed": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "pnl": pnl,
+        "time_exits": time_exits,
     }
 
 
@@ -2734,19 +2667,15 @@ def fmt_price(
 ):
 
     if value is None:
-
         return "N/A"
 
     if value >= 1000:
-
         return f"{value:.2f}"
 
     if value >= 1:
-
         return f"{value:.5f}"
 
     if value >= 0.01:
-
         return f"{value:.6f}"
 
     return f"{value:.8f}"
@@ -2761,7 +2690,6 @@ def format_candidate(
 ):
 
     if not candidate:
-
         return "None"
 
     side_icon = (
@@ -2893,11 +2821,8 @@ def send_telegram(
         response = session.post(
             url,
             data={
-                "chat_id":
-                    chat_id,
-
-                "text":
-                    message,
+                "chat_id": chat_id,
+                "text": message,
             },
             timeout=REQUEST_TIMEOUT,
         )
@@ -3422,7 +3347,7 @@ def main():
     )
 
     print(
-        "VOLUME-KHAT 100 v4.1"
+        "VOLUME-KHAT 100 v4.2"
     )
 
     print(
@@ -3459,7 +3384,7 @@ def main():
     # RESET
     # --------------------------------------------------------
 
-    perform_v41_reset()
+    perform_v42_reset()
 
     # --------------------------------------------------------
     # UPDATE OPEN TRADES
@@ -3511,7 +3436,6 @@ def main():
     # --------------------------------------------------------
 
     candidates = []
-
     signals = []
 
     # ========================================================
@@ -3560,7 +3484,6 @@ def main():
             )
 
             if not candles_1h:
-
                 continue
 
             trend = get_trend(
@@ -3591,7 +3514,6 @@ def main():
             )
 
             if not candles_15m:
-
                 continue
 
             setup = detect_setup(
@@ -3634,7 +3556,6 @@ def main():
             )
 
             if not candles_5m:
-
                 continue
 
             structure = (
@@ -3645,7 +3566,6 @@ def main():
             )
 
             if not structure:
-
                 continue
 
             # ------------------------------------------------
@@ -3712,6 +3632,7 @@ def main():
             # ------------------------------------------------
 
             candidate = {
+
                 "symbol":
                     symbol,
 
@@ -3906,11 +3827,9 @@ def main():
         if len(signals) >= (
             signal_limit
         ):
-
             break
 
         if candidate["reason"] is not None:
-
             continue
 
         if (
@@ -3921,7 +3840,6 @@ def main():
             or candidate["tp"]
             is None
         ):
-
             continue
 
         create_trade(
@@ -3950,9 +3868,7 @@ def main():
     )
 
     print("")
-
     print(report)
-
     print("")
 
     send_telegram(
@@ -3977,5 +3893,4 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
