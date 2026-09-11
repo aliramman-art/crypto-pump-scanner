@@ -1,28 +1,33 @@
 # ============================================================
-# KRAKEN FUTURES VOLUME-KHAT 100 v3.9
+# KRAKEN FUTURES VOLUME-KHAT 100 v4.0
 # ============================================================
 #
 # 1H  = TREND
 # 15M = SETUP
-# 5M  = CONFIRMATION / ENTRY
+# 5M  = STRUCTURE BREAK + PULLBACK + CONFIRMATION / ENTRY
 #
 # CLOSED CANDLES ONLY
 #
-# v3.9 CHANGES:
-#   - Performance starts from ZERO on first v3.9 run
+# v4.0 CHANGES:
+#   - 5M confirmation upgraded
+#   - 5M structure breakout required
+#   - 5M pullback required
+#   - 5M confirmation candle required
+#   - SL < 0.50% REJECTED
+#   - SL > 1.50% REJECTED
+#   - Valid SL range = 0.50% to 1.50%
+#   - Structural SL remains primary reference
+#   - RR minimum 2.0
+#   - Performance starts from ZERO on first v4.0 run
 #   - Old database trades cleared ONCE
 #   - Duration for OPEN trades
-#   - Duration for TIME_PROFIT exits
+#   - Duration for closed trades
 #   - TIME EXIT: >= 2H AND PnL >= +1.50%
-#   - Existing strategy logic preserved
 #   - Re-entry cooldown based on EXIT TIME
-#   - MIN SL reduced to 0.25%
-#   - MAX SL remains 0.80%
-#   - STRUCTURAL SL + MINIMUM SL FLOOR
-#   - RR minimum 2.0
 #   - Maximum 3 OPEN trades
 #   - Maximum 3 NEW signals per run
 #   - Better diagnostics
+#
 # ============================================================
 
 import os
@@ -62,7 +67,7 @@ RVOL_VERY_STRONG = 3.00
 
 
 # ============================================================
-# STRUCTURE
+# 15M STRUCTURE
 # ============================================================
 
 BREAKOUT_LOOKBACK = 5
@@ -73,33 +78,67 @@ WICK_BODY_RATIO = 1.15
 
 
 # ============================================================
+# 5M STRUCTURE
+# ============================================================
+
+# Number of candles used to identify the previous
+# 5M swing structure.
+#
+# Example:
+#
+# LONG:
+# previous swing high
+#       |
+#       | BREAK
+#       ↓
+# ----------- level
+#       ↑
+#    pullback
+#       ↑
+# confirmation
+#
+# ============================================================
+
+STRUCTURE_LOOKBACK_5M = 5
+
+# Pullback must return close enough to the broken
+# structure level.
+#
+# 0.003 = 0.30%
+#
+PULLBACK_TOLERANCE = 0.0030
+
+# Maximum candles allowed between the structure
+# breakout and confirmation.
+#
+MAX_PULLBACK_CANDLES = 6
+
+# Minimum candle body/range ratio for the final
+# confirmation candle.
+#
+MIN_CONFIRM_BODY_RATIO = 0.30
+
+
+# ============================================================
 # ATR / SL / TP
 # ============================================================
 
 ATR_PERIOD = 14
 
-# ATR buffer remains small because structural level
-# is the primary SL reference.
 ATR_SL_BUFFER = 0.15
 
 # ------------------------------------------------------------
-# IMPORTANT v3.9
+# IMPORTANT v4.0
 #
-# Previous:
-#   MIN_SL = 0.50%
+# SL BELOW 0.50% = REJECT
 #
-# New:
-#   MIN_SL = 0.25%
+# SL BETWEEN 0.50% AND 1.50% = VALID
 #
-# If structural SL is closer than 0.25%,
-# SL is expanded to the 0.25% minimum floor.
-#
-# If structural SL requires more than 0.80%,
-# trade is rejected.
+# SL ABOVE 1.50% = REJECT
 # ------------------------------------------------------------
 
-MIN_SL_PCT = 0.0025
-MAX_SL_PCT = 0.0080
+MIN_SL_PCT = 0.0050
+MAX_SL_PCT = 0.0150
 
 MIN_RR = 2.0
 
@@ -154,9 +193,9 @@ PAPER_TRADING = True
 
 DB_FILE = "volume_khat_100.db"
 
-RESET_DATABASE_ON_V39_START = True
+RESET_DATABASE_ON_V40_START = True
 
-RESET_KEY = "VOLUME_KHAT_V39_RESET_DONE"
+RESET_KEY = "VOLUME_KHAT_V40_RESET_DONE"
 
 
 # ============================================================
@@ -192,7 +231,7 @@ SESSION = requests.Session()
 SESSION.headers.update(
     {
         "User-Agent":
-            "VOLUME-KHAT-100/3.9"
+            "VOLUME-KHAT-100/4.0"
     }
 )
 
@@ -347,12 +386,12 @@ def init_db():
 
 
 # ============================================================
-# ONE-TIME V3.9 RESET
+# ONE-TIME V4.0 RESET
 # ============================================================
 
-def perform_v39_reset():
+def perform_v40_reset():
 
-    if not RESET_DATABASE_ON_V39_START:
+    if not RESET_DATABASE_ON_V40_START:
         return False
 
     conn = db_connect()
@@ -827,8 +866,7 @@ def calculate_atr(df):
 
     if (
         df is None
-        or len(df)
-        < ATR_PERIOD + 2
+        or len(df) < ATR_PERIOD + 2
     ):
         return 0.0
 
@@ -902,7 +940,7 @@ def get_trend(df):
 
 
 # ============================================================
-# BREAKOUT
+# 15M BREAKOUT
 # ============================================================
 
 def detect_breakout(
@@ -968,7 +1006,7 @@ def detect_breakout(
 
 
 # ============================================================
-# REJECTION
+# 15M REJECTION
 # ============================================================
 
 def detect_rejection(
@@ -1092,31 +1130,275 @@ def detect_setup(
 
 
 # ============================================================
-# 5M CONFIRMATION
+# 5M STRUCTURE BREAK + PULLBACK
 # ============================================================
 
-def confirm_5m(
+def confirm_5m_structure(
     df5,
     trend
 ):
 
+    result = {
+
+        "confirmed": False,
+
+        "stage": "NONE",
+
+        "break_level": None,
+
+        "break_index": None,
+
+        "confirmation_index": None,
+    }
+
     if (
         df5 is None
-        or len(df5) < 3
+        or len(df5)
+        < STRUCTURE_LOOKBACK_5M + 5
     ):
-        return False
+        result["stage"] = "INSUFFICIENT_DATA"
+        return result
 
-    last = df5.iloc[-1]
+    # --------------------------------------------------------
+    # Work only with CLOSED candles.
+    #
+    # Last row is already removed by fetch_ohlcv()
+    # if it is still forming.
+    # --------------------------------------------------------
 
-    o = float(last["open"])
-    h = float(last["high"])
-    l = float(last["low"])
-    c = float(last["close"])
+    last_index = len(df5) - 1
+
+    search_start = max(
+        1,
+        last_index
+        - MAX_PULLBACK_CANDLES
+        - 2
+    )
+
+    search_end = last_index - 1
+
+    if search_end <= search_start:
+        return result
+
+    # --------------------------------------------------------
+    # Find the most recent valid structure break.
+    # --------------------------------------------------------
+
+    break_data = None
+
+    for i in range(
+        search_start,
+        search_end + 1
+    ):
+
+        if i < STRUCTURE_LOOKBACK_5M:
+            continue
+
+        previous = df5.iloc[
+            i - STRUCTURE_LOOKBACK_5M:i
+        ]
+
+        candle = df5.iloc[i]
+
+        previous_high = float(
+            previous["high"].max()
+        )
+
+        previous_low = float(
+            previous["low"].min()
+        )
+
+        close = float(
+            candle["close"]
+        )
+
+        if (
+            trend == "LONG"
+            and close > previous_high
+        ):
+
+            break_data = {
+
+                "index": i,
+
+                "level": previous_high,
+
+                "direction": "LONG",
+            }
+
+        elif (
+            trend == "SHORT"
+            and close < previous_low
+        ):
+
+            break_data = {
+
+                "index": i,
+
+                "level": previous_low,
+
+                "direction": "SHORT",
+            }
+
+    if break_data is None:
+
+        result["stage"] = (
+            "NO_5M_STRUCTURE_BREAK"
+        )
+
+        return result
+
+    break_index = break_data["index"]
+    break_level = break_data["level"]
+
+    result["break_level"] = break_level
+    result["break_index"] = break_index
+
+    # --------------------------------------------------------
+    # There must be candles AFTER the breakout.
+    # --------------------------------------------------------
+
+    candles_after_break = (
+        last_index - break_index
+    )
+
+    if candles_after_break < 2:
+
+        result["stage"] = (
+            "BREAKOUT_NO_PULLBACK_YET"
+        )
+
+        return result
+
+    if (
+        candles_after_break
+        > MAX_PULLBACK_CANDLES
+    ):
+
+        result["stage"] = (
+            "BREAKOUT_TOO_OLD"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # Find pullback.
+    #
+    # LONG:
+    # price returns to the broken resistance.
+    #
+    # SHORT:
+    # price returns to the broken support.
+    # --------------------------------------------------------
+
+    pullback_index = None
+
+    for i in range(
+        break_index + 1,
+        last_index
+    ):
+
+        candle = df5.iloc[i]
+
+        high = float(
+            candle["high"]
+        )
+
+        low = float(
+            candle["low"]
+        )
+
+        if trend == "LONG":
+
+            distance = (
+                abs(low - break_level)
+                / break_level
+            )
+
+            if distance <= PULLBACK_TOLERANCE:
+
+                # Pullback must not close
+                # decisively below the broken level.
+                close = float(
+                    candle["close"]
+                )
+
+                if close >= (
+                    break_level
+                    * (1 - PULLBACK_TOLERANCE)
+                ):
+
+                    pullback_index = i
+
+        else:
+
+            distance = (
+                abs(high - break_level)
+                / break_level
+            )
+
+            if distance <= PULLBACK_TOLERANCE:
+
+                close = float(
+                    candle["close"]
+                )
+
+                if close <= (
+                    break_level
+                    * (1 + PULLBACK_TOLERANCE)
+                ):
+
+                    pullback_index = i
+
+    if pullback_index is None:
+
+        result["stage"] = (
+            "BREAKOUT_NO_PULLBACK"
+        )
+
+        return result
+
+    # --------------------------------------------------------
+    # Confirmation candle must be AFTER pullback.
+    # --------------------------------------------------------
+
+    if pullback_index >= last_index:
+
+        result["stage"] = (
+            "PULLBACK_NO_CONFIRMATION"
+        )
+
+        return result
+
+    confirmation = df5.iloc[
+        last_index
+    ]
+
+    o = float(
+        confirmation["open"]
+    )
+
+    h = float(
+        confirmation["high"]
+    )
+
+    l = float(
+        confirmation["low"]
+    )
+
+    c = float(
+        confirmation["close"]
+    )
 
     candle_range = h - l
 
     if candle_range <= 0:
-        return False
+
+        result["stage"] = (
+            "INVALID_CONFIRMATION_CANDLE"
+        )
+
+        return result
 
     body = abs(c - o)
 
@@ -1124,22 +1406,69 @@ def confirm_5m(
         body / candle_range
     )
 
-    if body_ratio < MIN_BODY_RATIO:
-        return False
+    if body_ratio < MIN_CONFIRM_BODY_RATIO:
 
-    if (
-        trend == "LONG"
-        and c > o
-    ):
-        return True
+        result["stage"] = (
+            "CONFIRMATION_WEAK"
+        )
 
-    if (
-        trend == "SHORT"
-        and c < o
-    ):
-        return True
+        return result
 
-    return False
+    # --------------------------------------------------------
+    # Direction confirmation
+    # --------------------------------------------------------
+
+    if trend == "LONG":
+
+        if c <= o:
+
+            result["stage"] = (
+                "CONFIRMATION_NOT_BULLISH"
+            )
+
+            return result
+
+        if c < break_level:
+
+            result["stage"] = (
+                "CONFIRMATION_BELOW_BREAK_LEVEL"
+            )
+
+            return result
+
+    else:
+
+        if c >= o:
+
+            result["stage"] = (
+                "CONFIRMATION_NOT_BEARISH"
+            )
+
+            return result
+
+        if c > break_level:
+
+            result["stage"] = (
+                "CONFIRMATION_ABOVE_BREAK_LEVEL"
+            )
+
+            return result
+
+    # --------------------------------------------------------
+    # SUCCESS
+    # --------------------------------------------------------
+
+    result["confirmed"] = True
+
+    result["stage"] = (
+        "BREAKOUT_PULLBACK_CONFIRMED"
+    )
+
+    result["confirmation_index"] = (
+        last_index
+    )
+
+    return result
 
 
 # ============================================================
@@ -1256,25 +1585,6 @@ def cooldown_active(symbol):
 # ============================================================
 # SL / TP
 # ============================================================
-#
-# IMPORTANT v3.9:
-#
-# The structural level remains the main SL reference.
-#
-# If structural SL is too close:
-#   expand SL to MIN_SL_PCT.
-#
-# If structural SL is wider than MAX_SL_PCT:
-#   reject.
-#
-# This prevents cases such as:
-#   XLM 0.01%
-#   WIF 0.04%
-#   PUMP 0.06%
-#
-# from being rejected merely because the calculated
-# structural distance is extremely tight.
-# ============================================================
 
 def build_sl_tp(
     df5,
@@ -1317,7 +1627,7 @@ def build_sl_tp(
     )
 
     # --------------------------------------------------------
-    # STRUCTURAL SL
+    # LONG
     # --------------------------------------------------------
 
     if side == "LONG":
@@ -1341,48 +1651,43 @@ def build_sl_tp(
         )
 
         # ----------------------------------------------------
-        # Minimum SL floor
+        # IMPORTANT:
+        # SL BELOW 0.50% IS REJECTED.
         # ----------------------------------------------------
 
         if structural_sl_pct < MIN_SL_PCT:
-
-            sl = (
-                entry
-                * (1 - MIN_SL_PCT)
-            )
-
-            sl_source = (
-                "MINIMUM SL FLOOR"
-            )
-
-        else:
-
-            sl = structural_sl
-
-            sl_source = (
-                "STRUCTURAL SL"
-            )
-
-        # ----------------------------------------------------
-        # MAX SL
-        # ----------------------------------------------------
-
-        final_sl_pct = (
-            abs(entry - sl)
-            / entry
-        )
-
-        if final_sl_pct > MAX_SL_PCT:
 
             return {
                 "valid": False,
                 "reason":
                     (
-                        f"SL {final_sl_pct * 100:.2f}% "
+                        f"SL "
+                        f"{structural_sl_pct * 100:.2f}% "
+                        f"< MIN "
+                        f"{MIN_SL_PCT * 100:.2f}%"
+                    ),
+            }
+
+        # ----------------------------------------------------
+        # SL ABOVE 1.50% IS REJECTED.
+        # ----------------------------------------------------
+
+        if structural_sl_pct > MAX_SL_PCT:
+
+            return {
+                "valid": False,
+                "reason":
+                    (
+                        f"SL "
+                        f"{structural_sl_pct * 100:.2f}% "
                         f"> MAX "
                         f"{MAX_SL_PCT * 100:.2f}%"
                     ),
             }
+
+        sl = structural_sl
+
+        sl_source = "STRUCTURAL SL"
 
         risk = (
             entry - sl
@@ -1403,6 +1708,10 @@ def build_sl_tp(
         reward = (
             tp - entry
         )
+
+    # --------------------------------------------------------
+    # SHORT
+    # --------------------------------------------------------
 
     else:
 
@@ -1425,48 +1734,42 @@ def build_sl_tp(
         )
 
         # ----------------------------------------------------
-        # Minimum SL floor
+        # SL BELOW 0.50% IS REJECTED.
         # ----------------------------------------------------
 
         if structural_sl_pct < MIN_SL_PCT:
-
-            sl = (
-                entry
-                * (1 + MIN_SL_PCT)
-            )
-
-            sl_source = (
-                "MINIMUM SL FLOOR"
-            )
-
-        else:
-
-            sl = structural_sl
-
-            sl_source = (
-                "STRUCTURAL SL"
-            )
-
-        # ----------------------------------------------------
-        # MAX SL
-        # ----------------------------------------------------
-
-        final_sl_pct = (
-            abs(sl - entry)
-            / entry
-        )
-
-        if final_sl_pct > MAX_SL_PCT:
 
             return {
                 "valid": False,
                 "reason":
                     (
-                        f"SL {final_sl_pct * 100:.2f}% "
+                        f"SL "
+                        f"{structural_sl_pct * 100:.2f}% "
+                        f"< MIN "
+                        f"{MIN_SL_PCT * 100:.2f}%"
+                    ),
+            }
+
+        # ----------------------------------------------------
+        # SL ABOVE 1.50% IS REJECTED.
+        # ----------------------------------------------------
+
+        if structural_sl_pct > MAX_SL_PCT:
+
+            return {
+                "valid": False,
+                "reason":
+                    (
+                        f"SL "
+                        f"{structural_sl_pct * 100:.2f}% "
                         f"> MAX "
                         f"{MAX_SL_PCT * 100:.2f}%"
                     ),
             }
+
+        sl = structural_sl
+
+        sl_source = "STRUCTURAL SL"
 
         risk = (
             sl - entry
@@ -1519,7 +1822,7 @@ def build_sl_tp(
         "rr": rr,
 
         "sl_pct":
-            final_sl_pct,
+            structural_sl_pct,
 
         "sl_source":
             sl_source,
@@ -1747,11 +2050,6 @@ def update_open_trades():
             )
 
             # ------------------------------------------------
-            # SL / TP are checked first by candle extremes.
-            # TIME EXIT is checked using CLOSED price.
-            # ------------------------------------------------
-
-            # ------------------------------------------------
             # LONG
             # ------------------------------------------------
 
@@ -1833,8 +2131,6 @@ def update_open_trades():
 
             # ------------------------------------------------
             # TIME PROFIT EXIT
-            #
-            # Only after 2 hours AND >= +1.50%
             # ------------------------------------------------
 
             if (
@@ -2135,6 +2431,9 @@ def format_signal(signal):
         f"Setup: "
         f"{signal['setup']}\n"
 
+        f"5M: "
+        f"BREAKOUT + PULLBACK + CONFIRMATION\n"
+
         f"Score: "
         f"{signal['score']}/15\n"
 
@@ -2168,18 +2467,27 @@ def scan_markets(markets):
     diagnostics = {
 
         "scanned": 0,
+
         "trend": 0,
         "trend_ok": 0,
+
         "setup": 0,
         "setup_ok": 0,
+
+        "structure_break": 0,
+        "pullback": 0,
         "confirmation": 0,
         "confirmation_ok": 0,
+
         "score": 0,
         "cooldown": 0,
         "open": 0,
+
         "sl_low": 0,
         "sl_high": 0,
+
         "rr": 0,
+
         "other": 0,
         "errors": 0,
     }
@@ -2260,10 +2568,14 @@ def scan_markets(markets):
 
             rvol = calculate_rvol(df5)
 
-            confirmed = confirm_5m(
+            structure = confirm_5m_structure(
                 df5,
                 trend
             )
+
+            confirmed = structure[
+                "confirmed"
+            ]
 
             score = calculate_score(
                 trend,
@@ -2301,12 +2613,17 @@ def scan_markets(markets):
                 top_candidate = preview
 
             # ------------------------------------------------
-            # CONFIRMATION
+            # STRUCTURE BREAK
             # ------------------------------------------------
 
-            if not confirmed:
+            if structure["stage"] in (
+                "NO_5M_STRUCTURE_BREAK",
+                "INSUFFICIENT_DATA",
+            ):
 
-                diagnostics["confirmation"] += 1
+                diagnostics[
+                    "structure_break"
+                ] += 1
 
                 if (
                     top_rejection is None
@@ -2319,12 +2636,73 @@ def scan_markets(markets):
                         **preview,
 
                         "reason":
-                            "5M Confirmation Failed",
+                            "5M Structure Break Failed",
                     }
 
                 continue
 
-            diagnostics["confirmation_ok"] += 1
+            # ------------------------------------------------
+            # PULLBACK
+            # ------------------------------------------------
+
+            if structure["stage"] in (
+                "BREAKOUT_NO_PULLBACK_YET",
+                "BREAKOUT_NO_PULLBACK",
+                "BREAKOUT_TOO_OLD",
+            ):
+
+                diagnostics[
+                    "pullback"
+                ] += 1
+
+                if (
+                    top_rejection is None
+                    or score
+                    > top_rejection["score"]
+                ):
+
+                    top_rejection = {
+
+                        **preview,
+
+                        "reason":
+                            "5M Pullback Failed",
+                    }
+
+                continue
+
+            # ------------------------------------------------
+            # CONFIRMATION
+            # ------------------------------------------------
+
+            if not confirmed:
+
+                diagnostics[
+                    "confirmation"
+                ] += 1
+
+                if (
+                    top_rejection is None
+                    or score
+                    > top_rejection["score"]
+                ):
+
+                    top_rejection = {
+
+                        **preview,
+
+                        "reason":
+                            (
+                                "5M Confirmation Failed: "
+                                + structure["stage"]
+                            ),
+                    }
+
+                continue
+
+            diagnostics[
+                "confirmation_ok"
+            ] += 1
 
             # ------------------------------------------------
             # SCORE
@@ -2434,21 +2812,29 @@ def scan_markets(markets):
 
                 reason = risk["reason"]
 
-                if "MIN" in reason:
+                if "< MIN" in reason:
 
-                    diagnostics["sl_low"] += 1
+                    diagnostics[
+                        "sl_low"
+                    ] += 1
 
-                elif "MAX" in reason:
+                elif "> MAX" in reason:
 
-                    diagnostics["sl_high"] += 1
+                    diagnostics[
+                        "sl_high"
+                    ] += 1
 
                 elif "RR" in reason:
 
-                    diagnostics["rr"] += 1
+                    diagnostics[
+                        "rr"
+                    ] += 1
 
                 else:
 
-                    diagnostics["other"] += 1
+                    diagnostics[
+                        "other"
+                    ] += 1
 
                 if (
                     top_rejection is None
@@ -2504,9 +2890,14 @@ def scan_markets(markets):
 
                 "rvol":
                     rvol,
+
+                "structure":
+                    structure,
             }
 
-            candidates.append(signal)
+            candidates.append(
+                signal
+            )
 
         except Exception:
 
@@ -2605,7 +2996,9 @@ def create_new_trades(candidates):
                 signal["score"],
         )
 
-        new_signals.append(signal)
+        new_signals.append(
+            signal
+        )
 
     return new_signals
 
@@ -2646,12 +3039,18 @@ def format_diagnostics(d):
 
             "",
 
-            "5M CONFIRMATION",
+            "5M STRUCTURE",
+
+            f"❌ Structure Break Failed: "
+            f"{d['structure_break']}",
+
+            f"❌ Pullback Failed: "
+            f"{d['pullback']}",
 
             f"❌ Confirmation Failed: "
             f"{d['confirmation']}",
 
-            f"✅ Confirmation Passed: "
+            f"✅ Full 5M Confirmation: "
             f"{d['confirmation_ok']}",
 
             "",
@@ -2844,6 +3243,9 @@ def build_report(
         "⚡ Kraken Futures | "
         "5M CLOSED | TOP 100",
 
+        "🧠 5M: "
+        "BREAKOUT + PULLBACK + CONFIRMATION",
+
     ]
 
     if time_exit_events:
@@ -2898,6 +3300,10 @@ def build_report(
             "",
             "📈 PERFORMANCE",
 
+            f"Open: "
+            f"{performance['open']}/"
+            f"{MAX_OPEN_TRADES}",
+
             f"Closed: "
             f"{performance['closed']}",
 
@@ -2937,8 +3343,24 @@ def build_report(
             f"Maximum SL: "
             f"{MAX_SL_PCT*100:.2f}%",
 
-            "Structural SL + minimum "
-            "SL floor",
+            "SL outside this range = REJECT",
+
+            "",
+            "🎯 5M ENTRY RULE",
+
+            "Structure Break",
+
+            "↓",
+
+            "Pullback to Break Level",
+
+            "↓",
+
+            "Bullish/Bearish Confirmation",
+
+            "↓",
+
+            "ENTRY",
 
             "",
         ]
@@ -3023,7 +3445,7 @@ def main():
     print("=" * 60)
 
     print(
-        "VOLUME-KHAT 100 v3.9"
+        "VOLUME-KHAT 100 v4.0"
     )
 
     print("=" * 60)
@@ -3041,13 +3463,13 @@ def main():
         # ----------------------------------------------------
 
         reset_done = (
-            perform_v39_reset()
+            perform_v40_reset()
         )
 
         if reset_done:
 
             print(
-                "V3.9 DATABASE RESET "
+                "V4.0 DATABASE RESET "
                 "COMPLETED"
             )
 
