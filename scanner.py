@@ -1,5 +1,5 @@
 # ============================================================
-# KRAKEN FUTURES VOLUME-KHAT 100 v4.2
+# KRAKEN FUTURES VOLUME-KHAT 100 v4.3
 # ============================================================
 #
 # 1H  = TREND
@@ -8,37 +8,29 @@
 #
 # CLOSED CANDLES ONLY
 #
-# v4.2
+# v4.3
 # ------------------------------------------------------------
-# - Based on v4.1
-# - ONLY 5M confirmation body threshold relaxed
-# - MIN_CONFIRM_BODY_RATIO: 0.30 -> 0.20
-# - Structure Break unchanged
-# - Pullback unchanged
-# - Confirmation direction unchanged
-# - Confirmation close beyond break level unchanged
-# - Robust SQLite schema migration
-# - Correct Kraken Futures candle endpoint
-# - Correct millisecond timestamp handling
-# - Detailed API diagnostics
-# - 5M structural SL / TP
-# - SL: 0.50% <= SL <= 1.50%
-# - TP: minimum RR 2.0
+# TRADE / DATABASE HARDENING
+#
+# - Open trades are preserved correctly
+# - Atomic trade closing
+# - Prevent duplicate open trade per symbol
+# - Aggregate statistics calculated from closed trades
+# - Repair incomplete closed records when possible
 # - Duration tracking
-# - Time-profit exit:
-#     >= 2 hours AND PnL >= +1.50%
-# - Max 3 open trades
-# - Max 3 new signals per run
-# - Cooldown = 3 closed 5M candles
-# - Performance reset once for v4.2
-# - PAPER TRADING ONLY
+# - TIME_PROFIT exit:
+#       after 120 min AND PnL >= +1.50%
+# - Reset is OFF by default
+# - Reset can only be forced with environment variable
+# - Strategy logic preserved from v4.2
+#
+# REAL TRADING: DISABLED
 # ============================================================
 
 import os
 import time
 import sqlite3
 import requests
-
 from datetime import datetime, timezone, timedelta
 
 
@@ -48,13 +40,12 @@ from datetime import datetime, timezone, timedelta
 
 TOP_N = 100
 
-TIMEFRAME_5M = "5m"
-TIMEFRAME_15M = "15m"
-TIMEFRAME_1H = "1h"
+TF_5M = "5"
+TF_15M = "15"
+TF_1H = "60"
 
 OHLCV_LIMIT = 150
 REQUEST_TIMEOUT = 20
-
 
 # ------------------------------------------------------------
 # RVOL
@@ -66,81 +57,63 @@ RVOL_ABNORMAL = 1.70
 RVOL_STRONG = 2.50
 RVOL_VERY_STRONG = 3.00
 
-
 # ------------------------------------------------------------
 # 15M SETUP
 # ------------------------------------------------------------
 
 BREAKOUT_LOOKBACK = 5
-
-SUPPORT_RESISTANCE_LOOKBACK = 20
+SR_LOOKBACK = 20
 
 REJECTION_DISTANCE = 0.008
-
 WICK_BODY_RATIO = 1.15
-
 MIN_BODY_RATIO = 0.20
 
-
 # ------------------------------------------------------------
-# 5M STRUCTURE
+# 5M CONFIRMATION
 # ------------------------------------------------------------
 
-STRUCTURE_LOOKBACK_5M = 5
-
+STRUCTURE_LOOKBACK = 5
 PULLBACK_TOLERANCE = 0.0030
-
 MAX_PULLBACK_CANDLES = 6
 
-# v4.2 ONLY CHANGE
-# v4.1 = 0.30
-# v4.2 = 0.20
+# v4.2 value preserved
 MIN_CONFIRM_BODY_RATIO = 0.20
 
-
 # ------------------------------------------------------------
-# ATR
+# ATR / SL
 # ------------------------------------------------------------
 
 ATR_PERIOD = 14
-
-ATR_SL_BUFFER = 0.15
-
-
-# ------------------------------------------------------------
-# SL / TP
-# ------------------------------------------------------------
+SL_BUFFER = 0.0015
 
 MIN_SL_PCT = 0.0050
-
 MAX_SL_PCT = 0.0150
 
 MIN_RR = 2.0
 
-
 # ------------------------------------------------------------
-# TRADING LIMITS
+# SCORE
 # ------------------------------------------------------------
 
 MIN_SCORE = 9
+MAX_SCORE = 15
+
+# ------------------------------------------------------------
+# TRADES
+# ------------------------------------------------------------
 
 MAX_OPEN_TRADES = 3
-
 MAX_NEW_SIGNALS = 3
 
 COOLDOWN_CANDLES = 3
-
+COOLDOWN_SECONDS = COOLDOWN_CANDLES * 300
 
 # ------------------------------------------------------------
-# TIME EXIT
+# TIME PROFIT EXIT
 # ------------------------------------------------------------
-
-TIME_EXIT_HOURS = 2.0
 
 TIME_EXIT_MINUTES = 120
-
 TIME_EXIT_MIN_PROFIT_PCT = 1.50
-
 
 # ------------------------------------------------------------
 # MODE
@@ -148,45 +121,44 @@ TIME_EXIT_MIN_PROFIT_PCT = 1.50
 
 PAPER_TRADING = True
 
-
 # ------------------------------------------------------------
 # DATABASE
 # ------------------------------------------------------------
 
 DB_FILE = "volume_khat_100.db"
 
-RESET_DATABASE_ON_V42_START = True
+SCHEMA_VERSION = "4.3"
 
-RESET_KEY = "VOLUME_KHAT_V42_RESET_DONE"
+# IMPORTANT:
+# Reset is OFF by default.
+#
+# If you really want to reset once:
+#
+#   RESET_DATABASE_ON_V43_START=1
+#
+# Then run once with the environment variable and turn it off.
+RESET_DATABASE_ON_V43_START = (
+    os.getenv("RESET_DATABASE_ON_V43_START", "0").strip() == "1"
+)
 
-SCHEMA_VERSION = "4.2"
-
+RESET_KEY = "VOLUME_KHAT_V43_RESET_DONE"
 
 # ------------------------------------------------------------
 # TIMEZONE
 # ------------------------------------------------------------
 
-IRAN_TZ = timezone(
-    timedelta(
-        hours=3,
-        minutes=30,
-    )
+IRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+
+# ------------------------------------------------------------
+# KRAKEN FUTURES
+# ------------------------------------------------------------
+
+KRAKEN_OHLCV_URL = (
+    "https://futures.kraken.com/api/charts/v1/trade"
 )
-
-
-# ============================================================
-# KRAKEN FUTURES API
-# ============================================================
-
-KRAKEN_OHLC_URL = (
-    "https://futures.kraken.com/api/charts/v1"
-)
-
-KRAKEN_OHLC_TICK_TYPE = "trade"
 
 KRAKEN_TICKER_URL = (
-    "https://futures.kraken.com/"
-    "derivatives/api/v3/tickers"
+    "https://futures.kraken.com/derivatives/api/v3/tickers"
 )
 
 
@@ -194,7 +166,7 @@ KRAKEN_TICKER_URL = (
 # GLOBAL DIAGNOSTICS
 # ============================================================
 
-diagnostics = {
+DIAG = {
     "scanned": 0,
 
     "trend_neutral": 0,
@@ -206,865 +178,782 @@ diagnostics = {
     "structure_failed": 0,
     "pullback_failed": 0,
     "confirmation_failed": 0,
-    "full_5m_confirmation": 0,
+    "full_5m": 0,
 
     "score_failed": 0,
-
     "cooldown": 0,
     "already_open": 0,
 
     "sl_too_small": 0,
     "sl_too_large": 0,
-
     "rr_failed": 0,
 
     "other": 0,
-
     "errors": 0,
-
-    # --------------------------------------------------------
-    # API diagnostics
-    # --------------------------------------------------------
 
     "api_errors": 0,
     "api_empty": 0,
     "api_parse_errors": 0,
 
-    "ohlcv_1h_errors": 0,
-    "ohlcv_15m_errors": 0,
-    "ohlcv_5m_errors": 0,
+    "tf_5m_errors": 0,
+    "tf_15m_errors": 0,
+    "tf_1h_errors": 0,
 }
+
+
+# ============================================================
+# UTILS
+# ============================================================
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def iso_now():
+    return utc_now().isoformat()
+
+
+def safe_float(value, default=None):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def pct_change(entry, current, side):
+    if entry is None or current is None or entry == 0:
+        return 0.0
+
+    if side == "LONG":
+        return ((current - entry) / entry) * 100.0
+
+    return ((entry - current) / entry) * 100.0
+
+
+def format_pct(value):
+    if value is None:
+        return "0.00%"
+    return f"{value:+.2f}%"
+
+
+def format_price(value):
+    if value is None:
+        return "N/A"
+
+    if abs(value) >= 1000:
+        return f"{value:.2f}"
+
+    if abs(value) >= 1:
+        return f"{value:.5f}"
+
+    if abs(value) >= 0.01:
+        return f"{value:.6f}"
+
+    return f"{value:.8f}"
+
+
+def parse_datetime(value):
+    if not value:
+        return None
+
+    try:
+        value = str(value)
+
+        if value.endswith("Z"):
+            value = value[:-1] + "+00:00"
+
+        dt = datetime.fromisoformat(value)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+
+        return dt.astimezone(timezone.utc)
+
+    except Exception:
+        return None
+
+
+def duration_minutes(entry_time):
+    dt = parse_datetime(entry_time)
+
+    if dt is None:
+        return 0.0
+
+    seconds = (utc_now() - dt).total_seconds()
+
+    if seconds < 0:
+        return 0.0
+
+    return seconds / 60.0
 
 
 # ============================================================
 # DATABASE
 # ============================================================
 
-def get_connection():
-    conn = sqlite3.connect(DB_FILE)
+def get_db():
+    conn = sqlite3.connect(
+        DB_FILE,
+        timeout=30,
+        isolation_level=None
+    )
+
     conn.row_factory = sqlite3.Row
+
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
+
     return conn
 
 
-def create_trades_table(cur):
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trades (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+def get_meta(key):
+    conn = get_db()
 
-            symbol TEXT NOT NULL,
-            side TEXT NOT NULL,
+    try:
+        row = conn.execute(
+            """
+            SELECT value
+            FROM system_meta
+            WHERE key = ?
+            """,
+            (key,)
+        ).fetchone()
 
-            entry REAL NOT NULL,
-            sl REAL NOT NULL,
-            tp REAL NOT NULL,
+        if row:
+            return row["value"]
 
-            entry_time TEXT NOT NULL,
+        return None
 
-            exit REAL,
-            exit_time TEXT,
+    finally:
+        conn.close()
 
-            pnl_pct REAL,
-            result TEXT,
-            exit_reason TEXT,
 
-            duration_minutes REAL,
+def set_meta(key, value):
+    conn = get_db()
 
-            closed_reported INTEGER DEFAULT 0
+    try:
+        conn.execute(
+            """
+            INSERT INTO system_meta(key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key)
+            DO UPDATE SET value = excluded.value
+            """,
+            (key, str(value))
         )
-        """
-    )
+
+    finally:
+        conn.close()
 
 
-def create_system_meta_table(cur):
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS system_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-        """
-    )
+def table_columns(conn, table_name):
+    rows = conn.execute(
+        f"PRAGMA table_info({table_name})"
+    ).fetchall()
+
+    return {row["name"] for row in rows}
 
 
 def init_db():
-    conn = get_connection()
-    cur = conn.cursor()
+    conn = get_db()
 
-    # --------------------------------------------------------
-    # Create tables
-    # --------------------------------------------------------
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trades (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
 
-    create_trades_table(cur)
-    create_system_meta_table(cur)
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
 
-    conn.commit()
+                entry REAL NOT NULL,
+                sl REAL NOT NULL,
+                tp REAL NOT NULL,
 
-    # --------------------------------------------------------
-    # Existing columns
-    # --------------------------------------------------------
+                entry_time TEXT NOT NULL,
 
-    cur.execute(
-        "PRAGMA table_info(trades)"
-    )
+                exit REAL,
+                exit_time TEXT,
 
-    existing_columns = {
-        row["name"]
-        for row in cur.fetchall()
-    }
+                pnl_pct REAL,
+                result TEXT,
+                exit_reason TEXT,
 
-    # --------------------------------------------------------
-    # Optional / migration columns
-    # --------------------------------------------------------
+                duration_minutes REAL,
 
-    migrations = {
-        "entry_time": "TEXT",
-        "exit": "REAL",
-        "exit_time": "TEXT",
-        "pnl_pct": "REAL",
-        "result": "TEXT",
-        "exit_reason": "TEXT",
-        "duration_minutes": "REAL",
-        "closed_reported": "INTEGER DEFAULT 0",
-    }
+                closed_reported INTEGER DEFAULT 0
+            )
+            """
+        )
 
-    for column, data_type in migrations.items():
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS system_meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        )
 
-        if column not in existing_columns:
+        # ----------------------------------------------------
+        # Migration
+        # ----------------------------------------------------
 
-            try:
-                cur.execute(
+        columns = table_columns(conn, "trades")
+
+        optional_columns = {
+            "exit": "REAL",
+            "exit_time": "TEXT",
+            "pnl_pct": "REAL",
+            "result": "TEXT",
+            "exit_reason": "TEXT",
+            "duration_minutes": "REAL",
+            "closed_reported": "INTEGER DEFAULT 0",
+        }
+
+        for column, definition in optional_columns.items():
+
+            if column not in columns:
+                conn.execute(
                     f"""
                     ALTER TABLE trades
-                    ADD COLUMN {column}
-                    {data_type}
+                    ADD COLUMN {column} {definition}
                     """
                 )
 
-                print(
-                    f"DB MIGRATION: added {column}"
-                )
+        # ----------------------------------------------------
+        # Required schema check
+        # ----------------------------------------------------
 
-            except sqlite3.OperationalError as exc:
+        required = {
+            "id",
+            "symbol",
+            "side",
+            "entry",
+            "sl",
+            "tp",
+            "entry_time",
+            "exit",
+            "exit_time",
+            "pnl_pct",
+            "result",
+            "exit_reason",
+            "duration_minutes",
+            "closed_reported",
+        }
 
-                print(
-                    f"DB MIGRATION ERROR "
-                    f"{column}: {exc}"
-                )
+        columns = table_columns(conn, "trades")
 
-                diagnostics["errors"] += 1
+        missing = required - columns
 
-    # --------------------------------------------------------
-    # Check required core columns
-    # --------------------------------------------------------
+        if missing:
+            raise RuntimeError(
+                f"Missing required DB columns: {sorted(missing)}"
+            )
 
-    cur.execute(
-        "PRAGMA table_info(trades)"
-    )
+        set_meta("schema_version", SCHEMA_VERSION)
 
-    final_columns = {
-        row["name"]
-        for row in cur.fetchall()
-    }
-
-    required_core = {
-        "symbol",
-        "side",
-        "entry",
-        "sl",
-        "tp",
-    }
-
-    missing_core = (
-        required_core
-        - final_columns
-    )
-
-    if missing_core:
-
-        print(
-            "CRITICAL DB ERROR: "
-            f"missing core columns "
-            f"{missing_core}"
-        )
-
+    finally:
         conn.close()
 
-        raise RuntimeError(
-            "Trades database schema "
-            "is incompatible. "
-            f"Missing: {missing_core}"
+
+# ============================================================
+# DATABASE RESET
+# ============================================================
+
+def perform_v43_reset():
+    """
+    IMPORTANT:
+    Reset is deliberately disabled unless the environment
+    variable RESET_DATABASE_ON_V43_START=1 is supplied.
+
+    This prevents a fresh GitHub Actions runner from repeatedly
+    destroying the trading history.
+    """
+
+    if not RESET_DATABASE_ON_V43_START:
+        return
+
+    already_done = get_meta(RESET_KEY)
+
+    if already_done == "1":
+        return
+
+    conn = get_db()
+
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+
+        conn.execute("DELETE FROM trades")
+
+        conn.execute(
+            """
+            INSERT INTO system_meta(key, value)
+            VALUES (?, '1')
+            ON CONFLICT(key)
+            DO UPDATE SET value = '1'
+            """,
+            (RESET_KEY,)
         )
 
-    # --------------------------------------------------------
-    # Schema version
-    # --------------------------------------------------------
+        conn.commit()
 
-    cur.execute(
-        """
-        INSERT OR REPLACE INTO system_meta
-        (key, value)
-        VALUES (?, ?)
-        """,
-        (
-            "SCHEMA_VERSION",
-            SCHEMA_VERSION,
-        ),
+        print("⚠️ V4.3 DATABASE RESET COMPLETED")
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# REPAIR DATABASE
+# ============================================================
+
+def repair_trade_records():
+    """
+    Repairs closed records where pnl/result/duration are missing
+    but enough information exists to calculate them.
+    """
+
+    conn = get_db()
+
+    repaired = 0
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                id,
+                symbol,
+                side,
+                entry,
+                exit,
+                entry_time,
+                exit_time,
+                pnl_pct,
+                result,
+                duration_minutes
+            FROM trades
+            WHERE exit_time IS NOT NULL
+            """
+        ).fetchall()
+
+        for row in rows:
+
+            exit_price = safe_float(row["exit"])
+
+            if exit_price is None:
+                continue
+
+            pnl = row["pnl_pct"]
+
+            if pnl is None:
+                pnl = pct_change(
+                    safe_float(row["entry"]),
+                    exit_price,
+                    row["side"]
+                )
+
+            result = row["result"]
+
+            if result not in ("WIN", "LOSS"):
+                result = "WIN" if pnl > 0 else "LOSS"
+
+            duration = row["duration_minutes"]
+
+            if duration is None:
+                entry_dt = parse_datetime(row["entry_time"])
+                exit_dt = parse_datetime(row["exit_time"])
+
+                if entry_dt and exit_dt:
+                    duration = max(
+                        0.0,
+                        (exit_dt - entry_dt).total_seconds() / 60.0
+                    )
+
+            conn.execute(
+                """
+                UPDATE trades
+                SET
+                    pnl_pct = ?,
+                    result = ?,
+                    duration_minutes = ?
+                WHERE id = ?
+                """,
+                (
+                    pnl,
+                    result,
+                    duration,
+                    row["id"]
+                )
+            )
+
+            repaired += 1
+
+        if repaired:
+            print(
+                f"🔧 DATABASE REPAIR: {repaired} record(s)"
+            )
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# KRAKEN OHLCV
+# ============================================================
+
+def fetch_ohlcv(symbol, interval):
+    url = (
+        f"{KRAKEN_OHLCV_URL}/"
+        f"{symbol}/"
+        f"{interval}"
     )
 
-    conn.commit()
-    conn.close()
+    try:
+        response = requests.get(
+            url,
+            timeout=REQUEST_TIMEOUT
+        )
+
+        if response.status_code != 200:
+            DIAG["api_errors"] += 1
+
+            if interval == TF_5M:
+                DIAG["tf_5m_errors"] += 1
+            elif interval == TF_15M:
+                DIAG["tf_15m_errors"] += 1
+            elif interval == TF_1H:
+                DIAG["tf_1h_errors"] += 1
+
+            return []
+
+        data = response.json()
+
+    except Exception:
+        DIAG["api_errors"] += 1
+
+        if interval == TF_5M:
+            DIAG["tf_5m_errors"] += 1
+        elif interval == TF_15M:
+            DIAG["tf_15m_errors"] += 1
+        elif interval == TF_1H:
+            DIAG["tf_1h_errors"] += 1
+
+        return []
+
+    candles = None
+
+    if isinstance(data, dict):
+
+        for key in (
+            "candles",
+            "data",
+            "result",
+            "ohlcv",
+        ):
+            if key in data:
+                candles = data[key]
+                break
+
+    elif isinstance(data, list):
+        candles = data
+
+    if not candles:
+        DIAG["api_empty"] += 1
+        return []
+
+    parsed = []
+
+    interval_seconds = int(interval) * 60
+
+    now_ts = int(time.time())
+
+    for candle in candles:
+
+        try:
+            if isinstance(candle, dict):
+
+                ts = (
+                    candle.get("time")
+                    or candle.get("timestamp")
+                    or candle.get("ts")
+                )
+
+                o = (
+                    candle.get("open")
+                    or candle.get("o")
+                )
+
+                h = (
+                    candle.get("high")
+                    or candle.get("h")
+                )
+
+                l = (
+                    candle.get("low")
+                    or candle.get("l")
+                )
+
+                c = (
+                    candle.get("close")
+                    or candle.get("c")
+                )
+
+                v = (
+                    candle.get("volume")
+                    or candle.get("v")
+                    or 0
+                )
+
+            else:
+
+                if len(candle) < 6:
+                    continue
+
+                ts = candle[0]
+                o = candle[1]
+                h = candle[2]
+                l = candle[3]
+                c = candle[4]
+                v = candle[5]
+
+            ts = float(ts)
+
+            # Kraken may return milliseconds
+            if ts > 10_000_000_000:
+                ts = ts / 1000.0
+
+            o = float(o)
+            h = float(h)
+            l = float(l)
+            c = float(c)
+            v = float(v)
+
+            # Remove currently forming candle
+            if ts + interval_seconds > now_ts:
+                continue
+
+            parsed.append({
+                "ts": ts,
+                "open": o,
+                "high": h,
+                "low": l,
+                "close": c,
+                "volume": v,
+            })
+
+        except Exception:
+            DIAG["api_parse_errors"] += 1
+            continue
+
+    # Sort
+    parsed.sort(key=lambda x: x["ts"])
+
+    # Deduplicate
+    unique = {}
+
+    for candle in parsed:
+        unique[candle["ts"]] = candle
+
+    parsed = list(unique.values())
+    parsed.sort(key=lambda x: x["ts"])
+
+    if len(parsed) < 20:
+        DIAG["api_empty"] += 1
+        return []
+
+    return parsed[-OHLCV_LIMIT:]
 
 
-def get_meta(key):
+# ============================================================
+# TICKERS
+# ============================================================
 
-    conn = get_connection()
-    cur = conn.cursor()
+def get_all_tickers():
+    try:
 
-    cur.execute(
-        """
-        SELECT value
-        FROM system_meta
-        WHERE key = ?
-        """,
-        (key,),
-    )
+        response = requests.get(
+            KRAKEN_TICKER_URL,
+            timeout=REQUEST_TIMEOUT
+        )
 
-    row = cur.fetchone()
+        if response.status_code != 200:
+            DIAG["api_errors"] += 1
+            return {}
 
-    conn.close()
+        data = response.json()
 
-    if row:
-        return row["value"]
+        if isinstance(data, dict):
+            tickers = (
+                data.get("tickers")
+                or data.get("data")
+                or data.get("result")
+                or []
+            )
+        else:
+            tickers = data
+
+        result = {}
+
+        for ticker in tickers:
+
+            if not isinstance(ticker, dict):
+                continue
+
+            symbol = (
+                ticker.get("symbol")
+                or ticker.get("pair")
+            )
+
+            if not symbol:
+                continue
+
+            result[symbol] = ticker
+
+        return result
+
+    except Exception:
+        DIAG["api_errors"] += 1
+        return {}
+
+
+def get_current_price(symbol, tickers=None):
+
+    if tickers is None:
+        tickers = get_all_tickers()
+
+    ticker = tickers.get(symbol)
+
+    if not ticker:
+        return None
+
+    for key in (
+        "last",
+        "lastPrice",
+        "last_price",
+        "price",
+        "markPrice",
+        "mark_price",
+    ):
+
+        value = ticker.get(key)
+
+        price = safe_float(value)
+
+        if price is not None and price > 0:
+            return price
 
     return None
 
 
-def set_meta(key, value):
+# ============================================================
+# TOP 100 MARKETS
+# ============================================================
 
-    conn = get_connection()
-    cur = conn.cursor()
+def get_top_markets():
+    tickers = get_all_tickers()
 
-    cur.execute(
-        """
-        INSERT OR REPLACE INTO system_meta
-        (key, value)
-        VALUES (?, ?)
-        """,
-        (
-            key,
-            str(value),
-        ),
+    markets = []
+
+    for symbol, ticker in tickers.items():
+
+        if not symbol.startswith("PF_"):
+            continue
+
+        if not symbol.endswith("USD"):
+            continue
+
+        volume = (
+            safe_float(ticker.get("vol24h"))
+            or safe_float(ticker.get("volume24h"))
+            or safe_float(ticker.get("volume"))
+            or 0.0
+        )
+
+        markets.append(
+            (
+                symbol,
+                volume
+            )
+        )
+
+    markets.sort(
+        key=lambda x: x[1],
+        reverse=True
     )
 
-    conn.commit()
-    conn.close()
+    return [x[0] for x in markets[:TOP_N]]
 
 
 # ============================================================
-# V4.2 RESET
+# INDICATORS
 # ============================================================
 
-def perform_v42_reset():
+def sma(values, period):
 
-    if not RESET_DATABASE_ON_V42_START:
-        return
+    if len(values) < period:
+        return None
 
-    done = get_meta(
-        RESET_KEY
-    )
+    return sum(values[-period:]) / period
 
-    if done == "1":
-        return
 
-    conn = get_connection()
-    cur = conn.cursor()
+def calculate_rvol(candles, period=RVOL_PERIOD):
 
-    cur.execute(
-        "DELETE FROM trades"
-    )
-
-    conn.commit()
-    conn.close()
-
-    set_meta(
-        RESET_KEY,
-        "1",
-    )
-
-    print(
-        "V4.2 performance reset completed."
-    )
-
-
-# ============================================================
-# HTTP SESSION
-# ============================================================
-
-session = requests.Session()
-
-session.headers.update(
-    {
-        "User-Agent":
-            "VOLUME-KHAT-100/4.2"
-    }
-)
-
-
-# ============================================================
-# OHLCV ERROR COUNTER
-# ============================================================
-
-def register_ohlcv_error(
-    interval,
-    error_type="generic",
-):
-
-    diagnostics["errors"] += 1
-    diagnostics["api_errors"] += 1
-
-    if error_type == "empty":
-        diagnostics["api_empty"] += 1
-
-    elif error_type == "parse":
-        diagnostics["api_parse_errors"] += 1
-
-    if interval == TIMEFRAME_1H:
-        diagnostics[
-            "ohlcv_1h_errors"
-        ] += 1
-
-    elif interval == TIMEFRAME_15M:
-        diagnostics[
-            "ohlcv_15m_errors"
-        ] += 1
-
-    elif interval == TIMEFRAME_5M:
-        diagnostics[
-            "ohlcv_5m_errors"
-        ] += 1
-
-
-# ============================================================
-# FETCH OHLCV
-# ============================================================
-
-def fetch_ohlcv(
-    symbol,
-    interval,
-    limit=OHLCV_LIMIT,
-):
-
-    try:
-
-        # ----------------------------------------------------
-        # Correct Kraken Futures endpoint
-        # /charts/v1/trade/SYMBOL/RESOLUTION
-        # ----------------------------------------------------
-
-        url = (
-            f"{KRAKEN_OHLC_URL}/"
-            f"{KRAKEN_OHLC_TICK_TYPE}/"
-            f"{symbol}/"
-            f"{interval}"
-        )
-
-        response = session.get(
-            url,
-            params={
-                "count": limit + 2,
-            },
-            timeout=REQUEST_TIMEOUT,
-        )
-
-        # ----------------------------------------------------
-        # HTTP ERROR
-        # ----------------------------------------------------
-
-        if not response.ok:
-
-            register_ohlcv_error(
-                interval
-            )
-
-            error_text = (
-                response.text[:300]
-                if response.text
-                else "No response body"
-            )
-
-            print(
-                f"OHLCV HTTP ERROR | "
-                f"{symbol} | "
-                f"{interval} | "
-                f"HTTP "
-                f"{response.status_code} | "
-                f"{error_text}"
-            )
-
-            return []
-
-        # ----------------------------------------------------
-        # JSON
-        # ----------------------------------------------------
-
-        try:
-            data = response.json()
-
-        except ValueError as exc:
-
-            register_ohlcv_error(
-                interval,
-                "parse",
-            )
-
-            print(
-                f"OHLCV JSON ERROR | "
-                f"{symbol} | "
-                f"{interval} | "
-                f"{exc}"
-            )
-
-            return []
-
-        # ----------------------------------------------------
-        # Validate object
-        # ----------------------------------------------------
-
-        if not isinstance(
-            data,
-            dict,
-        ):
-
-            register_ohlcv_error(
-                interval,
-                "parse",
-            )
-
-            print(
-                f"OHLCV FORMAT ERROR | "
-                f"{symbol} | "
-                f"{interval} | "
-                f"Expected dict, got "
-                f"{type(data).__name__}"
-            )
-
-            return []
-
-        # ----------------------------------------------------
-        # Kraken candles
-        # ----------------------------------------------------
-
-        candles = data.get(
-            "candles"
-        )
-
-        if candles is None:
-
-            register_ohlcv_error(
-                interval,
-                "parse",
-            )
-
-            print(
-                f"OHLCV DATA ERROR | "
-                f"{symbol} | "
-                f"{interval} | "
-                f"'candles' missing | "
-                f"keys={list(data.keys())}"
-            )
-
-            return []
-
-        if not isinstance(
-            candles,
-            list,
-        ):
-
-            register_ohlcv_error(
-                interval,
-                "parse",
-            )
-
-            print(
-                f"OHLCV DATA ERROR | "
-                f"{symbol} | "
-                f"{interval} | "
-                f"candles is not list"
-            )
-
-            return []
-
-        if not candles:
-
-            register_ohlcv_error(
-                interval,
-                "empty",
-            )
-
-            print(
-                f"OHLCV EMPTY | "
-                f"{symbol} | "
-                f"{interval}"
-            )
-
-            return []
-
-        result = []
-
-        # ----------------------------------------------------
-        # Parse
-        # ----------------------------------------------------
-
-        for candle in candles:
-
-            try:
-
-                if isinstance(
-                    candle,
-                    dict,
-                ):
-
-                    ts = (
-                        candle.get("time")
-                        or candle.get(
-                            "timestamp"
-                        )
-                    )
-
-                    op = candle.get(
-                        "open"
-                    )
-
-                    hi = candle.get(
-                        "high"
-                    )
-
-                    lo = candle.get(
-                        "low"
-                    )
-
-                    cl = candle.get(
-                        "close"
-                    )
-
-                    vol = candle.get(
-                        "volume"
-                    )
-
-                else:
-
-                    if len(candle) < 6:
-                        continue
-
-                    ts = candle[0]
-                    op = candle[1]
-                    hi = candle[2]
-                    lo = candle[3]
-                    cl = candle[4]
-                    vol = candle[5]
-
-                if (
-                    ts is None
-                    or op is None
-                    or hi is None
-                    or lo is None
-                    or cl is None
-                    or vol is None
-                ):
-                    continue
-
-                ts = float(ts)
-
-                # ------------------------------------------------
-                # Kraken Futures timestamps can be milliseconds.
-                # Convert milliseconds -> seconds.
-                # ------------------------------------------------
-
-                if ts > 10_000_000_000:
-                    ts /= 1000.0
-
-                result.append(
-                    {
-                        "time": ts,
-                        "open": float(op),
-                        "high": float(hi),
-                        "low": float(lo),
-                        "close": float(cl),
-                        "volume": float(vol),
-                    }
-                )
-
-            except Exception as exc:
-
-                print(
-                    f"OHLCV CANDLE PARSE ERROR | "
-                    f"{symbol} | "
-                    f"{interval} | "
-                    f"{exc}"
-                )
-
-                continue
-
-        # ----------------------------------------------------
-        # No valid candles
-        # ----------------------------------------------------
-
-        if not result:
-
-            register_ohlcv_error(
-                interval,
-                "parse",
-            )
-
-            print(
-                f"OHLCV PARSE EMPTY | "
-                f"{symbol} | "
-                f"{interval}"
-            )
-
-            return []
-
-        # ----------------------------------------------------
-        # Sort
-        # ----------------------------------------------------
-
-        result.sort(
-            key=lambda x: x["time"]
-        )
-
-        # ----------------------------------------------------
-        # Remove duplicates
-        # ----------------------------------------------------
-
-        unique = {}
-
-        for candle in result:
-
-            unique[
-                candle["time"]
-            ] = candle
-
-        result = list(
-            unique.values()
-        )
-
-        result.sort(
-            key=lambda x: x["time"]
-        )
-
-        # ----------------------------------------------------
-        # Closed candles only
-        # ----------------------------------------------------
-
-        interval_seconds = {
-            "1m": 60,
-            "5m": 300,
-            "15m": 900,
-            "30m": 1800,
-            "1h": 3600,
-            "4h": 14400,
-            "12h": 43200,
-            "1d": 86400,
-            "1w": 604800,
-        }.get(
-            interval
-        )
-
-        if interval_seconds is None:
-
-            register_ohlcv_error(
-                interval,
-                "parse",
-            )
-
-            print(
-                f"OHLCV INTERVAL ERROR | "
-                f"{symbol} | "
-                f"{interval}"
-            )
-
-            return []
-
-        # ----------------------------------------------------
-        # Remove current forming candle
-        # ----------------------------------------------------
-
-        now_ts = time.time()
-
-        if result:
-
-            last = result[-1]
-
-            candle_close_time = (
-                last["time"]
-                + interval_seconds
-            )
-
-            if now_ts < candle_close_time:
-
-                result = result[:-1]
-
-        # ----------------------------------------------------
-        # Minimum data
-        # ----------------------------------------------------
-
-        if len(result) < 20:
-
-            register_ohlcv_error(
-                interval,
-                "empty",
-            )
-
-            print(
-                f"OHLCV TOO FEW CANDLES | "
-                f"{symbol} | "
-                f"{interval} | "
-                f"count={len(result)}"
-            )
-
-            return []
-
-        return result[-limit:]
-
-    except requests.RequestException as exc:
-
-        register_ohlcv_error(
-            interval
-        )
-
-        print(
-            f"OHLCV REQUEST ERROR | "
-            f"{symbol} | "
-            f"{interval} | "
-            f"{exc}"
-        )
-
-        return []
-
-    except Exception as exc:
-
-        register_ohlcv_error(
-            interval
-        )
-
-        print(
-            f"OHLCV ERROR | "
-            f"{symbol} | "
-            f"{interval} | "
-            f"{type(exc).__name__}: "
-            f"{exc}"
-        )
-
-        return []
-
-
-# ============================================================
-# RVOL
-# ============================================================
-
-def calculate_rvol(
-    candles,
-    period=RVOL_PERIOD,
-):
-
-    if len(candles) <= period:
+    if len(candles) < period + 1:
         return 0.0
 
-    current_volume = (
-        candles[-1]["volume"]
-    )
+    current_volume = candles[-1]["volume"]
 
-    previous = candles[
-        -(period + 1):-1
+    previous = [
+        x["volume"]
+        for x in candles[-period-1:-1]
     ]
 
     if not previous:
         return 0.0
 
-    avg_volume = (
-        sum(
-            c["volume"]
-            for c in previous
-        )
-        / len(previous)
-    )
+    avg_volume = sum(previous) / len(previous)
 
     if avg_volume <= 0:
         return 0.0
 
-    return (
-        current_volume
-        / avg_volume
-    )
+    return current_volume / avg_volume
 
 
-# ============================================================
-# ATR
-# ============================================================
+def calculate_atr(candles, period=ATR_PERIOD):
 
-def calculate_atr(
-    candles,
-    period=ATR_PERIOD,
-):
-
-    if len(candles) < (
-        period + 1
-    ):
-        return 0.0
+    if len(candles) < period + 1:
+        return None
 
     trs = []
 
-    for i in range(
-        1,
-        len(candles),
-    ):
+    for i in range(1, len(candles)):
 
         current = candles[i]
         previous = candles[i - 1]
 
         tr = max(
-            current["high"]
-            - current["low"],
-
+            current["high"] - current["low"],
             abs(
                 current["high"]
                 - previous["close"]
             ),
-
             abs(
                 current["low"]
                 - previous["close"]
-            ),
+            )
         )
 
         trs.append(tr)
 
     if len(trs) < period:
-        return 0.0
-
-    return (
-        sum(trs[-period:])
-        / period
-    )
-
-
-# ============================================================
-# SMA
-# ============================================================
-
-def sma(
-    values,
-    period,
-):
-
-    if len(values) < period:
         return None
 
-    return (
-        sum(values[-period:])
-        / period
-    )
+    return sum(trs[-period:]) / period
 
 
 # ============================================================
@@ -1077,38 +966,22 @@ def get_trend(candles):
         return "NEUTRAL"
 
     closes = [
-        c["close"]
-        for c in candles
+        x["close"]
+        for x in candles
     ]
 
-    fast = sma(
-        closes,
-        20,
-    )
+    sma20 = sma(closes, 20)
+    sma50 = sma(closes, 50)
 
-    slow = sma(
-        closes,
-        50,
-    )
-
-    if (
-        fast is None
-        or slow is None
-    ):
+    if sma20 is None or sma50 is None:
         return "NEUTRAL"
 
-    last_close = closes[-1]
+    close = closes[-1]
 
-    if (
-        last_close > fast
-        and fast > slow
-    ):
+    if close > sma20 and sma20 > sma50:
         return "LONG"
 
-    if (
-        last_close < fast
-        and fast < slow
-    ):
+    if close < sma20 and sma20 < sma50:
         return "SHORT"
 
     return "NEUTRAL"
@@ -1118,11 +991,9 @@ def get_trend(candles):
 # 15M BREAKOUT
 # ============================================================
 
-def detect_breakout(candles):
+def detect_breakout(candles, trend):
 
-    if len(candles) < (
-        BREAKOUT_LOOKBACK + 2
-    ):
+    if len(candles) < BREAKOUT_LOOKBACK + 2:
         return None
 
     current = candles[-1]
@@ -1131,39 +1002,42 @@ def detect_breakout(candles):
         -(BREAKOUT_LOOKBACK + 1):-1
     ]
 
-    highest = max(
-        c["high"]
-        for c in previous
+    if not previous:
+        return None
+
+    rvol = calculate_rvol(candles)
+
+    prev_high = max(
+        x["high"]
+        for x in previous
     )
 
-    lowest = min(
-        c["low"]
-        for c in previous
-    )
-
-    rvol = calculate_rvol(
-        candles
+    prev_low = min(
+        x["low"]
+        for x in previous
     )
 
     if (
-        current["close"] > highest
+        trend == "LONG"
+        and current["close"] > prev_high
         and rvol >= RVOL_ABNORMAL
     ):
-
         return {
             "type": "BREAKOUT",
             "side": "LONG",
+            "level": prev_high,
             "rvol": rvol,
         }
 
     if (
-        current["close"] < lowest
+        trend == "SHORT"
+        and current["close"] < prev_low
         and rvol >= RVOL_ABNORMAL
     ):
-
         return {
             "type": "BREAKOUT",
             "side": "SHORT",
+            "level": prev_low,
             "rvol": rvol,
         }
 
@@ -1174,32 +1048,25 @@ def detect_breakout(candles):
 # 15M REJECTION
 # ============================================================
 
-def detect_rejection(
-    candles,
-    trend_side,
-):
+def detect_rejection(candles, trend):
 
-    if len(candles) < (
-        SUPPORT_RESISTANCE_LOOKBACK + 2
-    ):
+    if len(candles) < SR_LOOKBACK + 2:
         return None
 
     current = candles[-1]
 
     previous = candles[
-        -(
-            SUPPORT_RESISTANCE_LOOKBACK + 1
-        ):-1
+        -(SR_LOOKBACK + 1):-1
     ]
 
     resistance = max(
-        c["high"]
-        for c in previous
+        x["high"]
+        for x in previous
     )
 
     support = min(
-        c["low"]
-        for c in previous
+        x["low"]
+        for x in previous
     )
 
     body = abs(
@@ -1207,107 +1074,77 @@ def detect_rejection(
         - current["open"]
     )
 
-    candle_range = (
-        current["high"]
-        - current["low"]
-    )
-
-    if candle_range <= 0:
-        return None
-
-    body_ratio = (
-        body / candle_range
-    )
-
-    if body_ratio < MIN_BODY_RATIO:
-        return None
+    if body <= 0:
+        body = max(
+            abs(current["close"]) * 0.000001,
+            1e-12
+        )
 
     upper_wick = (
         current["high"]
         - max(
             current["open"],
-            current["close"],
+            current["close"]
         )
     )
 
     lower_wick = (
         min(
             current["open"],
-            current["close"],
+            current["close"]
         )
         - current["low"]
     )
 
-    if body <= 0:
-        return None
-
-    rvol = calculate_rvol(
-        candles
-    )
+    rvol = calculate_rvol(candles)
 
     # --------------------------------------------------------
-    # SHORT
+    # SHORT rejection at resistance
     # --------------------------------------------------------
 
-    if resistance <= 0:
-        return None
+    if trend == "SHORT":
 
-    resistance_distance = (
-        abs(
-            current["high"]
-            - resistance
-        )
-        / resistance
-    )
+        distance = abs(
+            current["high"] - resistance
+        ) / resistance
 
-    if (
-        trend_side == "SHORT"
-        and resistance_distance
-        <= REJECTION_DISTANCE
-        and upper_wick / body
-        >= WICK_BODY_RATIO
-        and current["close"]
-        < current["open"]
-        and rvol >= RVOL_ABNORMAL
-    ):
+        if (
+            distance <= REJECTION_DISTANCE
+            and upper_wick / body >= WICK_BODY_RATIO
+            and current["close"] < current["open"]
+            and rvol >= RVOL_ABNORMAL
+        ):
 
-        return {
-            "type": "REJECTION",
-            "side": "SHORT",
-            "rvol": rvol,
-        }
+            return {
+                "type": "REJECTION",
+                "side": "SHORT",
+                "level": resistance,
+                "rvol": rvol,
+            }
 
     # --------------------------------------------------------
-    # LONG
+    # LONG rejection at support
     # --------------------------------------------------------
 
-    if support <= 0:
-        return None
+    if trend == "LONG":
 
-    support_distance = (
-        abs(
-            current["low"]
-            - support
-        )
-        / support
-    )
+        distance = abs(
+            current["low"] - support
+        ) / support
 
-    if (
-        trend_side == "LONG"
-        and support_distance
-        <= REJECTION_DISTANCE
-        and lower_wick / body
-        >= WICK_BODY_RATIO
-        and current["close"]
-        > current["open"]
-        and rvol >= RVOL_ABNORMAL
-    ):
+        if (
+            distance <= REJECTION_DISTANCE
+            and lower_wick / body >= WICK_BODY_RATIO
+            and current["close"] > current["open"]
+            and rvol >= RVOL_ABNORMAL
+        ):
 
-        return {
-            "type": "REJECTION",
-            "side": "LONG",
-            "rvol": rvol,
-        }
+            return {
+                "type": "REJECTION",
+                "side": "LONG",
+                "level": support,
+                "rvol": rvol,
+            }
 
     return None
 
@@ -1316,26 +1153,22 @@ def detect_rejection(
 # 15M SETUP
 # ============================================================
 
-def detect_setup(
-    candles,
-    trend_side,
-):
+def detect_setup(candles, trend):
+
+    if trend not in ("LONG", "SHORT"):
+        return None
 
     breakout = detect_breakout(
-        candles
+        candles,
+        trend
     )
 
     if breakout:
-
-        if (
-            breakout["side"]
-            == trend_side
-        ):
-            return breakout
+        return breakout
 
     rejection = detect_rejection(
         candles,
-        trend_side,
+        trend
     )
 
     if rejection:
@@ -1345,367 +1178,225 @@ def detect_setup(
 
 
 # ============================================================
-# 5M STRUCTURE CONFIRMATION
+# 5M STRUCTURE
 # ============================================================
 
 def confirm_5m_structure(
     candles,
     side,
+    setup
 ):
 
-    if len(candles) < 20:
-
-        diagnostics[
-            "structure_failed"
-        ] += 1
-
+    if len(candles) < STRUCTURE_LOOKBACK + 10:
         return None
+
+    start = max(
+        1,
+        len(candles)
+        - STRUCTURE_LOOKBACK
+        - MAX_PULLBACK_CANDLES
+        - 5
+    )
+
+    last_index = len(candles) - 1
 
     break_index = None
     break_level = None
 
-    start = max(
-        STRUCTURE_LOOKBACK_5M,
-        len(candles)
-        - MAX_PULLBACK_CANDLES
-        - 3,
-    )
-
-    end = len(candles) - 1
-
     # --------------------------------------------------------
-    # STRUCTURE BREAK
+    # Find structure break
     # --------------------------------------------------------
 
     for i in range(
         start,
-        end,
+        last_index
     ):
-
-        previous = candles[
-            i - STRUCTURE_LOOKBACK_5M:i
-        ]
 
         current = candles[i]
 
+        left_start = max(
+            0,
+            i - STRUCTURE_LOOKBACK
+        )
+
+        left = candles[
+            left_start:i
+        ]
+
+        if len(left) < STRUCTURE_LOOKBACK:
+            continue
+
         previous_high = max(
-            c["high"]
-            for c in previous
+            x["high"]
+            for x in left
         )
 
         previous_low = min(
-            c["low"]
-            for c in previous
+            x["low"]
+            for x in left
         )
 
         if (
             side == "LONG"
-            and current["close"]
-            > previous_high
+            and current["close"] > previous_high
         ):
-
             break_index = i
             break_level = previous_high
+            break
 
-        elif (
+        if (
             side == "SHORT"
-            and current["close"]
-            < previous_low
+            and current["close"] < previous_low
         ):
-
             break_index = i
             break_level = previous_low
+            break
 
     if break_index is None:
-
-        diagnostics[
-            "structure_failed"
-        ] += 1
-
         return None
 
     # --------------------------------------------------------
-    # PULLBACK
+    # Pullback
     # --------------------------------------------------------
 
     pullback_index = None
 
     pullback_end = min(
-        len(candles) - 1,
-        break_index
-        + MAX_PULLBACK_CANDLES,
+        last_index,
+        break_index + MAX_PULLBACK_CANDLES
     )
 
     for i in range(
         break_index + 1,
-        pullback_end + 1,
+        pullback_end + 1
     ):
 
         candle = candles[i]
 
-        if side == "LONG":
+        distance = abs(
+            candle["close"]
+            - break_level
+        ) / max(
+            abs(break_level),
+            1e-12
+        )
 
-            distance = (
-                abs(
-                    candle["low"]
-                    - break_level
-                )
-                / break_level
-            )
+        if distance <= PULLBACK_TOLERANCE:
 
-            if (
-                distance
-                <= PULLBACK_TOLERANCE
-                and candle["low"]
-                >= (
-                    break_level
-                    * (
-                        1
-                        - PULLBACK_TOLERANCE
-                    )
-                )
-            ):
+            if side == "LONG":
+                if candle["low"] <= break_level * (
+                    1 + PULLBACK_TOLERANCE
+                ):
+                    pullback_index = i
+                    break
 
-                pullback_index = i
-                break
-
-        else:
-
-            distance = (
-                abs(
-                    candle["high"]
-                    - break_level
-                )
-                / break_level
-            )
-
-            if (
-                distance
-                <= PULLBACK_TOLERANCE
-                and candle["high"]
-                <= (
-                    break_level
-                    * (
-                        1
-                        + PULLBACK_TOLERANCE
-                    )
-                )
-            ):
-
-                pullback_index = i
-                break
+            else:
+                if candle["high"] >= break_level * (
+                    1 - PULLBACK_TOLERANCE
+                ):
+                    pullback_index = i
+                    break
 
     if pullback_index is None:
-
-        diagnostics[
-            "pullback_failed"
-        ] += 1
-
         return None
 
     # --------------------------------------------------------
-    # CONFIRMATION CANDLE
+    # Confirmation
     # --------------------------------------------------------
 
-    confirmation = candles[-1]
-
-    if (
-        pullback_index
-        >= len(candles) - 1
-    ):
-
-        diagnostics[
-            "confirmation_failed"
-        ] += 1
-
+    if pullback_index >= last_index:
         return None
+
+    confirmation_index = last_index
+    confirmation = candles[
+        confirmation_index
+    ]
 
     body = abs(
         confirmation["close"]
         - confirmation["open"]
     )
 
-    candle_range = (
+    full_range = (
         confirmation["high"]
         - confirmation["low"]
     )
 
-    if candle_range <= 0:
-
-        diagnostics[
-            "confirmation_failed"
-        ] += 1
-
+    if full_range <= 0:
         return None
 
-    body_ratio = (
-        body / candle_range
-    )
+    body_ratio = body / full_range
 
-    # --------------------------------------------------------
-    # v4.2 CHANGE
-    #
-    # v4.1 = 0.30
-    # v4.2 = 0.20
-    #
-    # Everything else remains unchanged.
-    # --------------------------------------------------------
-
-    if (
-        body_ratio
-        < MIN_CONFIRM_BODY_RATIO
-    ):
-
-        diagnostics[
-            "confirmation_failed"
-        ] += 1
-
+    if body_ratio < MIN_CONFIRM_BODY_RATIO:
         return None
-
-    # --------------------------------------------------------
-    # LONG CONFIRMATION
-    # --------------------------------------------------------
 
     if side == "LONG":
 
-        bullish = (
-            confirmation["close"]
-            > confirmation["open"]
-        )
-
-        valid_close = (
-            confirmation["close"]
-            > break_level
-        )
-
-        if not (
-            bullish
-            and valid_close
-        ):
-
-            diagnostics[
-                "confirmation_failed"
-            ] += 1
-
+        if confirmation["close"] <= break_level:
             return None
 
-    # --------------------------------------------------------
-    # SHORT CONFIRMATION
-    # --------------------------------------------------------
+        if confirmation["close"] <= confirmation["open"]:
+            return None
 
     else:
 
-        bearish = (
-            confirmation["close"]
-            < confirmation["open"]
-        )
-
-        valid_close = (
-            confirmation["close"]
-            < break_level
-        )
-
-        if not (
-            bearish
-            and valid_close
-        ):
-
-            diagnostics[
-                "confirmation_failed"
-            ] += 1
-
+        if confirmation["close"] >= break_level:
             return None
 
-    diagnostics[
-        "full_5m_confirmation"
-    ] += 1
+        if confirmation["close"] >= confirmation["open"]:
+            return None
 
     return {
-        "break_index":
-            break_index,
-
-        "break_level":
-            break_level,
-
-        "pullback_index":
-            pullback_index,
-
-        "confirmation_index":
-            len(candles) - 1,
-
-        "confirmation":
-            confirmation,
+        "break_index": break_index,
+        "break_level": break_level,
+        "pullback_index": pullback_index,
+        "confirmation_index": confirmation_index,
+        "confirmation_body_ratio": body_ratio,
     }
 
 
 # ============================================================
-# 5M STRUCTURAL SL
+# STRUCTURAL SL
 # ============================================================
 
 def calculate_5m_structural_sl(
     candles,
-    structure,
-    side,
+    confirmation
 ):
 
-    pullback_index = (
-        structure[
-            "pullback_index"
-        ]
-    )
-
-    confirmation_index = (
-        structure[
-            "confirmation_index"
-        ]
-    )
-
-    atr = calculate_atr(
-        candles
-    )
-
-    if atr <= 0:
+    if not confirmation:
         return None
 
+    start = confirmation["pullback_index"]
+    end = confirmation["confirmation_index"]
+
     section = candles[
-        pullback_index:
-        confirmation_index + 1
+        start:end + 1
     ]
 
     if not section:
         return None
 
-    if (
-        structure["break_level"]
-        <= 0
-    ):
-        return None
+    low = min(
+        x["low"]
+        for x in section
+    )
 
-    if side == "LONG":
+    high = max(
+        x["high"]
+        for x in section
+    )
 
-        structural_low = min(
-            c["low"]
-            for c in section
-        )
+    atr = calculate_atr(candles)
 
-        return (
-            structural_low
-            - atr * ATR_SL_BUFFER
-        )
+    if atr is None:
+        atr = 0.0
 
-    if side == "SHORT":
-
-        structural_high = max(
-            c["high"]
-            for c in section
-        )
-
-        return (
-            structural_high
-            + atr * ATR_SL_BUFFER
-        )
-
-    return None
+    return {
+        "low": low,
+        "high": high,
+        "atr": atr,
+    }
 
 
 # ============================================================
@@ -1715,100 +1406,107 @@ def calculate_5m_structural_sl(
 def build_sl_tp(
     entry,
     side,
-    sl,
+    structural
 ):
 
-    if (
-        entry <= 0
-        or sl <= 0
-    ):
+    if entry is None or entry <= 0:
+        DIAG["other"] += 1
         return None
+
+    if structural is None:
+        DIAG["other"] += 1
+        return None
+
+    atr = structural["atr"]
 
     if side == "LONG":
 
-        if sl >= entry:
+        raw_sl = (
+            structural["low"]
+            - atr * SL_BUFFER
+        )
+
+        if raw_sl >= entry:
+            DIAG["other"] += 1
             return None
 
-        risk = (
-            entry - sl
+        sl_distance = entry - raw_sl
+
+        sl_pct = (
+            sl_distance / entry
+        ) * 100.0
+
+        sl_fraction = (
+            sl_distance / entry
         )
 
-        tp = (
-            entry
-            + risk * MIN_RR
-        )
-
-    elif side == "SHORT":
-
-        if sl <= entry:
+        if sl_fraction < MIN_SL_PCT:
+            DIAG["sl_too_small"] += 1
             return None
 
-        risk = (
-            sl - entry
-        )
+        if sl_fraction > MAX_SL_PCT:
+            DIAG["sl_too_large"] += 1
+            return None
 
-        tp = (
-            entry
-            - risk * MIN_RR
+        tp = entry + (
+            sl_distance * MIN_RR
         )
 
     else:
-        return None
 
-    sl_pct = (
-        abs(
-            entry - sl
+        raw_sl = (
+            structural["high"]
+            + atr * SL_BUFFER
         )
-        / entry
-        * 100
-    )
 
-    if sl_pct < (
-        MIN_SL_PCT * 100
-    ):
+        if raw_sl <= entry:
+            DIAG["other"] += 1
+            return None
 
-        diagnostics[
-            "sl_too_small"
-        ] += 1
+        sl_distance = raw_sl - entry
 
+        sl_pct = (
+            sl_distance / entry
+        ) * 100.0
+
+        sl_fraction = (
+            sl_distance / entry
+        )
+
+        if sl_fraction < MIN_SL_PCT:
+            DIAG["sl_too_small"] += 1
+            return None
+
+        if sl_fraction > MAX_SL_PCT:
+            DIAG["sl_too_large"] += 1
+            return None
+
+        tp = entry - (
+            sl_distance * MIN_RR
+        )
+
+    if side == "LONG":
+
+        risk = entry - raw_sl
+        reward = tp - entry
+
+    else:
+
+        risk = raw_sl - entry
+        reward = entry - tp
+
+    if risk <= 0:
+        DIAG["other"] += 1
         return None
 
-    if sl_pct > (
-        MAX_SL_PCT * 100
-    ):
-
-        diagnostics[
-            "sl_too_large"
-        ] += 1
-
-        return None
-
-    risk_distance = abs(
-        entry - sl
-    )
-
-    reward_distance = abs(
-        tp - entry
-    )
-
-    if risk_distance <= 0:
-        return None
-
-    rr = (
-        reward_distance
-        / risk_distance
-    )
+    rr = reward / risk
 
     if rr < MIN_RR:
-
-        diagnostics[
-            "rr_failed"
-        ] += 1
-
+        DIAG["rr_failed"] += 1
         return None
 
     return {
-        "sl": sl,
+        "sl": raw_sl,
         "tp": tp,
         "sl_pct": sl_pct,
         "rr": rr,
@@ -1820,298 +1518,52 @@ def build_sl_tp(
 # ============================================================
 
 def calculate_score(
-    trend_side,
+    trend,
     setup,
     rvol_5m,
-    structure_ok,
+    confirmation
 ):
 
     score = 0
 
     # --------------------------------------------------------
-    # 1H
+    # 1H trend
     # --------------------------------------------------------
 
-    if trend_side in (
-        "LONG",
-        "SHORT",
-    ):
-
+    if trend in ("LONG", "SHORT"):
         score += 3
 
     # --------------------------------------------------------
-    # 15M
+    # 15M setup
     # --------------------------------------------------------
 
-    if setup is not None:
-
+    if setup:
         score += 4
 
     # --------------------------------------------------------
     # 5M RVOL
     # --------------------------------------------------------
 
-    if (
-        rvol_5m
-        >= RVOL_VERY_STRONG
-    ):
-
+    if rvol_5m >= RVOL_VERY_STRONG:
         score += 4
 
-    elif (
-        rvol_5m
-        >= RVOL_STRONG
-    ):
-
-        score += 4
-
-    elif (
-        rvol_5m
-        >= RVOL_ABNORMAL
-    ):
-
+    elif rvol_5m >= RVOL_STRONG:
         score += 3
+
+    elif rvol_5m >= RVOL_ABNORMAL:
+        score += 2
 
     # --------------------------------------------------------
     # 5M confirmation
     # --------------------------------------------------------
 
-    if structure_ok:
+    if confirmation:
         score += 4
 
     return min(
         score,
-        15,
+        MAX_SCORE
     )
-
-
-# ============================================================
-# TOP MARKETS
-# ============================================================
-
-def get_top_markets():
-
-    try:
-
-        response = session.get(
-            KRAKEN_TICKER_URL,
-            timeout=REQUEST_TIMEOUT,
-        )
-
-        if not response.ok:
-
-            diagnostics[
-                "errors"
-            ] += 1
-
-            print(
-                f"MARKET HTTP ERROR | "
-                f"HTTP "
-                f"{response.status_code} | "
-                f"{response.text[:300]}"
-            )
-
-            return []
-
-        data = response.json()
-
-        if not isinstance(
-            data,
-            dict,
-        ):
-
-            diagnostics[
-                "errors"
-            ] += 1
-
-            print(
-                "MARKET FORMAT ERROR"
-            )
-
-            return []
-
-        tickers = data.get(
-            "tickers"
-        )
-
-        if not tickers:
-
-            diagnostics[
-                "errors"
-            ] += 1
-
-            print(
-                "MARKET DATA EMPTY"
-            )
-
-            return []
-
-        markets = []
-
-        for ticker in tickers:
-
-            if not isinstance(
-                ticker,
-                dict,
-            ):
-                continue
-
-            symbol = ticker.get(
-                "symbol"
-            )
-
-            if not symbol:
-                continue
-
-            if not (
-                symbol.startswith(
-                    "PF_"
-                )
-                and symbol.endswith(
-                    "USD"
-                )
-            ):
-                continue
-
-            volume = (
-                ticker.get("vol24h")
-                or ticker.get("volume")
-                or 0
-            )
-
-            try:
-
-                volume = float(
-                    volume
-                )
-
-            except Exception:
-
-                volume = 0.0
-
-            markets.append(
-                (
-                    symbol,
-                    volume,
-                )
-            )
-
-        markets.sort(
-            key=lambda x: x[1],
-            reverse=True,
-        )
-
-        return [
-            symbol
-            for symbol, _
-            in markets[:TOP_N]
-        ]
-
-    except Exception as exc:
-
-        diagnostics[
-            "errors"
-        ] += 1
-
-        print(
-            f"MARKET ERROR: "
-            f"{type(exc).__name__}: "
-            f"{exc}"
-        )
-
-        return []
-
-
-# ============================================================
-# CURRENT PRICE
-# ============================================================
-
-def get_current_price(
-    symbol,
-):
-
-    try:
-
-        response = session.get(
-            KRAKEN_TICKER_URL,
-            timeout=REQUEST_TIMEOUT,
-        )
-
-        if not response.ok:
-
-            diagnostics[
-                "errors"
-            ] += 1
-
-            print(
-                f"PRICE HTTP ERROR | "
-                f"{symbol} | "
-                f"HTTP "
-                f"{response.status_code}"
-            )
-
-            return None
-
-        data = response.json()
-
-        tickers = (
-            data.get("tickers")
-            if isinstance(
-                data,
-                dict,
-            )
-            else data
-        )
-
-        if not isinstance(
-            tickers,
-            list,
-        ):
-            return None
-
-        for ticker in tickers:
-
-            if not isinstance(
-                ticker,
-                dict,
-            ):
-                continue
-
-            if (
-                ticker.get("symbol")
-                != symbol
-            ):
-                continue
-
-            price = (
-                ticker.get("last")
-                or ticker.get(
-                    "lastPrice"
-                )
-                or ticker.get(
-                    "markPrice"
-                )
-            )
-
-            if price is None:
-                continue
-
-            return float(price)
-
-    except Exception as exc:
-
-        diagnostics[
-            "errors"
-        ] += 1
-
-        print(
-            f"PRICE ERROR | "
-            f"{symbol} | "
-            f"{type(exc).__name__}: "
-            f"{exc}"
-        )
-
-    return None
 
 
 # ============================================================
@@ -2119,399 +1571,72 @@ def get_current_price(
 # ============================================================
 
 def get_open_trades():
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        SELECT *
-        FROM trades
-        WHERE exit_time IS NULL
-        ORDER BY id ASC
-        """
-    )
-
-    trades = cur.fetchall()
-
-    conn.close()
-
-    return trades
-
-
-def get_open_symbols():
-
-    return {
-        trade["symbol"]
-        for trade in get_open_trades()
-    }
-
-
-# ============================================================
-# DURATION
-# ============================================================
-
-def calculate_duration_minutes(
-    entry_time,
-):
-
-    if not entry_time:
-        return 0.0
+    conn = get_db()
 
     try:
 
-        dt = datetime.fromisoformat(
-            entry_time
-        )
+        return conn.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE exit_time IS NULL
+            ORDER BY entry_time ASC
+            """
+        ).fetchall()
 
-        if dt.tzinfo is None:
-
-            dt = dt.replace(
-                tzinfo=timezone.utc
-            )
-
-        now = datetime.now(
-            timezone.utc
-        )
-
-        return max(
-            0.0,
-            (
-                now - dt
-            ).total_seconds()
-            / 60.0,
-        )
-
-    except Exception:
-
-        return 0.0
-
-
-def format_duration(
-    minutes,
-):
-
-    if minutes is None:
-        return "N/A"
-
-    minutes = int(
-        max(
-            0,
-            minutes,
-        )
-    )
-
-    hours = (
-        minutes // 60
-    )
-
-    mins = (
-        minutes % 60
-    )
-
-    if hours > 0:
-
-        return (
-            f"{hours}h "
-            f"{mins}m"
-        )
-
-    return f"{mins}m"
-
-
-# ============================================================
-# PNL
-# ============================================================
-
-def calculate_pnl_pct(
-    side,
-    entry,
-    current,
-):
-
-    if entry <= 0:
-        return 0.0
-
-    if side == "LONG":
-
-        return (
-            (
-                current - entry
-            )
-            / entry
-            * 100
-        )
-
-    return (
-        (
-            entry - current
-        )
-        / entry
-        * 100
-    )
-
-
-# ============================================================
-# CLOSE TRADE
-# ============================================================
-
-def close_trade(
-    trade_id,
-    exit_price,
-    reason,
-):
-
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        SELECT *
-        FROM trades
-        WHERE id = ?
-        """,
-        (trade_id,),
-    )
-
-    trade = cur.fetchone()
-
-    if trade is None:
-
+    finally:
         conn.close()
-        return
-
-    pnl_pct = calculate_pnl_pct(
-        trade["side"],
-        trade["entry"],
-        exit_price,
-    )
-
-    result = (
-        "WIN"
-        if pnl_pct > 0
-        else "LOSS"
-    )
-
-    duration = (
-        calculate_duration_minutes(
-            trade["entry_time"]
-        )
-    )
-
-    exit_time = (
-        datetime.now(
-            timezone.utc
-        ).isoformat()
-    )
-
-    cur.execute(
-        """
-        UPDATE trades
-        SET
-            exit = ?,
-            exit_time = ?,
-            pnl_pct = ?,
-            result = ?,
-            exit_reason = ?,
-            duration_minutes = ?
-        WHERE id = ?
-        """,
-        (
-            exit_price,
-            exit_time,
-            pnl_pct,
-            result,
-            reason,
-            duration,
-            trade_id,
-        ),
-    )
-
-    conn.commit()
-    conn.close()
 
 
-# ============================================================
-# UPDATE OPEN TRADES
-# ============================================================
+def get_open_symbols():
+    rows = get_open_trades()
 
-def update_open_trades():
-
-    trades = get_open_trades()
-
-    for trade in trades:
-
-        symbol = trade["symbol"]
-        side = trade["side"]
-
-        entry = float(
-            trade["entry"]
-        )
-
-        sl = float(
-            trade["sl"]
-        )
-
-        tp = float(
-            trade["tp"]
-        )
-
-        current = get_current_price(
-            symbol
-        )
-
-        if current is None:
-            continue
-
-        pnl = calculate_pnl_pct(
-            side,
-            entry,
-            current,
-        )
-
-        duration = (
-            calculate_duration_minutes(
-                trade["entry_time"]
-            )
-        )
-
-        # ----------------------------------------------------
-        # LONG
-        # ----------------------------------------------------
-
-        if side == "LONG":
-
-            if current <= sl:
-
-                close_trade(
-                    trade["id"],
-                    current,
-                    "STOP_LOSS",
-                )
-
-                continue
-
-            if current >= tp:
-
-                close_trade(
-                    trade["id"],
-                    current,
-                    "TAKE_PROFIT",
-                )
-
-                continue
-
-        # ----------------------------------------------------
-        # SHORT
-        # ----------------------------------------------------
-
-        else:
-
-            if current >= sl:
-
-                close_trade(
-                    trade["id"],
-                    current,
-                    "STOP_LOSS",
-                )
-
-                continue
-
-            if current <= tp:
-
-                close_trade(
-                    trade["id"],
-                    current,
-                    "TAKE_PROFIT",
-                )
-
-                continue
-
-        # ----------------------------------------------------
-        # TIME PROFIT
-        # ----------------------------------------------------
-
-        if (
-            duration
-            >= TIME_EXIT_MINUTES
-            and pnl
-            >= TIME_EXIT_MIN_PROFIT_PCT
-        ):
-
-            close_trade(
-                trade["id"],
-                current,
-                "TIME_PROFIT",
-            )
+    return {
+        row["symbol"]
+        for row in rows
+    }
 
 
 # ============================================================
 # COOLDOWN
 # ============================================================
 
-def is_in_cooldown(
-    symbol,
-):
+def is_in_cooldown(symbol):
 
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        SELECT exit_time
-        FROM trades
-        WHERE symbol = ?
-          AND exit_time IS NOT NULL
-        ORDER BY exit_time DESC
-        LIMIT 1
-        """,
-        (symbol,),
-    )
-
-    row = cur.fetchone()
-
-    conn.close()
-
-    if (
-        not row
-        or not row["exit_time"]
-    ):
-        return False
+    conn = get_db()
 
     try:
 
-        exit_dt = (
-            datetime.fromisoformat(
-                row["exit_time"]
-            )
+        row = conn.execute(
+            """
+            SELECT exit_time
+            FROM trades
+            WHERE symbol = ?
+              AND exit_time IS NOT NULL
+            ORDER BY exit_time DESC
+            LIMIT 1
+            """,
+            (symbol,)
+        ).fetchone()
+
+        if not row:
+            return False
+
+        exit_dt = parse_datetime(
+            row["exit_time"]
         )
 
-        if exit_dt.tzinfo is None:
-
-            exit_dt = exit_dt.replace(
-                tzinfo=timezone.utc
-            )
+        if exit_dt is None:
+            return False
 
         elapsed = (
-            datetime.now(
-                timezone.utc
-            )
-            - exit_dt
+            utc_now() - exit_dt
         ).total_seconds()
 
-        candle_seconds = (
-            COOLDOWN_CANDLES
-            * 300
-        )
+        return elapsed < COOLDOWN_SECONDS
 
-        return (
-            elapsed
-            < candle_seconds
-        )
-
-    except Exception:
-
-        return False
+    finally:
+        conn.close()
 
 
 # ============================================================
@@ -2523,42 +1648,394 @@ def create_trade(
     side,
     entry,
     sl,
-    tp,
+    tp
 ):
 
-    conn = get_connection()
-    cur = conn.cursor()
+    conn = get_db()
 
-    entry_time = (
-        datetime.now(
-            timezone.utc
-        ).isoformat()
-    )
+    try:
 
-    cur.execute(
-        """
-        INSERT INTO trades (
-            symbol,
-            side,
-            entry,
-            sl,
-            tp,
-            entry_time
+        conn.execute("BEGIN IMMEDIATE")
+
+        # ----------------------------------------------------
+        # Hard protection against duplicate open symbol
+        # ----------------------------------------------------
+
+        existing = conn.execute(
+            """
+            SELECT id
+            FROM trades
+            WHERE symbol = ?
+              AND exit_time IS NULL
+            LIMIT 1
+            """,
+            (symbol,)
+        ).fetchone()
+
+        if existing:
+            conn.rollback()
+
+            print(
+                f"⚠️ CREATE BLOCKED: "
+                f"{symbol} already has open trade"
+            )
+
+            return None
+
+        # ----------------------------------------------------
+        # Recheck cooldown inside DB operation
+        # ----------------------------------------------------
+
+        latest = conn.execute(
+            """
+            SELECT exit_time
+            FROM trades
+            WHERE symbol = ?
+              AND exit_time IS NOT NULL
+            ORDER BY exit_time DESC
+            LIMIT 1
+            """,
+            (symbol,)
+        ).fetchone()
+
+        if latest:
+
+            exit_dt = parse_datetime(
+                latest["exit_time"]
+            )
+
+            if exit_dt:
+
+                elapsed = (
+                    utc_now() - exit_dt
+                ).total_seconds()
+
+                if elapsed < COOLDOWN_SECONDS:
+
+                    conn.rollback()
+
+                    print(
+                        f"⚠️ CREATE BLOCKED: "
+                        f"{symbol} cooldown"
+                    )
+
+                    return None
+
+        entry_time = iso_now()
+
+        cursor = conn.execute(
+            """
+            INSERT INTO trades (
+                symbol,
+                side,
+                entry,
+                sl,
+                tp,
+                entry_time,
+                exit,
+                exit_time,
+                pnl_pct,
+                result,
+                exit_reason,
+                duration_minutes,
+                closed_reported
+            )
+            VALUES (
+                ?, ?, ?, ?, ?,
+                ?,
+                NULL, NULL, NULL, NULL,
+                NULL, NULL, 0
+            )
+            """,
+            (
+                symbol,
+                side,
+                entry,
+                sl,
+                tp,
+                entry_time,
+            )
         )
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            symbol,
-            side,
-            entry,
-            sl,
-            tp,
-            entry_time,
-        ),
-    )
 
-    conn.commit()
-    conn.close()
+        trade_id = cursor.lastrowid
+
+        conn.commit()
+
+        return trade_id
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# CLOSE TRADE
+# ============================================================
+
+def close_trade(
+    trade_id,
+    exit_price,
+    reason
+):
+
+    conn = get_db()
+
+    try:
+
+        conn.execute("BEGIN IMMEDIATE")
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Only select OPEN trade
+        # ----------------------------------------------------
+
+        row = conn.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE id = ?
+              AND exit_time IS NULL
+            LIMIT 1
+            """,
+            (trade_id,)
+        ).fetchone()
+
+        # Already closed
+        if not row:
+
+            conn.rollback()
+
+            return False
+
+        entry = safe_float(
+            row["entry"]
+        )
+
+        exit_price = safe_float(
+            exit_price
+        )
+
+        if entry is None or exit_price is None:
+
+            conn.rollback()
+
+            return False
+
+        pnl = pct_change(
+            entry,
+            exit_price,
+            row["side"]
+        )
+
+        result = (
+            "WIN"
+            if pnl > 0
+            else "LOSS"
+        )
+
+        entry_dt = parse_datetime(
+            row["entry_time"]
+        )
+
+        now = utc_now()
+
+        if entry_dt:
+
+            duration = max(
+                0.0,
+                (
+                    now - entry_dt
+                ).total_seconds() / 60.0
+            )
+
+        else:
+            duration = 0.0
+
+        exit_time = now.isoformat()
+
+        # ----------------------------------------------------
+        # Atomic update
+        # ----------------------------------------------------
+
+        cursor = conn.execute(
+            """
+            UPDATE trades
+            SET
+                exit = ?,
+                exit_time = ?,
+                pnl_pct = ?,
+                result = ?,
+                exit_reason = ?,
+                duration_minutes = ?
+            WHERE id = ?
+              AND exit_time IS NULL
+            """,
+            (
+                exit_price,
+                exit_time,
+                pnl,
+                result,
+                reason,
+                duration,
+                trade_id,
+            )
+        )
+
+        if cursor.rowcount != 1:
+
+            conn.rollback()
+
+            return False
+
+        conn.commit()
+
+        print(
+            f"🔒 CLOSED "
+            f"{row['symbol']} "
+            f"{row['side']} "
+            f"{format_pct(pnl)} "
+            f"[{reason}] "
+            f"{duration:.1f}m"
+        )
+
+        return True
+
+    except Exception:
+
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# UPDATE OPEN TRADES
+# ============================================================
+
+def update_open_trades():
+
+    open_trades = get_open_trades()
+
+    if not open_trades:
+        return
+
+    tickers = get_all_tickers()
+
+    for trade in open_trades:
+
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Re-check DB state before processing
+        # ----------------------------------------------------
+
+        conn = get_db()
+
+        try:
+
+            current_row = conn.execute(
+                """
+                SELECT exit_time
+                FROM trades
+                WHERE id = ?
+                """,
+                (trade["id"],)
+            ).fetchone()
+
+        finally:
+            conn.close()
+
+        if not current_row:
+            continue
+
+        if current_row["exit_time"] is not None:
+            continue
+
+        current = get_current_price(
+            trade["symbol"],
+            tickers
+        )
+
+        if current is None:
+            continue
+
+        entry = safe_float(
+            trade["entry"]
+        )
+
+        sl = safe_float(
+            trade["sl"]
+        )
+
+        tp = safe_float(
+            trade["tp"]
+        )
+
+        if (
+            entry is None
+            or sl is None
+            or tp is None
+        ):
+            continue
+
+        pnl = pct_change(
+            entry,
+            current,
+            trade["side"]
+        )
+
+        duration = duration_minutes(
+            trade["entry_time"]
+        )
+
+        reason = None
+
+        # ----------------------------------------------------
+        # SL / TP
+        # ----------------------------------------------------
+
+        if trade["side"] == "LONG":
+
+            if current <= sl:
+                reason = "SL"
+
+            elif current >= tp:
+                reason = "TP"
+
+        else:
+
+            if current >= sl:
+                reason = "SL"
+
+            elif current <= tp:
+                reason = "TP"
+
+        # ----------------------------------------------------
+        # TIME PROFIT
+        # ----------------------------------------------------
+
+        if (
+            reason is None
+            and duration >= TIME_EXIT_MINUTES
+            and pnl >= TIME_EXIT_MIN_PROFIT_PCT
+        ):
+            reason = "TIME_PROFIT"
+
+        # ----------------------------------------------------
+        # Close
+        # ----------------------------------------------------
+
+        if reason:
+
+            close_trade(
+                trade["id"],
+                current,
+                reason
+            )
 
 
 # ============================================================
@@ -2567,276 +2044,175 @@ def create_trade(
 
 def get_performance():
 
-    conn = get_connection()
-    cur = conn.cursor()
-
-    cur.execute(
-        """
-        SELECT
-            COUNT(*) AS total,
-
-            SUM(
-                CASE
-                    WHEN result = 'WIN'
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS wins,
-
-            SUM(
-                CASE
-                    WHEN result = 'LOSS'
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS losses,
-
-            COALESCE(
-                SUM(pnl_pct),
-                0
-            ) AS pnl
-
-        FROM trades
-        WHERE exit_time IS NOT NULL
-        """
-    )
-
-    row = cur.fetchone()
-
-    cur.execute(
-        """
-        SELECT COUNT(*)
-        FROM trades
-        WHERE exit_time IS NULL
-        """
-    )
-
-    open_count = (
-        cur.fetchone()[0]
-    )
-
-    cur.execute(
-        """
-        SELECT COUNT(*)
-        FROM trades
-        WHERE exit_reason = ?
-        """,
-        ("TIME_PROFIT",),
-    )
-
-    time_exits = (
-        cur.fetchone()[0]
-    )
-
-    conn.close()
-
-    total = row["total"] or 0
-    wins = row["wins"] or 0
-    losses = row["losses"] or 0
-    pnl = row["pnl"] or 0.0
-
-    if total > 0:
-
-        win_rate = (
-            wins
-            / total
-            * 100
-        )
-
-    else:
-
-        win_rate = 0.0
-
-    return {
-        "open": open_count,
-        "closed": total,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "pnl": pnl,
-        "time_exits": time_exits,
-    }
-
-
-# ============================================================
-# FORMAT PRICE
-# ============================================================
-
-def fmt_price(
-    value,
-):
-
-    if value is None:
-        return "N/A"
-
-    if value >= 1000:
-        return f"{value:.2f}"
-
-    if value >= 1:
-        return f"{value:.5f}"
-
-    if value >= 0.01:
-        return f"{value:.6f}"
-
-    return f"{value:.8f}"
-
-
-# ============================================================
-# TOP CANDIDATE
-# ============================================================
-
-def format_candidate(
-    candidate,
-):
-
-    if not candidate:
-        return "None"
-
-    side_icon = (
-        "🟢"
-        if candidate["side"]
-        == "LONG"
-        else "🔴"
-    )
-
-    text = []
-
-    text.append(
-        f"{side_icon} "
-        f"{candidate['symbol']} "
-        f"{candidate['side']}"
-    )
-
-    text.append(
-        f"Setup: "
-        f"{candidate['setup']}"
-    )
-
-    text.append(
-        f"Score: "
-        f"{candidate['score']}/15"
-    )
-
-    text.append(
-        f"RVOL: "
-        f"{candidate['rvol']:.2f}x"
-    )
-
-    if candidate.get(
-        "entry"
-    ) is not None:
-
-        text.append(
-            f"Entry: "
-            f"{fmt_price(candidate['entry'])}"
-        )
-
-    if candidate.get(
-        "sl"
-    ) is not None:
-
-        text.append(
-            f"SL: "
-            f"{fmt_price(candidate['sl'])}"
-        )
-
-    if candidate.get(
-        "tp"
-    ) is not None:
-
-        text.append(
-            f"TP: "
-            f"{fmt_price(candidate['tp'])}"
-        )
-
-    if candidate.get(
-        "sl_pct"
-    ) is not None:
-
-        text.append(
-            f"SL Distance: "
-            f"{candidate['sl_pct']:.2f}%"
-        )
-
-    if candidate.get(
-        "rr"
-    ) is not None:
-
-        text.append(
-            f"RR: "
-            f"{candidate['rr']:.2f}"
-        )
-
-    if candidate.get(
-        "reason"
-    ):
-
-        text.append(
-            "❌ REJECTED"
-        )
-
-        text.append(
-            f"Reason: "
-            f"{candidate['reason']}"
-        )
-
-    return "\n".join(text)
-
-
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-def send_telegram(
-    message,
-):
-
-    bot_token = os.getenv(
-        "TELEGRAM_BOT_TOKEN"
-    )
-
-    chat_id = os.getenv(
-        "TELEGRAM_CHAT_ID"
-    )
-
-    if (
-        not bot_token
-        or not chat_id
-    ):
-
-        print(
-            "Telegram credentials "
-            "not found."
-        )
-
-        return False
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{bot_token}/sendMessage"
-    )
+    conn = get_db()
 
     try:
 
-        response = session.post(
-            url,
-            data={
-                "chat_id": chat_id,
-                "text": message,
-            },
-            timeout=REQUEST_TIMEOUT,
+        # ----------------------------------------------------
+        # Closed trades
+        # ----------------------------------------------------
+
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total_closed,
+
+                SUM(
+                    CASE
+                        WHEN pnl_pct > 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS wins,
+
+                SUM(
+                    CASE
+                        WHEN pnl_pct <= 0
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS losses,
+
+                COALESCE(
+                    SUM(pnl_pct),
+                    0
+                ) AS net_pnl
+
+            FROM trades
+            WHERE exit_time IS NOT NULL
+            """
+        ).fetchone()
+
+        closed = int(
+            row["total_closed"] or 0
         )
 
-        return response.ok
-
-    except Exception as exc:
-
-        print(
-            f"TELEGRAM ERROR: "
-            f"{exc}"
+        wins = int(
+            row["wins"] or 0
         )
 
-        return False
+        losses = int(
+            row["losses"] or 0
+        )
+
+        net_pnl = float(
+            row["net_pnl"] or 0.0
+        )
+
+        # ----------------------------------------------------
+        # Open trades
+        # ----------------------------------------------------
+
+        open_row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM trades
+            WHERE exit_time IS NULL
+            """
+        ).fetchone()
+
+        open_count = int(
+            open_row["count"] or 0
+        )
+
+        # ----------------------------------------------------
+        # Time exits
+        # ----------------------------------------------------
+
+        time_row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM trades
+            WHERE exit_time IS NOT NULL
+              AND exit_reason = 'TIME_PROFIT'
+            """
+        ).fetchone()
+
+        time_exits = int(
+            time_row["count"] or 0
+        )
+
+        # ----------------------------------------------------
+        # Integrity check
+        # ----------------------------------------------------
+
+        accounted = wins + losses
+
+        if accounted != closed:
+
+            print(
+                "⚠️ PERFORMANCE WARNING: "
+                f"Closed={closed}, "
+                f"W+L={accounted}"
+            )
+
+        win_rate = (
+            (wins / closed) * 100.0
+            if closed > 0
+            else 0.0
+        )
+
+        return {
+            "open": open_count,
+            "closed": closed,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": win_rate,
+            "net_pnl": net_pnl,
+            "time_exits": time_exits,
+        }
+
+    finally:
+        conn.close()
+
+
+# ============================================================
+# LIVE OPEN TRADE DATA
+# ============================================================
+
+def get_live_open_data():
+
+    rows = get_open_trades()
+
+    if not rows:
+        return []
+
+    tickers = get_all_tickers()
+
+    result = []
+
+    for trade in rows:
+
+        current = get_current_price(
+            trade["symbol"],
+            tickers
+        )
+
+        entry = safe_float(
+            trade["entry"]
+        )
+
+        pnl = None
+
+        if current is not None and entry:
+            pnl = pct_change(
+                entry,
+                current,
+                trade["side"]
+            )
+
+        duration = duration_minutes(
+            trade["entry_time"]
+        )
+
+        result.append({
+            "trade": trade,
+            "current": current,
+            "pnl": pnl,
+            "duration": duration,
+        })
+
+    return result
 
 
 # ============================================================
@@ -2845,22 +2221,12 @@ def send_telegram(
 
 def build_report(
     signals,
-    candidate,
+    candidates
 ):
 
-    now = datetime.now(
-        IRAN_TZ
-    ).strftime(
-        "%Y/%m/%d %H:%M:%S"
-    )
+    performance = get_performance()
 
-    performance = (
-        get_performance()
-    )
-
-    open_trades = (
-        get_open_trades()
-    )
+    live_open = get_live_open_data()
 
     lines = []
 
@@ -2869,335 +2235,220 @@ def build_report(
     )
 
     lines.append(
-        f"🕐 {now}"
+        f"🕐 {datetime.now(IRAN_TZ).strftime('%Y/%m/%d %H:%M:%S')}"
     )
 
     lines.append(
-        "⚡ Kraken Futures | "
-        "5M CLOSED | TOP 100"
+        "⚡ Kraken Futures | 5M CLOSED | TOP 100"
     )
 
     lines.append(
-        "🧠 5M: BREAKOUT + "
-        "PULLBACK + CONFIRMATION"
+        "🧠 5M: BREAKOUT + PULLBACK + CONFIRMATION"
     )
+
+    # --------------------------------------------------------
+    # NEW SIGNALS
+    # --------------------------------------------------------
 
     lines.append("")
-
-    # --------------------------------------------------------
-    # SIGNALS
-    # --------------------------------------------------------
-
-    lines.append(
-        "🎯 NEW SIGNALS"
-    )
+    lines.append("🎯 NEW SIGNALS")
 
     if not signals:
 
-        lines.append(
-            "None"
-        )
+        lines.append("None")
 
     else:
 
         for signal in signals:
 
-            side_icon = (
-                "🟢"
-                if signal["side"]
-                == "LONG"
-                else "🔴"
-            )
-
             lines.append(
-                f"{side_icon} "
-                f"{signal['symbol']} "
+                f"🟢 {signal['symbol']} "
                 f"{signal['side']}"
             )
 
             lines.append(
-                f"Entry: "
-                f"{fmt_price(signal['entry'])}"
+                f"Entry: {format_price(signal['entry'])}"
             )
 
             lines.append(
-                f"SL: "
-                f"{fmt_price(signal['sl'])} "
+                f"SL: {format_price(signal['sl'])} "
                 f"({signal['sl_pct']:.2f}%)"
             )
 
             lines.append(
-                f"TP: "
-                f"{fmt_price(signal['tp'])}"
+                f"TP: {format_price(signal['tp'])}"
             )
 
             lines.append(
-                f"RR: "
-                f"{signal['rr']:.2f}"
+                f"RR: {signal['rr']:.2f}"
             )
 
             lines.append(
-                f"Score: "
-                f"{signal['score']}/15"
+                f"Score: {signal['score']}/{MAX_SCORE}"
             )
 
-            lines.append("")
+            lines.append(
+                f"RVOL: {signal['rvol']:.2f}x"
+            )
 
     # --------------------------------------------------------
     # TOP CANDIDATE
     # --------------------------------------------------------
 
-    lines.append(
-        "🏆 TOP CANDIDATE"
-    )
+    lines.append("")
+    lines.append("🏆 TOP CANDIDATE")
 
-    if candidate:
+    if not candidates:
 
-        lines.append(
-            format_candidate(
-                candidate
-            )
-        )
+        lines.append("None")
 
     else:
 
-        lines.append(
-            "None"
+        candidate = sorted(
+            candidates,
+            key=lambda x: x.get(
+                "score",
+                0
+            ),
+            reverse=True
+        )[0]
+
+        side_icon = (
+            "🟢"
+            if candidate["side"] == "LONG"
+            else "🔴"
         )
 
-    lines.append("")
+        lines.append(
+            f"{side_icon} "
+            f"{candidate['symbol']} "
+            f"{candidate['side']}"
+        )
 
-    # --------------------------------------------------------
-    # DIAGNOSTICS
-    # --------------------------------------------------------
+        lines.append(
+            f"Setup: {candidate.get('setup_type', 'N/A')}"
+        )
 
-    lines.append(
-        "🔎 FILTER DIAGNOSTICS"
-    )
+        lines.append(
+            f"Score: "
+            f"{candidate.get('score', 0)}/{MAX_SCORE}"
+        )
 
-    lines.append(
-        f"Scanned: "
-        f"{diagnostics['scanned']}"
-    )
+        lines.append(
+            f"RVOL: "
+            f"{candidate.get('rvol', 0):.2f}x"
+        )
 
-    lines.append(
-        "1H FILTER"
-    )
+        if candidate.get("entry") is not None:
 
-    lines.append(
-        f"❌ Neutral: "
-        f"{diagnostics['trend_neutral']}"
-    )
+            lines.append(
+                f"Entry: "
+                f"{format_price(candidate['entry'])}"
+            )
 
-    lines.append(
-        f"✅ Trend OK: "
-        f"{diagnostics['trend_ok']}"
-    )
+        if candidate.get("sl") is not None:
 
-    lines.append(
-        "15M SETUP"
-    )
+            lines.append(
+                f"SL: "
+                f"{format_price(candidate['sl'])} "
+                f"({candidate.get('sl_pct', 0):.2f}%)"
+            )
 
-    lines.append(
-        f"❌ Setup Failed: "
-        f"{diagnostics['setup_failed']}"
-    )
+        if candidate.get("tp") is not None:
 
-    lines.append(
-        f"✅ Setup Passed: "
-        f"{diagnostics['setup_passed']}"
-    )
+            lines.append(
+                f"TP: "
+                f"{format_price(candidate['tp'])}"
+            )
 
-    lines.append(
-        "5M STRUCTURE"
-    )
+        if candidate.get("rr") is not None:
 
-    lines.append(
-        f"❌ Structure Break Failed: "
-        f"{diagnostics['structure_failed']}"
-    )
+            lines.append(
+                f"RR: "
+                f"{candidate['rr']:.2f}"
+            )
 
-    lines.append(
-        f"❌ Pullback Failed: "
-        f"{diagnostics['pullback_failed']}"
-    )
+        if candidate.get("reason"):
 
-    lines.append(
-        f"❌ Confirmation Failed: "
-        f"{diagnostics['confirmation_failed']}"
-    )
-
-    lines.append(
-        f"✅ Full 5M Confirmation: "
-        f"{diagnostics['full_5m_confirmation']}"
-    )
-
-    lines.append(
-        f"❌ Score < {MIN_SCORE}: "
-        f"{diagnostics['score_failed']}"
-    )
-
-    lines.append(
-        f"❌ Cooldown: "
-        f"{diagnostics['cooldown']}"
-    )
-
-    lines.append(
-        f"❌ Already Open: "
-        f"{diagnostics['already_open']}"
-    )
-
-    lines.append(
-        f"❌ SL < "
-        f"{MIN_SL_PCT * 100:.2f}%: "
-        f"{diagnostics['sl_too_small']}"
-    )
-
-    lines.append(
-        f"❌ SL > "
-        f"{MAX_SL_PCT * 100:.2f}%: "
-        f"{diagnostics['sl_too_large']}"
-    )
-
-    lines.append(
-        f"❌ RR < "
-        f"{MIN_RR:.2f}: "
-        f"{diagnostics['rr_failed']}"
-    )
-
-    lines.append(
-        f"❌ Other: "
-        f"{diagnostics['other']}"
-    )
-
-    lines.append(
-        f"⚠️ Errors: "
-        f"{diagnostics['errors']}"
-    )
-
-    lines.append(
-        f"   API Errors: "
-        f"{diagnostics['api_errors']}"
-    )
-
-    lines.append(
-        f"   API Empty: "
-        f"{diagnostics['api_empty']}"
-    )
-
-    lines.append(
-        f"   API Parse Errors: "
-        f"{diagnostics['api_parse_errors']}"
-    )
-
-    lines.append(
-        f"   1H Data Errors: "
-        f"{diagnostics['ohlcv_1h_errors']}"
-    )
-
-    lines.append(
-        f"   15M Data Errors: "
-        f"{diagnostics['ohlcv_15m_errors']}"
-    )
-
-    lines.append(
-        f"   5M Data Errors: "
-        f"{diagnostics['ohlcv_5m_errors']}"
-    )
-
-    lines.append("")
+            lines.append(
+                f"❌ REJECTED: "
+                f"{candidate['reason']}"
+            )
 
     # --------------------------------------------------------
     # OPEN TRADES
     # --------------------------------------------------------
 
+    lines.append("")
     lines.append(
         f"📂 OPEN TRADES "
-        f"({len(open_trades)}/"
-        f"{MAX_OPEN_TRADES})"
+        f"({len(live_open)}/{MAX_OPEN_TRADES})"
     )
 
-    if not open_trades:
+    if not live_open:
 
-        lines.append(
-            "None"
-        )
+        lines.append("None")
 
     else:
 
-        for trade in open_trades:
+        for item in live_open:
 
-            current = (
-                get_current_price(
-                    trade["symbol"]
-                )
-            )
-
-            if current is not None:
-
-                pnl = calculate_pnl_pct(
-                    trade["side"],
-                    trade["entry"],
-                    current,
-                )
-
-            else:
-
-                pnl = 0.0
-
-            duration = (
-                calculate_duration_minutes(
-                    trade["entry_time"]
-                )
-            )
+            trade = item["trade"]
 
             icon = (
                 "🟢"
-                if pnl >= 0
+                if trade["side"] == "LONG"
                 else "🔴"
             )
 
             lines.append(
                 f"{icon} "
                 f"{trade['symbol']} "
-                f"{trade['side']} "
-                f"{pnl:+.2f}%"
+                f"{trade['side']}"
             )
 
             lines.append(
                 f"Entry: "
-                f"{fmt_price(trade['entry'])}"
+                f"{format_price(trade['entry'])}"
             )
 
             lines.append(
+                f"Now: "
+                f"{format_price(item['current'])}"
+            )
+
+            if item["pnl"] is not None:
+
+                lines.append(
+                    f"Live PnL: "
+                    f"{format_pct(item['pnl'])}"
+                )
+
+            lines.append(
                 f"SL: "
-                f"{fmt_price(trade['sl'])}"
+                f"{format_price(trade['sl'])}"
             )
 
             lines.append(
                 f"TP: "
-                f"{fmt_price(trade['tp'])}"
+                f"{format_price(trade['tp'])}"
             )
 
             lines.append(
                 f"Duration: "
-                f"{format_duration(duration)}"
+                f"{item['duration']:.0f}m"
             )
-
-    lines.append("")
 
     # --------------------------------------------------------
     # PERFORMANCE
     # --------------------------------------------------------
 
-    lines.append(
-        "📈 PERFORMANCE"
-    )
+    lines.append("")
+    lines.append("📈 PERFORMANCE")
 
     lines.append(
         f"Open: "
-        f"{performance['open']}/"
-        f"{MAX_OPEN_TRADES}"
+        f"{performance['open']}/{MAX_OPEN_TRADES}"
     )
 
     lines.append(
@@ -3221,8 +2472,8 @@ def build_report(
     )
 
     lines.append(
-        f"Realized PnL: "
-        f"{performance['pnl']:+.3f}%"
+        f"Net PnL: "
+        f"{performance['net_pnl']:+.3f}%"
     )
 
     lines.append(
@@ -3230,260 +2481,191 @@ def build_report(
         f"{performance['time_exits']}"
     )
 
-    lines.append("")
-
     # --------------------------------------------------------
-    # TIME EXIT
+    # DIAGNOSTICS
     # --------------------------------------------------------
-
-    lines.append(
-        "⏱ TIME EXIT RULE"
-    )
-
-    lines.append(
-        "After: 2 hours"
-    )
-
-    lines.append(
-        "Minimum Profit: +1.50%"
-    )
-
-    lines.append(
-        "Only profitable trades "
-        "are closed by this rule."
-    )
 
     lines.append("")
+    lines.append("🔎 FILTER DIAGNOSTICS")
+
+    lines.append(
+        f"Scanned: {DIAG['scanned']}"
+    )
+
+    lines.append(
+        f"1H Filter ❌ Neutral: "
+        f"{DIAG['trend_neutral']}"
+    )
+
+    lines.append(
+        f"1H Filter ✅ Trend OK: "
+        f"{DIAG['trend_ok']}"
+    )
+
+    lines.append(
+        f"15M Setup ❌ Failed: "
+        f"{DIAG['setup_failed']}"
+    )
+
+    lines.append(
+        f"15M Setup ✅ Passed: "
+        f"{DIAG['setup_passed']}"
+    )
+
+    lines.append(
+        f"5M Structure ❌ Failed: "
+        f"{DIAG['structure_failed']}"
+    )
+
+    lines.append(
+        f"5M Pullback ❌ Failed: "
+        f"{DIAG['pullback_failed']}"
+    )
+
+    lines.append(
+        f"5M Confirmation ❌ Failed: "
+        f"{DIAG['confirmation_failed']}"
+    )
+
+    lines.append(
+        f"5M Full Confirmation: "
+        f"{DIAG['full_5m']}"
+    )
+
+    lines.append(
+        f"Score < {MIN_SCORE}: "
+        f"{DIAG['score_failed']}"
+    )
+
+    lines.append(
+        f"Cooldown: "
+        f"{DIAG['cooldown']}"
+    )
+
+    lines.append(
+        f"Already Open: "
+        f"{DIAG['already_open']}"
+    )
+
+    lines.append(
+        f"SL < {MIN_SL_PCT * 100:.2f}%: "
+        f"{DIAG['sl_too_small']}"
+    )
+
+    lines.append(
+        f"SL > {MAX_SL_PCT * 100:.2f}%: "
+        f"{DIAG['sl_too_large']}"
+    )
+
+    lines.append(
+        f"RR < {MIN_RR:.1f}: "
+        f"{DIAG['rr_failed']}"
+    )
+
+    lines.append(
+        f"Other: "
+        f"{DIAG['other']}"
+    )
+
+    lines.append(
+        f"Errors: "
+        f"{DIAG['errors']}"
+    )
 
     # --------------------------------------------------------
-    # SL / TP
+    # MODE
     # --------------------------------------------------------
-
-    lines.append(
-        "🛡 SL / TP RULE"
-    )
-
-    lines.append(
-        "SL source: "
-        "5M Pullback Structure"
-    )
-
-    lines.append(
-        f"Minimum SL: "
-        f"{MIN_SL_PCT * 100:.2f}%"
-    )
-
-    lines.append(
-        f"Maximum SL: "
-        f"{MAX_SL_PCT * 100:.2f}%"
-    )
-
-    lines.append(
-        f"Minimum RR: "
-        f"{MIN_RR:.2f}"
-    )
-
-    lines.append(
-        "SL outside range = REJECT"
-    )
 
     lines.append("")
-
-    # --------------------------------------------------------
-    # ENTRY RULE
-    # --------------------------------------------------------
-
     lines.append(
-        "🎯 5M ENTRY RULE"
+        "Real trading: "
+        + (
+            "ENABLED"
+            if not PAPER_TRADING
+            else "DISABLED"
+        )
     )
 
-    lines.append(
-        "Structure Break"
-    )
-
-    lines.append(
-        "↓"
-    )
-
-    lines.append(
-        "Pullback to Break Level"
-    )
-
-    lines.append(
-        "↓"
-    )
-
-    lines.append(
-        "Bullish/Bearish Confirmation"
-    )
-
-    lines.append(
-        "↓"
-    )
-
-    lines.append(
-        "ENTRY"
-    )
-
-    lines.append("")
-
-    lines.append(
-        "🧪 PAPER TRADING"
-    )
-
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 # ============================================================
-# MAIN SCANNER
+# SCAN
 # ============================================================
 
-def main():
+def scan():
 
-    print(
-        "=" * 60
-    )
+    markets = get_top_markets()
 
-    print(
-        "VOLUME-KHAT 100 v4.2"
-    )
-
-    print(
-        "SYSTEM: GitHub Actions"
-    )
-
-    print(
-        "EXCHANGE: Kraken Futures"
-    )
-
-    print(
-        "MARKETS: TOP 100 USD PERPETUAL"
-    )
-
-    print(
-        "MODE: PAPER TRADING"
-    )
-
-    print(
-        "=" * 60
-    )
-
-    print(
-        "STARTING SCANNER"
-    )
+    if not markets:
+        print("❌ No markets found")
+        return
 
     # --------------------------------------------------------
-    # DATABASE
-    # --------------------------------------------------------
-
-    init_db()
-
-    # --------------------------------------------------------
-    # RESET
-    # --------------------------------------------------------
-
-    perform_v42_reset()
-
-    # --------------------------------------------------------
-    # UPDATE OPEN TRADES
+    # First update existing trades
     # --------------------------------------------------------
 
     update_open_trades()
 
     # --------------------------------------------------------
-    # TOP MARKETS
+    # Current open state AFTER update
     # --------------------------------------------------------
 
-    markets = get_top_markets()
+    open_trades = get_open_trades()
 
-    if not markets:
+    open_symbols = {
+        row["symbol"]
+        for row in open_trades
+    }
 
-        print(
-            "No markets found."
-        )
-
-        report = build_report(
-            [],
-            None,
-        )
-
-        print(report)
-
-        send_telegram(
-            report
-        )
-
-        return
-
-    markets = markets[:TOP_N]
-
-    diagnostics[
-        "scanned"
-    ] = len(markets)
-
-    # --------------------------------------------------------
-    # Open trades
-    # --------------------------------------------------------
-
-    open_symbols = (
-        get_open_symbols()
+    available_slots = max(
+        0,
+        MAX_OPEN_TRADES
+        - len(open_trades)
     )
 
-    # --------------------------------------------------------
-    # Candidates
-    # --------------------------------------------------------
-
-    candidates = []
     signals = []
+    candidates = []
 
-    # ========================================================
-    # SCAN
-    # ========================================================
+    # --------------------------------------------------------
+    # Scan markets
+    # --------------------------------------------------------
 
     for symbol in markets:
+
+        DIAG["scanned"] += 1
+
+        # ----------------------------------------------------
+        # Already open
+        # ----------------------------------------------------
+
+        if symbol in open_symbols:
+
+            DIAG["already_open"] += 1
+            continue
+
+        # ----------------------------------------------------
+        # Cooldown
+        # ----------------------------------------------------
+
+        if is_in_cooldown(symbol):
+
+            DIAG["cooldown"] += 1
+            continue
 
         try:
 
             # ------------------------------------------------
-            # Already open
+            # 1H
             # ------------------------------------------------
 
-            if symbol in open_symbols:
-
-                diagnostics[
-                    "already_open"
-                ] += 1
-
-                continue
-
-            # ------------------------------------------------
-            # Cooldown
-            # ------------------------------------------------
-
-            if is_in_cooldown(
-                symbol
-            ):
-
-                diagnostics[
-                    "cooldown"
-                ] += 1
-
-                continue
-
-            # ------------------------------------------------
-            # 1H TREND
-            # ------------------------------------------------
-
-            candles_1h = (
-                fetch_ohlcv(
-                    symbol,
-                    TIMEFRAME_1H,
-                )
+            candles_1h = fetch_ohlcv(
+                symbol,
+                TF_1H
             )
 
             if not candles_1h:
+                DIAG["errors"] += 1
                 continue
 
             trend = get_trend(
@@ -3492,139 +2674,228 @@ def main():
 
             if trend == "NEUTRAL":
 
-                diagnostics[
-                    "trend_neutral"
-                ] += 1
-
+                DIAG["trend_neutral"] += 1
                 continue
 
-            diagnostics[
-                "trend_ok"
-            ] += 1
+            DIAG["trend_ok"] += 1
 
             # ------------------------------------------------
-            # 15M SETUP
+            # 15M
             # ------------------------------------------------
 
-            candles_15m = (
-                fetch_ohlcv(
-                    symbol,
-                    TIMEFRAME_15M,
-                )
+            candles_15m = fetch_ohlcv(
+                symbol,
+                TF_15M
             )
 
             if not candles_15m:
+                DIAG["errors"] += 1
                 continue
 
             setup = detect_setup(
                 candles_15m,
-                trend,
+                trend
             )
 
             if not setup:
 
-                diagnostics[
-                    "setup_failed"
-                ] += 1
-
+                DIAG["setup_failed"] += 1
                 continue
 
-            if (
-                setup["side"]
-                != trend
-            ):
-
-                diagnostics[
-                    "setup_failed"
-                ] += 1
-
-                continue
-
-            diagnostics[
-                "setup_passed"
-            ] += 1
+            DIAG["setup_passed"] += 1
 
             # ------------------------------------------------
             # 5M
             # ------------------------------------------------
 
-            candles_5m = (
-                fetch_ohlcv(
-                    symbol,
-                    TIMEFRAME_5M,
-                )
+            candles_5m = fetch_ohlcv(
+                symbol,
+                TF_5M
             )
 
             if not candles_5m:
+                DIAG["errors"] += 1
                 continue
 
-            structure = (
+            rvol_5m = calculate_rvol(
+                candles_5m
+            )
+
+            confirmation = (
                 confirm_5m_structure(
                     candles_5m,
                     trend,
+                    setup
                 )
             )
 
-            if not structure:
+            # ------------------------------------------------
+            # Diagnostics for 5M
+            # ------------------------------------------------
+
+            if not confirmation:
+
+                # Determine approximate failure reason
+                #
+                # We deliberately keep this diagnostic simple
+                # and do not alter signal logic.
+
+                if len(candles_5m) < (
+                    STRUCTURE_LOOKBACK
+                    + MAX_PULLBACK_CANDLES
+                    + 10
+                ):
+
+                    DIAG["structure_failed"] += 1
+
+                else:
+
+                    # Re-run the structural stages only for
+                    # diagnostics.
+
+                    structure_found = False
+                    pullback_found = False
+
+                    last_index = (
+                        len(candles_5m) - 1
+                    )
+
+                    start = max(
+                        1,
+                        len(candles_5m)
+                        - STRUCTURE_LOOKBACK
+                        - MAX_PULLBACK_CANDLES
+                        - 5
+                    )
+
+                    break_level = None
+                    break_index = None
+
+                    for i in range(
+                        start,
+                        last_index
+                    ):
+
+                        left_start = max(
+                            0,
+                            i - STRUCTURE_LOOKBACK
+                        )
+
+                        left = candles_5m[
+                            left_start:i
+                        ]
+
+                        if len(left) < STRUCTURE_LOOKBACK:
+                            continue
+
+                        previous_high = max(
+                            x["high"]
+                            for x in left
+                        )
+
+                        previous_low = min(
+                            x["low"]
+                            for x in left
+                        )
+
+                        current = candles_5m[i]
+
+                        if (
+                            trend == "LONG"
+                            and current["close"] > previous_high
+                        ):
+
+                            structure_found = True
+                            break_index = i
+                            break_level = previous_high
+                            break
+
+                        if (
+                            trend == "SHORT"
+                            and current["close"] < previous_low
+                        ):
+
+                            structure_found = True
+                            break_index = i
+                            break_level = previous_low
+                            break
+
+                    if not structure_found:
+
+                        DIAG["structure_failed"] += 1
+
+                    else:
+
+                        pullback_end = min(
+                            last_index,
+                            break_index
+                            + MAX_PULLBACK_CANDLES
+                        )
+
+                        for i in range(
+                            break_index + 1,
+                            pullback_end + 1
+                        ):
+
+                            candle = candles_5m[i]
+
+                            distance = abs(
+                                candle["close"]
+                                - break_level
+                            ) / max(
+                                abs(break_level),
+                                1e-12
+                            )
+
+                            if distance <= PULLBACK_TOLERANCE:
+
+                                if trend == "LONG":
+
+                                    if candle["low"] <= (
+                                        break_level
+                                        * (
+                                            1
+                                            + PULLBACK_TOLERANCE
+                                        )
+                                    ):
+
+                                        pullback_found = True
+                                        break
+
+                                else:
+
+                                    if candle["high"] >= (
+                                        break_level
+                                        * (
+                                            1
+                                            - PULLBACK_TOLERANCE
+                                        )
+                                    ):
+
+                                        pullback_found = True
+                                        break
+
+                        if not pullback_found:
+
+                            DIAG["pullback_failed"] += 1
+
+                        else:
+
+                            DIAG["confirmation_failed"] += 1
+
                 continue
 
-            # ------------------------------------------------
-            # ENTRY
-            # ------------------------------------------------
-
-            entry = (
-                candles_5m[-1]["close"]
-            )
+            DIAG["full_5m"] += 1
 
             # ------------------------------------------------
-            # 5M STRUCTURAL SL
-            # ------------------------------------------------
-
-            sl = (
-                calculate_5m_structural_sl(
-                    candles_5m,
-                    structure,
-                    trend,
-                )
-            )
-
-            if sl is None:
-
-                diagnostics[
-                    "other"
-                ] += 1
-
-                continue
-
-            # ------------------------------------------------
-            # SL / TP
-            # ------------------------------------------------
-
-            sltp = build_sl_tp(
-                entry,
-                trend,
-                sl,
-            )
-
-            # ------------------------------------------------
-            # 5M RVOL
-            # ------------------------------------------------
-
-            rvol_5m = (
-                calculate_rvol(
-                    candles_5m
-                )
-            )
-
-            # ------------------------------------------------
-            # SCORE
+            # Score
             # ------------------------------------------------
 
             score = calculate_score(
                 trend,
                 setup,
                 rvol_5m,
-                True,
+                confirmation
             )
 
             # ------------------------------------------------
@@ -3632,132 +2903,29 @@ def main():
             # ------------------------------------------------
 
             candidate = {
-
-                "symbol":
-                    symbol,
-
-                "side":
-                    trend,
-
-                "setup":
-                    setup["type"],
-
-                "score":
-                    score,
-
-                "rvol":
-                    rvol_5m,
-
-                "entry":
-                    entry,
-
-                "sl":
-                    sl,
-
-                "tp":
-                    None,
-
-                "sl_pct":
-                    None,
-
-                "rr":
-                    None,
-
-                "reason":
-                    None,
+                "symbol": symbol,
+                "side": trend,
+                "setup_type": setup["type"],
+                "score": score,
+                "rvol": rvol_5m,
+                "reason": None,
+                "entry": None,
+                "sl": None,
+                "tp": None,
+                "sl_pct": None,
+                "rr": None,
             }
 
             # ------------------------------------------------
-            # Invalid SL / TP
-            # ------------------------------------------------
-
-            if sltp is None:
-
-                sl_pct = (
-                    abs(
-                        entry - sl
-                    )
-                    / entry
-                    * 100
-                )
-
-                candidate[
-                    "sl_pct"
-                ] = sl_pct
-
-                if sl_pct < (
-                    MIN_SL_PCT * 100
-                ):
-
-                    candidate[
-                        "reason"
-                    ] = (
-                        f"SL "
-                        f"{sl_pct:.2f}% "
-                        f"< MIN "
-                        f"{MIN_SL_PCT * 100:.2f}%"
-                    )
-
-                elif sl_pct > (
-                    MAX_SL_PCT * 100
-                ):
-
-                    candidate[
-                        "reason"
-                    ] = (
-                        f"SL "
-                        f"{sl_pct:.2f}% "
-                        f"> MAX "
-                        f"{MAX_SL_PCT * 100:.2f}%"
-                    )
-
-                else:
-
-                    candidate[
-                        "reason"
-                    ] = (
-                        "SL/TP calculation "
-                        "failed"
-                    )
-
-                candidates.append(
-                    candidate
-                )
-
-                continue
-
-            # ------------------------------------------------
-            # Valid SL / TP
-            # ------------------------------------------------
-
-            candidate[
-                "tp"
-            ] = sltp["tp"]
-
-            candidate[
-                "sl_pct"
-            ] = sltp["sl_pct"]
-
-            candidate[
-                "rr"
-            ] = sltp["rr"]
-
-            # ------------------------------------------------
-            # Score
+            # Score check
             # ------------------------------------------------
 
             if score < MIN_SCORE:
 
-                diagnostics[
-                    "score_failed"
-                ] += 1
+                DIAG["score_failed"] += 1
 
-                candidate[
-                    "reason"
-                ] = (
-                    f"Score "
-                    f"{score} "
-                    f"< {MIN_SCORE}"
+                candidate["reason"] = (
+                    f"Score {score} < {MIN_SCORE}"
                 )
 
                 candidates.append(
@@ -3767,130 +2935,214 @@ def main():
                 continue
 
             # ------------------------------------------------
-            # Valid candidate
+            # Entry
+            # ------------------------------------------------
+
+            entry = candles_5m[-1]["close"]
+
+            # ------------------------------------------------
+            # Structural SL
+            # ------------------------------------------------
+
+            structural = (
+                calculate_5m_structural_sl(
+                    candles_5m,
+                    confirmation
+                )
+            )
+
+            sltp = build_sl_tp(
+                entry,
+                trend,
+                structural
+            )
+
+            # ------------------------------------------------
+            # Invalid SL/TP
+            # ------------------------------------------------
+
+            if not sltp:
+
+                if candidate["reason"] is None:
+
+                    # Diagnostic counters already updated
+                    # inside build_sl_tp.
+
+                    candidate["reason"] = (
+                        "Invalid SL/TP"
+                    )
+
+                candidate["entry"] = entry
+
+                candidates.append(
+                    candidate
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # Complete candidate
+            # ------------------------------------------------
+
+            candidate["entry"] = entry
+            candidate["sl"] = sltp["sl"]
+            candidate["tp"] = sltp["tp"]
+            candidate["sl_pct"] = sltp["sl_pct"]
+            candidate["rr"] = sltp["rr"]
+
+            # ------------------------------------------------
+            # Candidate list
             # ------------------------------------------------
 
             candidates.append(
                 candidate
             )
 
-        except Exception as exc:
+            # ------------------------------------------------
+            # Open slot check
+            # ------------------------------------------------
 
-            diagnostics[
-                "errors"
-            ] += 1
+            if (
+                len(signals)
+                >= available_slots
+                or len(signals)
+                >= MAX_NEW_SIGNALS
+            ):
+                continue
 
-            print(
-                f"SCAN ERROR | "
-                f"{symbol} | "
-                f"{type(exc).__name__}: "
-                f"{exc}"
+            # ------------------------------------------------
+            # Create trade
+            # ------------------------------------------------
+
+            trade_id = create_trade(
+                symbol,
+                trend,
+                entry,
+                sltp["sl"],
+                sltp["tp"]
             )
 
-    # ========================================================
-    # SORT
-    # ========================================================
+            if trade_id is None:
+                continue
 
-    candidates.sort(
-        key=lambda x: (
-            x["score"],
-            x["rvol"],
-        ),
-        reverse=True,
-    )
+            signal = {
+                "trade_id": trade_id,
+                "symbol": symbol,
+                "side": trend,
+                "entry": entry,
+                "sl": sltp["sl"],
+                "tp": sltp["tp"],
+                "sl_pct": sltp["sl_pct"],
+                "rr": sltp["rr"],
+                "score": score,
+                "rvol": rvol_5m,
+            }
 
-    top_candidate = (
-        candidates[0]
-        if candidates
-        else None
-    )
+            signals.append(
+                signal
+            )
 
-    # ========================================================
-    # CREATE SIGNALS
-    # ========================================================
+            open_symbols.add(
+                symbol
+            )
 
-    available_slots = max(
-        0,
-        MAX_OPEN_TRADES
-        - len(
-            get_open_trades()
-        ),
-    )
+        except Exception as exc:
 
-    signal_limit = min(
-        MAX_NEW_SIGNALS,
-        available_slots,
-    )
+            DIAG["errors"] += 1
 
-    for candidate in candidates:
+            print(
+                f"❌ ERROR {symbol}: {exc}"
+            )
 
-        if len(signals) >= (
-            signal_limit
-        ):
-            break
-
-        if candidate["reason"] is not None:
-            continue
-
-        if (
-            candidate["entry"]
-            is None
-            or candidate["sl"]
-            is None
-            or candidate["tp"]
-            is None
-        ):
-            continue
-
-        create_trade(
-            candidate["symbol"],
-            candidate["side"],
-            candidate["entry"],
-            candidate["sl"],
-            candidate["tp"],
-        )
-
-        signals.append(
-            candidate
-        )
-
-        open_symbols.add(
-            candidate["symbol"]
-        )
-
-    # ========================================================
-    # REPORT
-    # ========================================================
-
-    report = build_report(
-        signals,
-        top_candidate,
-    )
-
-    print("")
-    print(report)
-    print("")
-
-    send_telegram(
-        report
-    )
+    # --------------------------------------------------------
+    # Final report
+    # --------------------------------------------------------
 
     print(
-        "=" * 60
-    )
-
-    print(
-        "SCAN COMPLETE"
-    )
-
-    print(
-        "=" * 60
+        build_report(
+            signals,
+            candidates
+        )
     )
 
 
 # ============================================================
-# ENTRY POINT
+# MAIN
 # ============================================================
+
+def main():
+
+    try:
+
+        print(
+            "============================================================"
+        )
+
+        print(
+            "KRAKEN FUTURES VOLUME-KHAT 100 v4.3"
+        )
+
+        print(
+            "============================================================"
+        )
+
+        print(
+            f"DB: {DB_FILE}"
+        )
+
+        print(
+            f"Schema: {SCHEMA_VERSION}"
+        )
+
+        print(
+            "Real trading: "
+            + (
+                "ENABLED"
+                if not PAPER_TRADING
+                else "DISABLED"
+            )
+        )
+
+        # ----------------------------------------------------
+        # DB
+        # ----------------------------------------------------
+
+        init_db()
+
+        # ----------------------------------------------------
+        # Optional one-time reset
+        # ----------------------------------------------------
+
+        perform_v43_reset()
+
+        # ----------------------------------------------------
+        # Repair
+        # ----------------------------------------------------
+
+        repair_trade_records()
+
+        # ----------------------------------------------------
+        # Update open trades FIRST
+        # ----------------------------------------------------
+
+        update_open_trades()
+
+        # ----------------------------------------------------
+        # Scan
+        # ----------------------------------------------------
+
+        scan()
+
+    except Exception as exc:
+
+        DIAG["errors"] += 1
+
+        print(
+            f"❌ FATAL ERROR: {exc}"
+        )
+
+        raise
+
 
 if __name__ == "__main__":
     main()
