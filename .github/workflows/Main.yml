@@ -5,49 +5,146 @@ on:
   schedule:
     - cron: "*/5 * * * *"
 
+# ============================================================
+# PREVENT OVERLAPPING RUNS
+# ============================================================
+#
+# اگر یک اجرای قبلی هنوز تمام نشده باشد، اجرای بعدی صبر می‌کند.
+# این موضوع برای SQLite بسیار مهم است.
+#
+concurrency:
+  group: volume-khat-100-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   scanner:
     runs-on: ubuntu-latest
 
     steps:
 
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # ======================================================
+      # RESTORE DATABASE
+      # ======================================================
+      #
+      # volume_khat_100.db شامل:
+      # - Open trades
+      # - Closed trades
+      # - PnL
+      # - Win/Loss
+      # - Duration
+      # - Cooldown history
+      # - System metadata
+      #
+      # بدون این مرحله هر Runner جدید دیتابیس تازه می‌سازد.
+      #
+
+      - name: Restore VOLUME-KHAT database
+        uses: actions/cache/restore@v4
+        with:
+          path: volume_khat_100.db
+          key: volume-khat-db-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            volume-khat-db-${{ github.ref_name }}-
+
+      # ======================================================
+      # DATABASE STATUS
+      # ======================================================
+
+      - name: Check database state
+        shell: bash
+        run: |
+          echo "============================================================"
+          echo "DATABASE STATE"
+          echo "============================================================"
+
+          if [ -f volume_khat_100.db ]; then
+            echo "volume_khat_100.db FOUND"
+            ls -lh volume_khat_100.db
+          else
+            echo "volume_khat_100.db NOT FOUND"
+            echo "A new database will be created."
+          fi
+
+          echo "============================================================"
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ======================================================
+      # DEPENDENCIES
+      # ======================================================
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests pandas numpy
+
+      # ======================================================
+      # CHECK SCANNER
+      # ======================================================
 
       - name: Check scanner exists
         run: |
           test -f scanner.py
           echo "scanner.py FOUND."
 
+      # ======================================================
+      # PYTHON SYNTAX
+      # ======================================================
+
       - name: Check Python syntax
         run: |
           python -m py_compile scanner.py
           echo "Python syntax OK."
 
+      # ======================================================
+      # RUN SCANNER
+      # ======================================================
+
       - name: Run VOLUME-KHAT 100
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+          # --------------------------------------------------
+          # IMPORTANT:
+          # Never reset the database automatically.
+          #
+          # scanner.py v4.3 only resets when this is explicitly
+          # changed to 1.
+          # --------------------------------------------------
+
+          RESET_DATABASE_ON_V43_START: "0"
+
+        shell: bash
         run: |
+          set -e
           set -o pipefail
 
           echo "============================================================"
-          echo "VOLUME-KHAT 100"
+          echo "VOLUME-KHAT 100 v4.3"
           echo "============================================================"
 
           echo "SYSTEM: GitHub Actions"
           echo "EXCHANGE: Kraken Futures"
           echo "MARKETS: TOP 100 USD PERPETUAL"
+          echo "TIMEFRAME: 5M CLOSED CANDLES"
+          echo "REAL TRADING: DISABLED"
+          echo "DATABASE: volume_khat_100.db"
+          echo "DATABASE RESET: DISABLED"
 
           echo "============================================================"
           echo "STARTING SCANNER"
@@ -57,4 +154,63 @@ jobs:
 
           echo "============================================================"
           echo "SCANNER FINISHED"
+          echo "============================================================"
+
+      # ======================================================
+      # DATABASE AFTER SCANNER
+      # ======================================================
+
+      - name: Check database after scanner
+        if: always()
+        shell: bash
+        run: |
+          echo "============================================================"
+          echo "DATABASE AFTER SCANNER"
+          echo "============================================================"
+
+          if [ -f volume_khat_100.db ]; then
+            echo "volume_khat_100.db EXISTS"
+            ls -lh volume_khat_100.db
+          else
+            echo "ERROR: volume_khat_100.db NOT FOUND"
+            exit 1
+          fi
+
+          echo "============================================================"
+
+      # ======================================================
+      # SAVE DATABASE
+      # ======================================================
+      #
+      # Every run creates a new cache entry.
+      # The next run restores the newest available database
+      # through restore-keys.
+      #
+
+      - name: Save VOLUME-KHAT database
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: volume_khat_100.db
+          key: volume-khat-db-${{ github.ref_name }}-${{ github.run_id }}
+
+      # ======================================================
+      # FINAL STATUS
+      # ======================================================
+
+      - name: Final status
+        if: always()
+        shell: bash
+        run: |
+          echo "============================================================"
+          echo "VOLUME-KHAT 100 FINISHED"
+          echo "============================================================"
+
+          if [ -f volume_khat_100.db ]; then
+            echo "DATABASE: SAVED"
+            ls -lh volume_khat_100.db
+          else
+            echo "DATABASE: MISSING"
+          fi
+
           echo "============================================================"
