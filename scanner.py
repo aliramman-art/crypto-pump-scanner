@@ -15,12 +15,16 @@
 # - Open trades are preserved correctly
 # - Atomic trade closing
 # - Prevent duplicate open trade per symbol
-# - Aggregate statistics calculated from closed trades
+# - Aggregate statistics calculated from CLOSED trades
+# - Performance statistics RESET from a new start point
+# - OLD trade history is PRESERVED in database
 # - Repair incomplete closed records when possible
 # - Duration tracking
 # - TIME_PROFIT exit:
 #       after 120 min AND PnL >= +1.50%
-# - Reset is OFF by default
+# - Database reset is OFF by default
+# - Performance reset is automatic on first v4.3 run
+# - Optional one-time manual performance reset
 # - Database migration for older schemas
 # - Missing entry_time is automatically repaired
 # - Strategy logic preserved
@@ -44,12 +48,6 @@ from datetime import datetime, timezone, timedelta
 # ============================================================
 
 TOP_N = 100
-
-# ------------------------------------------------------------
-# IMPORTANT:
-# Kraken Futures chart API uses:
-# 5m / 15m / 1h
-# ------------------------------------------------------------
 
 TF_5M = "5m"
 TF_15M = "15m"
@@ -118,8 +116,6 @@ def send_telegram(message):
         + "/sendMessage"
     )
 
-    # Telegram message limit is 4096.
-    # Keep a safety margin.
     chunks = [
         message[i:i + 3900]
         for i in range(
@@ -298,6 +294,13 @@ DB_FILE = "volume_khat_100.db"
 
 SCHEMA_VERSION = "4.3"
 
+# ------------------------------------------------------------
+# DATABASE RESET
+#
+# 0 = KEEP DATABASE
+# 1 = physically delete all trades ONCE
+# ------------------------------------------------------------
+
 RESET_DATABASE_ON_V43_START = (
     os.getenv(
         "RESET_DATABASE_ON_V43_START",
@@ -307,6 +310,37 @@ RESET_DATABASE_ON_V43_START = (
 
 RESET_KEY = (
     "VOLUME_KHAT_V43_RESET_DONE"
+)
+
+
+# ============================================================
+# PERFORMANCE RESET
+# ============================================================
+#
+# IMPORTANT:
+#
+# This DOES NOT delete old trades.
+#
+# It only tells performance calculations:
+#
+# "Start counting statistics from this timestamp."
+#
+# Existing historical trades remain in SQLite.
+# ============================================================
+
+PERFORMANCE_RESET_KEY = (
+    "VOLUME_KHAT_V43_PERFORMANCE_START"
+)
+
+PERFORMANCE_RESET_DONE_KEY = (
+    "VOLUME_KHAT_V43_PERFORMANCE_RESET_DONE"
+)
+
+RESET_PERFORMANCE_ON_V43_START = (
+    os.getenv(
+        "RESET_PERFORMANCE_ON_V43_START",
+        "0"
+    ).strip() == "1"
 )
 
 
@@ -985,6 +1019,110 @@ def perform_v43_reset():
     finally:
 
         conn.close()
+
+
+# ============================================================
+# PERFORMANCE RESET / START POINT
+# ============================================================
+
+def init_performance_start():
+
+    current_start = get_meta(
+        PERFORMANCE_RESET_KEY
+    )
+
+    # --------------------------------------------------------
+    # First run of this performance-reset system
+    # --------------------------------------------------------
+
+    if not current_start:
+
+        start_time = iso_now()
+
+        set_meta(
+            PERFORMANCE_RESET_KEY,
+            start_time
+        )
+
+        set_meta(
+            PERFORMANCE_RESET_DONE_KEY,
+            "1"
+        )
+
+        print(
+            "📊 PERFORMANCE RESET:"
+        )
+
+        print(
+            "   Statistics start from:"
+        )
+
+        print(
+            f"   {start_time}"
+        )
+
+        print(
+            "   Old trade history preserved."
+        )
+
+        return start_time
+
+    # --------------------------------------------------------
+    # Optional manual one-time reset
+    #
+    # If RESET_PERFORMANCE_ON_V43_START=1,
+    # reset only once, then the DONE flag prevents
+    # repeated reset on every 5-minute GitHub Action.
+    # --------------------------------------------------------
+
+    reset_done = get_meta(
+        PERFORMANCE_RESET_DONE_KEY
+    )
+
+    if (
+        RESET_PERFORMANCE_ON_V43_START
+        and reset_done != "1"
+    ):
+
+        start_time = iso_now()
+
+        set_meta(
+            PERFORMANCE_RESET_KEY,
+            start_time
+        )
+
+        set_meta(
+            PERFORMANCE_RESET_DONE_KEY,
+            "1"
+        )
+
+        print(
+            "📊 PERFORMANCE RESET:"
+        )
+
+        print(
+            "   Statistics restarted from:"
+        )
+
+        print(
+            f"   {start_time}"
+        )
+
+        print(
+            "   Old trade history preserved."
+        )
+
+        return start_time
+
+    print(
+        "📊 PERFORMANCE START:"
+    )
+
+    print(
+        f"   {current_start}"
+    )
+
+    return current_start
 
 
 # ============================================================
@@ -3097,6 +3235,32 @@ def get_performance():
 
     try:
 
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Only closed trades AFTER performance start
+        # are included in the statistics.
+        #
+        # Historical trades remain in DB.
+        # ----------------------------------------------------
+
+        performance_start = get_meta(
+            PERFORMANCE_RESET_KEY
+        )
+
+        if not performance_start:
+
+            performance_start = iso_now()
+
+            set_meta(
+                PERFORMANCE_RESET_KEY,
+                performance_start
+            )
+
+            set_meta(
+                PERFORMANCE_RESET_DONE_KEY,
+                "1"
+            )
+
         row = conn.execute(
             """
             SELECT
@@ -3127,7 +3291,11 @@ def get_performance():
             FROM trades
 
             WHERE exit_time IS NOT NULL
-            """
+              AND exit_time >= ?
+            """,
+            (
+                performance_start,
+            )
         ).fetchone()
 
         closed = int(
@@ -3150,6 +3318,12 @@ def get_performance():
             or 0.0
         )
 
+        # ----------------------------------------------------
+        # OPEN TRADES:
+        # Always show ALL current open trades.
+        # Performance reset does NOT hide open trades.
+        # ----------------------------------------------------
+
         open_row = conn.execute(
             """
             SELECT COUNT(*) AS count
@@ -3165,6 +3339,11 @@ def get_performance():
             or 0
         )
 
+        # ----------------------------------------------------
+        # TIME PROFIT:
+        # Only exits after performance start.
+        # ----------------------------------------------------
+
         time_row = conn.execute(
             """
             SELECT COUNT(*) AS count
@@ -3172,9 +3351,13 @@ def get_performance():
             FROM trades
 
             WHERE exit_time IS NOT NULL
+              AND exit_time >= ?
               AND exit_reason =
                   'TIME_PROFIT'
-            """
+            """,
+            (
+                performance_start,
+            )
         ).fetchone()
 
         time_exits = int(
@@ -3223,6 +3406,9 @@ def get_performance():
 
             "time_exits":
                 time_exits,
+
+            "performance_start":
+                performance_start,
         }
 
     finally:
@@ -4248,10 +4434,16 @@ def main():
         init_db()
 
         # ----------------------------------------------------
-        # OPTIONAL RESET
+        # OPTIONAL DATABASE RESET
         # ----------------------------------------------------
 
         perform_v43_reset()
+
+        # ----------------------------------------------------
+        # PERFORMANCE RESET / START POINT
+        # ----------------------------------------------------
+
+        init_performance_start()
 
         # ----------------------------------------------------
         # REPAIR
@@ -4260,13 +4452,10 @@ def main():
         repair_trade_records()
 
         # ----------------------------------------------------
-        # UPDATE OPEN TRADES
-        # ----------------------------------------------------
-
-        update_open_trades()
-
-        # ----------------------------------------------------
         # SCAN
+        #
+        # scan() itself updates open trades first.
+        # No duplicate update here.
         # ----------------------------------------------------
 
         report = scan()
