@@ -32,6 +32,17 @@
 # - Telegram reporting added
 # - API diagnostics added
 #
+# NEW R-MILESTONE TRACKING
+# ------------------------------------------------------------
+# - Track whether trade reached +1R
+# - Track whether trade reached +2R
+# - Uses CLOSED 5M candle High/Low
+# - Intrabar touches are detected
+# - Milestones are monotonic:
+#       once reached, they remain reached
+# - Historical closed trades are NOT falsely counted as 0
+# - Existing strategy / entry / SL / TP logic unchanged
+#
 # REAL TRADING: DISABLED
 # ============================================================
 
@@ -315,17 +326,6 @@ RESET_KEY = (
 
 # ============================================================
 # PERFORMANCE RESET
-# ============================================================
-#
-# IMPORTANT:
-#
-# This DOES NOT delete old trades.
-#
-# It only tells performance calculations:
-#
-# "Start counting statistics from this timestamp."
-#
-# Existing historical trades remain in SQLite.
 # ============================================================
 
 PERFORMANCE_RESET_KEY = (
@@ -713,6 +713,20 @@ def migrate_database(conn):
 
         "closed_reported":
             "INTEGER DEFAULT 0",
+
+        # ----------------------------------------------------
+        # NEW:
+        # No DEFAULT here intentionally.
+        #
+        # Old records become NULL and are therefore treated
+        # as NOT TRACKED rather than falsely counted as 0.
+        # ----------------------------------------------------
+
+        "reached_1r":
+            "INTEGER",
+
+        "reached_2r":
+            "INTEGER",
     }
 
     for column, definition in (
@@ -884,6 +898,12 @@ def init_db():
                 duration_minutes REAL,
 
                 closed_reported
+                    INTEGER DEFAULT 0,
+
+                reached_1r
+                    INTEGER DEFAULT 0,
+
+                reached_2r
                     INTEGER DEFAULT 0
             )
             """
@@ -926,6 +946,9 @@ def init_db():
             "duration_minutes",
 
             "closed_reported",
+
+            "reached_1r",
+            "reached_2r",
         }
 
         columns = table_columns(
@@ -1031,10 +1054,6 @@ def init_performance_start():
         PERFORMANCE_RESET_KEY
     )
 
-    # --------------------------------------------------------
-    # First run of this performance-reset system
-    # --------------------------------------------------------
-
     if not current_start:
 
         start_time = iso_now()
@@ -1066,14 +1085,6 @@ def init_performance_start():
         )
 
         return start_time
-
-    # --------------------------------------------------------
-    # Optional manual one-time reset
-    #
-    # If RESET_PERFORMANCE_ON_V43_START=1,
-    # reset only once, then the DONE flag prevents
-    # repeated reset on every 5-minute GitHub Action.
-    # --------------------------------------------------------
 
     reset_done = get_meta(
         PERFORMANCE_RESET_DONE_KEY
@@ -2788,6 +2799,271 @@ def is_in_cooldown(
 
 
 # ============================================================
+# R-MILESTONE HELPERS
+# ============================================================
+
+def get_r_levels(trade):
+
+    entry = safe_float(
+        trade["entry"]
+    )
+
+    sl = safe_float(
+        trade["sl"]
+    )
+
+    if (
+        entry is None
+        or sl is None
+        or entry <= 0
+    ):
+
+        return None
+
+    risk = abs(
+        entry - sl
+    )
+
+    if risk <= 0:
+
+        return None
+
+    if trade["side"] == "LONG":
+
+        return {
+
+            "risk":
+                risk,
+
+            "r1":
+                entry + risk,
+
+            "r2":
+                entry + (
+                    2.0 * risk
+                ),
+        }
+
+    return {
+
+        "risk":
+            risk,
+
+        "r1":
+            entry - risk,
+
+        "r2":
+            entry - (
+                2.0 * risk
+            ),
+    }
+
+
+def get_reached_r_flags(
+    trade,
+    candles
+):
+
+    levels = get_r_levels(
+        trade
+    )
+
+    if levels is None:
+
+        return (
+            None,
+            None
+        )
+
+    entry_dt = parse_datetime(
+        trade["entry_time"]
+    )
+
+    if entry_dt is None:
+
+        return (
+            None,
+            None
+        )
+
+    entry_ts = (
+        entry_dt.timestamp()
+    )
+
+    # --------------------------------------------------------
+    # Entry is made at the close of the latest closed 5M
+    # candle.
+    #
+    # Therefore we deliberately start from the NEXT 5M
+    # candle. Otherwise the candle that produced the entry
+    # could falsely count movement that happened before entry.
+    # --------------------------------------------------------
+
+    next_candle_ts = (
+        int(entry_ts // 300)
+        * 300
+        + 300
+    )
+
+    relevant = [
+        candle
+        for candle in candles
+        if candle["ts"]
+        >= next_candle_ts
+    ]
+
+    if not relevant:
+
+        return (
+            None,
+            None
+        )
+
+    if trade["side"] == "LONG":
+
+        reached_1r = any(
+            candle["high"]
+            >= levels["r1"]
+            for candle in relevant
+        )
+
+        reached_2r = any(
+            candle["high"]
+            >= levels["r2"]
+            for candle in relevant
+        )
+
+    else:
+
+        reached_1r = any(
+            candle["low"]
+            <= levels["r1"]
+            for candle in relevant
+        )
+
+        reached_2r = any(
+            candle["low"]
+            <= levels["r2"]
+            for candle in relevant
+        )
+
+    return (
+        bool(reached_1r),
+        bool(reached_2r)
+    )
+
+
+def update_r_milestones(
+    trade,
+    candles=None
+):
+
+    # --------------------------------------------------------
+    # If candles were not supplied, fetch 5M candles.
+    # --------------------------------------------------------
+
+    if candles is None:
+
+        candles = fetch_ohlcv(
+            trade["symbol"],
+            TF_5M
+        )
+
+    if not candles:
+
+        return False
+
+    reached_1r, reached_2r = (
+        get_reached_r_flags(
+            trade,
+            candles
+        )
+    )
+
+    if (
+        reached_1r is None
+        or reached_2r is None
+    ):
+
+        return False
+
+    old_1r = trade["reached_1r"]
+    old_2r = trade["reached_2r"]
+
+    # --------------------------------------------------------
+    # Monotonic flags.
+    #
+    # Once 1R or 2R is reached, it NEVER goes back to 0.
+    # --------------------------------------------------------
+
+    final_1r = (
+        1
+        if (
+            reached_1r
+            or old_1r == 1
+        )
+        else 0
+    )
+
+    final_2r = (
+        1
+        if (
+            reached_2r
+            or old_2r == 1
+        )
+        else 0
+    )
+
+    conn = get_db()
+
+    try:
+
+        conn.execute(
+            """
+            UPDATE trades
+
+            SET
+                reached_1r = ?,
+                reached_2r = ?
+
+            WHERE id = ?
+            """,
+            (
+                final_1r,
+                final_2r,
+                trade["id"]
+            )
+        )
+
+        return True
+
+    finally:
+
+        conn.close()
+
+
+def update_all_open_r_milestones(
+    open_trades
+):
+
+    for trade in open_trades:
+
+        try:
+
+            update_r_milestones(
+                trade
+            )
+
+        except Exception as exc:
+
+            print(
+                f"⚠️ R-MILESTONE ERROR "
+                f"{trade['symbol']}: "
+                f"{exc}"
+            )
+
+
+# ============================================================
 # CREATE TRADE
 # ============================================================
 
@@ -2899,7 +3175,10 @@ def create_trade(
 
                 duration_minutes,
 
-                closed_reported
+                closed_reported,
+
+                reached_1r,
+                reached_2r
             )
 
             VALUES (
@@ -2916,6 +3195,9 @@ def create_trade(
 
                 NULL,
 
+                0,
+
+                0,
                 0
             )
             """,
@@ -3120,7 +3402,7 @@ def update_open_trades():
 
             current_row = conn.execute(
                 """
-                SELECT exit_time
+                SELECT *
                 FROM trades
 
                 WHERE id = ?
@@ -3143,8 +3425,30 @@ def update_open_trades():
 
             continue
 
+        # ----------------------------------------------------
+        # R MILESTONE TRACKING
+        #
+        # Done BEFORE exit checks so that a candle which
+        # touches +1R/+2R and then reverses to SL is correctly
+        # recorded.
+        # ----------------------------------------------------
+
+        try:
+
+            update_r_milestones(
+                current_row
+            )
+
+        except Exception as exc:
+
+            print(
+                f"⚠️ R-MILESTONE UPDATE "
+                f"{current_row['symbol']}: "
+                f"{exc}"
+            )
+
         current = get_current_price(
-            trade["symbol"],
+            current_row["symbol"],
             tickers
         )
 
@@ -3153,15 +3457,15 @@ def update_open_trades():
             continue
 
         entry = safe_float(
-            trade["entry"]
+            current_row["entry"]
         )
 
         sl = safe_float(
-            trade["sl"]
+            current_row["sl"]
         )
 
         tp = safe_float(
-            trade["tp"]
+            current_row["tp"]
         )
 
         if (
@@ -3175,16 +3479,16 @@ def update_open_trades():
         pnl = pct_change(
             entry,
             current,
-            trade["side"]
+            current_row["side"]
         )
 
         duration = duration_minutes(
-            trade["entry_time"]
+            current_row["entry_time"]
         )
 
         reason = None
 
-        if trade["side"] == "LONG":
+        if current_row["side"] == "LONG":
 
             if current <= sl:
 
@@ -3219,7 +3523,7 @@ def update_open_trades():
         if reason:
 
             close_trade(
-                trade["id"],
+                current_row["id"],
                 current,
                 reason
             )
@@ -3234,14 +3538,6 @@ def get_performance():
     conn = get_db()
 
     try:
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # Only closed trades AFTER performance start
-        # are included in the statistics.
-        #
-        # Historical trades remain in DB.
-        # ----------------------------------------------------
 
         performance_start = get_meta(
             PERFORMANCE_RESET_KEY
@@ -3319,9 +3615,7 @@ def get_performance():
         )
 
         # ----------------------------------------------------
-        # OPEN TRADES:
-        # Always show ALL current open trades.
-        # Performance reset does NOT hide open trades.
+        # OPEN TRADES
         # ----------------------------------------------------
 
         open_row = conn.execute(
@@ -3340,8 +3634,7 @@ def get_performance():
         )
 
         # ----------------------------------------------------
-        # TIME PROFIT:
-        # Only exits after performance start.
+        # TIME PROFIT
         # ----------------------------------------------------
 
         time_row = conn.execute(
@@ -3363,6 +3656,107 @@ def get_performance():
         time_exits = int(
             time_row["count"]
             or 0
+        )
+
+        # ----------------------------------------------------
+        # R-MILESTONE STATISTICS
+        #
+        # IMPORTANT:
+        # Only trades with non-NULL milestone values are
+        # included.
+        #
+        # This prevents old historical trades from being
+        # falsely counted as "did not reach 1R/2R".
+        # ----------------------------------------------------
+
+        r1_row = conn.execute(
+            """
+            SELECT
+
+                COUNT(*) AS tracked,
+
+                SUM(
+                    CASE
+                        WHEN reached_1r = 1
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS reached
+
+            FROM trades
+
+            WHERE exit_time IS NOT NULL
+              AND exit_time >= ?
+              AND reached_1r IS NOT NULL
+            """,
+            (
+                performance_start,
+            )
+        ).fetchone()
+
+        r2_row = conn.execute(
+            """
+            SELECT
+
+                COUNT(*) AS tracked,
+
+                SUM(
+                    CASE
+                        WHEN reached_2r = 1
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS reached
+
+            FROM trades
+
+            WHERE exit_time IS NOT NULL
+              AND exit_time >= ?
+              AND reached_2r IS NOT NULL
+            """,
+            (
+                performance_start,
+            )
+        ).fetchone()
+
+        reached_1r = int(
+            r1_row["reached"]
+            or 0
+        )
+
+        tracked_1r = int(
+            r1_row["tracked"]
+            or 0
+        )
+
+        reached_2r = int(
+            r2_row["reached"]
+            or 0
+        )
+
+        tracked_2r = int(
+            r2_row["tracked"]
+            or 0
+        )
+
+        r1_rate = (
+            (
+                reached_1r
+                / tracked_1r
+            )
+            * 100.0
+            if tracked_1r > 0
+            else 0.0
+        )
+
+        r2_rate = (
+            (
+                reached_2r
+                / tracked_2r
+            )
+            * 100.0
+            if tracked_2r > 0
+            else 0.0
         )
 
         accounted = (
@@ -3406,6 +3800,24 @@ def get_performance():
 
             "time_exits":
                 time_exits,
+
+            "reached_1r":
+                reached_1r,
+
+            "tracked_1r":
+                tracked_1r,
+
+            "r1_rate":
+                r1_rate,
+
+            "reached_2r":
+                reached_2r,
+
+            "tracked_2r":
+                tracked_2r,
+
+            "r2_rate":
+                r2_rate,
 
             "performance_start":
                 performance_start,
@@ -3816,6 +4228,24 @@ def build_report(
     lines.append(
         f"Time-Profit Exits: "
         f"{performance['time_exits']}"
+    )
+
+    # --------------------------------------------------------
+    # NEW R STATISTICS
+    # --------------------------------------------------------
+
+    lines.append(
+        f"Reached +1R: "
+        f"{performance['reached_1r']}/"
+        f"{performance['tracked_1r']} "
+        f"({performance['r1_rate']:.1f}%)"
+    )
+
+    lines.append(
+        f"Reached +2R: "
+        f"{performance['reached_2r']}/"
+        f"{performance['tracked_2r']} "
+        f"({performance['r2_rate']:.1f}%)"
     )
 
     lines.append("")
