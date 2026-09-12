@@ -8,7 +8,7 @@
 #
 # CLOSED CANDLES ONLY
 #
-# v4.3
+# v4.3 FINAL
 # ------------------------------------------------------------
 # TRADE / DATABASE HARDENING
 #
@@ -24,6 +24,9 @@
 # - Database migration for older schemas
 # - Missing entry_time is automatically repaired
 # - Strategy logic preserved
+# - Kraken timeframe format fixed
+# - Telegram reporting added
+# - API diagnostics added
 #
 # REAL TRADING: DISABLED
 # ============================================================
@@ -32,6 +35,7 @@ import os
 import time
 import sqlite3
 import requests
+
 from datetime import datetime, timezone, timedelta
 
 
@@ -41,16 +45,172 @@ from datetime import datetime, timezone, timedelta
 
 TOP_N = 100
 
-TF_5M = "5"
-TF_15M = "15"
-TF_1H = "60"
+# ------------------------------------------------------------
+# IMPORTANT:
+# Kraken Futures chart API uses:
+# 5m / 15m / 1h
+# ------------------------------------------------------------
+
+TF_5M = "5m"
+TF_15M = "15m"
+TF_1H = "1h"
+
+TF_SECONDS = {
+    TF_5M: 300,
+    TF_15M: 900,
+    TF_1H: 3600,
+}
 
 OHLCV_LIMIT = 150
 REQUEST_TIMEOUT = 20
 
-# ------------------------------------------------------------
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+).strip()
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+).strip()
+
+TELEGRAM_URL = (
+    "https://api.telegram.org/bot"
+)
+
+
+def send_telegram(message):
+
+    if not TELEGRAM_BOT_TOKEN:
+
+        print(
+            "⚠️ TELEGRAM: "
+            "TELEGRAM_BOT_TOKEN is missing"
+        )
+
+        return False
+
+    if not TELEGRAM_CHAT_ID:
+
+        print(
+            "⚠️ TELEGRAM: "
+            "TELEGRAM_CHAT_ID is missing"
+        )
+
+        return False
+
+    if not message:
+
+        print(
+            "⚠️ TELEGRAM: empty message"
+        )
+
+        return False
+
+    url = (
+        TELEGRAM_URL
+        + TELEGRAM_BOT_TOKEN
+        + "/sendMessage"
+    )
+
+    # Telegram message limit is 4096.
+    # Keep a safety margin.
+    chunks = [
+        message[i:i + 3900]
+        for i in range(
+            0,
+            len(message),
+            3900
+        )
+    ]
+
+    success = True
+
+    for index, chunk in enumerate(
+        chunks,
+        1
+    ):
+
+        try:
+
+            response = requests.post(
+                url,
+                json={
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
+
+                    "text":
+                        chunk,
+
+                    "disable_web_page_preview":
+                        True,
+                },
+                timeout=REQUEST_TIMEOUT
+            )
+
+            if response.status_code != 200:
+
+                success = False
+
+                print(
+                    "❌ TELEGRAM ERROR "
+                    f"HTTP {response.status_code}: "
+                    f"{response.text[:1000]}"
+                )
+
+                continue
+
+            try:
+
+                data = response.json()
+
+            except Exception:
+
+                success = False
+
+                print(
+                    "❌ TELEGRAM INVALID JSON: "
+                    f"{response.text[:1000]}"
+                )
+
+                continue
+
+            if not data.get("ok"):
+
+                success = False
+
+                print(
+                    "❌ TELEGRAM API ERROR: "
+                    f"{data}"
+                )
+
+            else:
+
+                print(
+                    f"✅ TELEGRAM SENT "
+                    f"({index}/{len(chunks)})"
+                )
+
+        except Exception as exc:
+
+            success = False
+
+            print(
+                "❌ TELEGRAM SEND ERROR: "
+                f"{exc}"
+            )
+
+    return success
+
+
+# ============================================================
 # RVOL
-# ------------------------------------------------------------
+# ============================================================
 
 RVOL_PERIOD = 20
 
@@ -58,9 +218,10 @@ RVOL_ABNORMAL = 1.70
 RVOL_STRONG = 2.50
 RVOL_VERY_STRONG = 3.00
 
-# ------------------------------------------------------------
+
+# ============================================================
 # 15M SETUP
-# ------------------------------------------------------------
+# ============================================================
 
 BREAKOUT_LOOKBACK = 5
 SR_LOOKBACK = 20
@@ -69,18 +230,20 @@ REJECTION_DISTANCE = 0.008
 WICK_BODY_RATIO = 1.15
 MIN_BODY_RATIO = 0.20
 
-# ------------------------------------------------------------
+
+# ============================================================
 # 5M CONFIRMATION
-# ------------------------------------------------------------
+# ============================================================
 
 STRUCTURE_LOOKBACK = 5
 PULLBACK_TOLERANCE = 0.0030
 MAX_PULLBACK_CANDLES = 6
 MIN_CONFIRM_BODY_RATIO = 0.20
 
-# ------------------------------------------------------------
+
+# ============================================================
 # ATR / SL
-# ------------------------------------------------------------
+# ============================================================
 
 ATR_PERIOD = 14
 SL_BUFFER = 0.0015
@@ -90,39 +253,46 @@ MAX_SL_PCT = 0.0150
 
 MIN_RR = 2.0
 
-# ------------------------------------------------------------
+
+# ============================================================
 # SCORE
-# ------------------------------------------------------------
+# ============================================================
 
 MIN_SCORE = 9
 MAX_SCORE = 15
 
-# ------------------------------------------------------------
+
+# ============================================================
 # TRADES
-# ------------------------------------------------------------
+# ============================================================
 
 MAX_OPEN_TRADES = 3
 MAX_NEW_SIGNALS = 3
 
 COOLDOWN_CANDLES = 3
-COOLDOWN_SECONDS = COOLDOWN_CANDLES * 300
+COOLDOWN_SECONDS = (
+    COOLDOWN_CANDLES * 300
+)
 
-# ------------------------------------------------------------
+
+# ============================================================
 # TIME PROFIT EXIT
-# ------------------------------------------------------------
+# ============================================================
 
 TIME_EXIT_MINUTES = 120
 TIME_EXIT_MIN_PROFIT_PCT = 1.50
 
-# ------------------------------------------------------------
+
+# ============================================================
 # MODE
-# ------------------------------------------------------------
+# ============================================================
 
 PAPER_TRADING = True
 
-# ------------------------------------------------------------
+
+# ============================================================
 # DATABASE
-# ------------------------------------------------------------
+# ============================================================
 
 DB_FILE = "volume_khat_100.db"
 
@@ -135,26 +305,35 @@ RESET_DATABASE_ON_V43_START = (
     ).strip() == "1"
 )
 
-RESET_KEY = "VOLUME_KHAT_V43_RESET_DONE"
-
-# ------------------------------------------------------------
-# TIMEZONE
-# ------------------------------------------------------------
-
-IRAN_TZ = timezone(
-    timedelta(hours=3, minutes=30)
+RESET_KEY = (
+    "VOLUME_KHAT_V43_RESET_DONE"
 )
 
-# ------------------------------------------------------------
+
+# ============================================================
+# TIMEZONE
+# ============================================================
+
+IRAN_TZ = timezone(
+    timedelta(
+        hours=3,
+        minutes=30
+    )
+)
+
+
+# ============================================================
 # KRAKEN FUTURES
-# ------------------------------------------------------------
+# ============================================================
 
 KRAKEN_OHLCV_URL = (
-    "https://futures.kraken.com/api/charts/v1/trade"
+    "https://futures.kraken.com/"
+    "api/charts/v1/trade"
 )
 
 KRAKEN_TICKER_URL = (
-    "https://futures.kraken.com/derivatives/api/v3/tickers"
+    "https://futures.kraken.com/"
+    "derivatives/api/v3/tickers"
 )
 
 
@@ -163,6 +342,7 @@ KRAKEN_TICKER_URL = (
 # ============================================================
 
 DIAG = {
+
     "scanned": 0,
 
     "trend_neutral": 0,
@@ -177,11 +357,13 @@ DIAG = {
     "full_5m": 0,
 
     "score_failed": 0,
+
     "cooldown": 0,
     "already_open": 0,
 
     "sl_too_small": 0,
     "sl_too_large": 0,
+
     "rr_failed": 0,
 
     "other": 0,
@@ -202,30 +384,47 @@ DIAG = {
 # ============================================================
 
 def utc_now():
-    return datetime.now(timezone.utc)
+
+    return datetime.now(
+        timezone.utc
+    )
 
 
 def iso_now():
+
     return utc_now().isoformat()
 
 
-def safe_float(value, default=None):
+def safe_float(
+    value,
+    default=None
+):
+
     try:
+
         return float(value)
+
     except Exception:
+
         return default
 
 
-def pct_change(entry, current, side):
+def pct_change(
+    entry,
+    current,
+    side
+):
 
     if (
         entry is None
         or current is None
         or entry == 0
     ):
+
         return 0.0
 
     if side == "LONG":
+
         return (
             (current - entry)
             / entry
@@ -240,6 +439,7 @@ def pct_change(entry, current, side):
 def format_pct(value):
 
     if value is None:
+
         return "0.00%"
 
     return f"{value:+.2f}%"
@@ -248,15 +448,19 @@ def format_pct(value):
 def format_price(value):
 
     if value is None:
+
         return "N/A"
 
     if abs(value) >= 1000:
+
         return f"{value:.2f}"
 
     if abs(value) >= 1:
+
         return f"{value:.5f}"
 
     if abs(value) >= 0.01:
+
         return f"{value:.6f}"
 
     return f"{value:.8f}"
@@ -265,6 +469,7 @@ def format_price(value):
 def parse_datetime(value):
 
     if not value:
+
         return None
 
     try:
@@ -272,11 +477,18 @@ def parse_datetime(value):
         value = str(value)
 
         if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
 
-        dt = datetime.fromisoformat(value)
+            value = (
+                value[:-1]
+                + "+00:00"
+            )
+
+        dt = datetime.fromisoformat(
+            value
+        )
 
         if dt.tzinfo is None:
+
             dt = dt.replace(
                 tzinfo=timezone.utc
             )
@@ -286,14 +498,20 @@ def parse_datetime(value):
         )
 
     except Exception:
+
         return None
 
 
-def duration_minutes(entry_time):
+def duration_minutes(
+    entry_time
+):
 
-    dt = parse_datetime(entry_time)
+    dt = parse_datetime(
+        entry_time
+    )
 
     if dt is None:
+
         return 0.0
 
     seconds = (
@@ -301,6 +519,7 @@ def duration_minutes(entry_time):
     ).total_seconds()
 
     if seconds < 0:
+
         return 0.0
 
     return seconds / 60.0
@@ -347,15 +566,20 @@ def get_meta(key):
         ).fetchone()
 
         if row:
+
             return row["value"]
 
         return None
 
     finally:
+
         conn.close()
 
 
-def set_meta(key, value):
+def set_meta(
+    key,
+    value
+):
 
     conn = get_db()
 
@@ -363,10 +587,15 @@ def set_meta(key, value):
 
         conn.execute(
             """
-            INSERT INTO system_meta(key, value)
+            INSERT INTO system_meta(
+                key,
+                value
+            )
             VALUES (?, ?)
+
             ON CONFLICT(key)
-            DO UPDATE SET value = excluded.value
+            DO UPDATE SET
+                value = excluded.value
             """,
             (
                 key,
@@ -375,6 +604,7 @@ def set_meta(key, value):
         )
 
     finally:
+
         conn.close()
 
 
@@ -407,8 +637,7 @@ def migrate_database(conn):
     migrated = []
 
     # --------------------------------------------------------
-    # IMPORTANT:
-    # Older versions may have created_at instead of entry_time.
+    # ENTRY TIME
     # --------------------------------------------------------
 
     if "entry_time" not in columns:
@@ -430,7 +659,7 @@ def migrate_database(conn):
         )
 
     # --------------------------------------------------------
-    # Add remaining columns
+    # OPTIONAL COLUMNS
     # --------------------------------------------------------
 
     optional_columns = {
@@ -445,7 +674,8 @@ def migrate_database(conn):
 
         "exit_reason": "TEXT",
 
-        "duration_minutes": "REAL",
+        "duration_minutes":
+            "REAL",
 
         "closed_reported":
             "INTEGER DEFAULT 0",
@@ -470,7 +700,7 @@ def migrate_database(conn):
             )
 
     # --------------------------------------------------------
-    # Repair entry_time
+    # REPAIR ENTRY TIME FROM CREATED_AT
     # --------------------------------------------------------
 
     columns = table_columns(
@@ -493,7 +723,7 @@ def migrate_database(conn):
         )
 
     # --------------------------------------------------------
-    # Some older versions may have entry_timestamp
+    # REPAIR FROM ENTRY_TIMESTAMP
     # --------------------------------------------------------
 
     columns = table_columns(
@@ -516,15 +746,7 @@ def migrate_database(conn):
         )
 
     # --------------------------------------------------------
-    # Final fallback for legacy rows
-    #
-    # We do NOT delete the trade.
-    #
-    # Closed trades:
-    # use exit_time if available.
-    #
-    # Open trades:
-    # use current time only if absolutely necessary.
+    # LAST FALLBACK
     # --------------------------------------------------------
 
     columns = table_columns(
@@ -547,7 +769,7 @@ def migrate_database(conn):
         )
 
     # --------------------------------------------------------
-    # Remaining rows
+    # ABSOLUTE LAST FALLBACK
     # --------------------------------------------------------
 
     conn.execute(
@@ -574,10 +796,6 @@ def migrate_database(conn):
                 f"   + {item}"
             )
 
-    # --------------------------------------------------------
-    # Integrity report
-    # --------------------------------------------------------
-
     remaining = conn.execute(
         """
         SELECT COUNT(*) AS count
@@ -591,9 +809,14 @@ def migrate_database(conn):
 
         raise RuntimeError(
             "Database migration failed: "
-            "some trades still have no entry_time"
+            "some trades still have "
+            "no entry_time"
         )
 
+
+# ============================================================
+# INIT DATABASE
+# ============================================================
 
 def init_db():
 
@@ -604,7 +827,9 @@ def init_db():
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                id INTEGER PRIMARY KEY
+                AUTOINCREMENT,
 
                 symbol TEXT NOT NULL,
                 side TEXT NOT NULL,
@@ -624,7 +849,8 @@ def init_db():
 
                 duration_minutes REAL,
 
-                closed_reported INTEGER DEFAULT 0
+                closed_reported
+                    INTEGER DEFAULT 0
             )
             """
         )
@@ -632,21 +858,16 @@ def init_db():
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS system_meta (
+
                 key TEXT PRIMARY KEY,
                 value TEXT
             )
             """
         )
 
-        # ----------------------------------------------------
-        # Migrate old database
-        # ----------------------------------------------------
-
-        migrate_database(conn)
-
-        # ----------------------------------------------------
-        # Required schema
-        # ----------------------------------------------------
+        migrate_database(
+            conn
+        )
 
         required = {
 
@@ -685,7 +906,8 @@ def init_db():
         if missing:
 
             raise RuntimeError(
-                "Missing required DB columns: "
+                "Missing required DB "
+                "columns: "
                 f"{sorted(missing)}"
             )
 
@@ -699,6 +921,7 @@ def init_db():
         )
 
     finally:
+
         conn.close()
 
 
@@ -709,6 +932,7 @@ def init_db():
 def perform_v43_reset():
 
     if not RESET_DATABASE_ON_V43_START:
+
         return
 
     already_done = get_meta(
@@ -716,6 +940,7 @@ def perform_v43_reset():
     )
 
     if already_done == "1":
+
         return
 
     conn = get_db()
@@ -737,6 +962,7 @@ def perform_v43_reset():
                 value
             )
             VALUES (?, '1')
+
             ON CONFLICT(key)
             DO UPDATE SET value = '1'
             """,
@@ -746,7 +972,8 @@ def perform_v43_reset():
         conn.commit()
 
         print(
-            "⚠️ V4.3 DATABASE RESET COMPLETED"
+            "⚠️ V4.3 DATABASE RESET "
+            "COMPLETED"
         )
 
     except Exception:
@@ -756,11 +983,12 @@ def perform_v43_reset():
         raise
 
     finally:
+
         conn.close()
 
 
 # ============================================================
-# REPAIR DATABASE
+# REPAIR TRADE RECORDS
 # ============================================================
 
 def repair_trade_records():
@@ -784,7 +1012,9 @@ def repair_trade_records():
                 pnl_pct,
                 result,
                 duration_minutes
+
             FROM trades
+
             WHERE exit_time IS NOT NULL
             """
         ).fetchall()
@@ -796,6 +1026,7 @@ def repair_trade_records():
             )
 
             if exit_price is None:
+
                 continue
 
             pnl = row["pnl_pct"]
@@ -854,10 +1085,12 @@ def repair_trade_records():
             conn.execute(
                 """
                 UPDATE trades
+
                 SET
                     pnl_pct = ?,
                     result = ?,
                     duration_minutes = ?
+
                 WHERE id = ?
                 """,
                 (
@@ -878,6 +1111,7 @@ def repair_trade_records():
             )
 
     finally:
+
         conn.close()
 
 
@@ -896,6 +1130,21 @@ def fetch_ohlcv(
         f"{interval}"
     )
 
+    interval_seconds = (
+        TF_SECONDS.get(interval)
+    )
+
+    if interval_seconds is None:
+
+        DIAG["api_errors"] += 1
+
+        print(
+            f"❌ INVALID TIMEFRAME: "
+            f"{interval}"
+        )
+
+        return []
+
     try:
 
         response = requests.get(
@@ -908,36 +1157,85 @@ def fetch_ohlcv(
             DIAG["api_errors"] += 1
 
             if interval == TF_5M:
-                DIAG["tf_5m_errors"] += 1
+
+                DIAG[
+                    "tf_5m_errors"
+                ] += 1
 
             elif interval == TF_15M:
-                DIAG["tf_15m_errors"] += 1
+
+                DIAG[
+                    "tf_15m_errors"
+                ] += 1
 
             elif interval == TF_1H:
-                DIAG["tf_1h_errors"] += 1
+
+                DIAG[
+                    "tf_1h_errors"
+                ] += 1
+
+            print(
+                f"❌ API ERROR "
+                f"{symbol} {interval} "
+                f"HTTP {response.status_code}: "
+                f"{response.text[:300]}"
+            )
 
             return []
 
-        data = response.json()
+        try:
 
-    except Exception:
+            data = response.json()
+
+        except Exception:
+
+            DIAG[
+                "api_parse_errors"
+            ] += 1
+
+            print(
+                f"❌ API JSON ERROR "
+                f"{symbol} {interval}"
+            )
+
+            return []
+
+    except Exception as exc:
 
         DIAG["api_errors"] += 1
 
         if interval == TF_5M:
-            DIAG["tf_5m_errors"] += 1
+
+            DIAG[
+                "tf_5m_errors"
+            ] += 1
 
         elif interval == TF_15M:
-            DIAG["tf_15m_errors"] += 1
+
+            DIAG[
+                "tf_15m_errors"
+            ] += 1
 
         elif interval == TF_1H:
-            DIAG["tf_1h_errors"] += 1
+
+            DIAG[
+                "tf_1h_errors"
+            ] += 1
+
+        print(
+            f"❌ REQUEST ERROR "
+            f"{symbol} {interval}: "
+            f"{exc}"
+        )
 
         return []
 
     candles = None
 
-    if isinstance(data, dict):
+    if isinstance(
+        data,
+        dict
+    ):
 
         for key in (
             "candles",
@@ -952,7 +1250,10 @@ def fetch_ohlcv(
 
                 break
 
-    elif isinstance(data, list):
+    elif isinstance(
+        data,
+        list
+    ):
 
         candles = data
 
@@ -963,10 +1264,6 @@ def fetch_ohlcv(
         return []
 
     parsed = []
-
-    interval_seconds = (
-        int(interval) * 60
-    )
 
     now_ts = int(
         time.time()
@@ -1018,6 +1315,7 @@ def fetch_ohlcv(
             else:
 
                 if len(candle) < 6:
+
                     continue
 
                 ts = candle[0]
@@ -1039,19 +1337,29 @@ def fetch_ohlcv(
             c = float(c)
             v = float(v)
 
-            # Remove currently forming candle
+            # ------------------------------------------------
+            # CLOSED CANDLES ONLY
+            # ------------------------------------------------
+
             if (
                 ts + interval_seconds
                 > now_ts
             ):
+
                 continue
 
             parsed.append({
+
                 "ts": ts,
+
                 "open": o,
+
                 "high": h,
+
                 "low": l,
+
                 "close": c,
+
                 "volume": v,
             })
 
@@ -1111,11 +1419,29 @@ def get_all_tickers():
 
             DIAG["api_errors"] += 1
 
+            print(
+                "❌ TICKER API ERROR "
+                f"HTTP {response.status_code}"
+            )
+
             return {}
 
-        data = response.json()
+        try:
 
-        if isinstance(data, dict):
+            data = response.json()
+
+        except Exception:
+
+            DIAG[
+                "api_parse_errors"
+            ] += 1
+
+            return {}
+
+        if isinstance(
+            data,
+            dict
+        ):
 
             tickers = (
                 data.get("tickers")
@@ -1136,6 +1462,7 @@ def get_all_tickers():
                 ticker,
                 dict
             ):
+
                 continue
 
             symbol = (
@@ -1144,15 +1471,20 @@ def get_all_tickers():
             )
 
             if not symbol:
+
                 continue
 
             result[symbol] = ticker
 
         return result
 
-    except Exception:
+    except Exception as exc:
 
         DIAG["api_errors"] += 1
+
+        print(
+            f"❌ TICKER ERROR: {exc}"
+        )
 
         return {}
 
@@ -1163,13 +1495,17 @@ def get_current_price(
 ):
 
     if tickers is None:
-        tickers = get_all_tickers()
+
+        tickers = (
+            get_all_tickers()
+        )
 
     ticker = tickers.get(
         symbol
     )
 
     if not ticker:
+
         return None
 
     for key in (
@@ -1181,7 +1517,9 @@ def get_current_price(
         "mark_price"
     ):
 
-        value = ticker.get(key)
+        value = ticker.get(
+            key
+        )
 
         price = safe_float(
             value
@@ -1191,6 +1529,7 @@ def get_current_price(
             price is not None
             and price > 0
         ):
+
             return price
 
     return None
@@ -1202,7 +1541,9 @@ def get_current_price(
 
 def get_top_markets():
 
-    tickers = get_all_tickers()
+    tickers = (
+        get_all_tickers()
+    )
 
     markets = []
 
@@ -1213,11 +1554,13 @@ def get_top_markets():
         if not symbol.startswith(
             "PF_"
         ):
+
             continue
 
         if not symbol.endswith(
             "USD"
         ):
+
             continue
 
         volume = (
@@ -1230,7 +1573,9 @@ def get_top_markets():
                 )
             )
             or safe_float(
-                ticker.get("volume")
+                ticker.get(
+                    "volume"
+                )
             )
             or 0.0
         )
@@ -1263,6 +1608,7 @@ def sma(
 ):
 
     if len(values) < period:
+
         return None
 
     return (
@@ -1279,6 +1625,7 @@ def calculate_rvol(
     if len(candles) < (
         period + 1
     ):
+
         return 0.0
 
     current_volume = (
@@ -1293,6 +1640,7 @@ def calculate_rvol(
     ]
 
     if not previous:
+
         return 0.0
 
     avg_volume = (
@@ -1301,6 +1649,7 @@ def calculate_rvol(
     )
 
     if avg_volume <= 0:
+
         return 0.0
 
     return (
@@ -1317,6 +1666,7 @@ def calculate_atr(
     if len(candles) < (
         period + 1
     ):
+
         return None
 
     trs = []
@@ -1330,6 +1680,7 @@ def calculate_atr(
         previous = candles[i - 1]
 
         tr = max(
+
             current["high"]
             - current["low"],
 
@@ -1347,6 +1698,7 @@ def calculate_atr(
         trs.append(tr)
 
     if len(trs) < period:
+
         return None
 
     return (
@@ -1362,6 +1714,7 @@ def calculate_atr(
 def get_trend(candles):
 
     if len(candles) < 50:
+
         return "NEUTRAL"
 
     closes = [
@@ -1383,6 +1736,7 @@ def get_trend(candles):
         sma20 is None
         or sma50 is None
     ):
+
         return "NEUTRAL"
 
     close = closes[-1]
@@ -1391,12 +1745,14 @@ def get_trend(candles):
         close > sma20
         and sma20 > sma50
     ):
+
         return "LONG"
 
     if (
         close < sma20
         and sma20 < sma50
     ):
+
         return "SHORT"
 
     return "NEUTRAL"
@@ -1414,6 +1770,7 @@ def detect_breakout(
     if len(candles) < (
         BREAKOUT_LOOKBACK + 2
     ):
+
         return None
 
     current = candles[-1]
@@ -1423,6 +1780,7 @@ def detect_breakout(
     ]
 
     if not previous:
+
         return None
 
     rvol = calculate_rvol(
@@ -1448,10 +1806,18 @@ def detect_breakout(
     ):
 
         return {
-            "type": "BREAKOUT",
-            "side": "LONG",
-            "level": prev_high,
-            "rvol": rvol,
+
+            "type":
+                "BREAKOUT",
+
+            "side":
+                "LONG",
+
+            "level":
+                prev_high,
+
+            "rvol":
+                rvol,
         }
 
     if (
@@ -1463,10 +1829,18 @@ def detect_breakout(
     ):
 
         return {
-            "type": "BREAKOUT",
-            "side": "SHORT",
-            "level": prev_low,
-            "rvol": rvol,
+
+            "type":
+                "BREAKOUT",
+
+            "side":
+                "SHORT",
+
+            "level":
+                prev_low,
+
+            "rvol":
+                rvol,
         }
 
     return None
@@ -1484,6 +1858,7 @@ def detect_rejection(
     if len(candles) < (
         SR_LOOKBACK + 2
     ):
+
         return None
 
     current = candles[-1]
@@ -1549,19 +1924,30 @@ def detect_rejection(
         if (
             distance
             <= REJECTION_DISTANCE
+
             and upper_wick / body
             >= WICK_BODY_RATIO
+
             and current["close"]
             < current["open"]
+
             and rvol
             >= RVOL_ABNORMAL
         ):
 
             return {
-                "type": "REJECTION",
-                "side": "SHORT",
-                "level": resistance,
-                "rvol": rvol,
+
+                "type":
+                    "REJECTION",
+
+                "side":
+                    "SHORT",
+
+                "level":
+                    resistance,
+
+                "rvol":
+                    rvol,
             }
 
     if trend == "LONG":
@@ -1577,19 +1963,30 @@ def detect_rejection(
         if (
             distance
             <= REJECTION_DISTANCE
+
             and lower_wick / body
             >= WICK_BODY_RATIO
+
             and current["close"]
             > current["open"]
+
             and rvol
             >= RVOL_ABNORMAL
         ):
 
             return {
-                "type": "REJECTION",
-                "side": "LONG",
-                "level": support,
-                "rvol": rvol,
+
+                "type":
+                    "REJECTION",
+
+                "side":
+                    "LONG",
+
+                "level":
+                    support,
+
+                "rvol":
+                    rvol,
             }
 
     return None
@@ -1608,6 +2005,7 @@ def detect_setup(
         "LONG",
         "SHORT"
     ):
+
         return None
 
     breakout = detect_breakout(
@@ -1616,6 +2014,7 @@ def detect_setup(
     )
 
     if breakout:
+
         return breakout
 
     rejection = detect_rejection(
@@ -1624,6 +2023,7 @@ def detect_setup(
     )
 
     if rejection:
+
         return rejection
 
     return None
@@ -1644,6 +2044,7 @@ def confirm_5m_structure(
         + MAX_PULLBACK_CANDLES
         + 10
     ):
+
         return None
 
     start = max(
@@ -1680,6 +2081,7 @@ def confirm_5m_structure(
         if len(left) < (
             STRUCTURE_LOOKBACK
         ):
+
             continue
 
         previous_high = max(
@@ -1700,6 +2102,7 @@ def confirm_5m_structure(
 
             break_index = i
             break_level = previous_high
+
             break
 
         if (
@@ -1710,9 +2113,11 @@ def confirm_5m_structure(
 
             break_index = i
             break_level = previous_low
+
             break
 
     if break_index is None:
+
         return None
 
     pullback_index = None
@@ -1757,6 +2162,7 @@ def confirm_5m_structure(
                 ):
 
                     pullback_index = i
+
                     break
 
             else:
@@ -1770,12 +2176,15 @@ def confirm_5m_structure(
                 ):
 
                     pullback_index = i
+
                     break
 
     if pullback_index is None:
+
         return None
 
     if pullback_index >= last_index:
+
         return None
 
     confirmation = candles[
@@ -1793,6 +2202,7 @@ def confirm_5m_structure(
     )
 
     if full_range <= 0:
+
         return None
 
     body_ratio = (
@@ -1803,6 +2213,7 @@ def confirm_5m_structure(
         body_ratio
         < MIN_CONFIRM_BODY_RATIO
     ):
+
         return None
 
     if side == "LONG":
@@ -1811,12 +2222,14 @@ def confirm_5m_structure(
             confirmation["close"]
             <= break_level
         ):
+
             return None
 
         if (
             confirmation["close"]
             <= confirmation["open"]
         ):
+
             return None
 
     else:
@@ -1825,20 +2238,32 @@ def confirm_5m_structure(
             confirmation["close"]
             >= break_level
         ):
+
             return None
 
         if (
             confirmation["close"]
             >= confirmation["open"]
         ):
+
             return None
 
     return {
-        "break_index": break_index,
-        "break_level": break_level,
-        "pullback_index": pullback_index,
-        "confirmation_index": last_index,
-        "confirmation_body_ratio": body_ratio,
+
+        "break_index":
+            break_index,
+
+        "break_level":
+            break_level,
+
+        "pullback_index":
+            pullback_index,
+
+        "confirmation_index":
+            last_index,
+
+        "confirmation_body_ratio":
+            body_ratio,
     }
 
 
@@ -1852,6 +2277,7 @@ def calculate_5m_structural_sl(
 ):
 
     if not confirmation:
+
         return None
 
     start = confirmation[
@@ -1867,6 +2293,7 @@ def calculate_5m_structural_sl(
     ]
 
     if not section:
+
         return None
 
     low = min(
@@ -1884,12 +2311,19 @@ def calculate_5m_structural_sl(
     )
 
     if atr is None:
+
         atr = 0.0
 
     return {
-        "low": low,
-        "high": high,
-        "atr": atr,
+
+        "low":
+            low,
+
+        "high":
+            high,
+
+        "atr":
+            atr,
     }
 
 
@@ -1909,11 +2343,13 @@ def build_sl_tp(
     ):
 
         DIAG["other"] += 1
+
         return None
 
     if structural is None:
 
         DIAG["other"] += 1
+
         return None
 
     atr = structural["atr"]
@@ -1928,6 +2364,7 @@ def build_sl_tp(
         if raw_sl >= entry:
 
             DIAG["other"] += 1
+
             return None
 
         sl_distance = (
@@ -1935,26 +2372,35 @@ def build_sl_tp(
         )
 
         sl_pct = (
-            sl_distance / entry
+            sl_distance
+            / entry
         ) * 100.0
 
         sl_fraction = (
-            sl_distance / entry
+            sl_distance
+            / entry
         )
 
         if sl_fraction < MIN_SL_PCT:
 
-            DIAG["sl_too_small"] += 1
+            DIAG[
+                "sl_too_small"
+            ] += 1
+
             return None
 
         if sl_fraction > MAX_SL_PCT:
 
-            DIAG["sl_too_large"] += 1
+            DIAG[
+                "sl_too_large"
+            ] += 1
+
             return None
 
         tp = (
             entry
-            + sl_distance * MIN_RR
+            + sl_distance
+            * MIN_RR
         )
 
     else:
@@ -1967,6 +2413,7 @@ def build_sl_tp(
         if raw_sl <= entry:
 
             DIAG["other"] += 1
+
             return None
 
         sl_distance = (
@@ -1974,26 +2421,35 @@ def build_sl_tp(
         )
 
         sl_pct = (
-            sl_distance / entry
+            sl_distance
+            / entry
         ) * 100.0
 
         sl_fraction = (
-            sl_distance / entry
+            sl_distance
+            / entry
         )
 
         if sl_fraction < MIN_SL_PCT:
 
-            DIAG["sl_too_small"] += 1
+            DIAG[
+                "sl_too_small"
+            ] += 1
+
             return None
 
         if sl_fraction > MAX_SL_PCT:
 
-            DIAG["sl_too_large"] += 1
+            DIAG[
+                "sl_too_large"
+            ] += 1
+
             return None
 
         tp = (
             entry
-            - sl_distance * MIN_RR
+            - sl_distance
+            * MIN_RR
         )
 
     if side == "LONG":
@@ -2019,6 +2475,7 @@ def build_sl_tp(
     if risk <= 0:
 
         DIAG["other"] += 1
+
         return None
 
     rr = (
@@ -2028,13 +2485,22 @@ def build_sl_tp(
     if rr < MIN_RR:
 
         DIAG["rr_failed"] += 1
+
         return None
 
     return {
-        "sl": raw_sl,
-        "tp": tp,
-        "sl_pct": sl_pct,
-        "rr": rr,
+
+        "sl":
+            raw_sl,
+
+        "tp":
+            tp,
+
+        "sl_pct":
+            sl_pct,
+
+        "rr":
+            rr,
     }
 
 
@@ -2055,9 +2521,11 @@ def calculate_score(
         "LONG",
         "SHORT"
     ):
+
         score += 3
 
     if setup:
+
         score += 4
 
     if (
@@ -2082,6 +2550,7 @@ def calculate_score(
         score += 2
 
     if confirmation:
+
         score += 4
 
     return min(
@@ -2110,12 +2579,15 @@ def get_open_trades():
         ).fetchall()
 
     finally:
+
         conn.close()
 
 
 def get_open_symbols():
 
-    rows = get_open_trades()
+    rows = (
+        get_open_trades()
+    )
 
     return {
         row["symbol"]
@@ -2127,7 +2599,9 @@ def get_open_symbols():
 # COOLDOWN
 # ============================================================
 
-def is_in_cooldown(symbol):
+def is_in_cooldown(
+    symbol
+):
 
     conn = get_db()
 
@@ -2137,15 +2611,19 @@ def is_in_cooldown(symbol):
             """
             SELECT exit_time
             FROM trades
+
             WHERE symbol = ?
               AND exit_time IS NOT NULL
+
             ORDER BY exit_time DESC
+
             LIMIT 1
             """,
             (symbol,)
         ).fetchone()
 
         if not row:
+
             return False
 
         exit_dt = parse_datetime(
@@ -2153,6 +2631,7 @@ def is_in_cooldown(symbol):
         )
 
         if exit_dt is None:
+
             return False
 
         elapsed = (
@@ -2166,6 +2645,7 @@ def is_in_cooldown(symbol):
         )
 
     finally:
+
         conn.close()
 
 
@@ -2193,8 +2673,10 @@ def create_trade(
             """
             SELECT id
             FROM trades
+
             WHERE symbol = ?
               AND exit_time IS NULL
+
             LIMIT 1
             """,
             (symbol,)
@@ -2206,7 +2688,8 @@ def create_trade(
 
             print(
                 f"⚠️ CREATE BLOCKED: "
-                f"{symbol} already has open trade"
+                f"{symbol} already has "
+                f"open trade"
             )
 
             return None
@@ -2215,9 +2698,12 @@ def create_trade(
             """
             SELECT exit_time
             FROM trades
+
             WHERE symbol = ?
               AND exit_time IS NOT NULL
+
             ORDER BY exit_time DESC
+
             LIMIT 1
             """,
             (symbol,)
@@ -2255,25 +2741,44 @@ def create_trade(
         cursor = conn.execute(
             """
             INSERT INTO trades (
+
                 symbol,
                 side,
+
                 entry,
                 sl,
                 tp,
+
                 entry_time,
+
                 exit,
                 exit_time,
+
                 pnl_pct,
                 result,
+
                 exit_reason,
+
                 duration_minutes,
+
                 closed_reported
             )
+
             VALUES (
+
                 ?, ?, ?, ?, ?,
+
                 ?,
-                NULL, NULL, NULL, NULL,
-                NULL, NULL, 0
+
+                NULL, NULL,
+
+                NULL, NULL,
+
+                NULL,
+
+                NULL,
+
+                0
             )
             """,
             (
@@ -2297,9 +2802,11 @@ def create_trade(
     except Exception:
 
         conn.rollback()
+
         raise
 
     finally:
+
         conn.close()
 
 
@@ -2325,8 +2832,10 @@ def close_trade(
             """
             SELECT *
             FROM trades
+
             WHERE id = ?
               AND exit_time IS NULL
+
             LIMIT 1
             """,
             (trade_id,)
@@ -2394,6 +2903,7 @@ def close_trade(
         cursor = conn.execute(
             """
             UPDATE trades
+
             SET
                 exit = ?,
                 exit_time = ?,
@@ -2401,6 +2911,7 @@ def close_trade(
                 result = ?,
                 exit_reason = ?,
                 duration_minutes = ?
+
             WHERE id = ?
               AND exit_time IS NULL
             """,
@@ -2437,9 +2948,11 @@ def close_trade(
     except Exception:
 
         conn.rollback()
+
         raise
 
     finally:
+
         conn.close()
 
 
@@ -2454,6 +2967,7 @@ def update_open_trades():
     )
 
     if not open_trades:
+
         return
 
     tickers = (
@@ -2470,21 +2984,25 @@ def update_open_trades():
                 """
                 SELECT exit_time
                 FROM trades
+
                 WHERE id = ?
                 """,
                 (trade["id"],)
             ).fetchone()
 
         finally:
+
             conn.close()
 
         if not current_row:
+
             continue
 
         if (
             current_row["exit_time"]
             is not None
         ):
+
             continue
 
         current = get_current_price(
@@ -2493,6 +3011,7 @@ def update_open_trades():
         )
 
         if current is None:
+
             continue
 
         entry = safe_float(
@@ -2512,6 +3031,7 @@ def update_open_trades():
             or sl is None
             or tp is None
         ):
+
             continue
 
         pnl = pct_change(
@@ -2529,23 +3049,29 @@ def update_open_trades():
         if trade["side"] == "LONG":
 
             if current <= sl:
+
                 reason = "SL"
 
             elif current >= tp:
+
                 reason = "TP"
 
         else:
 
             if current >= sl:
+
                 reason = "SL"
 
             elif current <= tp:
+
                 reason = "TP"
 
         if (
             reason is None
+
             and duration
             >= TIME_EXIT_MINUTES
+
             and pnl
             >= TIME_EXIT_MIN_PROFIT_PCT
         ):
@@ -2574,6 +3100,7 @@ def get_performance():
         row = conn.execute(
             """
             SELECT
+
                 COUNT(*) AS total_closed,
 
                 SUM(
@@ -2598,49 +3125,61 @@ def get_performance():
                 ) AS net_pnl
 
             FROM trades
+
             WHERE exit_time IS NOT NULL
             """
         ).fetchone()
 
         closed = int(
-            row["total_closed"] or 0
+            row["total_closed"]
+            or 0
         )
 
         wins = int(
-            row["wins"] or 0
+            row["wins"]
+            or 0
         )
 
         losses = int(
-            row["losses"] or 0
+            row["losses"]
+            or 0
         )
 
         net_pnl = float(
-            row["net_pnl"] or 0.0
+            row["net_pnl"]
+            or 0.0
         )
 
         open_row = conn.execute(
             """
             SELECT COUNT(*) AS count
+
             FROM trades
+
             WHERE exit_time IS NULL
             """
         ).fetchone()
 
         open_count = int(
-            open_row["count"] or 0
+            open_row["count"]
+            or 0
         )
 
         time_row = conn.execute(
             """
             SELECT COUNT(*) AS count
+
             FROM trades
+
             WHERE exit_time IS NOT NULL
-              AND exit_reason = 'TIME_PROFIT'
+              AND exit_reason =
+                  'TIME_PROFIT'
             """
         ).fetchone()
 
         time_exits = int(
-            time_row["count"] or 0
+            time_row["count"]
+            or 0
         )
 
         accounted = (
@@ -2663,16 +3202,31 @@ def get_performance():
         )
 
         return {
-            "open": open_count,
-            "closed": closed,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": win_rate,
-            "net_pnl": net_pnl,
-            "time_exits": time_exits,
+
+            "open":
+                open_count,
+
+            "closed":
+                closed,
+
+            "wins":
+                wins,
+
+            "losses":
+                losses,
+
+            "win_rate":
+                win_rate,
+
+            "net_pnl":
+                net_pnl,
+
+            "time_exits":
+                time_exits,
         }
 
     finally:
+
         conn.close()
 
 
@@ -2682,9 +3236,12 @@ def get_performance():
 
 def get_live_open_data():
 
-    rows = get_open_trades()
+    rows = (
+        get_open_trades()
+    )
 
     if not rows:
+
         return []
 
     tickers = (
@@ -2722,10 +3279,18 @@ def get_live_open_data():
         )
 
         result.append({
-            "trade": trade,
-            "current": current,
-            "pnl": pnl,
-            "duration": duration,
+
+            "trade":
+                trade,
+
+            "current":
+                current,
+
+            "pnl":
+                pnl,
+
+            "duration":
+                duration,
         })
 
     return result
@@ -2774,13 +3339,16 @@ def build_report(
     )
 
     lines.append("")
+
     lines.append(
         "🎯 NEW SIGNALS"
     )
 
     if not signals:
 
-        lines.append("None")
+        lines.append(
+            "None"
+        )
 
     else:
 
@@ -2823,12 +3391,14 @@ def build_report(
             )
 
             lines.append(
-                f"RR: {signal['rr']:.2f}"
+                f"RR: "
+                f"{signal['rr']:.2f}"
             )
 
             lines.append(
                 f"Score: "
-                f"{signal['score']}/{MAX_SCORE}"
+                f"{signal['score']}"
+                f"/{MAX_SCORE}"
             )
 
             lines.append(
@@ -2837,20 +3407,26 @@ def build_report(
             )
 
     lines.append("")
+
     lines.append(
         "🏆 TOP CANDIDATE"
     )
 
     if not candidates:
 
-        lines.append("None")
+        lines.append(
+            "None"
+        )
 
     else:
 
         candidate = sorted(
             candidates,
             key=lambda x:
-                x.get("score", 0),
+                x.get(
+                    "score",
+                    0
+                ),
             reverse=True
         )[0]
 
@@ -2940,6 +3516,7 @@ def build_report(
             )
 
     lines.append("")
+
     lines.append(
         f"📂 OPEN TRADES "
         f"({len(live_open)}/"
@@ -2948,7 +3525,9 @@ def build_report(
 
     if not live_open:
 
-        lines.append("None")
+        lines.append(
+            "None"
+        )
 
     else:
 
@@ -3012,6 +3591,7 @@ def build_report(
             )
 
     lines.append("")
+
     lines.append(
         "📈 PERFORMANCE"
     )
@@ -3053,6 +3633,7 @@ def build_report(
     )
 
     lines.append("")
+
     lines.append(
         "🔎 FILTER DIAGNOSTICS"
     )
@@ -3144,7 +3725,48 @@ def build_report(
         f"{DIAG['errors']}"
     )
 
+    # --------------------------------------------------------
+    # API DIAGNOSTICS
+    # --------------------------------------------------------
+
     lines.append("")
+
+    lines.append(
+        "🌐 API DIAGNOSTICS"
+    )
+
+    lines.append(
+        f"API Errors: "
+        f"{DIAG['api_errors']}"
+    )
+
+    lines.append(
+        f"API Empty: "
+        f"{DIAG['api_empty']}"
+    )
+
+    lines.append(
+        f"API Parse Errors: "
+        f"{DIAG['api_parse_errors']}"
+    )
+
+    lines.append(
+        f"5M API Errors: "
+        f"{DIAG['tf_5m_errors']}"
+    )
+
+    lines.append(
+        f"15M API Errors: "
+        f"{DIAG['tf_15m_errors']}"
+    )
+
+    lines.append(
+        f"1H API Errors: "
+        f"{DIAG['tf_1h_errors']}"
+    )
+
+    lines.append("")
+
     lines.append(
         "Real trading: "
         + (
@@ -3154,7 +3776,9 @@ def build_report(
         )
     )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -3163,15 +3787,22 @@ def build_report(
 
 def scan():
 
-    markets = get_top_markets()
+    markets = (
+        get_top_markets()
+    )
 
     if not markets:
 
-        print(
-            "❌ No markets found"
+        report = (
+            "📊 VOLUME-KHAT 100\n"
+            "❌ No markets found\n"
+            "\n"
+            "Real trading: DISABLED"
         )
 
-        return
+        print(report)
+
+        return report
 
     # --------------------------------------------------------
     # Update existing trades first
@@ -3201,25 +3832,37 @@ def scan():
 
         DIAG["scanned"] += 1
 
+        # ----------------------------------------------------
+        # ALREADY OPEN
+        # ----------------------------------------------------
+
         if symbol in open_symbols:
 
-            DIAG["already_open"] += 1
+            DIAG[
+                "already_open"
+            ] += 1
 
             continue
+
+        # ----------------------------------------------------
+        # COOLDOWN
+        # ----------------------------------------------------
 
         if is_in_cooldown(
             symbol
         ):
 
-            DIAG["cooldown"] += 1
+            DIAG[
+                "cooldown"
+            ] += 1
 
             continue
 
         try:
 
-            # ------------------------------------------------
+            # =================================================
             # 1H
-            # ------------------------------------------------
+            # =================================================
 
             candles_1h = (
                 fetch_ohlcv(
@@ -3250,9 +3893,9 @@ def scan():
                 "trend_ok"
             ] += 1
 
-            # ------------------------------------------------
+            # =================================================
             # 15M
-            # ------------------------------------------------
+            # =================================================
 
             candles_15m = (
                 fetch_ohlcv(
@@ -3284,9 +3927,9 @@ def scan():
                 "setup_passed"
             ] += 1
 
-            # ------------------------------------------------
+            # =================================================
             # 5M
-            # ------------------------------------------------
+            # =================================================
 
             candles_5m = (
                 fetch_ohlcv(
@@ -3327,9 +3970,9 @@ def scan():
                 "full_5m"
             ] += 1
 
-            # ------------------------------------------------
+            # =================================================
             # SCORE
-            # ------------------------------------------------
+            # =================================================
 
             score = calculate_score(
                 trend,
@@ -3339,18 +3982,39 @@ def scan():
             )
 
             candidate = {
-                "symbol": symbol,
-                "side": trend,
+
+                "symbol":
+                    symbol,
+
+                "side":
+                    trend,
+
                 "setup_type":
                     setup["type"],
-                "score": score,
-                "rvol": rvol_5m,
-                "reason": None,
-                "entry": None,
-                "sl": None,
-                "tp": None,
-                "sl_pct": None,
-                "rr": None,
+
+                "score":
+                    score,
+
+                "rvol":
+                    rvol_5m,
+
+                "reason":
+                    None,
+
+                "entry":
+                    None,
+
+                "sl":
+                    None,
+
+                "tp":
+                    None,
+
+                "sl_pct":
+                    None,
+
+                "rr":
+                    None,
             }
 
             if score < MIN_SCORE:
@@ -3370,9 +4034,9 @@ def scan():
 
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # ENTRY
-            # ------------------------------------------------
+            # =================================================
 
             entry = (
                 candles_5m[-1]["close"]
@@ -3397,7 +4061,9 @@ def scan():
                     "Invalid SL/TP"
                 )
 
-                candidate["entry"] = entry
+                candidate["entry"] = (
+                    entry
+                )
 
                 candidates.append(
                     candidate
@@ -3405,12 +4071,22 @@ def scan():
 
                 continue
 
-            candidate["entry"] = entry
-            candidate["sl"] = sltp["sl"]
-            candidate["tp"] = sltp["tp"]
+            candidate["entry"] = (
+                entry
+            )
+
+            candidate["sl"] = (
+                sltp["sl"]
+            )
+
+            candidate["tp"] = (
+                sltp["tp"]
+            )
+
             candidate["sl_pct"] = (
                 sltp["sl_pct"]
             )
+
             candidate["rr"] = (
                 sltp["rr"]
             )
@@ -3419,12 +4095,20 @@ def scan():
                 candidate
             )
 
+            # ------------------------------------------------
+            # OPEN SLOT CHECK
+            # ------------------------------------------------
+
             if (
                 len(signals)
                 >= available_slots
-                or len(signals)
+
+                or
+
+                len(signals)
                 >= MAX_NEW_SIGNALS
             ):
+
                 continue
 
             trade_id = create_trade(
@@ -3436,27 +4120,38 @@ def scan():
             )
 
             if trade_id is None:
+
                 continue
 
             signal = {
+
                 "trade_id":
                     trade_id,
+
                 "symbol":
                     symbol,
+
                 "side":
                     trend,
+
                 "entry":
                     entry,
+
                 "sl":
                     sltp["sl"],
+
                 "tp":
                     sltp["tp"],
+
                 "sl_pct":
                     sltp["sl_pct"],
+
                 "rr":
                     sltp["rr"],
+
                 "score":
                     score,
+
                 "rvol":
                     rvol_5m,
             }
@@ -3471,19 +4166,28 @@ def scan():
 
         except Exception as exc:
 
-            DIAG["errors"] += 1
+            DIAG[
+                "errors"
+            ] += 1
 
             print(
                 f"❌ ERROR "
-                f"{symbol}: {exc}"
+                f"{symbol}: "
+                f"{exc}"
             )
 
-    print(
-        build_report(
-            signals,
-            candidates
-        )
+    # --------------------------------------------------------
+    # FINAL REPORT
+    # --------------------------------------------------------
+
+    report = build_report(
+        signals,
+        candidates
     )
+
+    print(report)
+
+    return report
 
 
 # ============================================================
@@ -3512,7 +4216,8 @@ def main():
         )
 
         print(
-            f"Schema: {SCHEMA_VERSION}"
+            f"Schema: "
+            f"{SCHEMA_VERSION}"
         )
 
         print(
@@ -3524,8 +4229,20 @@ def main():
             )
         )
 
+        print(
+            "============================================================"
+        )
+
+        print(
+            "STARTING SCANNER"
+        )
+
+        print(
+            "============================================================"
+        )
+
         # ----------------------------------------------------
-        # INIT + MIGRATION
+        # DATABASE
         # ----------------------------------------------------
 
         init_db()
@@ -3552,18 +4269,97 @@ def main():
         # SCAN
         # ----------------------------------------------------
 
-        scan()
+        report = scan()
+
+        # ----------------------------------------------------
+        # TELEGRAM
+        # ----------------------------------------------------
+
+        print(
+            "============================================================"
+        )
+
+        print(
+            "SENDING TELEGRAM REPORT"
+        )
+
+        print(
+            "============================================================"
+        )
+
+        telegram_ok = (
+            send_telegram(
+                report
+            )
+        )
+
+        if telegram_ok:
+
+            print(
+                "✅ TELEGRAM REPORT SENT"
+            )
+
+        else:
+
+            print(
+                "❌ TELEGRAM REPORT FAILED"
+            )
+
+        print(
+            "============================================================"
+        )
+
+        print(
+            "SCANNER FINISHED"
+        )
+
+        print(
+            "============================================================"
+        )
 
     except Exception as exc:
 
-        DIAG["errors"] += 1
+        DIAG[
+            "errors"
+        ] += 1
+
+        fatal_message = (
+            "❌ VOLUME-KHAT 100 "
+            "FATAL ERROR\n\n"
+            f"{exc}\n\n"
+            "Real trading: DISABLED"
+        )
 
         print(
-            f"❌ FATAL ERROR: {exc}"
+            fatal_message
         )
+
+        # ----------------------------------------------------
+        # Try to notify Telegram even
+        # when scanner crashes.
+        # ----------------------------------------------------
+
+        try:
+
+            send_telegram(
+                fatal_message
+            )
+
+        except Exception as telegram_exc:
+
+            print(
+                "❌ Telegram fatal "
+                "notification failed: "
+                f"{telegram_exc}"
+            )
 
         raise
 
 
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
 if __name__ == "__main__":
+
     main()
