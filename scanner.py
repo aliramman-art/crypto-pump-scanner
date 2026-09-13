@@ -258,7 +258,7 @@ SL_BUFFER = 0.0015
 MIN_SL_PCT = 0.0050
 MAX_SL_PCT = 0.0150
 
-MIN_RR = 2.0
+MIN_RR = 1.0
 
 
 # ============================================================
@@ -713,14 +713,6 @@ def migrate_database(conn):
 
         "closed_reported":
             "INTEGER DEFAULT 0",
-
-        # ----------------------------------------------------
-        # NEW:
-        # No DEFAULT here intentionally.
-        #
-        # Old records become NULL and are therefore treated
-        # as NOT TRACKED rather than falsely counted as 0.
-        # ----------------------------------------------------
 
         "reached_1r":
             "INTEGER",
