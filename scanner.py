@@ -43,6 +43,15 @@
 # - Historical closed trades are NOT falsely counted as 0
 # - Existing strategy / entry / SL / TP logic unchanged
 #
+# NEW LBANK PRICE SYNC
+# ------------------------------------------------------------
+# - Signal detection remains on Kraken Futures
+# - Entry price is taken from LBank Futures
+# - SL / TP are recalculated from LBank Entry
+# - Open-trade live price uses LBank Futures
+# - Live PnL uses LBank Futures
+# - No Kraken fallback for LBank execution price
+#
 # REAL TRADING: DISABLED
 # ============================================================
 
@@ -305,13 +314,6 @@ DB_FILE = "volume_khat_100.db"
 
 SCHEMA_VERSION = "4.3"
 
-# ------------------------------------------------------------
-# DATABASE RESET
-#
-# 0 = KEEP DATABASE
-# 1 = physically delete all trades ONCE
-# ------------------------------------------------------------
-
 RESET_DATABASE_ON_V43_START = (
     os.getenv(
         "RESET_DATABASE_ON_V43_START",
@@ -369,6 +371,18 @@ KRAKEN_TICKER_URL = (
     "https://futures.kraken.com/"
     "derivatives/api/v3/tickers"
 )
+
+
+# ============================================================
+# LBANK FUTURES
+# ============================================================
+
+LBANK_MARKET_URL = (
+    "https://lbkperp.lbank.com/"
+    "cfd/openApi/v1/pub/marketData"
+)
+
+LBANK_PRODUCT_GROUP = "SwapU"
 
 
 # ============================================================
@@ -560,6 +574,249 @@ def duration_minutes(
 
 
 # ============================================================
+# LBANK SYMBOL NORMALIZATION
+# ============================================================
+
+def normalize_base_symbol(symbol):
+
+    if not symbol:
+
+        return None
+
+    value = str(
+        symbol
+    ).upper().strip()
+
+    value = (
+        value
+        .replace("_", "")
+        .replace("-", "")
+        .replace("/", "")
+        .replace(":", "")
+    )
+
+    if value.startswith("PF"):
+
+        value = value[2:]
+
+    if value.endswith("USDT"):
+
+        value = value[:-4]
+
+    elif value.endswith("USD"):
+
+        value = value[:-3]
+
+    elif value.endswith("USDC"):
+
+        value = value[:-4]
+
+    # --------------------------------------------------------
+    # Kraken uses XBT for Bitcoin in some futures symbols.
+    # LBank normally uses BTC.
+    # --------------------------------------------------------
+
+    if value == "XBT":
+
+        value = "BTC"
+
+    return value
+
+
+def get_lbank_futures_prices():
+
+    """
+    Fetch all LBank USDT-margined perpetual prices once.
+
+    Returns:
+
+        {
+            "BTC": 104000.0,
+            "ETH": 4000.0,
+            ...
+        }
+
+    The scanner uses lastPrice, not markedPrice.
+    """
+
+    try:
+
+        response = requests.get(
+            LBANK_MARKET_URL,
+            params={
+                "productGroup":
+                    LBANK_PRODUCT_GROUP
+            },
+            timeout=REQUEST_TIMEOUT
+        )
+
+        if response.status_code != 200:
+
+            print(
+                "❌ LBANK MARKET API ERROR "
+                f"HTTP {response.status_code}: "
+                f"{response.text[:500]}"
+            )
+
+            return {}
+
+        try:
+
+            data = response.json()
+
+        except Exception:
+
+            print(
+                "❌ LBANK MARKET JSON ERROR"
+            )
+
+            return {}
+
+        markets = []
+
+        if isinstance(
+            data,
+            list
+        ):
+
+            markets = data
+
+        elif isinstance(
+            data,
+            dict
+        ):
+
+            for key in (
+                "data",
+                "result",
+                "markets"
+            ):
+
+                value = data.get(
+                    key
+                )
+
+                if isinstance(
+                    value,
+                    list
+                ):
+
+                    markets = value
+
+                    break
+
+        if not markets:
+
+            print(
+                "⚠️ LBANK MARKET DATA EMPTY"
+            )
+
+            return {}
+
+        prices = {}
+
+        for market in markets:
+
+            if not isinstance(
+                market,
+                dict
+            ):
+
+                continue
+
+            symbol = (
+                market.get("symbol")
+                or market.get("pair")
+                or market.get("contract")
+            )
+
+            if not symbol:
+
+                continue
+
+            price = None
+
+            for key in (
+                "lastPrice",
+                "last_price",
+                "last",
+                "price"
+            ):
+
+                price = safe_float(
+                    market.get(key)
+                )
+
+                if (
+                    price is not None
+                    and price > 0
+                ):
+
+                    break
+
+            if (
+                price is None
+                or price <= 0
+            ):
+
+                continue
+
+            base = (
+                normalize_base_symbol(
+                    symbol
+                )
+            )
+
+            if not base:
+
+                continue
+
+            prices[base] = price
+
+        if not prices:
+
+            print(
+                "⚠️ LBANK MARKET DATA "
+                "CONTAINS NO VALID PRICES"
+            )
+
+        return prices
+
+    except Exception as exc:
+
+        print(
+            f"❌ LBANK MARKET ERROR: "
+            f"{exc}"
+        )
+
+        return {}
+
+
+def get_lbank_price(
+    kraken_symbol,
+    lbank_prices
+):
+
+    if not lbank_prices:
+
+        return None
+
+    base = (
+        normalize_base_symbol(
+            kraken_symbol
+        )
+    )
+
+    if not base:
+
+        return None
+
+    return safe_float(
+        lbank_prices.get(base)
+    )
+
+
+# ============================================================
 # DATABASE
 # ============================================================
 
@@ -670,10 +927,6 @@ def migrate_database(conn):
 
     migrated = []
 
-    # --------------------------------------------------------
-    # ENTRY TIME
-    # --------------------------------------------------------
-
     if "entry_time" not in columns:
 
         conn.execute(
@@ -691,10 +944,6 @@ def migrate_database(conn):
             conn,
             "trades"
         )
-
-    # --------------------------------------------------------
-    # OPTIONAL COLUMNS
-    # --------------------------------------------------------
 
     optional_columns = {
 
@@ -739,10 +988,6 @@ def migrate_database(conn):
                 column
             )
 
-    # --------------------------------------------------------
-    # REPAIR ENTRY TIME FROM CREATED_AT
-    # --------------------------------------------------------
-
     columns = table_columns(
         conn,
         "trades"
@@ -761,10 +1006,6 @@ def migrate_database(conn):
             AND created_at IS NOT NULL
             """
         )
-
-    # --------------------------------------------------------
-    # REPAIR FROM ENTRY_TIMESTAMP
-    # --------------------------------------------------------
 
     columns = table_columns(
         conn,
@@ -785,10 +1026,6 @@ def migrate_database(conn):
             """
         )
 
-    # --------------------------------------------------------
-    # LAST FALLBACK
-    # --------------------------------------------------------
-
     columns = table_columns(
         conn,
         "trades"
@@ -807,10 +1044,6 @@ def migrate_database(conn):
             AND exit_time IS NOT NULL
             """
         )
-
-    # --------------------------------------------------------
-    # ABSOLUTE LAST FALLBACK
-    # --------------------------------------------------------
 
     conn.execute(
         """
@@ -1477,10 +1710,6 @@ def fetch_ohlcv(
             l = float(l)
             c = float(c)
             v = float(v)
-
-            # ------------------------------------------------
-            # CLOSED CANDLES ONLY
-            # ------------------------------------------------
 
             if (
                 ts + interval_seconds
@@ -2882,15 +3111,6 @@ def get_reached_r_flags(
         entry_dt.timestamp()
     )
 
-    # --------------------------------------------------------
-    # Entry is made at the close of the latest closed 5M
-    # candle.
-    #
-    # Therefore we deliberately start from the NEXT 5M
-    # candle. Otherwise the candle that produced the entry
-    # could falsely count movement that happened before entry.
-    # --------------------------------------------------------
-
     next_candle_ts = (
         int(entry_ts // 300)
         * 300
@@ -2950,10 +3170,6 @@ def update_r_milestones(
     candles=None
 ):
 
-    # --------------------------------------------------------
-    # If candles were not supplied, fetch 5M candles.
-    # --------------------------------------------------------
-
     if candles is None:
 
         candles = fetch_ohlcv(
@@ -2981,12 +3197,6 @@ def update_r_milestones(
 
     old_1r = trade["reached_1r"]
     old_2r = trade["reached_2r"]
-
-    # --------------------------------------------------------
-    # Monotonic flags.
-    #
-    # Once 1R or 2R is reached, it NEVER goes back to 0.
-    # --------------------------------------------------------
 
     final_1r = (
         1
@@ -3382,8 +3592,12 @@ def update_open_trades():
 
         return
 
-    tickers = (
-        get_all_tickers()
+    # --------------------------------------------------------
+    # LBank is now the live price source for open trades.
+    # --------------------------------------------------------
+
+    lbank_prices = (
+        get_lbank_futures_prices()
     )
 
     for trade in open_trades:
@@ -3419,10 +3633,6 @@ def update_open_trades():
 
         # ----------------------------------------------------
         # R MILESTONE TRACKING
-        #
-        # Done BEFORE exit checks so that a candle which
-        # touches +1R/+2R and then reverses to SL is correctly
-        # recorded.
         # ----------------------------------------------------
 
         try:
@@ -3439,12 +3649,22 @@ def update_open_trades():
                 f"{exc}"
             )
 
-        current = get_current_price(
+        # ----------------------------------------------------
+        # CURRENT PRICE = LBANK
+        # ----------------------------------------------------
+
+        current = get_lbank_price(
             current_row["symbol"],
-            tickers
+            lbank_prices
         )
 
         if current is None:
+
+            print(
+                f"⚠️ LBANK PRICE MISSING "
+                f"{current_row['symbol']} - "
+                f"OPEN TRADE NOT UPDATED"
+            )
 
             continue
 
@@ -3606,10 +3826,6 @@ def get_performance():
             or 0.0
         )
 
-        # ----------------------------------------------------
-        # OPEN TRADES
-        # ----------------------------------------------------
-
         open_row = conn.execute(
             """
             SELECT COUNT(*) AS count
@@ -3624,10 +3840,6 @@ def get_performance():
             open_row["count"]
             or 0
         )
-
-        # ----------------------------------------------------
-        # TIME PROFIT
-        # ----------------------------------------------------
 
         time_row = conn.execute(
             """
@@ -3649,17 +3861,6 @@ def get_performance():
             time_row["count"]
             or 0
         )
-
-        # ----------------------------------------------------
-        # R-MILESTONE STATISTICS
-        #
-        # IMPORTANT:
-        # Only trades with non-NULL milestone values are
-        # included.
-        #
-        # This prevents old historical trades from being
-        # falsely counted as "did not reach 1R/2R".
-        # ----------------------------------------------------
 
         r1_row = conn.execute(
             """
@@ -3834,17 +4035,21 @@ def get_live_open_data():
 
         return []
 
-    tickers = (
-        get_all_tickers()
+    # --------------------------------------------------------
+    # LBank is the live price source.
+    # --------------------------------------------------------
+
+    lbank_prices = (
+        get_lbank_futures_prices()
     )
 
     result = []
 
     for trade in rows:
 
-        current = get_current_price(
+        current = get_lbank_price(
             trade["symbol"],
-            tickers
+            lbank_prices
         )
 
         entry = safe_float(
@@ -4222,10 +4427,6 @@ def build_report(
         f"{performance['time_exits']}"
     )
 
-    # --------------------------------------------------------
-    # NEW R STATISTICS
-    # --------------------------------------------------------
-
     lines.append(
         f"Reached +1R: "
         f"{performance['reached_1r']}/"
@@ -4333,10 +4534,6 @@ def build_report(
         f"{DIAG['errors']}"
     )
 
-    # --------------------------------------------------------
-    # API DIAGNOSTICS
-    # --------------------------------------------------------
-
     lines.append("")
 
     lines.append(
@@ -4371,6 +4568,20 @@ def build_report(
     lines.append(
         f"1H API Errors: "
         f"{DIAG['tf_1h_errors']}"
+    )
+
+    lines.append("")
+
+    lines.append(
+        "💱 PRICE SOURCE"
+    )
+
+    lines.append(
+        "Signal Logic: Kraken Futures"
+    )
+
+    lines.append(
+        "Entry / Live Price: LBank Futures"
     )
 
     lines.append("")
@@ -4431,6 +4642,14 @@ def scan():
         0,
         MAX_OPEN_TRADES
         - len(open_trades)
+    )
+
+    # --------------------------------------------------------
+    # Fetch LBank prices once for the whole scan.
+    # --------------------------------------------------------
+
+    lbank_prices = (
+        get_lbank_futures_prices()
     )
 
     signals = []
@@ -4644,11 +4863,33 @@ def scan():
 
             # =================================================
             # ENTRY
+            #
+            # Strategy detection remains Kraken.
+            # Actual entry price is synchronized to LBank.
             # =================================================
 
-            entry = (
-                candles_5m[-1]["close"]
+            entry = get_lbank_price(
+                symbol,
+                lbank_prices
             )
+
+            if entry is None:
+
+                candidate["reason"] = (
+                    "LBank price unavailable"
+                )
+
+                candidates.append(
+                    candidate
+                )
+
+                print(
+                    f"⚠️ LBANK PRICE MISSING "
+                    f"{symbol} - "
+                    f"signal skipped"
+                )
+
+                continue
 
             structural = (
                 calculate_5m_structural_sl(
@@ -4656,6 +4897,10 @@ def scan():
                     confirmation
                 )
             )
+
+            # ------------------------------------------------
+            # SL / TP are now calculated from LBank Entry.
+            # ------------------------------------------------
 
             sltp = build_sl_tp(
                 entry,
@@ -4875,9 +5120,6 @@ def main():
 
         # ----------------------------------------------------
         # SCAN
-        #
-        # scan() itself updates open trades first.
-        # No duplicate update here.
         # ----------------------------------------------------
 
         report = scan()
@@ -4944,11 +5186,6 @@ def main():
         print(
             fatal_message
         )
-
-        # ----------------------------------------------------
-        # Try to notify Telegram even
-        # when scanner crashes.
-        # ----------------------------------------------------
 
         try:
 
