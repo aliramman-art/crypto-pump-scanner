@@ -1,5 +1,5 @@
 # ============================================================
-# KRAKEN FUTURES VOLUME-KHAT 100 v7.2
+# KRAKEN FUTURES VOLUME-KHAT 100 v7.3
 # ============================================================
 #
 # 1H  = TREND + TREND STRENGTH
@@ -7,26 +7,68 @@
 # 5M  = FRESH BREAKOUT + PULLBACK + CONFIRMATION
 # VOL = RVOL CONFIRMATION
 #
-# TP   = NEAREST VALID SUPPORT / RESISTANCE
-# RR   = STRICTLY > 1.00
+# TP v7.3
+# ------------------------------------------------------------
+# LONG:
+#   Nearest Resistance
+#       ↓
+#   RR sufficient? YES → TP
+#       ↓ NO
+#   Next Resistance
+#       ↓
+#   RR sufficient? YES → TP
+#       ↓ NO
+#   Next Resistance
+#
+# SHORT:
+#   Nearest Support
+#       ↓
+#   RR sufficient? YES → TP
+#       ↓ NO
+#   Next Support
+#
+# TP must satisfy BOTH:
+#   RR > MIN_TP_RR
+#   TP distance <= MAX_TP_DISTANCE_PCT
+#
+# ENTRY FILTERS UNCHANGED
+# ------------------------------------------------------------
+# 1H Trend + Trend Strength
+# 15M Support / Resistance + Reaction
+# 5M Breakout + Pullback + Confirmation
+# RVOL
+# Score
+# SL
 #
 # CLOSED CANDLES ONLY
 #
 # EXIT = HISTORICAL 5M HIGH / LOW
 # TIME EXIT = DISABLED
 #
-# STATISTICS = RESET ONCE AT v7.0 START
-#
-# v7.2 IMPROVEMENTS
+# STATISTICS
 # ------------------------------------------------------------
-# - Real RVOL shown for TOP CANDIDATE at every stage
-# - Exact 5M confirmation failure reason
-# - WAITING_NEXT_CANDLE when pullback occurs on latest candle
-# - Stage-aware score
-# - Clear SUPPORT / RESISTANCE / SETUP / TP zones
-# - Separate NO_VALID_SR_TARGET from RR <= 1
-# - TOP CANDIDATE selected from complete TOP 100 scan
-# - Scanner continues after MAX_NEW_SIGNALS
+# v7.3 uses a separate database.
+# Previous v7.2 statistics remain untouched.
+#
+# TELEGRAM REPORT
+# ------------------------------------------------------------
+# Only:
+# - New Signals
+# - Open Trades
+# - Performance
+#
+# Internal calculations remain active but are NOT displayed:
+# - Support / Resistance levels
+# - Setup Zone
+# - Breakout details
+# - Pullback details
+# - Confirmation details
+# - RVOL
+# - Diagnostics
+# - Rejection reason
+# - Scanned count
+# - Individual filter states
+# - Full strategy settings
 #
 # REAL TRADING = DISABLED
 # ============================================================
@@ -44,14 +86,20 @@ import numpy as np
 # CONFIG
 # ============================================================
 
-VERSION = "v7.2"
+VERSION = "v7.3"
 
 KRAKEN_BASE = "https://futures.kraken.com"
 
 TICKERS_URL = f"{KRAKEN_BASE}/derivatives/api/v3/tickers"
 CHART_URL = f"{KRAKEN_BASE}/api/charts/v1/trade"
 
-DB_FILE = "volume_khat_100.db"
+# ------------------------------------------------------------
+# IMPORTANT:
+# v7.3 uses a separate DB.
+# v7.2 database remains untouched.
+# ------------------------------------------------------------
+
+DB_FILE = "volume_khat_100_v73.db"
 
 PAPER_TRADING = True
 
@@ -62,9 +110,10 @@ MAX_NEW_SIGNALS = 3
 
 COOLDOWN_CANDLES = 3
 
-# ------------------------------------------------------------
+
+# ============================================================
 # TIMEFRAMES
-# ------------------------------------------------------------
+# ============================================================
 
 TF_1H = "1h"
 TF_15M = "15m"
@@ -74,22 +123,25 @@ LOOKBACK_1H = 180
 LOOKBACK_15M = 220
 LOOKBACK_5M = 250
 
-# ------------------------------------------------------------
+
+# ============================================================
 # MOVING AVERAGES
-# ------------------------------------------------------------
+# ============================================================
 
 SMA_FAST = 20
 SMA_SLOW = 50
 
-# ------------------------------------------------------------
+
+# ============================================================
 # TREND SCORE
-# ------------------------------------------------------------
+# ============================================================
 
 MIN_TREND_SCORE = 7
 
-# ------------------------------------------------------------
+
+# ============================================================
 # SUPPORT / RESISTANCE
-# ------------------------------------------------------------
+# ============================================================
 
 PIVOT_SWING = 3
 
@@ -101,9 +153,10 @@ TP_ZONE_BUFFER_PCT = 0.10
 
 SR_REPORT_LIMIT = 3
 
-# ------------------------------------------------------------
+
+# ============================================================
 # VOLUME
-# ------------------------------------------------------------
+# ============================================================
 
 RVOL_PERIOD = 20
 
@@ -111,9 +164,10 @@ RVOL_NORMAL = 1.70
 RVOL_STRONG = 2.50
 RVOL_VERY_STRONG = 3.00
 
-# ------------------------------------------------------------
+
+# ============================================================
 # BREAKOUT
-# ------------------------------------------------------------
+# ============================================================
 
 BREAKOUT_LOOKBACK = 5
 
@@ -121,17 +175,19 @@ BREAKOUT_MAX_AGE = 3
 
 BREAKOUT_BUFFER_PCT = 0.05
 
-# ------------------------------------------------------------
+
+# ============================================================
 # CANDLE CONFIRMATION
-# ------------------------------------------------------------
+# ============================================================
 
 MIN_BODY_PCT = 0.20
 
 WICK_BODY_RATIO = 1.15
 
-# ------------------------------------------------------------
+
+# ============================================================
 # SL
-# ------------------------------------------------------------
+# ============================================================
 
 ATR_PERIOD = 14
 
@@ -143,9 +199,10 @@ MAX_SL_PCT = 1.50
 
 SL_PRICE_BUFFER_PCT = 0.15
 
-# ------------------------------------------------------------
+
+# ============================================================
 # SCORE
-# ------------------------------------------------------------
+# ============================================================
 #
 # Trend       0-7
 # Setup       0-4
@@ -154,21 +211,39 @@ SL_PRICE_BUFFER_PCT = 0.15
 #
 # MAX = 16
 #
-# ------------------------------------------------------------
+# ============================================================
 
 MIN_SCORE = 10
 
-# ------------------------------------------------------------
+
+# ============================================================
+# TP v7.3
+# ============================================================
+
+# Minimum acceptable reward/risk.
+# TP must be STRICTLY greater than this value.
+
+MIN_TP_RR = 1.00
+
+# Maximum allowed TP distance from entry.
+#
+# This prevents the scanner from selecting a very distant
+# S/R level merely to manufacture an acceptable RR.
+#
+# TP must satisfy:
+#
+#     RR > MIN_TP_RR
+#     AND
+#     TP distance <= MAX_TP_DISTANCE_PCT
+#
+MAX_TP_DISTANCE_PCT = 3.00
+
+
+# ============================================================
 # EXIT
-# ------------------------------------------------------------
+# ============================================================
 
 TIME_EXIT_ENABLED = False
-
-# ------------------------------------------------------------
-# ONE-TIME RESET
-# ------------------------------------------------------------
-
-RESET_KEY = "VOLUME_KHAT_V7_RESET_DONE"
 
 
 # ============================================================
@@ -179,7 +254,7 @@ SESSION = requests.Session()
 
 SESSION.headers.update(
     {
-        "User-Agent": "VOLUME-KHAT-100/7.2",
+        "User-Agent": "VOLUME-KHAT-100/7.3",
         "Accept": "application/json",
     }
 )
@@ -235,6 +310,22 @@ def normalize_ts(value):
     return value
 
 
+def format_price(value):
+
+    value = safe_float(value)
+
+    if value >= 100:
+        return f"{value:.2f}"
+
+    if value >= 1:
+        return f"{value:.5f}"
+
+    if value >= 0.01:
+        return f"{value:.6f}"
+
+    return f"{value:.8f}"
+
+
 # ============================================================
 # DATABASE
 # ============================================================
@@ -281,15 +372,6 @@ def init_db():
         """
     )
 
-    cur.execute(
-        """
-        CREATE TABLE IF NOT EXISTS system_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-        """
-    )
-
     conn.commit()
 
     columns = {
@@ -318,55 +400,6 @@ def init_db():
 
     conn.commit()
     conn.close()
-
-
-def get_meta(key):
-
-    conn = db()
-
-    row = conn.execute(
-        "SELECT value FROM system_meta WHERE key=?",
-        (key,)
-    ).fetchone()
-
-    conn.close()
-
-    return row["value"] if row else None
-
-
-def set_meta(key, value):
-
-    conn = db()
-
-    conn.execute(
-        """
-        INSERT INTO system_meta(key,value)
-        VALUES(?,?)
-        ON CONFLICT(key)
-        DO UPDATE SET value=excluded.value
-        """,
-        (key, str(value))
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def reset_database_once():
-
-    if get_meta(RESET_KEY) == "1":
-        return False
-
-    conn = db()
-
-    conn.execute("DELETE FROM trades")
-
-    conn.commit()
-    conn.close()
-
-    set_meta(RESET_KEY, "1")
-
-    return True
 
 
 # ============================================================
@@ -531,11 +564,30 @@ def parse_candles(data):
                     or item.get("t")
                 )
 
-                o = item.get("open", item.get("o"))
-                h = item.get("high", item.get("h"))
-                l = item.get("low", item.get("l"))
-                c = item.get("close", item.get("c"))
-                v = item.get("volume", item.get("v", 0))
+                o = item.get(
+                    "open",
+                    item.get("o")
+                )
+
+                h = item.get(
+                    "high",
+                    item.get("h")
+                )
+
+                l = item.get(
+                    "low",
+                    item.get("l")
+                )
+
+                c = item.get(
+                    "close",
+                    item.get("c")
+                )
+
+                v = item.get(
+                    "volume",
+                    item.get("v", 0)
+                )
 
             else:
 
@@ -858,7 +910,7 @@ def build_sr_zones(candles_15m, candles_1h):
 
 
 # ============================================================
-# S/R DISPLAY
+# S/R INTERNAL HELPERS
 # ============================================================
 
 def sort_supports_below_price(
@@ -1588,7 +1640,7 @@ def detect_pullback(
 
 
 # ============================================================
-# CONFIRMATION DIAGNOSTICS
+# CONFIRMATION
 # ============================================================
 
 def evaluate_confirmation(
@@ -1599,8 +1651,6 @@ def evaluate_confirmation(
 
     idx = pullback["index"]
 
-    # If pullback happened on latest closed candle,
-    # there is no candle after it yet.
     if idx >= len(candles) - 1:
 
         return {
@@ -1824,16 +1874,35 @@ def calculate_sl(
 
 
 # ============================================================
-# TP
+# TP v7.3
 # ============================================================
 
-def select_nearest_tp(
+def select_tp(
     side,
     entry,
     sl,
     support_zones,
     resistance_zones
 ):
+    """
+    v7.3 multi-level TP selection.
+
+    LONG:
+        Nearest resistance
+            -> RR sufficient?
+            -> distance acceptable?
+        If not, next resistance.
+
+    SHORT:
+        Nearest support
+            -> RR sufficient?
+            -> distance acceptable?
+        If not, next support.
+
+    IMPORTANT:
+    Entry filters are NOT changed here.
+    This function only determines the final TP.
+    """
 
     risk = abs(
         entry - sl
@@ -1842,6 +1911,10 @@ def select_nearest_tp(
     if risk <= 0:
 
         return None, "INVALID_RISK"
+
+    # ========================================================
+    # LONG
+    # ========================================================
 
     if side == "LONG":
 
@@ -1859,18 +1932,56 @@ def select_nearest_tp(
 
             return None, "NO_VALID_SR_TARGET"
 
-        zone = candidates[0]
+        for zone in candidates:
 
-        tp = (
-            zone["low"]
-            * (
-                1
-                - TP_ZONE_BUFFER_PCT
-                / 100
+            tp = (
+                zone["low"]
+                * (
+                    1
+                    - TP_ZONE_BUFFER_PCT
+                    / 100
+                )
             )
-        )
 
-        reward = tp - entry
+            reward = tp - entry
+
+            if reward <= 0:
+                continue
+
+            rr = reward / risk
+
+            distance_pct = (
+                reward
+                / entry
+                * 100
+            )
+
+            # ----------------------------------------------
+            # RR not enough -> try next resistance
+            # ----------------------------------------------
+
+            if rr <= MIN_TP_RR:
+                continue
+
+            # ----------------------------------------------
+            # TP too far -> all later resistances are farther
+            # ----------------------------------------------
+
+            if distance_pct > MAX_TP_DISTANCE_PCT:
+                break
+
+            return {
+                "tp": tp,
+                "rr": rr,
+                "zone": zone,
+                "reward": reward,
+                "risk": risk,
+                "distance_pct": distance_pct
+            }, None
+
+    # ========================================================
+    # SHORT
+    # ========================================================
 
     else:
 
@@ -1889,40 +2000,54 @@ def select_nearest_tp(
 
             return None, "NO_VALID_SR_TARGET"
 
-        zone = candidates[0]
+        for zone in candidates:
 
-        tp = (
-            zone["high"]
-            * (
-                1
-                + TP_ZONE_BUFFER_PCT
-                / 100
+            tp = (
+                zone["high"]
+                * (
+                    1
+                    + TP_ZONE_BUFFER_PCT
+                    / 100
+                )
             )
-        )
 
-        reward = entry - tp
+            reward = entry - tp
 
-    rr = reward / risk
+            if reward <= 0:
+                continue
 
-    if reward <= 0:
+            rr = reward / risk
 
-        return None, "INVALID_REWARD"
+            distance_pct = (
+                reward
+                / entry
+                * 100
+            )
 
-    if reward <= risk:
+            # ----------------------------------------------
+            # RR not enough -> try next support
+            # ----------------------------------------------
 
-        return None, "NEAREST_SR_RR_FAILED"
+            if rr <= MIN_TP_RR:
+                continue
 
-    if rr <= 1.0:
+            # ----------------------------------------------
+            # TP too far -> all later supports are farther
+            # ----------------------------------------------
 
-        return None, "NEAREST_SR_RR_FAILED"
+            if distance_pct > MAX_TP_DISTANCE_PCT:
+                break
 
-    return {
-        "tp": tp,
-        "rr": rr,
-        "zone": zone,
-        "reward": reward,
-        "risk": risk
-    }, None
+            return {
+                "tp": tp,
+                "rr": rr,
+                "zone": zone,
+                "reward": reward,
+                "risk": risk,
+                "distance_pct": distance_pct
+            }, None
+
+    return None, "NO_VALID_TP"
 
 
 # ============================================================
@@ -2334,7 +2459,7 @@ def build_signal(
     if sl is None:
         return None, "SL_FAILED"
 
-    tp_data, tp_reason = select_nearest_tp(
+    tp_data, tp_reason = select_tp(
         side,
         entry,
         sl,
@@ -2582,382 +2707,12 @@ def update_top_candidate(
 
 
 # ============================================================
-# REJECTION TEXT
-# ============================================================
-
-def rejection_text(candidate):
-
-    reason = candidate.get(
-        "reason",
-        "UNKNOWN"
-    )
-
-    mapping = {
-
-        "SETUP_FAILED":
-            "No valid 15M support/resistance reaction",
-
-        "BREAKOUT_FAILED":
-            "5M fresh breakout failed",
-
-        "PULLBACK_FAILED":
-            "5M pullback failed",
-
-        "WAITING_NEXT_CANDLE":
-            "Pullback is on the latest closed 5M candle; waiting for the next closed candle",
-
-        "CONFIRMATION_FAILED":
-            "5M confirmation failed",
-
-        "CONFIRMATION_CANDLE_NOT_BULLISH":
-            "5M confirmation candle is not bullish",
-
-        "CONFIRMATION_CANDLE_NOT_BEARISH":
-            "5M confirmation candle is not bearish",
-
-        "CLOSE_DID_NOT_BREAK_PULLBACK_HIGH":
-            "5M bullish candle did not close above pullback high",
-
-        "CLOSE_DID_NOT_BREAK_PULLBACK_LOW":
-            "5M bearish candle did not close below pullback low",
-
-        "CONFIRMATION_NOT_BULLISH_AND_CLOSE_NOT_ABOVE_PULLBACK_HIGH":
-            "5M candle is not bullish and close did not break pullback high",
-
-        "CONFIRMATION_NOT_BEARISH_AND_CLOSE_NOT_BELOW_PULLBACK_LOW":
-            "5M candle is not bearish and close did not break pullback low",
-
-        "CONFIRMATION_PASSED":
-            "Confirmation passed",
-
-        "RVOL_FAILED":
-            f"RVOL below {RVOL_NORMAL:.2f}",
-
-        "SL_FAILED":
-            "Valid SL could not be created within 0.50%-1.50%",
-
-        "NO_VALID_SR_TARGET":
-            "No valid nearest S/R target exists",
-
-        "NEAREST_SR_RR_FAILED":
-            "Nearest valid S/R gives RR <= 1.00",
-
-        "INVALID_RISK":
-            "Invalid SL risk",
-
-        "INVALID_REWARD":
-            "TP reward is invalid",
-
-        "SCORE_FAILED":
-            f"Final score below {MIN_SCORE}",
-
-        "SIGNAL_CREATED":
-            "Candidate passed all strategy filters",
-
-        "OPEN_TRADE":
-            "Symbol already has an open trade",
-
-        "COOLDOWN":
-            "Symbol is in cooldown",
-
-        "ERROR":
-            "Scanner error"
-    }
-
-    return mapping.get(
-        reason,
-        reason
-    )
-
-
-# ============================================================
-# REPORT HELPERS
-# ============================================================
-
-def format_price(value):
-
-    value = safe_float(value)
-
-    if value >= 100:
-        return f"{value:.2f}"
-
-    if value >= 1:
-        return f"{value:.5f}"
-
-    if value >= 0.01:
-        return f"{value:.6f}"
-
-    return f"{value:.8f}"
-
-
-def format_candidate(
-    candidate
-):
-
-    lines = []
-
-    if not candidate:
-
-        lines.append(
-            "🔎 TOP CANDIDATE"
-        )
-
-        lines.append(
-            "None"
-        )
-
-        lines.append(
-            "❌ REJECTION"
-        )
-
-        lines.append(
-            "No market reached a valid 1H directional trend"
-        )
-
-        return lines
-
-    symbol = candidate["symbol"]
-    side = candidate["side"]
-
-    lines.append(
-        "🔎 TOP CANDIDATE"
-    )
-
-    lines.append(
-        f"{'🟢' if side == 'LONG' else '🔴'} "
-        f"{symbol} {side}"
-    )
-
-    lines.append(
-        f"Stage: {candidate['stage']}"
-    )
-
-    lines.append(
-        f"1H Trend: "
-        f"{side} "
-        f"{candidate['trend_score']}/7"
-    )
-
-    if candidate["setup"]:
-
-        lines.append(
-            f"15M Setup: "
-            f"{candidate['setup']}"
-        )
-
-    if candidate["setup_zone"]:
-
-        lines.append(
-            "📍 Setup Zone: "
-            f"{zone_text(candidate['setup_zone'])}"
-        )
-
-    lines.append(
-        f"5M Breakout: "
-        f"{'PASS' if candidate['breakout'] else 'FAIL'}"
-    )
-
-    lines.append(
-        f"5M Pullback: "
-        f"{'PASS' if candidate['pullback'] else 'FAIL'}"
-    )
-
-    confirmation_status = candidate.get(
-        "confirmation_status",
-        "NONE"
-    )
-
-    if confirmation_status == "PASS":
-
-        confirmation_display = "PASS"
-
-    elif confirmation_status == "WAIT":
-
-        confirmation_display = "WAIT"
-
-    elif confirmation_status == "FAIL":
-
-        confirmation_display = "FAIL"
-
-    else:
-
-        confirmation_display = "NOT REACHED"
-
-    lines.append(
-        f"5M Confirmation: "
-        f"{confirmation_display}"
-    )
-
-    if candidate.get("confirmation_reason"):
-
-        lines.append(
-            "Confirmation Detail: "
-            f"{candidate['confirmation_reason']}"
-        )
-
-    lines.append(
-        f"RVOL: {candidate['rv']:.2f}"
-    )
-
-    current_score = candidate_current_score(
-        candidate
-    )
-
-    if candidate["score"] is not None:
-
-        lines.append(
-            f"Score: "
-            f"{candidate['score']}/16"
-        )
-
-    else:
-
-        lines.append(
-            f"Current Score: "
-            f"{current_score}/16"
-        )
-
-    # --------------------------------------------------------
-    # S/R
-    # --------------------------------------------------------
-
-    price = candidate["entry"]
-
-    if price is None:
-
-        lines.append(
-            "📍 Price: None"
-        )
-
-    else:
-
-        lines.append(
-            "📍 Price: "
-            f"{format_price(price)}"
-        )
-
-        support, resistance = (
-            contextual_sr_text(
-                candidate["support_zones"],
-                candidate["resistance_zones"],
-                price
-            )
-        )
-
-        lines.append(
-            "📍 Nearest SUPPORT: "
-            f"{zone_text(support)}"
-        )
-
-        lines.append(
-            "📍 Nearest RESISTANCE: "
-            f"{zone_text(resistance)}"
-        )
-
-        support_list = sr_list_text(
-            candidate["support_zones"],
-            price,
-            "SUPPORT"
-        )
-
-        resistance_list = sr_list_text(
-            candidate["resistance_zones"],
-            price,
-            "RESISTANCE"
-        )
-
-        lines.append(
-            "Support Levels: "
-            f"{support_list}"
-        )
-
-        lines.append(
-            "Resistance Levels: "
-            f"{resistance_list}"
-        )
-
-    if candidate["breakout_level"] is not None:
-
-        lines.append(
-            "Breakout Level: "
-            f"{format_price(candidate['breakout_level'])}"
-        )
-
-    if candidate["entry"] is not None:
-
-        lines.append(
-            f"Entry: "
-            f"{format_price(candidate['entry'])}"
-        )
-
-    if candidate["sl"] is not None:
-
-        lines.append(
-            f"SL: "
-            f"{format_price(candidate['sl'])}"
-        )
-
-    if candidate["tp"] is not None:
-
-        lines.append(
-            f"TP: "
-            f"{format_price(candidate['tp'])}"
-        )
-
-    if candidate["tp_zone"]:
-
-        lines.append(
-            "🎯 TP Zone: "
-            f"{zone_text(candidate['tp_zone'])}"
-        )
-
-    if candidate["rr"] is not None:
-
-        lines.append(
-            f"RR: {candidate['rr']:.2f}"
-        )
-
-    # --------------------------------------------------------
-    # Rejection / status
-    # --------------------------------------------------------
-
-    if candidate["reason"] == "SIGNAL_CREATED":
-
-        lines.append(
-            "✅ STATUS"
-        )
-
-        lines.append(
-            "Candidate passed all strategy filters"
-        )
-
-    elif candidate["reason"] == "WAITING_NEXT_CANDLE":
-
-        lines.append(
-            "⏳ WAITING"
-        )
-
-        lines.append(
-            "Reason: "
-            f"{rejection_text(candidate)}"
-        )
-
-    else:
-
-        lines.append(
-            "❌ REJECTED"
-        )
-
-        lines.append(
-            f"Reason: "
-            f"{rejection_text(candidate)}"
-        )
-
-    return lines
-
-
-# ============================================================
 # REPORT
+# ============================================================
+#
+# IMPORTANT:
+# Internal candidate diagnostics remain available to the
+# scanner, but are NOT displayed in Telegram.
 # ============================================================
 
 def build_report(
@@ -2972,7 +2727,7 @@ def build_report(
     lines = []
 
     lines.append(
-        "📊 VOLUME-KHAT 100"
+        f"📊 VOLUME-KHAT 100 {VERSION}"
     )
 
     lines.append(
@@ -2985,39 +2740,12 @@ def build_report(
     )
 
     lines.append(
-        "🧠 1H TREND + 15M S/R ZONE + "
-        "5M BREAKOUT/PULLBACK"
-    )
-
-    lines.append(
-        f"🛠 Strategy: {VERSION}"
-    )
-
-    lines.append(
-        "💡 TP = NEAREST VALID SUPPORT/RESISTANCE"
-    )
-
-    lines.append(
-        "💡 TP distance MUST be > SL distance"
-    )
-
-    lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    lines.extend(
-        format_candidate(
-            top_candidate
-        )
-    )
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    # --------------------------------------------------------
+    # ========================================================
     # NEW SIGNALS
-    # --------------------------------------------------------
+    # ========================================================
 
     lines.append(
         "🎯 NEW SIGNALS"
@@ -3025,11 +2753,13 @@ def build_report(
 
     if not signals:
 
-        lines.append("None")
+        lines.append(
+            "None"
+        )
 
     else:
 
-        for s in signals:
+        for index, s in enumerate(signals):
 
             sl_pct = pct_distance(
                 s["entry"],
@@ -3042,7 +2772,7 @@ def build_report(
             )
 
             lines.append(
-                f"{'🟢' if s['side']=='LONG' else '🔴'} "
+                f"{'🟢' if s['side'] == 'LONG' else '🔴'} "
                 f"{s['symbol']} {s['side']}"
             )
 
@@ -3068,54 +2798,22 @@ def build_report(
             )
 
             lines.append(
-                f"RVOL: {s['rv']:.2f}"
-            )
-
-            lines.append(
                 f"Score: {s['score']}/16"
             )
 
-            lines.append(
-                f"Setup: {s['setup']}"
-            )
+            if index < len(signals) - 1:
 
-            lines.append(
-                "📍 Setup Zone: "
-                f"{zone_text(s.get('setup_zone'))}"
-            )
+                lines.append(
+                    "━━━━━━━━━━━━━━━━━━"
+                )
 
-            lines.append(
-                "🎯 TP Zone: "
-                f"{zone_text(s.get('sr_zone'))}"
-            )
+    lines.append(
+        "━━━━━━━━━━━━━━━━━━"
+    )
 
-            support = nearest_support(
-                s.get("support_zones", []),
-                s["entry"]
-            )
-
-            resistance = nearest_resistance(
-                s.get("resistance_zones", []),
-                s["entry"]
-            )
-
-            lines.append(
-                "📍 Nearest Support: "
-                f"{zone_text(support)}"
-            )
-
-            lines.append(
-                "📍 Nearest Resistance: "
-                f"{zone_text(resistance)}"
-            )
-
-            lines.append(
-                "━━━━━━━━━━━━━━━━━━"
-            )
-
-    # --------------------------------------------------------
+    # ========================================================
     # OPEN TRADES
-    # --------------------------------------------------------
+    # ========================================================
 
     lines.append(
         "📂 OPEN TRADES "
@@ -3126,11 +2824,13 @@ def build_report(
 
     if not open_trades:
 
-        lines.append("None")
+        lines.append(
+            "None"
+        )
 
     else:
 
-        for trade in open_trades:
+        for index, trade in enumerate(open_trades):
 
             current = get_current_price(
                 trade["symbol"]
@@ -3206,24 +2906,26 @@ def build_report(
                 f"{safe_float(trade['rr']):.2f}"
             )
 
-            lines.append(
-                f"Setup: {trade['setup']}"
-            )
+            if index < len(open_trades) - 1:
 
-            lines.append(
-                "━━━━━━━━━━━━━━━━━━"
-            )
-
-    # --------------------------------------------------------
-    # PERFORMANCE
-    # --------------------------------------------------------
+                lines.append(
+                    "━━━━━━━━━━━━━━━━━━"
+                )
 
     lines.append(
-        "📈 PERFORMANCE"
+        "━━━━━━━━━━━━━━━━━━"
+    )
+
+    # ========================================================
+    # PERFORMANCE
+    # ========================================================
+
+    lines.append(
+        f"📈 STATS {VERSION}"
     )
 
     lines.append(
-        f"Open:   {perf['open']}"
+        f"Open: {perf['open']}"
     )
 
     lines.append(
@@ -3231,7 +2933,7 @@ def build_report(
     )
 
     lines.append(
-        f"Wins:   {perf['wins']}"
+        f"Wins: {perf['wins']}"
     )
 
     lines.append(
@@ -3249,91 +2951,16 @@ def build_report(
     )
 
     lines.append(
-        f"Closed This Run: "
-        f"{closed_trades}"
-    )
-
-    lines.append(
         "━━━━━━━━━━━━━━━━━━"
     )
 
-    # --------------------------------------------------------
-    # FILTER DIAGNOSTICS
-    # --------------------------------------------------------
+    # ========================================================
+    # REAL TRADING STATUS
+    # ========================================================
 
     lines.append(
-        "🔎 FILTER DIAGNOSTICS"
-    )
-
-    for key, value in diagnostics.items():
-
-        label = key.replace(
-            "_",
-            " "
-        )
-
-        lines.append(
-            f"{label}: {value}"
-        )
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    # --------------------------------------------------------
-    # SETTINGS
-    # --------------------------------------------------------
-
-    lines.append(
-        "⚙️ SETTINGS"
-    )
-
-    lines.append(
-        f"1H Trend Score: "
-        f">= {MIN_TREND_SCORE}/7"
-    )
-
-    lines.append(
-        "15M: SUPPORT/RESISTANCE ZONES + "
-        "PRICE REACTION"
-    )
-
-    lines.append(
-        "5M: FRESH BREAKOUT + "
-        "PULLBACK + CONFIRMATION"
-    )
-
-    lines.append(
-        f"RVOL: >= {RVOL_NORMAL:.2f}"
-    )
-
-    lines.append(
-        f"SL: {MIN_SL_PCT:.2f}% - "
-        f"{MAX_SL_PCT:.2f}%"
-    )
-
-    lines.append(
-        "TP: NEAREST VALID S/R"
-    )
-
-    lines.append(
-        "RR: > 1.00 ONLY"
-    )
-
-    lines.append(
-        "Exit: HISTORICAL 5M HIGH/LOW"
-    )
-
-    lines.append(
-        "Time Exit: DISABLED"
-    )
-
-    lines.append(
-        "Statistics: RESET AT v7.0 START"
-    )
-
-    lines.append(
-        "Real trading: DISABLED"
+        "Real trading: "
+        f"{'ENABLED' if not PAPER_TRADING else 'DISABLED'}"
     )
 
     return "\n".join(lines)
@@ -3448,17 +3075,6 @@ def scan():
 
     init_db()
 
-    reset_happened = (
-        reset_database_once()
-    )
-
-    if reset_happened:
-
-        print(
-            "🔄 Statistics reset "
-            "for VOLUME-KHAT v7.0"
-        )
-
     diagnostics = {
         "Scanned": 0,
 
@@ -3486,7 +3102,8 @@ def scan():
         "Score Failed": 0,
 
         "No Valid S/R Target": 0,
-        "Nearest S/R RR <= 1": 0,
+
+        "No Valid TP": 0,
 
         "SL Failed": 0,
 
@@ -3502,17 +3119,17 @@ def scan():
 
     top_candidate = None
 
-    # --------------------------------------------------------
-    # Tickers / TOP 100
-    # --------------------------------------------------------
+    # ========================================================
+    # TICKERS / TOP 100
+    # ========================================================
 
     symbols = get_top_symbols()
 
     diagnostics["Scanned"] = len(symbols)
 
-    # --------------------------------------------------------
-    # Historical exits first
-    # --------------------------------------------------------
+    # ========================================================
+    # HISTORICAL EXITS FIRST
+    # ========================================================
 
     open_trades = get_open_trades()
 
@@ -3535,9 +3152,9 @@ def scan():
         if result:
             closed_trades += 1
 
-    # --------------------------------------------------------
-    # Refresh open trades after exits
-    # --------------------------------------------------------
+    # ========================================================
+    # REFRESH OPEN TRADES
+    # ========================================================
 
     open_trades = get_open_trades()
 
@@ -3550,9 +3167,9 @@ def scan():
         open_trades
     )
 
-    # --------------------------------------------------------
-    # Scan TOP 100
-    # --------------------------------------------------------
+    # ========================================================
+    # SCAN TOP 100
+    # ========================================================
 
     for symbol in symbols:
 
@@ -3606,9 +3223,9 @@ def scan():
 
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # 1H TREND
-            # ------------------------------------------------
+            # =================================================
 
             trend = trend_1h(
                 candles_1h
@@ -3630,13 +3247,9 @@ def scan():
 
                 continue
 
-            # ------------------------------------------------
-            # RVOL EARLY
-            #
-            # Important:
-            # RVOL is calculated before confirmation so that
-            # TOP CANDIDATE always displays the real value.
-            # ------------------------------------------------
+            # =================================================
+            # RVOL
+            # =================================================
 
             rv = rvol(
                 candles_5m,
@@ -3645,9 +3258,9 @@ def scan():
 
             current_price = candles_5m[-1]["close"]
 
-            # ------------------------------------------------
+            # =================================================
             # S/R
-            # ------------------------------------------------
+            # =================================================
 
             support_zones, resistance_zones = (
                 build_sr_zones(
@@ -3656,9 +3269,9 @@ def scan():
                 )
             )
 
-            # ------------------------------------------------
-            # Initial candidate
-            # ------------------------------------------------
+            # =================================================
+            # INITIAL CANDIDATE
+            # =================================================
 
             candidate = make_candidate(
                 symbol=symbol,
@@ -3677,9 +3290,9 @@ def scan():
                 candidate
             )
 
-            # ------------------------------------------------
+            # =================================================
             # 15M SETUP
-            # ------------------------------------------------
+            # =================================================
 
             setup = detect_15m_setup(
                 side,
@@ -3714,9 +3327,9 @@ def scan():
                     "15M SHORT Setup"
                 ] += 1
 
-            # ------------------------------------------------
-            # Candidate after setup
-            # ------------------------------------------------
+            # =================================================
+            # CANDIDATE AFTER SETUP
+            # =================================================
 
             candidate = make_candidate(
                 symbol=symbol,
@@ -3736,9 +3349,9 @@ def scan():
                 candidate
             )
 
-            # ------------------------------------------------
+            # =================================================
             # BREAKOUT
-            # ------------------------------------------------
+            # =================================================
 
             breakout = find_recent_breakout(
                 candles_5m,
@@ -3766,9 +3379,9 @@ def scan():
                 "5M Breakout Pass"
             ] += 1
 
-            # ------------------------------------------------
-            # Candidate after breakout
-            # ------------------------------------------------
+            # =================================================
+            # CANDIDATE AFTER BREAKOUT
+            # =================================================
 
             candidate = make_candidate(
                 symbol=symbol,
@@ -3789,9 +3402,9 @@ def scan():
                 candidate
             )
 
-            # ------------------------------------------------
+            # =================================================
             # PULLBACK
-            # ------------------------------------------------
+            # =================================================
 
             pullback = detect_pullback(
                 candles_5m,
@@ -3819,9 +3432,9 @@ def scan():
                 "5M Pullback Pass"
             ] += 1
 
-            # ------------------------------------------------
-            # CONFIRMATION EVALUATION
-            # ------------------------------------------------
+            # =================================================
+            # CONFIRMATION
+            # =================================================
 
             confirmation = evaluate_confirmation(
                 candles_5m,
@@ -3837,9 +3450,9 @@ def scan():
                 confirmation["reason"]
             )
 
-            # ------------------------------------------------
+            # -------------------------------------------------
             # WAITING
-            # ------------------------------------------------
+            # -------------------------------------------------
 
             if confirmation_status == "WAIT":
 
@@ -3871,9 +3484,9 @@ def scan():
 
                 continue
 
-            # ------------------------------------------------
+            # -------------------------------------------------
             # CONFIRMATION FAIL
-            # ------------------------------------------------
+            # -------------------------------------------------
 
             if not confirmation["passed"]:
 
@@ -3905,23 +3518,23 @@ def scan():
 
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # CONFIRMATION PASS
-            # ------------------------------------------------
+            # =================================================
 
             diagnostics[
                 "5M Confirmation Pass"
             ] += 1
 
-            # ------------------------------------------------
+            # =================================================
             # ENTRY
-            # ------------------------------------------------
+            # =================================================
 
             entry = candles_5m[-1]["close"]
 
-            # ------------------------------------------------
+            # =================================================
             # RVOL FILTER
-            # ------------------------------------------------
+            # =================================================
 
             if rv < RVOL_NORMAL:
 
@@ -3953,9 +3566,9 @@ def scan():
 
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # SL
-            # ------------------------------------------------
+            # =================================================
 
             sl = calculate_sl(
                 side,
@@ -3994,11 +3607,11 @@ def scan():
 
                 continue
 
-            # ------------------------------------------------
-            # TP / RR
-            # ------------------------------------------------
+            # =================================================
+            # TP v7.3
+            # =================================================
 
-            tp_data, tp_reason = select_nearest_tp(
+            tp_data, tp_reason = select_tp(
                 side,
                 entry,
                 sl,
@@ -4014,10 +3627,10 @@ def scan():
                         "No Valid S/R Target"
                     ] += 1
 
-                elif tp_reason == "NEAREST_SR_RR_FAILED":
+                else:
 
                     diagnostics[
-                        "Nearest S/R RR <= 1"
+                        "No Valid TP"
                     ] += 1
 
                 candidate = make_candidate(
@@ -4045,9 +3658,9 @@ def scan():
 
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # SCORE
-            # ------------------------------------------------
+            # =================================================
 
             trend_score = min(
                 trend["score"],
@@ -4096,9 +3709,9 @@ def scan():
                 resistance_zones=resistance_zones
             )
 
-            # ------------------------------------------------
+            # =================================================
             # SCORE FAIL
-            # ------------------------------------------------
+            # =================================================
 
             if score < MIN_SCORE:
 
@@ -4113,9 +3726,9 @@ def scan():
 
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # VALID SIGNAL
-            # ------------------------------------------------
+            # =================================================
 
             candidate["stage"] = "SIGNAL"
             candidate["reason"] = "SIGNAL_CREATED"
@@ -4125,25 +3738,25 @@ def scan():
                 candidate
             )
 
-            # ------------------------------------------------
+            # =================================================
             # MAX NEW SIGNALS
-            # ------------------------------------------------
+            # =================================================
 
             if len(signals) >= MAX_NEW_SIGNALS:
 
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # MAX OPEN TRADES
-            # ------------------------------------------------
+            # =================================================
 
             if current_open_count >= MAX_OPEN_TRADES:
 
                 continue
 
-            # ------------------------------------------------
+            # =================================================
             # BUILD SIGNAL
-            # ------------------------------------------------
+            # =================================================
 
             signal = {
                 "symbol": symbol,
@@ -4180,9 +3793,9 @@ def scan():
                 f"{symbol}: {e}"
             )
 
-    # --------------------------------------------------------
+    # ========================================================
     # REPORT
-    # --------------------------------------------------------
+    # ========================================================
 
     report = build_report(
         signals,
@@ -4193,9 +3806,9 @@ def scan():
 
     print(report)
 
-    # --------------------------------------------------------
+    # ========================================================
     # TELEGRAM
-    # --------------------------------------------------------
+    # ========================================================
 
     send_telegram(report)
 
@@ -4219,7 +3832,7 @@ if __name__ == "__main__":
         try:
 
             send_telegram(
-                "❌ VOLUME-KHAT 100\n"
+                f"❌ VOLUME-KHAT 100 {VERSION}\n"
                 f"Fatal scanner error:\n{e}"
             )
 
