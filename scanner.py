@@ -1,647 +1,379 @@
 # ============================================================
-# KRAKEN FUTURES VOLUME-KHAT 100 v7.4
+# KRAKEN FUTURES VOLUME-KHAT 100 v7.5
 # ============================================================
 #
 # 1H  = TREND + TREND STRENGTH
-# 15M = SUPPORT / RESISTANCE ZONE + PRICE REACTION
-# 5M  = FRESH BREAKOUT + PULLBACK + CONFIRMATION
-# VOL = RVOL CONFIRMATION
+# 15M = SUPPORT / RESISTANCE + REACTION / BREAKOUT / RETEST
+# 5M  = BREAKOUT / PULLBACK / REJECTION + CONFIRMATION
+# VOL = RVOL SCORE
 #
-# v7.4 CHANGES
+# v7.5
 # ------------------------------------------------------------
-# - More practical 5M sequence detection
-# - Breakout can be up to 4 closed candles old
-# - Pullback can occur after breakout
-# - Confirmation can occur within next 3 candles
-# - Latest CLOSED candle must be confirmation
-# - RVOL >= 1.70
-# - TP = nearest valid S/R
-# - RR > 1.00
-# - SL = 0.50% to 1.50%
-# - MAX TP distance = 3.00%
-# - MAX OPEN = 3
-# - CLOSED CANDLES ONLY
-# - OPEN trades are preserved
-# - SQLite persistence handled by GitHub Actions
-# - Real trading DISABLED
+# IMPORTANT DESIGN CHANGE:
 #
-# TELEGRAM:
-#   NEW SIGNALS
-#   OPEN TRADES
-#   STATS
+# v7.4 required:
+# 5M breakout -> exact pullback -> confirmation
 #
-# Direction emoji:
-#   LONG  = 🟢
-#   SHORT = 🔴
+# v7.5:
+# Three valid 5M paths:
+#   A) BREAKOUT + CONFIRMATION
+#   B) PULLBACK + CONFIRMATION
+#   C) REJECTION + CONFIRMATION
+#
+# RVOL is score-based, not mandatory.
+#
+# PAPER TRADING ONLY
 # ============================================================
 
 import os
 import time
 import sqlite3
+import traceback
 from datetime import datetime, timezone
 
-import numpy as np
 import requests
+import numpy as np
 
 
 # ============================================================
-# VERSION
+# CONFIG
 # ============================================================
 
-VERSION = "v7.4"
+VERSION = "v7.5"
 
+DB_FILE = "volume_khat_100_v75.db"
 
-# ============================================================
-# KRAKEN
-# ============================================================
-
-KRAKEN_BASE = "https://futures.kraken.com"
-
-TICKERS_URL = (
-    f"{KRAKEN_BASE}/derivatives/api/v3/tickers"
-)
-
-CHART_URL = (
-    f"{KRAKEN_BASE}/api/charts/v1/trade"
-)
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-DB_FILE = "volume_khat_100_v74.db"
-
-
-# ============================================================
-# MODE
-# ============================================================
+TOP_N = 100
+MAX_OPEN_TRADES = 3
+MAX_NEW_SIGNALS = 3
 
 PAPER_TRADING = True
 
+KRAKEN_BASE = "https://futures.kraken.com"
 
-# ============================================================
-# UNIVERSE
-# ============================================================
+REQUEST_TIMEOUT = 15
 
-TOP_N = 100
+INTERVAL_1H = 60
+INTERVAL_15M = 15
+INTERVAL_5M = 5
 
-MAX_OPEN_TRADES = 3
-
-MAX_NEW_SIGNALS = 3
-
-
-# ============================================================
-# TIMEFRAMES
-# ============================================================
-
-TF_1H = "1h"
-TF_15M = "15m"
-TF_5M = "5m"
-
-LOOKBACK_1H = 180
-LOOKBACK_15M = 220
-LOOKBACK_5M = 250
-
-
-# ============================================================
-# TREND
-# ============================================================
+# ------------------------------------------------------------
+# Trend
+# ------------------------------------------------------------
 
 SMA_FAST = 20
 SMA_SLOW = 50
 
-MIN_TREND_SCORE = 6
+MIN_TREND_SCORE = 3
 
-
-# ============================================================
+# ------------------------------------------------------------
 # S/R
-# ============================================================
+# ------------------------------------------------------------
 
-PIVOT_SWING = 3
+SR_LOOKBACK_15M = 80
+SR_LOOKBACK_1H = 80
 
-ZONE_TOLERANCE_PCT = 0.30
+PIVOT_LEFT = 2
+PIVOT_RIGHT = 2
 
-TP_ZONE_BUFFER_PCT = 0.10
+ZONE_TOLERANCE_PCT = 0.35
 
+# ------------------------------------------------------------
+# 5M
+# ------------------------------------------------------------
 
-# ============================================================
-# RVOL
-# ============================================================
+BREAKOUT_LOOKBACK = 6
 
-RVOL_PERIOD = 20
+PULLBACK_TOLERANCE_PCT = 0.50
 
-RVOL_NORMAL = 1.70
-RVOL_STRONG = 2.50
+REJECTION_DISTANCE_PCT = 0.80
+
+MIN_BODY_PCT = 0.15
+WICK_BODY_RATIO = 1.00
+
+# ------------------------------------------------------------
+# Volume
+# ------------------------------------------------------------
+
+RVOL_LOOKBACK = 20
+
+RVOL_NORMAL = 1.50
+RVOL_STRONG = 2.20
 RVOL_VERY_STRONG = 3.00
 
-
-# ============================================================
-# 5M BREAKOUT
-# ============================================================
-
-BREAKOUT_MAX_AGE = 4
-
-BREAKOUT_BUFFER_PCT = 0.05
-
-
-# ============================================================
-# 5M PULLBACK
-# ============================================================
-
-PULLBACK_TOLERANCE_PCT = 0.35
-
-
-# ============================================================
-# 5M CONFIRMATION
-# ============================================================
-
-MAX_CONFIRMATION_BARS = 3
-
-MIN_BODY_PCT = 0.20
-
-WICK_BODY_RATIO = 1.15
-
-
-# ============================================================
-# SL
-# ============================================================
-
-ATR_PERIOD = 14
-
-ATR_SL_MULTIPLIER = 0.20
+# ------------------------------------------------------------
+# Risk
+# ------------------------------------------------------------
 
 MIN_SL_PCT = 0.50
-
 MAX_SL_PCT = 1.50
 
+MIN_RR = 1.00
+MAX_TP_PCT = 3.00
 
-# ============================================================
-# SCORE
-# ============================================================
+ATR_PERIOD = 14
+ATR_MULTIPLIER = 1.20
+ATR_BUFFER = 0.20
 
-MIN_SCORE = 10
+# ------------------------------------------------------------
+# Score
+# ------------------------------------------------------------
 
+MIN_SCORE = 9
 
-# ============================================================
-# TP
-# ============================================================
+# Trend       = 0..5
+# 15M setup   = 0..4
+# 5M confirm  = 0..4
+# Volume      = 0..2
+#
+# TOTAL       = 15
 
-MIN_TP_RR = 1.00
+# ------------------------------------------------------------
+# Cooldown
+# ------------------------------------------------------------
 
-MAX_TP_DISTANCE_PCT = 3.00
-
-
-# ============================================================
-# HTTP
-# ============================================================
-
-SESSION = requests.Session()
-
-SESSION.headers.update(
-    {
-        "User-Agent": "VOLUME-KHAT-100/7.4",
-        "Accept": "application/json",
-    }
-)
-
-TICKER_CACHE = {}
+COOLDOWN_MINUTES = 15
 
 
 # ============================================================
-# TIME
+# SESSION
+# ============================================================
+
+session = requests.Session()
+
+session.headers.update({
+    "User-Agent": "VOLUME-KHAT-100-v7.5"
+})
+
+
+# ============================================================
+# HELPERS
 # ============================================================
 
 def now_utc():
-
     return datetime.now(timezone.utc)
 
 
-# ============================================================
-# SAFE FLOAT
-# ============================================================
+def now_str():
+    return now_utc().strftime("%Y-%m-%d %H:%M:%S UTC")
 
-def safe_float(value, default=0.0):
 
+def pct_change(a, b):
+    if a == 0:
+        return 0.0
+    return ((b - a) / a) * 100.0
+
+
+def safe_float(value, default=None):
     try:
         return float(value)
     except Exception:
         return default
 
 
-# ============================================================
-# TIMESTAMP
-# ============================================================
-
-def normalize_ts(value):
-
-    value = safe_float(value)
-
-    if value > 10_000_000_000:
-        value /= 1000.0
-
-    return value
+def clamp(value, low, high):
+    return max(low, min(high, value))
 
 
 # ============================================================
-# PRICE FORMAT
+# API
 # ============================================================
 
-def format_price(value):
-
-    value = safe_float(value)
-
-    if value >= 100:
-        return f"{value:.2f}"
-
-    if value >= 1:
-        return f"{value:.5f}"
-
-    if value >= 0.01:
-        return f"{value:.6f}"
-
-    return f"{value:.8f}"
-
-
-# ============================================================
-# PERCENT DISTANCE
-# ============================================================
-
-def pct_distance(a, b):
-
-    a = safe_float(a)
-    b = safe_float(b)
-
-    if a <= 0:
-        return 0.0
-
-    return abs(b - a) / a * 100.0
-
-
-# ============================================================
-# DATABASE CONNECTION
-# ============================================================
-
-def db():
-
-    conn = sqlite3.connect(DB_FILE)
-
-    conn.row_factory = sqlite3.Row
-
-    return conn
-
-
-# ============================================================
-# INIT DATABASE
-# ============================================================
-
-def init_db():
-
-    conn = db()
-
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS trades (
-
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            symbol TEXT NOT NULL,
-
-            side TEXT NOT NULL,
-
-            setup TEXT,
-
-            entry REAL NOT NULL,
-
-            sl REAL NOT NULL,
-
-            tp REAL NOT NULL,
-
-            rr REAL,
-
-            status TEXT NOT NULL,
-
-            result TEXT,
-
-            pnl REAL,
-
-            entry_time REAL,
-
-            exit_time REAL,
-
-            exit REAL,
-
-            exit_reason TEXT,
-
-            duration_minutes REAL,
-
-            closed_reported INTEGER DEFAULT 0,
-
-            created_at REAL
-
+def api_get(url, params=None):
+    try:
+        r = session.get(
+            url,
+            params=params,
+            timeout=REQUEST_TIMEOUT
         )
-        """
-    )
 
-    conn.commit()
+        r.raise_for_status()
 
-    conn.close()
+        data = r.json()
 
+        return data
 
-# ============================================================
-# HTTP GET
-# ============================================================
-
-def get_json(
-    url,
-    params=None,
-    timeout=20
-):
-
-    response = SESSION.get(
-        url,
-        params=params,
-        timeout=timeout
-    )
-
-    response.raise_for_status()
-
-    return response.json()
+    except Exception as e:
+        print(f"[API ERROR] {url} -> {e}")
+        return None
 
 
 # ============================================================
 # TICKERS
 # ============================================================
 
-def get_all_tickers():
+def get_tickers():
+    url = f"{KRAKEN_BASE}/derivatives/api/v3/tickers"
 
-    global TICKER_CACHE
+    data = api_get(url)
 
-    try:
+    if not data:
+        return []
 
-        data = get_json(
-            TICKERS_URL
-        )
+    result = data.get("tickers", [])
 
-        tickers = data.get(
-            "tickers",
-            []
-        )
+    if not isinstance(result, list):
+        return []
 
-        result = {}
+    return result
 
-        for ticker in tickers:
-
-            symbol = ticker.get(
-                "symbol"
-            )
-
-            if symbol:
-                result[symbol] = ticker
-
-        TICKER_CACHE = result
-
-        return result
-
-    except Exception as e:
-
-        print(
-            f"❌ Ticker error: {e}"
-        )
-
-        return TICKER_CACHE
-
-
-# ============================================================
-# CURRENT PRICE
-# ============================================================
-
-def get_current_price(symbol):
-
-    ticker = TICKER_CACHE.get(
-        symbol
-    )
-
-    if not ticker:
-        return None
-
-    for key in (
-        "last",
-        "lastPrice",
-        "price"
-    ):
-
-        if key in ticker:
-
-            price = safe_float(
-                ticker[key]
-            )
-
-            if price > 0:
-                return price
-
-    return None
-
-
-# ============================================================
-# TOP 100
-# ============================================================
 
 def get_top_symbols():
+    tickers = get_tickers()
 
-    tickers = get_all_tickers()
+    rows = []
 
-    candidates = []
+    for t in tickers:
 
-    for symbol, ticker in tickers.items():
+        symbol = (
+            t.get("symbol")
+            or t.get("pair")
+            or t.get("product_id")
+        )
 
-        if not symbol.startswith("PF_"):
+        if not symbol:
             continue
+
+        symbol = str(symbol)
 
         if not symbol.endswith("USD"):
             continue
 
-        volume = 0.0
+        if "PI_" not in symbol and "PF_" not in symbol:
+            continue
 
-        for key in (
-            "vol24h",
-            "volume24h",
-            "volume"
-        ):
-
-            if key in ticker:
-
-                volume = safe_float(
-                    ticker[key]
-                )
-
-                if volume > 0:
-                    break
-
-        candidates.append(
-            (
-                symbol,
-                volume
-            )
+        volume = (
+            safe_float(t.get("vol24h"))
+            or safe_float(t.get("volume24h"))
+            or safe_float(t.get("volume"))
+            or 0
         )
 
-    candidates.sort(
-        key=lambda x: x[1],
+        last = (
+            safe_float(t.get("last"))
+            or safe_float(t.get("markPrice"))
+            or safe_float(t.get("price"))
+        )
+
+        if not last:
+            continue
+
+        rows.append({
+            "symbol": symbol,
+            "volume": volume,
+            "price": last
+        })
+
+    rows.sort(
+        key=lambda x: x["volume"],
         reverse=True
     )
 
-    return [
-        x[0]
-        for x in candidates[:TOP_N]
-    ]
+    return rows[:TOP_N]
 
 
 # ============================================================
-# PARSE CANDLES
+# CANDLES
 # ============================================================
 
-def parse_candles(data):
+def get_candles(symbol, interval, limit=200):
 
-    raw = None
+    url = (
+        f"{KRAKEN_BASE}/api/charts/v1/"
+        f"market/{symbol}/{interval}"
+    )
 
-    if isinstance(data, dict):
+    data = api_get(
+        url,
+        params={
+            "from": int(time.time()) - (limit * interval * 60 * 2),
+            "to": int(time.time())
+        }
+    )
 
-        raw = (
-            data.get("candles")
-            or data.get("data")
-            or data.get("result")
-        )
-
-    elif isinstance(data, list):
-
-        raw = data
-
-    if not raw:
+    if not data:
         return []
 
-    candles = []
+    candles = data.get("candles", data)
 
-    for item in raw:
+    if not isinstance(candles, list):
+        return []
+
+    parsed = []
+
+    for c in candles:
 
         try:
+            ts = (
+                c.get("time")
+                or c.get("timestamp")
+                or c.get("t")
+            )
 
-            if isinstance(item, dict):
+            o = (
+                c.get("open")
+                or c.get("o")
+            )
 
-                ts = (
-                    item.get("time")
-                    or item.get("timestamp")
-                    or item.get("t")
-                )
+            h = (
+                c.get("high")
+                or c.get("h")
+            )
 
-                o = item.get(
-                    "open",
-                    item.get("o")
-                )
+            l = (
+                c.get("low")
+                or c.get("l")
+            )
 
-                h = item.get(
-                    "high",
-                    item.get("h")
-                )
+            cl = (
+                c.get("close")
+                or c.get("c")
+            )
 
-                l = item.get(
-                    "low",
-                    item.get("l")
-                )
+            v = (
+                c.get("volume")
+                or c.get("v")
+                or 0
+            )
 
-                c = item.get(
-                    "close",
-                    item.get("c")
-                )
-
-                v = item.get(
-                    "volume",
-                    item.get("v", 0)
-                )
-
-            else:
-
-                if len(item) < 6:
-                    continue
-
-                ts, o, h, l, c, v = item[:6]
-
-            ts = normalize_ts(ts)
-
-            o = safe_float(o)
-            h = safe_float(h)
-            l = safe_float(l)
-            c = safe_float(c)
-            v = safe_float(v)
-
-            if min(o, h, l, c) <= 0:
+            if None in (ts, o, h, l, cl):
                 continue
 
-            candles.append(
-                {
-                    "time": ts,
-                    "open": o,
-                    "high": h,
-                    "low": l,
-                    "close": c,
-                    "volume": v
-                }
-            )
+            parsed.append({
+                "time": int(float(ts)),
+                "open": float(o),
+                "high": float(h),
+                "low": float(l),
+                "close": float(cl),
+                "volume": float(v)
+            })
 
         except Exception:
             continue
 
-    candles.sort(
-        key=lambda x: x["time"]
-    )
+    parsed.sort(key=lambda x: x["time"])
 
-    return candles
+    # --------------------------------------------------------
+    # Kraken normally returns the currently forming candle.
+    # Remove it so all calculations use CLOSED candles only.
+    # --------------------------------------------------------
 
+    if len(parsed) > 3:
 
-# ============================================================
-# GET CANDLES
-# ============================================================
+        current_ts = int(time.time())
 
-def get_candles(
-    symbol,
-    resolution,
-    limit
-):
+        candle_seconds = interval * 60
 
-    try:
+        last = parsed[-1]
 
-        url = (
-            f"{CHART_URL}/"
-            f"{symbol}/"
-            f"{resolution}"
-        )
+        if last["time"] + candle_seconds > current_ts:
+            parsed = parsed[:-1]
 
-        data = get_json(url)
-
-        candles = parse_candles(
-            data
-        )
-
-        if len(candles) < 10:
-            return []
-
-        # Last API candle is treated as open.
-        # Therefore remove it.
-        candles = candles[:-1]
-
-        return candles[-limit:]
-
-    except Exception as e:
-
-        print(
-            f"❌ Candle error "
-            f"{symbol} {resolution}: {e}"
-        )
-
-        return []
+    return parsed[-limit:]
 
 
 # ============================================================
-# SMA
+# INDICATORS
 # ============================================================
 
 def sma(values, period):
@@ -650,48 +382,27 @@ def sma(values, period):
         return None
 
     return float(
-        np.mean(
-            values[-period:]
-        )
+        np.mean(values[-period:])
     )
 
 
-# ============================================================
-# ATR
-# ============================================================
-
-def atr(
-    candles,
-    period=ATR_PERIOD
-):
+def atr(candles, period=ATR_PERIOD):
 
     if len(candles) < period + 1:
         return None
 
     trs = []
 
-    for i in range(
-        1,
-        len(candles)
-    ):
+    for i in range(1, len(candles)):
 
-        current = candles[i]
-
-        previous = candles[i - 1]
+        high = candles[i]["high"]
+        low = candles[i]["low"]
+        prev_close = candles[i - 1]["close"]
 
         tr = max(
-            current["high"]
-            - current["low"],
-
-            abs(
-                current["high"]
-                - previous["close"]
-            ),
-
-            abs(
-                current["low"]
-                - previous["close"]
-            )
+            high - low,
+            abs(high - prev_close),
+            abs(low - prev_close)
         )
 
         trs.append(tr)
@@ -700,70 +411,97 @@ def atr(
         return None
 
     return float(
-        np.mean(
-            trs[-period:]
-        )
+        np.mean(trs[-period:])
     )
 
 
-# ============================================================
-# RVOL
-# ============================================================
+def rvol(candles):
 
-def rvol(
-    candles,
-    period=RVOL_PERIOD
-):
-
-    if len(candles) < period + 1:
+    if len(candles) < RVOL_LOOKBACK + 1:
         return 0.0
 
-    current_volume = (
-        candles[-1]["volume"]
-    )
+    current_volume = candles[-1]["volume"]
 
     previous = [
-        c["volume"]
-        for c in candles[
-            -period - 1:-1
-        ]
+        x["volume"]
+        for x in candles[-RVOL_LOOKBACK-1:-1]
+        if x["volume"] > 0
     ]
 
-    average = np.mean(
-        previous
-    )
-
-    if average <= 0:
+    if not previous:
         return 0.0
 
-    return (
-        current_volume
-        / average
+    avg_volume = np.mean(previous)
+
+    if avg_volume <= 0:
+        return 0.0
+
+    return current_volume / avg_volume
+
+
+# ============================================================
+# CANDLE STRUCTURE
+# ============================================================
+
+def candle_body_pct(c):
+
+    if c["close"] == 0:
+        return 0
+
+    return abs(
+        c["close"] - c["open"]
+    ) / c["close"] * 100
+
+
+def candle_direction(c):
+
+    if c["close"] > c["open"]:
+        return "LONG"
+
+    if c["close"] < c["open"]:
+        return "SHORT"
+
+    return "NEUTRAL"
+
+
+def candle_wicks(c):
+
+    body = abs(
+        c["close"] - c["open"]
     )
 
+    upper = c["high"] - max(
+        c["open"],
+        c["close"]
+    )
+
+    lower = min(
+        c["open"],
+        c["close"]
+    ) - c["low"]
+
+    return body, upper, lower
+
 
 # ============================================================
-# PIVOT HIGHS
+# PIVOTS
 # ============================================================
 
-def pivot_highs(
-    candles,
-    swing=PIVOT_SWING
-):
+def pivot_highs(candles):
 
     levels = []
 
-    for i in range(
-        swing,
-        len(candles) - swing
-    ):
+    start = PIVOT_LEFT
+    end = len(candles) - PIVOT_RIGHT
 
-        high = candles[i]["high"]
+    for i in range(start, end):
+
+        h = candles[i]["high"]
 
         left = [
             candles[j]["high"]
             for j in range(
-                i - swing,
+                i - PIVOT_LEFT,
                 i
             )
         ]
@@ -772,48 +510,31 @@ def pivot_highs(
             candles[j]["high"]
             for j in range(
                 i + 1,
-                i + swing + 1
+                i + 1 + PIVOT_RIGHT
             )
         ]
 
-        if (
-            high >= max(left)
-            and high >= max(right)
-        ):
-
-            levels.append(
-                {
-                    "price": high,
-                    "time":
-                        candles[i]["time"]
-                }
-            )
+        if all(h >= x for x in left + right):
+            levels.append(h)
 
     return levels
 
 
-# ============================================================
-# PIVOT LOWS
-# ============================================================
-
-def pivot_lows(
-    candles,
-    swing=PIVOT_SWING
-):
+def pivot_lows(candles):
 
     levels = []
 
-    for i in range(
-        swing,
-        len(candles) - swing
-    ):
+    start = PIVOT_LEFT
+    end = len(candles) - PIVOT_RIGHT
 
-        low = candles[i]["low"]
+    for i in range(start, end):
+
+        l = candles[i]["low"]
 
         left = [
             candles[j]["low"]
             for j in range(
-                i - swing,
+                i - PIVOT_LEFT,
                 i
             )
         ]
@@ -822,201 +543,84 @@ def pivot_lows(
             candles[j]["low"]
             for j in range(
                 i + 1,
-                i + swing + 1
+                i + 1 + PIVOT_RIGHT
             )
         ]
 
-        if (
-            low <= min(left)
-            and low <= min(right)
-        ):
-
-            levels.append(
-                {
-                    "price": low,
-                    "time":
-                        candles[i]["time"]
-                }
-            )
+        if all(l <= x for x in left + right):
+            levels.append(l)
 
     return levels
 
 
 # ============================================================
-# BUILD ZONE
+# ZONE CLUSTERING
 # ============================================================
 
-def build_zone(
-    levels,
-    zone_type
-):
-
-    prices = [
-        x["price"]
-        for x in levels
-    ]
-
-    return {
-        "low": min(prices),
-        "high": max(prices),
-        "center": float(
-            np.mean(prices)
-        ),
-        "touches": len(levels),
-        "type": zone_type,
-        "last_time": max(
-            x["time"]
-            for x in levels
-        )
-    }
-
-
-# ============================================================
-# CLUSTER LEVELS
-# ============================================================
-
-def cluster_levels(
-    levels,
-    zone_type
-):
+def cluster_levels(levels):
 
     if not levels:
         return []
 
-    levels = sorted(
-        levels,
-        key=lambda x: x["price"]
-    )
+    levels = sorted(levels)
 
     zones = []
 
-    current = [
-        levels[0]
-    ]
+    current = [levels[0]]
 
     for level in levels[1:]:
 
-        center = np.mean(
-            [
-                x["price"]
-                for x in current
-            ]
-        )
+        base = np.mean(current)
 
-        distance = (
-            abs(
-                level["price"]
-                - center
-            )
-            / center
-            * 100
-        )
+        distance = abs(
+            level - base
+        ) / base * 100
 
-        if (
-            distance
-            <= ZONE_TOLERANCE_PCT
-        ):
-
+        if distance <= ZONE_TOLERANCE_PCT:
             current.append(level)
 
         else:
-
             zones.append(
-                build_zone(
-                    current,
-                    zone_type
-                )
+                float(np.mean(current))
             )
 
-            current = [
-                level
-            ]
+            current = [level]
 
-    zones.append(
-        build_zone(
-            current,
-            zone_type
+    if current:
+        zones.append(
+            float(np.mean(current))
         )
-    )
 
     return zones
 
 
-# ============================================================
-# SUPPORT / RESISTANCE
-# ============================================================
+def get_sr_zones(c15, c1h):
 
-def build_sr_zones(
-    candles_15m,
-    candles_1h
-):
-
-    resistance_levels = (
-        pivot_highs(candles_15m)
-        + pivot_highs(candles_1h)
+    lows_15 = pivot_lows(
+        c15[-SR_LOOKBACK_15M:]
     )
 
-    support_levels = (
-        pivot_lows(candles_15m)
-        + pivot_lows(candles_1h)
+    highs_15 = pivot_highs(
+        c15[-SR_LOOKBACK_15M:]
     )
 
-    support_zones = cluster_levels(
-        support_levels,
-        "SUPPORT"
+    lows_1h = pivot_lows(
+        c1h[-SR_LOOKBACK_1H:]
     )
 
-    resistance_zones = cluster_levels(
-        resistance_levels,
-        "RESISTANCE"
+    highs_1h = pivot_highs(
+        c1h[-SR_LOOKBACK_1H:]
     )
 
-    return (
-        support_zones,
-        resistance_zones
+    supports = cluster_levels(
+        lows_15 + lows_1h
     )
 
-
-# ============================================================
-# 1H STRUCTURE
-# ============================================================
-
-def get_structure(candles):
-
-    if len(candles) < 10:
-        return None
-
-    recent = candles[-1]
-
-    previous = candles[-6:-1]
-
-    previous_high = max(
-        c["high"]
-        for c in previous
+    resistances = cluster_levels(
+        highs_15 + highs_1h
     )
 
-    previous_low = min(
-        c["low"]
-        for c in previous
-    )
-
-    return {
-        "HH":
-            recent["high"]
-            > previous_high,
-
-        "HL":
-            recent["low"]
-            > previous_low,
-
-        "LH":
-            recent["high"]
-            < previous_high,
-
-        "LL":
-            recent["low"]
-            < previous_low
-    }
+    return supports, resistances
 
 
 # ============================================================
@@ -1025,21 +629,16 @@ def get_structure(candles):
 
 def trend_1h(candles):
 
-    if len(candles) < (
-        SMA_SLOW + 10
-    ):
-
+    if len(candles) < SMA_SLOW + 5:
         return {
-            "side": None,
+            "direction": "NEUTRAL",
             "score": 0
         }
 
     closes = [
-        c["close"]
-        for c in candles
+        x["close"]
+        for x in candles
     ]
-
-    price = closes[-1]
 
     fast = sma(
         closes,
@@ -1051,302 +650,83 @@ def trend_1h(candles):
         SMA_SLOW
     )
 
-    old_fast = sma(
-        closes[:-5],
+    price = closes[-1]
+
+    score_long = 0
+    score_short = 0
+
+    # Price vs MA
+    if price > fast:
+        score_long += 1
+
+    if price < fast:
+        score_short += 1
+
+    if price > slow:
+        score_long += 1
+
+    if price < slow:
+        score_short += 1
+
+    # MA relationship
+    if fast > slow:
+        score_long += 1
+
+    if fast < slow:
+        score_short += 1
+
+    # MA slope
+    previous_fast = sma(
+        closes[:-3],
         SMA_FAST
     )
 
-    structure = get_structure(
-        candles
+    previous_slow = sma(
+        closes[:-3],
+        SMA_SLOW
     )
 
-    if (
-        fast is None
-        or slow is None
-        or structure is None
-    ):
+    if previous_fast is not None:
 
-        return {
-            "side": None,
-            "score": 0
-        }
+        if fast > previous_fast:
+            score_long += 1
 
-    long_score = 0
-    short_score = 0
+        if fast < previous_fast:
+            score_short += 1
 
-    # Structure
-    if structure["HH"]:
-        long_score += 2
+    if previous_slow is not None:
 
-    if structure["HL"]:
-        long_score += 1
+        if slow > previous_slow:
+            score_long += 1
 
-    if structure["LH"]:
-        short_score += 2
+        if slow < previous_slow:
+            score_short += 1
 
-    if structure["LL"]:
-        short_score += 1
+    # Recent structure
+    recent = candles[-6:]
 
-    # Moving average alignment
-    if fast > slow:
-        long_score += 2
+    if recent[-1]["close"] > recent[0]["close"]:
+        score_long += 1
 
-    elif fast < slow:
-        short_score += 2
+    if recent[-1]["close"] < recent[0]["close"]:
+        score_short += 1
 
-    # Price location
-    if price > fast:
-        long_score += 1
+    if score_long >= score_short:
+        direction = "LONG"
+        score = score_long
 
-    elif price < fast:
-        short_score += 1
+    else:
+        direction = "SHORT"
+        score = score_short
 
-    # MA slope
-    if old_fast is not None:
-
-        if fast > old_fast:
-            long_score += 1
-
-        elif fast < old_fast:
-            short_score += 1
-
-    if (
-        long_score >= MIN_TREND_SCORE
-        and long_score > short_score
-    ):
-
-        return {
-            "side": "LONG",
-            "score": long_score
-        }
-
-    if (
-        short_score >= MIN_TREND_SCORE
-        and short_score > long_score
-    ):
-
-        return {
-            "side": "SHORT",
-            "score": short_score
-        }
+    # Avoid weak trend
+    if score < MIN_TREND_SCORE:
+        direction = "NEUTRAL"
 
     return {
-        "side": None,
-        "score": max(
-            long_score,
-            short_score
-        )
+        "direction": direction,
+        "score": int(score)
     }
-
-
-# ============================================================
-# CANDLE HELPERS
-# ============================================================
-
-def candle_body(candle):
-
-    return abs(
-        candle["close"]
-        - candle["open"]
-    )
-
-
-def candle_range(candle):
-
-    return (
-        candle["high"]
-        - candle["low"]
-    )
-
-
-def upper_wick(candle):
-
-    return (
-        candle["high"]
-        - max(
-            candle["open"],
-            candle["close"]
-        )
-    )
-
-
-def lower_wick(candle):
-
-    return (
-        min(
-            candle["open"],
-            candle["close"]
-        )
-        - candle["low"]
-    )
-
-
-# ============================================================
-# 15M SUPPORT REACTION
-# ============================================================
-
-def support_reaction(
-    candles,
-    zone
-):
-
-    recent = candles[-3:]
-
-    touched = False
-
-    bullish_rejection = False
-
-    for candle in recent:
-
-        if (
-            candle["low"]
-            <= zone["high"]
-            * (
-                1
-                + ZONE_TOLERANCE_PCT
-                / 100
-            )
-        ):
-
-            touched = True
-
-        body = candle_body(
-            candle
-        )
-
-        if body <= 0:
-            continue
-
-        lower = lower_wick(
-            candle
-        )
-
-        bullish = (
-            candle["close"]
-            > candle["open"]
-        )
-
-        if (
-            bullish
-            and lower / body
-            >= WICK_BODY_RATIO
-        ):
-
-            bullish_rejection = True
-
-    return (
-        touched
-        and bullish_rejection
-    )
-
-
-# ============================================================
-# 15M RESISTANCE REACTION
-# ============================================================
-
-def resistance_reaction(
-    candles,
-    zone
-):
-
-    recent = candles[-3:]
-
-    touched = False
-
-    bearish_rejection = False
-
-    for candle in recent:
-
-        if (
-            candle["high"]
-            >= zone["low"]
-            * (
-                1
-                - ZONE_TOLERANCE_PCT
-                / 100
-            )
-        ):
-
-            touched = True
-
-        body = candle_body(
-            candle
-        )
-
-        if body <= 0:
-            continue
-
-        upper = upper_wick(
-            candle
-        )
-
-        bearish = (
-            candle["close"]
-            < candle["open"]
-        )
-
-        if (
-            bearish
-            and upper / body
-            >= WICK_BODY_RATIO
-        ):
-
-            bearish_rejection = True
-
-    return (
-        touched
-        and bearish_rejection
-    )
-
-
-# ============================================================
-# 15M BREAK
-# ============================================================
-
-def resistance_break(
-    candles,
-    zone
-):
-
-    previous = candles[-2]
-    current = candles[-1]
-
-    return (
-        previous["close"]
-        <= zone["high"]
-        and
-        current["close"]
-        >
-        zone["high"]
-        * (
-            1
-            + BREAKOUT_BUFFER_PCT
-            / 100
-        )
-    )
-
-
-def support_break(
-    candles,
-    zone
-):
-
-    previous = candles[-2]
-    current = candles[-1]
-
-    return (
-        previous["close"]
-        >= zone["low"]
-        and
-        current["close"]
-        <
-        zone["low"]
-        * (
-            1
-            - BREAKOUT_BUFFER_PCT
-            / 100
-        )
-    )
 
 
 # ============================================================
@@ -1354,900 +734,649 @@ def support_break(
 # ============================================================
 
 def detect_15m_setup(
-    side,
     candles,
-    support_zones,
-    resistance_zones
-):
-
-    if side == "LONG":
-
-        # First preference:
-        # support reaction
-
-        for zone in sorted(
-            support_zones,
-            key=lambda z:
-                abs(
-                    z["center"]
-                    - candles[-1]["close"]
-                )
-        ):
-
-            if support_reaction(
-                candles,
-                zone
-            ):
-
-                return {
-                    "setup":
-                        "SUPPORT_REACTION",
-                    "zone": zone,
-                    "score": 4
-                }
-
-        # Second:
-        # resistance breakout/hold
-
-        for zone in sorted(
-            resistance_zones,
-            key=lambda z:
-                abs(
-                    z["center"]
-                    - candles[-1]["close"]
-                )
-        ):
-
-            if resistance_break(
-                candles,
-                zone
-            ):
-
-                return {
-                    "setup":
-                        "RESISTANCE_BREAK",
-                    "zone": zone,
-                    "score": 4
-                }
-
-    else:
-
-        # Resistance reaction
-
-        for zone in sorted(
-            resistance_zones,
-            key=lambda z:
-                abs(
-                    z["center"]
-                    - candles[-1]["close"]
-                )
-        ):
-
-            if resistance_reaction(
-                candles,
-                zone
-            ):
-
-                return {
-                    "setup":
-                        "RESISTANCE_REACTION",
-                    "zone": zone,
-                    "score": 4
-                }
-
-        # Support breakdown
-
-        for zone in sorted(
-            support_zones,
-            key=lambda z:
-                abs(
-                    z["center"]
-                    - candles[-1]["close"]
-                )
-        ):
-
-            if support_break(
-                candles,
-                zone
-            ):
-
-                return {
-                    "setup":
-                        "SUPPORT_BREAK",
-                    "zone": zone,
-                    "score": 4
-                }
-
-    return None
-
-
-# ============================================================
-# 5M BREAKOUT
-# ============================================================
-#
-# Find a fresh breakout among the last few CLOSED candles.
-#
-# The breakout does NOT need to be the latest candle.
-# ============================================================
-
-def find_recent_breakout(
-    candles,
-    side,
-    zone
+    supports,
+    resistances,
+    direction
 ):
 
     if len(candles) < 10:
-        return None
+        return {
+            "valid": False,
+            "score": 0,
+            "level": None,
+            "type": None
+        }
 
-    latest_index = (
-        len(candles) - 1
-    )
+    current = candles[-1]
+    previous = candles[-2]
 
-    first_index = max(
-        2,
-        latest_index
-        - BREAKOUT_MAX_AGE
-    )
+    price = current["close"]
 
-    candidates = []
+    best_score = 0
+    best_type = None
+    best_level = None
 
-    for i in range(
-        first_index,
-        latest_index
-    ):
+    # --------------------------------------------------------
+    # LONG
+    # --------------------------------------------------------
 
-        candle = candles[i]
+    if direction == "LONG":
 
-        if side == "LONG":
+        # Support reaction
+        for support in supports:
 
-            level = zone["high"]
+            distance = abs(
+                current["low"] - support
+            ) / support * 100
 
-            broken = (
-                candle["close"]
-                >
-                level
-                * (
-                    1
-                    + BREAKOUT_BUFFER_PCT
-                    / 100
+            if distance <= REJECTION_DISTANCE_PCT:
+
+                bullish = (
+                    current["close"] >
+                    current["open"]
                 )
+
+                if bullish:
+
+                    score = 3
+
+                    if current["close"] > support:
+                        score += 1
+
+                    if score > best_score:
+                        best_score = score
+                        best_type = "SUPPORT_REACTION"
+                        best_level = support
+
+        # Resistance breakout
+        for resistance in resistances:
+
+            crossed = (
+                previous["close"] <= resistance
+                and current["close"] > resistance
             )
 
-        else:
+            if crossed:
 
-            level = zone["low"]
+                score = 3
 
-            broken = (
-                candle["close"]
-                <
-                level
-                * (
-                    1
-                    - BREAKOUT_BUFFER_PCT
-                    / 100
+                if current["close"] > current["open"]:
+                    score += 1
+
+                if score > best_score:
+                    best_score = score
+                    best_type = "RESISTANCE_BREAKOUT"
+                    best_level = resistance
+
+        # Resistance retest
+        for resistance in resistances:
+
+            distance = abs(
+                current["low"] - resistance
+            ) / resistance * 100
+
+            if (
+                distance <= PULLBACK_TOLERANCE_PCT
+                and current["close"] > resistance
+            ):
+
+                score = 3
+
+                if current["close"] > current["open"]:
+                    score += 1
+
+                if score > best_score:
+                    best_score = score
+                    best_type = "RESISTANCE_RETEST"
+                    best_level = resistance
+
+    # --------------------------------------------------------
+    # SHORT
+    # --------------------------------------------------------
+
+    if direction == "SHORT":
+
+        # Resistance reaction
+        for resistance in resistances:
+
+            distance = abs(
+                current["high"] - resistance
+            ) / resistance * 100
+
+            if distance <= REJECTION_DISTANCE_PCT:
+
+                bearish = (
+                    current["close"] <
+                    current["open"]
                 )
+
+                if bearish:
+
+                    score = 3
+
+                    if current["close"] < resistance:
+                        score += 1
+
+                    if score > best_score:
+                        best_score = score
+                        best_type = "RESISTANCE_REACTION"
+                        best_level = resistance
+
+        # Support breakdown
+        for support in supports:
+
+            crossed = (
+                previous["close"] >= support
+                and current["close"] < support
             )
 
-        if broken:
+            if crossed:
 
-            candidates.append(
-                {
-                    "index": i,
-                    "level": level,
-                    "candle": candle
-                }
-            )
+                score = 3
 
-    if not candidates:
-        return None
+                if current["close"] < current["open"]:
+                    score += 1
 
-    # Most recent breakout wins.
-    return candidates[-1]
+                if score > best_score:
+                    best_score = score
+                    best_type = "SUPPORT_BREAKOUT"
+                    best_level = support
+
+        # Support retest
+        for support in supports:
+
+            distance = abs(
+                current["high"] - support
+            ) / support * 100
+
+            if (
+                distance <= PULLBACK_TOLERANCE_PCT
+                and current["close"] < support
+            ):
+
+                score = 3
+
+                if current["close"] < current["open"]:
+                    score += 1
+
+                if score > best_score:
+                    best_score = score
+                    best_type = "SUPPORT_RETEST"
+                    best_level = support
+
+    return {
+        "valid": best_score >= 3,
+        "score": min(best_score, 4),
+        "level": best_level,
+        "type": best_type
+    }
 
 
 # ============================================================
-# 5M PULLBACK
+# 5M BREAKOUT DETECTION
 # ============================================================
 
-def find_pullback(
+def recent_breakout(
     candles,
-    side,
-    breakout
+    level,
+    direction
 ):
 
-    breakout_index = (
-        breakout["index"]
-    )
+    if level is None:
+        return False
 
-    level = breakout["level"]
+    if len(candles) < BREAKOUT_LOOKBACK + 2:
+        return False
 
-    latest_index = (
-        len(candles) - 1
-    )
+    recent = candles[-BREAKOUT_LOOKBACK:]
 
-    if (
-        breakout_index
-        >= latest_index
-    ):
+    if direction == "LONG":
 
-        return None
+        for c in recent[:-1]:
 
-    max_pullback_index = min(
-        latest_index,
-        breakout_index
-        + MAX_CONFIRMATION_BARS
-    )
+            if c["close"] > level:
+                return True
 
-    for i in range(
-        breakout_index + 1,
-        max_pullback_index + 1
-    ):
+    if direction == "SHORT":
 
-        candle = candles[i]
+        for c in recent[:-1]:
 
-        if side == "LONG":
+            if c["close"] < level:
+                return True
 
-            touched = (
-                candle["low"]
-                <= level
-                * (
-                    1
-                    + PULLBACK_TOLERANCE_PCT
-                    / 100
-                )
-            )
-
-            held = (
-                candle["close"]
-                >= level
-                * (
-                    1
-                    - PULLBACK_TOLERANCE_PCT
-                    / 100
-                )
-            )
-
-        else:
-
-            touched = (
-                candle["high"]
-                >= level
-                * (
-                    1
-                    - PULLBACK_TOLERANCE_PCT
-                    / 100
-                )
-            )
-
-            held = (
-                candle["close"]
-                <= level
-                * (
-                    1
-                    + PULLBACK_TOLERANCE_PCT
-                    / 100
-                )
-            )
-
-        if touched and held:
-
-            return {
-                "index": i,
-                "level": level,
-                "candle": candle
-            }
-
-    return None
+    return False
 
 
 # ============================================================
 # 5M CONFIRMATION
 # ============================================================
-#
-# IMPORTANT v7.4:
-#
-# Confirmation is checked AFTER pullback.
-#
-# The latest CLOSED candle must be confirmation.
-#
-# Therefore:
-#
-# breakout
-#     ↓
-# pullback
-#     ↓
-# one or more candles
-#     ↓
-# latest closed candle = confirmation
-#
-# This avoids requiring breakout/pullback/confirmation to
-# happen in one absurdly tiny sequence.
-# ============================================================
 
-def confirmation_signal(
+def confirmation_5m(
     candles,
-    side,
-    pullback
+    setup_level,
+    direction
 ):
 
-    pullback_index = (
-        pullback["index"]
-    )
-
-    latest_index = (
-        len(candles) - 1
-    )
-
-    bars_after_pullback = (
-        latest_index
-        - pullback_index
-    )
-
-    if bars_after_pullback < 1:
-
+    if len(candles) < 5:
         return {
-            "passed": False,
-            "reason":
-                "WAITING_CONFIRMATION"
+            "valid": False,
+            "score": 0,
+            "type": None
         }
 
-    if (
-        bars_after_pullback
-        > MAX_CONFIRMATION_BARS
-    ):
+    current = candles[-1]
+    previous = candles[-2]
 
-        return {
-            "passed": False,
-            "reason":
-                "CONFIRMATION_TOO_OLD"
-        }
-
-    confirmation = candles[
-        latest_index
-    ]
-
-    previous = candles[
-        latest_index - 1
-    ]
-
-    body = candle_body(
-        confirmation
+    body, upper, lower = candle_wicks(
+        current
     )
 
-    candle_range_value = candle_range(
-        confirmation
-    )
-
-    if (
-        candle_range_value <= 0
-        or body <= 0
-    ):
-
-        return {
-            "passed": False,
-            "reason":
-                "WEAK_CONFIRMATION_CANDLE"
-        }
-
-    body_pct = (
-        body
-        / confirmation["open"]
-        * 100
+    body_pct = candle_body_pct(
+        current
     )
 
     if body_pct < MIN_BODY_PCT:
-
         return {
-            "passed": False,
-            "reason":
-                "CONFIRMATION_BODY_TOO_SMALL"
+            "valid": False,
+            "score": 0,
+            "type": "SMALL_BODY"
         }
 
-    if side == "LONG":
+    score = 0
+    pattern = None
+
+    # --------------------------------------------------------
+    # LONG
+    # --------------------------------------------------------
+
+    if direction == "LONG":
 
         bullish = (
-            confirmation["close"]
-            > confirmation["open"]
-        )
-
-        higher_close = (
-            confirmation["close"]
-            > previous["high"]
-        )
-
-        above_pullback = (
-            confirmation["close"]
-            > pullback["level"]
+            current["close"] >
+            current["open"]
         )
 
         if not bullish:
-
             return {
-                "passed": False,
-                "reason":
-                    "CONFIRMATION_NOT_BULLISH"
+                "valid": False,
+                "score": 0,
+                "type": "NOT_BULLISH"
             }
 
-        if not above_pullback:
+        # Breakout confirmation
+        if (
+            setup_level is not None
+            and current["close"] > setup_level
+            and current["close"] > previous["high"]
+        ):
 
-            return {
-                "passed": False,
-                "reason":
-                    "CONFIRMATION_BELOW_BREAKOUT_LEVEL"
-            }
+            score = 4
+            pattern = "BREAKOUT_CONFIRMATION"
 
-        if not higher_close:
+        # Pullback confirmation
+        elif (
+            setup_level is not None
+            and current["low"] <=
+                setup_level *
+                (1 + PULLBACK_TOLERANCE_PCT / 100)
+            and current["close"] > setup_level
+        ):
 
-            return {
-                "passed": False,
-                "reason":
-                    "CONFIRMATION_NO_MOMENTUM"
-            }
+            score = 3
+            pattern = "PULLBACK_CONFIRMATION"
 
-    else:
+        # Bullish rejection
+        elif (
+            lower >= body * WICK_BODY_RATIO
+            and current["close"] >
+                previous["close"]
+        ):
+
+            score = 3
+            pattern = "BULLISH_REJECTION"
+
+        # Momentum continuation
+        elif current["close"] > previous["high"]:
+
+            score = 3
+            pattern = "MOMENTUM_CONFIRMATION"
+
+    # --------------------------------------------------------
+    # SHORT
+    # --------------------------------------------------------
+
+    if direction == "SHORT":
 
         bearish = (
-            confirmation["close"]
-            < confirmation["open"]
-        )
-
-        lower_close = (
-            confirmation["close"]
-            < previous["low"]
-        )
-
-        below_pullback = (
-            confirmation["close"]
-            < pullback["level"]
+            current["close"] <
+            current["open"]
         )
 
         if not bearish:
-
             return {
-                "passed": False,
-                "reason":
-                    "CONFIRMATION_NOT_BEARISH"
+                "valid": False,
+                "score": 0,
+                "type": "NOT_BEARISH"
             }
 
-        if not below_pullback:
+        # Breakdown confirmation
+        if (
+            setup_level is not None
+            and current["close"] < setup_level
+            and current["close"] < previous["low"]
+        ):
 
-            return {
-                "passed": False,
-                "reason":
-                    "CONFIRMATION_ABOVE_BREAKOUT_LEVEL"
-            }
+            score = 4
+            pattern = "BREAKDOWN_CONFIRMATION"
 
-        if not lower_close:
+        # Pullback confirmation
+        elif (
+            setup_level is not None
+            and current["high"] >=
+                setup_level *
+                (1 - PULLBACK_TOLERANCE_PCT / 100)
+            and current["close"] < setup_level
+        ):
 
-            return {
-                "passed": False,
-                "reason":
-                    "CONFIRMATION_NO_MOMENTUM"
-            }
+            score = 3
+            pattern = "PULLBACK_CONFIRMATION"
+
+        # Bearish rejection
+        elif (
+            upper >= body * WICK_BODY_RATIO
+            and current["close"] <
+                previous["close"]
+        ):
+
+            score = 3
+            pattern = "BEARISH_REJECTION"
+
+        # Momentum continuation
+        elif current["close"] < previous["low"]:
+
+            score = 3
+            pattern = "MOMENTUM_CONFIRMATION"
 
     return {
-        "passed": True,
-        "reason":
-            "CONFIRMATION_PASSED"
+        "valid": score >= 3,
+        "score": score,
+        "type": pattern
     }
 
 
 # ============================================================
-# 5M ENTRY STRUCTURE
+# VOLUME SCORE
 # ============================================================
 
-def find_5m_structure(
-    candles,
-    side,
-    setup_zone
-):
+def volume_score(candles):
 
-    breakout = find_recent_breakout(
-        candles,
-        side,
-        setup_zone
-    )
+    value = rvol(candles)
 
-    if not breakout:
+    if value >= RVOL_VERY_STRONG:
+        return 2, value
 
-        return None, "NO_FRESH_BREAKOUT"
+    if value >= RVOL_NORMAL:
+        return 1, value
 
-    pullback = find_pullback(
-        candles,
-        side,
-        breakout
-    )
-
-    if not pullback:
-
-        return None, "NO_PULLBACK"
-
-    confirmation = confirmation_signal(
-        candles,
-        side,
-        pullback
-    )
-
-    if not confirmation["passed"]:
-
-        return None, confirmation["reason"]
-
-    return {
-        "breakout": breakout,
-        "pullback": pullback,
-        "confirmation": confirmation
-    }, None
+    return 0, value
 
 
 # ============================================================
-# SL
+# STOP LOSS
 # ============================================================
 
 def calculate_sl(
-    side,
-    entry,
     candles,
-    setup_zone
+    entry,
+    direction
 ):
 
-    current_atr = atr(
-        candles,
-        ATR_PERIOD
+    a = atr(candles)
+
+    if a is None:
+        return None
+
+    raw_distance = (
+        a * ATR_MULTIPLIER
     )
 
-    if current_atr is None:
-
-        current_atr = (
-            entry * 0.005
-        )
-
-    buffer = (
-        current_atr
-        * ATR_SL_MULTIPLIER
+    distance = (
+        raw_distance +
+        a * ATR_BUFFER
     )
 
-    if side == "LONG":
+    sl_pct = (
+        distance /
+        entry *
+        100
+    )
 
-        structural_sl = (
-            setup_zone["low"]
-            - buffer
+    sl_pct = clamp(
+        sl_pct,
+        MIN_SL_PCT,
+        MAX_SL_PCT
+    )
+
+    if direction == "LONG":
+        sl = entry * (
+            1 - sl_pct / 100
         )
 
-        minimum_sl = (
-            entry
-            * (
-                1
-                - MIN_SL_PCT / 100
-            )
+    else:
+        sl = entry * (
+            1 + sl_pct / 100
         )
 
-        maximum_sl = (
-            entry
-            * (
-                1
-                - MAX_SL_PCT / 100
-            )
-        )
+    return {
+        "price": sl,
+        "pct": sl_pct
+    }
 
-        sl = structural_sl
 
-        if sl > minimum_sl:
-            sl = minimum_sl
+# ============================================================
+# TAKE PROFIT
+# ============================================================
 
-        if sl < maximum_sl:
-            sl = maximum_sl
+def calculate_tp(
+    entry,
+    sl,
+    direction,
+    supports,
+    resistances
+):
+
+    candidates = []
+
+    if direction == "LONG":
+
+        for level in resistances:
+
+            if level > entry:
+
+                distance_pct = (
+                    level - entry
+                ) / entry * 100
+
+                if (
+                    0 < distance_pct <=
+                    MAX_TP_PCT
+                ):
+                    candidates.append(level)
 
     else:
 
-        structural_sl = (
-            setup_zone["high"]
-            + buffer
-        )
+        for level in supports:
 
-        minimum_sl = (
-            entry
-            * (
-                1
-                + MIN_SL_PCT / 100
-            )
-        )
+            if level < entry:
 
-        maximum_sl = (
-            entry
-            * (
-                1
-                + MAX_SL_PCT / 100
-            )
-        )
+                distance_pct = (
+                    entry - level
+                ) / entry * 100
 
-        sl = structural_sl
+                if (
+                    0 < distance_pct <=
+                    MAX_TP_PCT
+                ):
+                    candidates.append(level)
 
-        if sl < minimum_sl:
-            sl = minimum_sl
-
-        if sl > maximum_sl:
-            sl = maximum_sl
-
-    distance = pct_distance(
-        entry,
-        sl
-    )
-
-    if (
-        distance < MIN_SL_PCT
-        or distance > MAX_SL_PCT
-    ):
-
+    if not candidates:
         return None
 
-    return sl
+    if direction == "LONG":
+        tp = min(candidates)
 
+        risk = entry - sl
+        reward = tp - entry
 
-# ============================================================
-# TP
-# ============================================================
+    else:
+        tp = max(candidates)
 
-def select_tp(
-    side,
-    entry,
-    sl,
-    support_zones,
-    resistance_zones
-):
-
-    risk = abs(
-        entry - sl
-    )
+        risk = sl - entry
+        reward = entry - tp
 
     if risk <= 0:
         return None
 
-    if side == "LONG":
+    rr = reward / risk
 
-        candidates = [
-            zone
-            for zone in resistance_zones
-            if zone["center"] > entry
-        ]
+    if rr < MIN_RR:
+        return None
 
-        candidates.sort(
-            key=lambda z:
-                z["center"]
-        )
+    tp_pct = abs(
+        tp - entry
+    ) / entry * 100
 
-        for zone in candidates:
-
-            tp = (
-                zone["low"]
-                * (
-                    1
-                    - TP_ZONE_BUFFER_PCT
-                    / 100
-                )
-            )
-
-            reward = (
-                tp - entry
-            )
-
-            if reward <= 0:
-                continue
-
-            rr = reward / risk
-
-            distance_pct = (
-                reward
-                / entry
-                * 100
-            )
-
-            if rr <= MIN_TP_RR:
-                continue
-
-            if (
-                distance_pct
-                > MAX_TP_DISTANCE_PCT
-            ):
-                break
-
-            return {
-                "tp": tp,
-                "rr": rr,
-                "distance_pct":
-                    distance_pct,
-                "zone": zone
-            }
-
-    else:
-
-        candidates = [
-            zone
-            for zone in support_zones
-            if zone["center"] < entry
-        ]
-
-        candidates.sort(
-            key=lambda z:
-                z["center"],
-            reverse=True
-        )
-
-        for zone in candidates:
-
-            tp = (
-                zone["high"]
-                * (
-                    1
-                    + TP_ZONE_BUFFER_PCT
-                    / 100
-                )
-            )
-
-            reward = (
-                entry - tp
-            )
-
-            if reward <= 0:
-                continue
-
-            rr = reward / risk
-
-            distance_pct = (
-                reward
-                / entry
-                * 100
-            )
-
-            if rr <= MIN_TP_RR:
-                continue
-
-            if (
-                distance_pct
-                > MAX_TP_DISTANCE_PCT
-            ):
-                break
-
-            return {
-                "tp": tp,
-                "rr": rr,
-                "distance_pct":
-                    distance_pct,
-                "zone": zone
-            }
-
-    return None
+    return {
+        "price": tp,
+        "pct": tp_pct,
+        "rr": rr
+    }
 
 
 # ============================================================
-# OPEN TRADE
+# DATABASE
+# ============================================================
+
+def init_db():
+
+    conn = sqlite3.connect(DB_FILE)
+
+    cur = conn.cursor()
+
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            entry REAL NOT NULL,
+            sl REAL NOT NULL,
+            tp REAL NOT NULL,
+            entry_time INTEGER NOT NULL,
+            exit_time INTEGER,
+            exit_price REAL,
+            exit_reason TEXT,
+            pnl_pct REAL,
+            score INTEGER,
+            setup_type TEXT,
+            confirmation_type TEXT,
+            rvol REAL,
+            closed_reported INTEGER DEFAULT 0
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+
+def db_connection():
+    return sqlite3.connect(DB_FILE)
+
+
+# ============================================================
+# OPEN TRADES
 # ============================================================
 
 def get_open_trades():
 
-    conn = db()
+    conn = db_connection()
 
-    rows = conn.execute(
-        """
-        SELECT *
-        FROM trades
-        WHERE status='OPEN'
-        ORDER BY id ASC
-        """
-    ).fetchall()
+    cur = conn.cursor()
 
-    conn.close()
-
-    return rows
-
-
-# ============================================================
-# HAS OPEN TRADE
-# ============================================================
-
-def has_open_trade(symbol):
-
-    conn = db()
-
-    row = conn.execute(
-        """
-        SELECT id
-        FROM trades
-        WHERE symbol=?
-          AND status='OPEN'
-        LIMIT 1
-        """,
-        (symbol,)
-    ).fetchone()
-
-    conn.close()
-
-    return row is not None
-
-
-# ============================================================
-# COOLDOWN
-# ============================================================
-
-def in_cooldown(symbol):
-
-    conn = db()
-
-    row = conn.execute(
-        """
-        SELECT exit_time
-        FROM trades
-        WHERE symbol=?
-          AND status='CLOSED'
-          AND exit_time IS NOT NULL
-        ORDER BY exit_time DESC
-        LIMIT 1
-        """,
-        (symbol,)
-    ).fetchone()
-
-    conn.close()
-
-    if not row:
-        return False
-
-    exit_time = safe_float(
-        row["exit_time"]
-    )
-
-    if exit_time <= 0:
-        return False
-
-    cooldown_seconds = (
-        3 * 5 * 60
-    )
-
-    return (
-        time.time()
-        - exit_time
-        < cooldown_seconds
-    )
-
-
-# ============================================================
-# SAVE TRADE
-# ============================================================
-
-def save_trade(signal):
-
-    conn = db()
-
-    conn.execute(
-        """
-        INSERT INTO trades (
+    cur.execute("""
+        SELECT
+            id,
             symbol,
             side,
-            setup,
             entry,
             sl,
             tp,
-            rr,
-            status,
             entry_time,
-            created_at
+            score,
+            setup_type,
+            confirmation_type,
+            rvol
+        FROM trades
+        WHERE exit_time IS NULL
+        ORDER BY entry_time ASC
+    """)
+
+    rows = cur.fetchall()
+
+    conn.close()
+
+    columns = [
+        "id",
+        "symbol",
+        "side",
+        "entry",
+        "sl",
+        "tp",
+        "entry_time",
+        "score",
+        "setup_type",
+        "confirmation_type",
+        "rvol"
+    ]
+
+    return [
+        dict(zip(columns, row))
+        for row in rows
+    ]
+
+
+def insert_trade(trade):
+
+    conn = db_connection()
+
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO trades (
+            symbol,
+            side,
+            entry,
+            sl,
+            tp,
+            entry_time,
+            score,
+            setup_type,
+            confirmation_type,
+            rvol
         )
-        VALUES (
-            ?, ?, ?, ?, ?, ?, ?,
-            'OPEN',
-            ?, ?
-        )
-        """,
-        (
-            signal["symbol"],
-            signal["side"],
-            signal["setup"],
-            signal["entry"],
-            signal["sl"],
-            signal["tp"],
-            signal["rr"],
-            signal["entry_time"],
-            time.time()
-        )
-    )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        trade["symbol"],
+        trade["side"],
+        trade["entry"],
+        trade["sl"],
+        trade["tp"],
+        trade["entry_time"],
+        trade["score"],
+        trade["setup_type"],
+        trade["confirmation_type"],
+        trade["rvol"]
+    ))
 
     conn.commit()
 
@@ -2255,278 +1384,312 @@ def save_trade(signal):
 
 
 # ============================================================
-# PROCESS OPEN TRADE
+# CLOSE TRADE
 # ============================================================
 
-def process_open_trade(
-    trade,
-    candles
+def close_trade(
+    trade_id,
+    exit_price,
+    exit_reason,
+    exit_time,
+    pnl_pct
 ):
 
-    entry = safe_float(
-        trade["entry"]
-    )
+    conn = db_connection()
 
-    sl = safe_float(
-        trade["sl"]
-    )
+    cur = conn.cursor()
 
-    tp = safe_float(
-        trade["tp"]
-    )
+    cur.execute("""
+        UPDATE trades
+        SET
+            exit_time = ?,
+            exit_price = ?,
+            exit_reason = ?,
+            pnl_pct = ?,
+            closed_reported = 0
+        WHERE id = ?
+          AND exit_time IS NULL
+    """, (
+        exit_time,
+        exit_price,
+        exit_reason,
+        pnl_pct,
+        trade_id
+    ))
 
-    entry_time = safe_float(
-        trade["entry_time"]
-    )
+    conn.commit()
 
-    side = trade["side"]
+    conn.close()
 
-    if (
-        entry <= 0
-        or sl <= 0
-        or tp <= 0
-    ):
 
-        return None
+# ============================================================
+# COOLDOWN
+# ============================================================
 
-    # IMPORTANT:
-    # Trade enters at the CLOSE of signal candle.
-    # Therefore the signal candle itself must NOT be used
-    # to trigger SL/TP.
-    relevant = [
-        candle
-        for candle in candles
-        if candle["time"] > entry_time
-    ]
+def recently_traded(symbol):
 
-    for candle in relevant:
+    conn = db_connection()
 
-        high = candle["high"]
+    cur = conn.cursor()
 
-        low = candle["low"]
+    cur.execute("""
+        SELECT exit_time
+        FROM trades
+        WHERE symbol = ?
+          AND exit_time IS NOT NULL
+        ORDER BY exit_time DESC
+        LIMIT 1
+    """, (symbol,))
 
-        if side == "LONG":
+    row = cur.fetchone()
 
-            sl_hit = (
-                low <= sl
-            )
+    conn.close()
 
-            tp_hit = (
-                high >= tp
-            )
+    if not row:
+        return False
 
-        else:
+    exit_time = row[0]
 
-            sl_hit = (
-                high >= sl
-            )
+    elapsed = (
+        int(time.time()) -
+        int(exit_time)
+    ) / 60
 
-            tp_hit = (
-                low <= tp
-            )
+    return elapsed < COOLDOWN_MINUTES
 
-        if not sl_hit and not tp_hit:
 
+# ============================================================
+# PROCESS OPEN TRADES
+# ============================================================
+
+def process_open_trades():
+
+    trades = get_open_trades()
+
+    closed = []
+
+    for trade in trades:
+
+        candles = get_candles(
+            trade["symbol"],
+            INTERVAL_5M,
+            200
+        )
+
+        if not candles:
             continue
 
-        # If both are touched inside the same 5M candle,
-        # assume SL first. Conservative handling.
-        if sl_hit and tp_hit:
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Never allow the entry candle to close the trade.
+        # ----------------------------------------------------
 
-            exit_price = sl
+        candles = [
+            c for c in candles
+            if c["time"] > trade["entry_time"]
+        ]
 
-            result = "LOSS"
+        if not candles:
+            continue
 
-            reason = (
-                "AMBIGUOUS_SAME_CANDLE_SL_TP"
-            )
+        exit_price = None
+        reason = None
 
-        elif sl_hit:
+        for c in candles:
 
-            exit_price = sl
+            hit_sl = False
+            hit_tp = False
 
-            result = "LOSS"
+            if trade["side"] == "LONG":
 
-            reason = (
-                "HISTORICAL_5M_SL"
-            )
+                hit_sl = (
+                    c["low"] <= trade["sl"]
+                )
 
-        else:
+                hit_tp = (
+                    c["high"] >= trade["tp"]
+                )
 
-            exit_price = tp
+            else:
 
-            result = "WIN"
+                hit_sl = (
+                    c["high"] >= trade["sl"]
+                )
 
-            reason = (
-                "HISTORICAL_5M_TP"
-            )
+                hit_tp = (
+                    c["low"] <= trade["tp"]
+                )
 
-        if side == "LONG":
+            # ------------------------------------------------
+            # Conservative rule:
+            # If both happen in same candle,
+            # SL is assumed first.
+            # ------------------------------------------------
 
-            pnl = (
-                exit_price - entry
-            ) / entry * 100
+            if hit_sl:
 
-        else:
+                exit_price = trade["sl"]
+                reason = "SL"
+                exit_time = c["time"]
+                break
 
-            pnl = (
-                entry - exit_price
-            ) / entry * 100
+            if hit_tp:
 
-        exit_time = (
-            candle["time"]
-        )
+                exit_price = trade["tp"]
+                reason = "TP"
+                exit_time = c["time"]
+                break
 
-        duration = (
-            exit_time
-            - entry_time
-        ) / 60
+        if exit_price is not None:
 
-        conn = db()
+            if trade["side"] == "LONG":
 
-        cursor = conn.execute(
-            """
-            UPDATE trades
-            SET
-                status='CLOSED',
-                result=?,
-                pnl=?,
-                exit_time=?,
-                exit=?,
-                exit_reason=?,
-                duration_minutes=?
-            WHERE id=?
-              AND status='OPEN'
-            """,
-            (
-                result,
-                pnl,
-                exit_time,
+                pnl_pct = (
+                    exit_price -
+                    trade["entry"]
+                ) / trade["entry"] * 100
+
+            else:
+
+                pnl_pct = (
+                    trade["entry"] -
+                    exit_price
+                ) / trade["entry"] * 100
+
+            close_trade(
+                trade["id"],
                 exit_price,
                 reason,
-                duration,
-                trade["id"]
+                exit_time,
+                pnl_pct
             )
+
+            closed.append({
+                "symbol": trade["symbol"],
+                "side": trade["side"],
+                "reason": reason,
+                "pnl_pct": pnl_pct
+            })
+
+    return closed
+
+
+# ============================================================
+# STATS
+# ============================================================
+
+def get_stats():
+
+    conn = db_connection()
+
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM trades
+        WHERE exit_time IS NOT NULL
+    """)
+
+    closed = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM trades
+        WHERE exit_time IS NOT NULL
+          AND pnl_pct > 0
+    """)
+
+    wins = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COUNT(*)
+        FROM trades
+        WHERE exit_time IS NOT NULL
+          AND pnl_pct <= 0
+    """)
+
+    losses = cur.fetchone()[0]
+
+    cur.execute("""
+        SELECT COALESCE(SUM(pnl_pct), 0)
+        FROM trades
+        WHERE exit_time IS NOT NULL
+    """)
+
+    net = cur.fetchone()[0]
+
+    conn.close()
+
+    wr = (
+        wins / closed * 100
+        if closed
+        else 0
+    )
+
+    return {
+        "closed": closed,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": wr,
+        "net": net
+    }
+
+
+# ============================================================
+# CURRENT PRICE
+# ============================================================
+
+def get_current_price(symbol):
+
+    tickers = get_tickers()
+
+    for t in tickers:
+
+        s = (
+            t.get("symbol")
+            or t.get("pair")
+            or t.get("product_id")
         )
 
-        conn.commit()
+        if s != symbol:
+            continue
 
-        updated = cursor.rowcount
+        price = (
+            safe_float(t.get("last"))
+            or safe_float(t.get("markPrice"))
+            or safe_float(t.get("price"))
+        )
 
-        conn.close()
-
-        if updated == 1:
-
-            print(
-                f"✅ CLOSED "
-                f"{trade['symbol']} "
-                f"{side} "
-                f"{result} "
-                f"{pnl:+.2f}% "
-                f"{reason}"
-            )
-
-            return {
-                "result": result,
-                "pnl": pnl,
-                "reason": reason
-            }
-
-        return None
-
-    # ========================================================
-    # VERY IMPORTANT:
-    #
-    # Neither SL nor TP was hit.
-    #
-    # The trade remains OPEN.
-    # ========================================================
+        if price:
+            return price
 
     return None
 
 
 # ============================================================
-# PERFORMANCE
+# P&L
 # ============================================================
 
-def get_performance():
+def live_pnl(trade, current):
 
-    conn = db()
+    if current is None:
+        return 0
 
-    open_count = conn.execute(
-        """
-        SELECT COUNT(*)
-        FROM trades
-        WHERE status='OPEN'
-        """
-    ).fetchone()[0]
+    if trade["side"] == "LONG":
 
-    row = conn.execute(
-        """
-        SELECT
-            COUNT(*) AS total,
+        return (
+            current -
+            trade["entry"]
+        ) / trade["entry"] * 100
 
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN result='WIN'
-                        THEN 1
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS wins,
-
-            COALESCE(
-                SUM(
-                    CASE
-                        WHEN result='LOSS'
-                        THEN 1
-                        ELSE 0
-                    END
-                ),
-                0
-            ) AS losses,
-
-            COALESCE(
-                SUM(pnl),
-                0
-            ) AS net_pnl
-
-        FROM trades
-
-        WHERE status='CLOSED'
-        """
-    ).fetchone()
-
-    conn.close()
-
-    total = row["total"]
-
-    wins = row["wins"]
-
-    losses = row["losses"]
-
-    net_pnl = row["net_pnl"]
-
-    win_rate = (
-        wins / total * 100
-        if total > 0
-        else 0
-    )
-
-    return {
-        "open": open_count,
-        "closed": total,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "net_pnl": net_pnl
-    }
+    return (
+        trade["entry"] -
+        current
+    ) / trade["entry"] * 100
 
 
 # ============================================================
-# BUILD SIGNAL
+# EVALUATE SYMBOL
 # ============================================================
 
 def evaluate_symbol(
@@ -2534,591 +1697,439 @@ def evaluate_symbol(
     diagnostics
 ):
 
-    candles_1h = get_candles(
-        symbol,
-        TF_1H,
-        LOOKBACK_1H
-    )
+    try:
 
-    candles_15m = get_candles(
-        symbol,
-        TF_15M,
-        LOOKBACK_15M
-    )
+        c1h = get_candles(
+            symbol,
+            INTERVAL_1H,
+            150
+        )
 
-    candles_5m = get_candles(
-        symbol,
-        TF_5M,
-        LOOKBACK_5M
-    )
+        c15 = get_candles(
+            symbol,
+            INTERVAL_15M,
+            150
+        )
 
-    if (
-        not candles_1h
-        or not candles_15m
-        or not candles_5m
-    ):
+        c5 = get_candles(
+            symbol,
+            INTERVAL_5M,
+            150
+        )
 
-        diagnostics["ERROR"] += 1
+        if (
+            len(c1h) < 70
+            or len(c15) < 50
+            or len(c5) < 50
+        ):
 
-        return None
+            diagnostics["data_fail"] += 1
 
-    # ========================================================
-    # 1H TREND
-    # ========================================================
+            return None
 
-    trend = trend_1h(
-        candles_1h
-    )
+        trend = trend_1h(c1h)
 
-    side = trend["side"]
+        if trend["direction"] == "NEUTRAL":
 
-    if side is None:
+            diagnostics["trend_neutral"] += 1
 
-        diagnostics["1H NEUTRAL"] += 1
-
-        return None
-
-    diagnostics[
-        f"1H {side}"
-    ] += 1
-
-    # ========================================================
-    # S/R
-    # ========================================================
-
-    (
-        support_zones,
-        resistance_zones
-    ) = build_sr_zones(
-        candles_15m,
-        candles_1h
-    )
-
-    # ========================================================
-    # 15M SETUP
-    # ========================================================
-
-    setup = detect_15m_setup(
-        side,
-        candles_15m,
-        support_zones,
-        resistance_zones
-    )
-
-    if not setup:
-
-        diagnostics["15M SETUP FAIL"] += 1
-
-        return None
-
-    diagnostics["15M SETUP PASS"] += 1
-
-    # ========================================================
-    # 5M STRUCTURE
-    # ========================================================
-
-    structure, reason = find_5m_structure(
-        candles_5m,
-        side,
-        setup["zone"]
-    )
-
-    if structure is None:
+            return None
 
         diagnostics[
-            f"5M {reason}"
+            f"trend_{trend['direction'].lower()}"
         ] += 1
 
-        return None
-
-    diagnostics["5M CONFIRM PASS"] += 1
-
-    # ========================================================
-    # RVOL
-    # ========================================================
-
-    current_rvol = rvol(
-        candles_5m,
-        RVOL_PERIOD
-    )
-
-    if current_rvol < RVOL_NORMAL:
-
-        diagnostics["RVOL FAIL"] += 1
-
-        return None
-
-    diagnostics["RVOL PASS"] += 1
-
-    # ========================================================
-    # ENTRY
-    # ========================================================
-
-    confirmation_candle = (
-        candles_5m[-1]
-    )
-
-    entry = confirmation_candle[
-        "close"
-    ]
-
-    # ========================================================
-    # SL
-    # ========================================================
-
-    sl = calculate_sl(
-        side,
-        entry,
-        candles_5m,
-        setup["zone"]
-    )
-
-    if sl is None:
-
-        diagnostics["SL FAIL"] += 1
-
-        return None
-
-    diagnostics["SL PASS"] += 1
-
-    # ========================================================
-    # TP
-    # ========================================================
-
-    tp_data = select_tp(
-        side,
-        entry,
-        sl,
-        support_zones,
-        resistance_zones
-    )
-
-    if tp_data is None:
-
-        diagnostics["TP FAIL"] += 1
-
-        return None
-
-    diagnostics["TP PASS"] += 1
-
-    # ========================================================
-    # SCORE
-    # ========================================================
-
-    trend_score = min(
-        trend["score"],
-        7
-    )
-
-    setup_score = min(
-        setup["score"],
-        4
-    )
-
-    confirmation_score = 3
-
-    volume_score = 0
-
-    if current_rvol >= RVOL_NORMAL:
-        volume_score += 1
-
-    if current_rvol >= RVOL_STRONG:
-        volume_score += 1
-
-    score = (
-        trend_score
-        + setup_score
-        + confirmation_score
-        + volume_score
-    )
-
-    if score < MIN_SCORE:
-
-        diagnostics["SCORE FAIL"] += 1
-
-        return None
-
-    diagnostics["SCORE PASS"] += 1
-
-    # ========================================================
-    # SIGNAL
-    # ========================================================
-
-    return {
-        "symbol": symbol,
-        "side": side,
-        "setup": setup["setup"],
-        "entry": entry,
-        "sl": sl,
-        "tp": tp_data["tp"],
-        "rr": tp_data["rr"],
-        "rvol": current_rvol,
-        "score": score,
-        "entry_time":
-            confirmation_candle["time"]
-    }
-
-
-# ============================================================
-# REPORT
-# ============================================================
-
-def build_report(
-    signals
-):
-
-    performance = get_performance()
-
-    open_trades = get_open_trades()
-
-    lines = []
-
-    lines.append(
-        f"📊 VOLUME-KHAT 100 {VERSION}"
-    )
-
-    lines.append(
-        "🕐 "
-        + now_utc().strftime(
-            "%Y/%m/%d %H:%M:%S UTC"
+        supports, resistances = get_sr_zones(
+            c15,
+            c1h
         )
-    )
 
-    lines.append(
-        "⚡ Kraken Futures | "
-        "5M CLOSED | TOP 100"
-    )
+        if not supports and not resistances:
 
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
+            diagnostics["sr_fail"] += 1
 
-    # ========================================================
-    # NEW SIGNALS
-    # ========================================================
+            return None
 
-    lines.append(
-        "🎯 NEW SIGNALS"
-    )
+        setup = detect_15m_setup(
+            c15,
+            supports,
+            resistances,
+            trend["direction"]
+        )
 
-    if not signals:
+        if not setup["valid"]:
 
-        lines.append("None")
+            diagnostics["setup_fail"] += 1
 
-    else:
+            return None
 
-        for index, signal in enumerate(
-            signals
+        diagnostics["setup_pass"] += 1
+
+        confirmation = confirmation_5m(
+            c5,
+            setup["level"],
+            trend["direction"]
+        )
+
+        if not confirmation["valid"]:
+
+            diagnostics[
+                "confirmation_fail"
+            ] += 1
+
+            return None
+
+        diagnostics[
+            "confirmation_pass"
+        ] += 1
+
+        volume_points, rv = volume_score(
+            c5
+        )
+
+        if rv >= RVOL_NORMAL:
+            diagnostics["rvol_pass"] += 1
+        else:
+            diagnostics["rvol_soft"] += 1
+
+        # ----------------------------------------------------
+        # SCORE
+        # ----------------------------------------------------
+
+        trend_points = clamp(
+            trend["score"],
+            0,
+            5
+        )
+
+        setup_points = clamp(
+            setup["score"],
+            0,
+            4
+        )
+
+        confirmation_points = clamp(
+            confirmation["score"],
+            0,
+            4
+        )
+
+        score = (
+            trend_points
+            + setup_points
+            + confirmation_points
+            + volume_points
+        )
+
+        diagnostics["score_checked"] += 1
+
+        if score < MIN_SCORE:
+
+            diagnostics["score_fail"] += 1
+
+            return None
+
+        diagnostics["score_pass"] += 1
+
+        # ----------------------------------------------------
+        # ENTRY
+        # ----------------------------------------------------
+
+        entry = c5[-1]["close"]
+
+        sl_data = calculate_sl(
+            c5,
+            entry,
+            trend["direction"]
+        )
+
+        if not sl_data:
+
+            diagnostics["sl_fail"] += 1
+
+            return None
+
+        if not (
+            MIN_SL_PCT
+            <= sl_data["pct"]
+            <= MAX_SL_PCT
         ):
 
-            emoji = (
-                "🟢"
-                if signal["side"] == "LONG"
-                else "🔴"
-            )
+            diagnostics["sl_fail"] += 1
 
-            sl_pct = pct_distance(
-                signal["entry"],
-                signal["sl"]
-            )
+            return None
 
-            tp_pct = pct_distance(
-                signal["entry"],
-                signal["tp"]
-            )
+        diagnostics["sl_pass"] += 1
 
-            lines.append(
-                f"{emoji} "
-                f"{signal['symbol']} "
-                f"{signal['side']}"
-            )
+        tp_data = calculate_tp(
+            entry,
+            sl_data["price"],
+            trend["direction"],
+            supports,
+            resistances
+        )
 
-            lines.append(
-                f"Entry: "
-                f"{format_price(signal['entry'])}"
-            )
+        if not tp_data:
 
-            lines.append(
-                f"SL: "
-                f"{format_price(signal['sl'])} "
-                f"({sl_pct:.2f}%)"
-            )
+            diagnostics["tp_fail"] += 1
 
-            lines.append(
-                f"TP: "
-                f"{format_price(signal['tp'])} "
-                f"({tp_pct:.2f}%)"
-            )
+            return None
 
-            lines.append(
-                f"RR: "
-                f"{signal['rr']:.2f}"
-            )
+        diagnostics["tp_pass"] += 1
 
-            lines.append(
-                f"Score: "
-                f"{signal['score']}/16"
-            )
+        if tp_data["rr"] < MIN_RR:
 
-            if index < len(signals) - 1:
+            diagnostics["rr_fail"] += 1
 
-                lines.append(
-                    "━━━━━━━━━━━━━━━━━━"
-                )
+            return None
 
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
+        diagnostics["rr_pass"] += 1
 
-    # ========================================================
-    # OPEN TRADES
-    # ========================================================
+        return {
+            "symbol": symbol,
+            "side": trend["direction"],
+            "entry": entry,
+            "sl": sl_data["price"],
+            "sl_pct": sl_data["pct"],
+            "tp": tp_data["price"],
+            "tp_pct": tp_data["pct"],
+            "rr": tp_data["rr"],
+            "score": int(score),
+            "trend_score": int(trend_points),
+            "setup_score": int(setup_points),
+            "confirmation_score": int(
+                confirmation_points
+            ),
+            "rvol": rv,
+            "setup_type": setup["type"],
+            "confirmation_type": confirmation["type"],
+            "entry_time": c5[-1]["time"]
+        }
 
-    lines.append(
-        "📂 OPEN TRADES "
-        f"({performance['open']}/"
-        f"{MAX_OPEN_TRADES})"
-    )
+    except Exception as e:
 
-    if not open_trades:
+        diagnostics["errors"] += 1
 
-        lines.append("None")
+        print(
+            f"[ERROR] {symbol}: {e}"
+        )
 
-    else:
+        traceback.print_exc()
 
-        for index, trade in enumerate(
-            open_trades
-        ):
-
-            current = get_current_price(
-                trade["symbol"]
-            )
-
-            if current is None:
-
-                current = safe_float(
-                    trade["entry"]
-                )
-
-            if trade["side"] == "LONG":
-
-                pnl = (
-                    current
-                    - trade["entry"]
-                ) / trade["entry"] * 100
-
-                emoji = "🟢"
-
-            else:
-
-                pnl = (
-                    trade["entry"]
-                    - current
-                ) / trade["entry"] * 100
-
-                emoji = "🔴"
-
-            sl_pct = pct_distance(
-                trade["entry"],
-                trade["sl"]
-            )
-
-            tp_pct = pct_distance(
-                trade["entry"],
-                trade["tp"]
-            )
-
-            lines.append(
-                f"{emoji} "
-                f"{trade['symbol']} "
-                f"{trade['side']}"
-            )
-
-            lines.append(
-                f"Entry: "
-                f"{format_price(trade['entry'])}"
-            )
-
-            lines.append(
-                f"Current: "
-                f"{format_price(current)} "
-                f"({pnl:+.2f}%)"
-            )
-
-            lines.append(
-                f"P&L: "
-                f"{pnl:+.2f}%"
-            )
-
-            lines.append(
-                f"SL: "
-                f"{format_price(trade['sl'])} "
-                f"({sl_pct:.2f}%)"
-            )
-
-            lines.append(
-                f"TP: "
-                f"{format_price(trade['tp'])} "
-                f"({tp_pct:.2f}%)"
-            )
-
-            lines.append(
-                f"RR: "
-                f"{safe_float(trade['rr']):.2f}"
-            )
-
-            if index < len(open_trades) - 1:
-
-                lines.append(
-                    "━━━━━━━━━━━━━━━━━━"
-                )
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    # ========================================================
-    # STATS
-    # ========================================================
-
-    lines.append(
-        f"📈 STATS {VERSION}"
-    )
-
-    lines.append(
-        f"Open: "
-        f"{performance['open']}"
-    )
-
-    lines.append(
-        f"Closed: "
-        f"{performance['closed']}"
-    )
-
-    lines.append(
-        f"Wins: "
-        f"{performance['wins']}"
-    )
-
-    lines.append(
-        f"Losses: "
-        f"{performance['losses']}"
-    )
-
-    lines.append(
-        f"Win Rate: "
-        f"{performance['win_rate']:.1f}%"
-    )
-
-    lines.append(
-        f"Net PnL: "
-        f"{performance['net_pnl']:+.2f}%"
-    )
-
-    lines.append(
-        "━━━━━━━━━━━━━━━━━━"
-    )
-
-    lines.append(
-        "Real trading: DISABLED"
-    )
-
-    return "\n".join(lines)
+        return None
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN",
-    ""
-)
-
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    ""
-)
-
-
 def send_telegram(text):
 
-    if not TELEGRAM_BOT_TOKEN:
+    token = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID")
 
-        print(
-            "❌ TELEGRAM_BOT_TOKEN missing"
-        )
-
-        return False
-
-    if not TELEGRAM_CHAT_ID:
-
-        print(
-            "❌ TELEGRAM_CHAT_ID missing"
-        )
-
-        return False
+    if not token or not chat_id:
+        print("[TELEGRAM] credentials missing")
+        return
 
     url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        f"https://api.telegram.org/"
+        f"bot{token}/sendMessage"
     )
 
-    max_length = 3900
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
 
-    chunks = [
-        text[i:i + max_length]
-        for i in range(
-            0,
-            len(text),
-            max_length
+    try:
+
+        r = session.post(
+            url,
+            json=payload,
+            timeout=REQUEST_TIMEOUT
         )
-    ]
 
-    success = True
+        print(
+            f"[TELEGRAM] {r.status_code}"
+        )
 
-    for chunk in chunks:
+    except Exception as e:
 
-        try:
+        print(
+            f"[TELEGRAM ERROR] {e}"
+        )
 
-            response = SESSION.post(
-                url,
-                data={
-                    "chat_id":
-                        TELEGRAM_CHAT_ID,
-                    "text": chunk
-                },
-                timeout=20
+
+# ============================================================
+# FORMAT SIGNAL
+# ============================================================
+
+def format_signal(t):
+
+    emoji = (
+        "🟢"
+        if t["side"] == "LONG"
+        else "🔴"
+    )
+
+    return (
+        f"{emoji} {t['symbol']} "
+        f"{t['side']}\n"
+        f"Entry: {t['entry']:.8g}\n"
+        f"SL: {t['sl']:.8g} "
+        f"(-{t['sl_pct']:.2f}%)\n"
+        f"TP: {t['tp']:.8g} "
+        f"(+{t['tp_pct']:.2f}%)\n"
+        f"RR: 1:{t['rr']:.2f}\n"
+        f"Score: {t['score']}/15\n"
+        f"Setup: {t['setup_type']}\n"
+        f"5M: {t['confirmation_type']}\n"
+        f"RVOL: {t['rvol']:.2f}"
+    )
+
+
+# ============================================================
+# TELEGRAM REPORT
+# ============================================================
+
+def build_report(
+    new_signals,
+    open_trades,
+    stats
+):
+
+    lines = []
+
+    lines.append(
+        f"📊 VOLUME-KHAT 100 v{VERSION}"
+    )
+
+    lines.append(
+        f"🕐 {now_str()}"
+    )
+
+    lines.append(
+        "⚡ Kraken Futures | 5M CLOSED | TOP 100"
+    )
+
+    lines.append("")
+
+    # --------------------------------------------------------
+    # NEW SIGNALS
+    # --------------------------------------------------------
+
+    lines.append("🎯 NEW SIGNALS")
+
+    if new_signals:
+
+        for t in new_signals:
+
+            lines.append(
+                format_signal(t)
             )
 
-            if response.status_code != 200:
+            lines.append("")
 
-                print(
-                    "❌ Telegram error "
-                    f"{response.status_code}"
-                )
+    else:
 
-                print(
-                    response.text[:500]
-                )
+        lines.append("None")
 
-                success = False
+    # --------------------------------------------------------
+    # OPEN TRADES
+    # --------------------------------------------------------
 
-            else:
+    lines.append(
+        f"📂 OPEN TRADES "
+        f"({len(open_trades)}/{MAX_OPEN_TRADES})"
+    )
 
-                print(
-                    "📨 Telegram sent"
-                )
+    if open_trades:
 
-        except Exception as e:
+        for trade in open_trades:
 
-            print(
-                f"❌ Telegram exception: {e}"
+            current = get_current_price(
+                trade["symbol"]
             )
 
-            success = False
+            pnl = live_pnl(
+                trade,
+                current
+            )
 
-    return success
+            emoji = (
+                "🟢"
+                if trade["side"] == "LONG"
+                else "🔴"
+            )
+
+            current_text = (
+                f"{current:.8g}"
+                if current is not None
+                else "N/A"
+            )
+
+            lines.append(
+                f"{emoji} {trade['symbol']} "
+                f"{trade['side']}"
+            )
+
+            lines.append(
+                f"Entry: {trade['entry']:.8g}"
+            )
+
+            lines.append(
+                f"Current: {current_text} "
+                f"({pnl:+.2f}%)"
+            )
+
+            lines.append(
+                f"SL: {trade['sl']:.8g}"
+            )
+
+            lines.append(
+                f"TP: {trade['tp']:.8g}"
+            )
+
+            lines.append("")
+
+    else:
+
+        lines.append("None")
+
+    # --------------------------------------------------------
+    # STATS
+    # --------------------------------------------------------
+
+    lines.append("📈 STATS")
+
+    lines.append(
+        f"Closed: {stats['closed']}"
+    )
+
+    lines.append(
+        f"Wins: {stats['wins']}"
+    )
+
+    lines.append(
+        f"Losses: {stats['losses']}"
+    )
+
+    lines.append(
+        f"Win Rate: {stats['win_rate']:.1f}%"
+    )
+
+    lines.append(
+        f"Net PnL: {stats['net']:+.2f}%"
+    )
+
+    lines.append("")
+
+    lines.append(
+        "Real trading: DISABLED"
+    )
+
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -3131,271 +2142,352 @@ def print_diagnostics(
 ):
 
     print("")
-    print(
-        "=============================="
-    )
-
-    print(
-        f"VOLUME-KHAT {VERSION} DIAGNOSTICS"
-    )
-
-    print(
-        "=============================="
-    )
+    print("=" * 60)
+    print(f"VOLUME-KHAT {VERSION} DIAGNOSTICS")
+    print("=" * 60)
 
     print(
         f"Scanned: {scanned}"
     )
 
-    ordered = [
-        "1H LONG",
-        "1H SHORT",
-        "1H NEUTRAL",
-        "15M SETUP PASS",
-        "15M SETUP FAIL",
-        "5M CONFIRM PASS",
-        "5M NO_FRESH_BREAKOUT",
-        "5M NO_PULLBACK",
-        "5M WAITING_CONFIRMATION",
-        "5M CONFIRMATION_TOO_OLD",
-        "5M CONFIRMATION_NOT_BULLISH",
-        "5M CONFIRMATION_NOT_BEARISH",
-        "5M CONFIRMATION_BELOW_BREAKOUT_LEVEL",
-        "5M CONFIRMATION_ABOVE_BREAKOUT_LEVEL",
-        "5M CONFIRMATION_NO_MOMENTUM",
-        "5M WEAK_CONFIRMATION_CANDLE",
-        "RVOL PASS",
-        "RVOL FAIL",
-        "SL PASS",
-        "SL FAIL",
-        "TP PASS",
-        "TP FAIL",
-        "SCORE PASS",
-        "SCORE FAIL",
-        "ERROR"
-    ]
-
-    for key in ordered:
-
-        value = diagnostics.get(
-            key,
-            0
-        )
-
-        if value:
-
-            print(
-                f"{key}: {value}"
-            )
+    print(
+        f"1H LONG: "
+        f"{diagnostics['trend_long']}"
+    )
 
     print(
-        "=============================="
+        f"1H SHORT: "
+        f"{diagnostics['trend_short']}"
     )
-
-
-# ============================================================
-# SCAN
-# ============================================================
-
-def scan():
-
-    init_db()
-
-    symbols = get_top_symbols()
-
-    diagnostics = {}
-
-    def inc(key):
-
-        diagnostics[key] = (
-            diagnostics.get(key, 0)
-            + 1
-        )
-
-    # ========================================================
-    # EXISTING OPEN TRADES
-    # ========================================================
-
-    open_before = get_open_trades()
 
     print(
-        f"Existing OPEN trades: "
-        f"{len(open_before)}"
+        f"1H NEUTRAL: "
+        f"{diagnostics['trend_neutral']}"
     )
 
-    for trade in open_before:
-
-        candles = get_candles(
-            trade["symbol"],
-            TF_5M,
-            LOOKBACK_5M
-        )
-
-        if not candles:
-            continue
-
-        process_open_trade(
-            trade,
-            candles
-        )
-
-    # ========================================================
-    # REFRESH OPEN TRADES
-    # ========================================================
-
-    open_trades = get_open_trades()
-
-    open_symbols = {
-        trade["symbol"]
-        for trade in open_trades
-    }
-
-    open_count = len(
-        open_trades
+    print(
+        f"Data fail: "
+        f"{diagnostics['data_fail']}"
     )
 
-    # ========================================================
-    # SIGNALS
-    # ========================================================
-
-    signals = []
-
-    for symbol in symbols:
-
-        if (
-            open_count
-            >= MAX_OPEN_TRADES
-        ):
-
-            break
-
-        if (
-            len(signals)
-            >= MAX_NEW_SIGNALS
-        ):
-
-            break
-
-        if symbol in open_symbols:
-
-            inc(
-                "ALREADY OPEN"
-            )
-
-            continue
-
-        if in_cooldown(symbol):
-
-            inc(
-                "COOLDOWN"
-            )
-
-            continue
-
-        try:
-
-            signal = evaluate_symbol(
-                symbol,
-                diagnostics
-            )
-
-            if signal is None:
-                continue
-
-            # =================================================
-            # SAVE
-            # =================================================
-
-            save_trade(
-                signal
-            )
-
-            signals.append(
-                signal
-            )
-
-            open_symbols.add(
-                symbol
-            )
-
-            open_count += 1
-
-            print(
-                "🎯 SIGNAL "
-                f"{signal['symbol']} "
-                f"{signal['side']} "
-                f"Entry="
-                f"{format_price(signal['entry'])} "
-                f"SL="
-                f"{format_price(signal['sl'])} "
-                f"TP="
-                f"{format_price(signal['tp'])} "
-                f"RR="
-                f"{signal['rr']:.2f} "
-                f"RVOL="
-                f"{signal['rvol']:.2f} "
-                f"Score="
-                f"{signal['score']}/16"
-            )
-
-        except Exception as e:
-
-            inc("ERROR")
-
-            print(
-                f"❌ {symbol}: {e}"
-            )
-
-    # ========================================================
-    # DIAGNOSTICS
-    # ========================================================
-
-    print_diagnostics(
-        diagnostics,
-        len(symbols)
+    print(
+        f"S/R fail: "
+        f"{diagnostics['sr_fail']}"
     )
 
-    # ========================================================
-    # REPORT
-    # ========================================================
-
-    report = build_report(
-        signals
+    print(
+        f"15M setup PASS: "
+        f"{diagnostics['setup_pass']}"
     )
 
-    print("")
-    print(report)
-
-    send_telegram(
-        report
+    print(
+        f"15M setup FAIL: "
+        f"{diagnostics['setup_fail']}"
     )
+
+    print(
+        f"5M confirmation PASS: "
+        f"{diagnostics['confirmation_pass']}"
+    )
+
+    print(
+        f"5M confirmation FAIL: "
+        f"{diagnostics['confirmation_fail']}"
+    )
+
+    print(
+        f"RVOL >= {RVOL_NORMAL}: "
+        f"{diagnostics['rvol_pass']}"
+    )
+
+    print(
+        f"RVOL soft: "
+        f"{diagnostics['rvol_soft']}"
+    )
+
+    print(
+        f"Score checked: "
+        f"{diagnostics['score_checked']}"
+    )
+
+    print(
+        f"Score >= {MIN_SCORE}: "
+        f"{diagnostics['score_pass']}"
+    )
+
+    print(
+        f"Score fail: "
+        f"{diagnostics['score_fail']}"
+    )
+
+    print(
+        f"SL pass: "
+        f"{diagnostics['sl_pass']}"
+    )
+
+    print(
+        f"SL fail: "
+        f"{diagnostics['sl_fail']}"
+    )
+
+    print(
+        f"TP pass: "
+        f"{diagnostics['tp_pass']}"
+    )
+
+    print(
+        f"TP fail: "
+        f"{diagnostics['tp_fail']}"
+    )
+
+    print(
+        f"RR pass: "
+        f"{diagnostics['rr_pass']}"
+    )
+
+    print(
+        f"RR fail: "
+        f"{diagnostics['rr_fail']}"
+    )
+
+    print(
+        f"Errors: "
+        f"{diagnostics['errors']}"
+    )
+
+    print("=" * 60)
 
 
 # ============================================================
 # MAIN
 # ============================================================
 
+def main():
+
+    print("")
+    print("=" * 60)
+    print(
+        f"KRAKEN FUTURES VOLUME-KHAT 100 v{VERSION}"
+    )
+    print(now_str())
+    print("=" * 60)
+
+    init_db()
+
+    # --------------------------------------------------------
+    # First process existing trades.
+    # --------------------------------------------------------
+
+    closed = process_open_trades()
+
+    if closed:
+
+        print(
+            f"[CLOSED] {len(closed)} trades"
+        )
+
+        for t in closed:
+
+            print(
+                f"{t['symbol']} "
+                f"{t['side']} "
+                f"{t['reason']} "
+                f"{t['pnl_pct']:+.2f}%"
+            )
+
+    # --------------------------------------------------------
+    # Existing open trades
+    # --------------------------------------------------------
+
+    open_trades = get_open_trades()
+
+    print(
+        f"[OPEN] {len(open_trades)}/"
+        f"{MAX_OPEN_TRADES}"
+    )
+
+    # --------------------------------------------------------
+    # Top 100
+    # --------------------------------------------------------
+
+    symbols = get_top_symbols()
+
+    print(
+        f"[TOP] {len(symbols)} symbols"
+    )
+
+    diagnostics = {
+        "trend_long": 0,
+        "trend_short": 0,
+        "trend_neutral": 0,
+
+        "data_fail": 0,
+        "sr_fail": 0,
+
+        "setup_pass": 0,
+        "setup_fail": 0,
+
+        "confirmation_pass": 0,
+        "confirmation_fail": 0,
+
+        "rvol_pass": 0,
+        "rvol_soft": 0,
+
+        "score_checked": 0,
+        "score_pass": 0,
+        "score_fail": 0,
+
+        "sl_pass": 0,
+        "sl_fail": 0,
+
+        "tp_pass": 0,
+        "tp_fail": 0,
+
+        "rr_pass": 0,
+        "rr_fail": 0,
+
+        "errors": 0
+    }
+
+    candidates = []
+
+    # --------------------------------------------------------
+    # Scan
+    # --------------------------------------------------------
+
+    for item in symbols:
+
+        if len(open_trades) >= MAX_OPEN_TRADES:
+            break
+
+        symbol = item["symbol"]
+
+        # Existing position on same symbol
+        if any(
+            x["symbol"] == symbol
+            for x in open_trades
+        ):
+            continue
+
+        if recently_traded(symbol):
+            continue
+
+        result = evaluate_symbol(
+            symbol,
+            diagnostics
+        )
+
+        if result:
+            candidates.append(result)
+
+    # --------------------------------------------------------
+    # Rank candidates
+    # --------------------------------------------------------
+
+    candidates.sort(
+        key=lambda x: (
+            x["score"],
+            x["rr"],
+            x["rvol"]
+        ),
+        reverse=True
+    )
+
+    # --------------------------------------------------------
+    # Create new trades
+    # --------------------------------------------------------
+
+    new_signals = []
+
+    slots = (
+        MAX_OPEN_TRADES -
+        len(open_trades)
+    )
+
+    slots = max(
+        0,
+        min(
+            slots,
+            MAX_NEW_SIGNALS
+        )
+    )
+
+    for candidate in candidates[:slots]:
+
+        # Double-check same symbol
+        if any(
+            x["symbol"] ==
+            candidate["symbol"]
+            for x in open_trades
+        ):
+            continue
+
+        insert_trade(candidate)
+
+        new_signals.append(
+            candidate
+        )
+
+        open_trades.append({
+            "id": None,
+            "symbol": candidate["symbol"],
+            "side": candidate["side"],
+            "entry": candidate["entry"],
+            "sl": candidate["sl"],
+            "tp": candidate["tp"],
+            "entry_time": candidate["entry_time"],
+            "score": candidate["score"],
+            "setup_type": candidate["setup_type"],
+            "confirmation_type": candidate[
+                "confirmation_type"
+            ],
+            "rvol": candidate["rvol"]
+        })
+
+    # --------------------------------------------------------
+    # Stats
+    # --------------------------------------------------------
+
+    stats = get_stats()
+
+    # --------------------------------------------------------
+    # Report
+    # --------------------------------------------------------
+
+    report = build_report(
+        new_signals,
+        open_trades,
+        stats
+    )
+
+    print("")
+    print(report)
+    print("")
+
+    print_diagnostics(
+        diagnostics,
+        len(symbols)
+    )
+
+    send_telegram(report)
+
+
+# ============================================================
+# ENTRY
+# ============================================================
+
 if __name__ == "__main__":
 
     try:
 
-        scan()
+        main()
 
     except Exception as e:
 
         print(
-            f"❌ FATAL ERROR: {e}"
+            f"[FATAL ERROR] {e}"
         )
 
-        try:
-
-            send_telegram(
-                f"❌ VOLUME-KHAT {VERSION}\n"
-                f"Fatal scanner error:\n"
-                f"{e}"
-            )
-
-        except Exception:
-            pass
+        traceback.print_exc()
 
         raise
