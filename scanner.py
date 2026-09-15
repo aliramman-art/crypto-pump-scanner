@@ -29,6 +29,7 @@
 # - Max 3 new signals
 # - Persistent SQLite
 # - Closed trades never deleted
+# - Open trades persist between GitHub Actions runs
 # - DB close operation verified
 # - Compact Telegram
 # - TOP CANDIDATE shown when there is no new signal
@@ -352,8 +353,10 @@ def body_pct(c):
         abs(
             c["close"] - c["open"]
         )
-        / c["open"]
-        * 100.0
+        /
+        c["open"]
+        *
+        100.0
     )
 
 
@@ -402,8 +405,10 @@ def near_level(
 
     return (
         abs(price - level)
-        / level
-        * 100.0
+        /
+        level
+        *
+        100.0
         <= tolerance_pct
     )
 
@@ -1397,8 +1402,7 @@ def analyze_5m_confirmation(
         BREAKOUT_LOOKBACK
         +
         RETEST_WINDOW
-        +
-        3
+        + 3
     )
 
     if len(candles) < minimum:
@@ -1418,8 +1422,7 @@ def analyze_5m_confirmation(
         CONFIRMATION_WINDOW
         -
         RETEST_WINDOW
-        -
-        2
+        - 2
     )
 
     if direction == "LONG":
@@ -1542,9 +1545,7 @@ def analyze_5m_confirmation(
                 ):
 
                     retest_idx = i
-
                     found_retest = True
-
                     break
 
             if retest_idx is None:
@@ -1577,7 +1578,6 @@ def analyze_5m_confirmation(
                 if confirmation_candle_long(c):
 
                     score += 1
-
                     reasons.append(
                         "BULLISH_CONFIRM"
                     )
@@ -1589,7 +1589,6 @@ def analyze_5m_confirmation(
                 ):
 
                     score += 1
-
                     reasons.append(
                         "CLOSE_ABOVE_BREAKOUT"
                     )
@@ -1603,7 +1602,6 @@ def analyze_5m_confirmation(
                 ):
 
                     score += 1
-
                     reasons.append(
                         "HIGHER_CLOSE"
                     )
@@ -1617,7 +1615,6 @@ def analyze_5m_confirmation(
                 ):
 
                     score += 1
-
                     reasons.append(
                         "HOLDING_LOW"
                     )
@@ -1810,9 +1807,7 @@ def analyze_5m_confirmation(
                 ):
 
                     retest_idx = i
-
                     found_retest = True
-
                     break
 
             if retest_idx is None:
@@ -1845,7 +1840,6 @@ def analyze_5m_confirmation(
                 if confirmation_candle_short(c):
 
                     score += 1
-
                     reasons.append(
                         "BEARISH_CONFIRM"
                     )
@@ -1857,7 +1851,6 @@ def analyze_5m_confirmation(
                 ):
 
                     score += 1
-
                     reasons.append(
                         "CLOSE_BELOW_BREAKDOWN"
                     )
@@ -1871,7 +1864,6 @@ def analyze_5m_confirmation(
                 ):
 
                     score += 1
-
                     reasons.append(
                         "LOWER_CLOSE"
                     )
@@ -1885,7 +1877,6 @@ def analyze_5m_confirmation(
                 ):
 
                     score += 1
-
                     reasons.append(
                         "HOLDING_HIGH"
                     )
@@ -2148,7 +2139,6 @@ def calculate_trade_levels(
                 continue
 
             if reward_pct > MAX_TP_PCT:
-
                 continue
 
             rr = (
@@ -2439,6 +2429,11 @@ def db_connect():
 
     conn.row_factory = sqlite3.Row
 
+    # Prevent "database is locked" during GitHub Actions.
+    conn.execute(
+        "PRAGMA busy_timeout = 30000"
+    )
+
     return conn
 
 
@@ -2531,10 +2526,25 @@ def init_db():
 
     conn.commit()
 
+    # ========================================================
+    # IMPORTANT:
+    #
+    # Do NOT use WAL for this GitHub Actions setup.
+    #
+    # WAL creates:
+    #   volume_khat_100_v78.db-wal
+    #   volume_khat_100_v78.db-shm
+    #
+    # GitHub persistence only commits the .db file.
+    #
+    # DELETE journal mode keeps the committed database state
+    # inside the .db file itself.
+    # ========================================================
+
     try:
 
         cur.execute(
-            "PRAGMA journal_mode=WAL"
+            "PRAGMA wal_checkpoint(TRUNCATE)"
         )
 
         conn.commit()
@@ -2542,10 +2552,29 @@ def init_db():
     except Exception:
         pass
 
+    try:
+
+        cur.execute(
+            "PRAGMA journal_mode=DELETE"
+        )
+
+        conn.commit()
+
+    except Exception as e:
+
+        print(
+            f"[DB JOURNAL WARNING] {e}"
+        )
+
     conn.close()
 
     print(
         f"[DB] Ready: {DB_FILE}"
+    )
+
+    print(
+        f"[DB] Absolute path: "
+        f"{os.path.abspath(DB_FILE)}"
     )
 
 
@@ -2738,194 +2767,217 @@ def update_open_trades():
 
     conn = db_connect()
 
-    for trade in open_trades:
+    try:
 
-        symbol = trade["symbol"]
+        for trade in open_trades:
 
-        candles = get_candles(
-            symbol,
-            TF_5M,
-            limit=180
-        )
+            symbol = trade["symbol"]
 
-        if not candles:
-
-            print(
-                f"[DB HOLD] "
-                f"{symbol}: no candles"
+            candles = get_candles(
+                symbol,
+                TF_5M,
+                limit=180
             )
 
-            continue
+            if not candles:
 
-        entry_time = int(
-            trade["entry_time"]
-        )
+                print(
+                    f"[DB HOLD] "
+                    f"{symbol}: no candles"
+                )
 
-        relevant = [
-            c
-            for c in candles
-            if (
-                c["time"]
-                +
-                TF_SECONDS[TF_5M]
-                >
-                entry_time
-            )
-        ]
+                continue
 
-        if not relevant:
-
-            print(
-                f"[DB HOLD] "
-                f"{symbol}: "
-                f"no candle after entry"
+            entry_time = int(
+                trade["entry_time"]
             )
 
-            continue
-
-        direction = trade["direction"]
-
-        sl = float(trade["sl"])
-        tp = float(trade["tp"])
-        entry = float(trade["entry"])
-
-        exit_price = None
-        exit_reason = None
-        exit_time = None
-
-        for c in relevant:
-
-            high = c["high"]
-            low = c["low"]
-
-            if direction == "LONG":
-
-                hit_sl = (
-                    low <= sl
-                )
-
-                hit_tp = (
-                    high >= tp
-                )
-
-                if hit_sl:
-
-                    exit_price = sl
-                    exit_reason = "SL"
-
-                elif hit_tp:
-
-                    exit_price = tp
-                    exit_reason = "TP"
-
-            else:
-
-                hit_sl = (
-                    high >= sl
-                )
-
-                hit_tp = (
-                    low <= tp
-                )
-
-                if hit_sl:
-
-                    exit_price = sl
-                    exit_reason = "SL"
-
-                elif hit_tp:
-
-                    exit_price = tp
-                    exit_reason = "TP"
-
-            if exit_reason:
-
-                exit_time = (
+            # Only candles whose CLOSE is after
+            # the recorded entry time are allowed
+            # to resolve the trade.
+            relevant = [
+                c
+                for c in candles
+                if (
                     c["time"]
                     +
                     TF_SECONDS[TF_5M]
+                    >
+                    entry_time
+                )
+            ]
+
+            if not relevant:
+
+                print(
+                    f"[DB HOLD] "
+                    f"{symbol}: "
+                    f"no candle after entry"
                 )
 
-                break
+                continue
 
-        if exit_reason is None:
+            direction = trade["direction"]
 
-            print(
-                f"[DB HOLD] "
-                f"{symbol} "
-                f"{direction}"
-            )
+            sl = float(trade["sl"])
+            tp = float(trade["tp"])
+            entry = float(trade["entry"])
 
-            continue
+            exit_price = None
+            exit_reason = None
+            exit_time = None
 
-        if direction == "LONG":
+            for c in relevant:
 
-            pnl = (
-                exit_price - entry
-            ) / entry * 100
+                high = c["high"]
+                low = c["low"]
 
-        else:
+                if direction == "LONG":
 
-            pnl = (
-                entry - exit_price
-            ) / entry * 100
+                    hit_sl = (
+                        low <= sl
+                    )
 
-        cur = conn.cursor()
+                    hit_tp = (
+                        high >= tp
+                    )
 
-        cur.execute("""
-            UPDATE trades
-            SET
-                exit_time = ?,
-                exit_price = ?,
-                exit_reason = ?,
-                pnl_pct = ?,
-                status = 'CLOSED'
-            WHERE id = ?
-              AND status = 'OPEN'
-        """, (
-            exit_time,
-            exit_price,
-            exit_reason,
-            pnl,
-            trade["id"],
-        ))
+                    # If both SL and TP are inside
+                    # the same candle, SL has priority.
+                    if hit_sl:
 
-        updated = cur.rowcount
+                        exit_price = sl
+                        exit_reason = "SL"
 
-        if updated == 1:
+                    elif hit_tp:
 
-            DIAG[
-                "db_close_ok"
-            ] += 1
+                        exit_price = tp
+                        exit_reason = "TP"
 
-            print(
-                f"[CLOSE] "
-                f"id={trade['id']} "
-                f"{symbol} "
-                f"{direction} "
-                f"reason={exit_reason} "
-                f"entry={entry:.8f} "
-                f"exit={exit_price:.8f} "
-                f"pnl={pnl:+.4f}%"
-            )
+                elif direction == "SHORT":
 
-        else:
+                    hit_sl = (
+                        high >= sl
+                    )
 
-            DIAG[
-                "db_close_fail"
-            ] += 1
+                    hit_tp = (
+                        low <= tp
+                    )
 
-            print(
-                f"[DB CLOSE ERROR] "
-                f"id={trade['id']} "
-                f"{symbol}: "
-                f"UPDATE affected "
-                f"{updated} rows"
-            )
+                    # If both SL and TP are inside
+                    # the same candle, SL has priority.
+                    if hit_sl:
 
-    conn.commit()
+                        exit_price = sl
+                        exit_reason = "SL"
 
-    conn.close()
+                    elif hit_tp:
+
+                        exit_price = tp
+                        exit_reason = "TP"
+
+                if exit_reason:
+
+                    exit_time = (
+                        c["time"]
+                        +
+                        TF_SECONDS[TF_5M]
+                    )
+
+                    break
+
+            # ------------------------------------------------
+            # CRITICAL:
+            #
+            # If neither SL nor TP was hit,
+            # the trade remains OPEN.
+            #
+            # There is NO time exit.
+            # There is NO DELETE.
+            # ------------------------------------------------
+
+            if exit_reason is None:
+
+                print(
+                    f"[DB HOLD] "
+                    f"{symbol} "
+                    f"{direction} "
+                    f"SL={sl:.8f} "
+                    f"TP={tp:.8f}"
+                )
+
+                continue
+
+            if direction == "LONG":
+
+                pnl = (
+                    exit_price - entry
+                ) / entry * 100
+
+            else:
+
+                pnl = (
+                    entry - exit_price
+                ) / entry * 100
+
+            cur = conn.cursor()
+
+            cur.execute("""
+                UPDATE trades
+                SET
+                    exit_time = ?,
+                    exit_price = ?,
+                    exit_reason = ?,
+                    pnl_pct = ?,
+                    status = 'CLOSED'
+                WHERE id = ?
+                  AND status = 'OPEN'
+            """, (
+                exit_time,
+                exit_price,
+                exit_reason,
+                pnl,
+                trade["id"],
+            ))
+
+            updated = cur.rowcount
+
+            if updated == 1:
+
+                DIAG[
+                    "db_close_ok"
+                ] += 1
+
+                print(
+                    f"[CLOSE] "
+                    f"id={trade['id']} "
+                    f"{symbol} "
+                    f"{direction} "
+                    f"reason={exit_reason} "
+                    f"entry={entry:.8f} "
+                    f"exit={exit_price:.8f} "
+                    f"pnl={pnl:+.4f}%"
+                )
+
+            else:
+
+                DIAG[
+                    "db_close_fail"
+                ] += 1
+
+                print(
+                    f"[DB CLOSE ERROR] "
+                    f"id={trade['id']} "
+                    f"{symbol}: "
+                    f"UPDATE affected "
+                    f"{updated} rows"
+                )
+
+        conn.commit()
+
+    finally:
+
+        conn.close()
 
     print_db_state()
 
@@ -3635,7 +3687,7 @@ def main():
     print_db_state()
 
     # ========================================================
-    # UPDATE OPEN TRADES
+    # UPDATE OPEN TRADES FIRST
     # ========================================================
 
     update_open_trades()
@@ -4098,7 +4150,6 @@ def main():
         # ----------------------------------------------------
 
         if slots <= 0:
-
             break
 
         new_signals.append(
