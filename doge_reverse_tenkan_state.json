@@ -1,8 +1,16 @@
 {
-  "active_trade": null,
-  "last_signal_candle": null,
+  "active_trade": {
+    "side": "SHORT",
+    "score": 8,
+    "entry": 0.08196,
+    "tp": 0.081275,
+    "sl": 0.08359920000000001,
+    "tenkan": 0.081275,
+    "timestamp": "2026-09-15T15:25:00+00:00"
+  },
+  "last_signal_candle": "2026-09-15T15:25:00+00:00",
   "last_status_candle": null,
-  "signals_total": 0,
+  "signals_total": 1,
   "wins": 0,
   "losses": 0,
   "timeouts": 0,
