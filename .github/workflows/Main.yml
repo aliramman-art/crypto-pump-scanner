@@ -1,4 +1,4 @@
-name: VOLUME-KHAT 100 v7.6
+name: VOLUME-KHAT 100 v7.8
 
 on:
   schedule:
@@ -6,8 +6,13 @@ on:
 
   workflow_dispatch:
 
+# ============================================================
+# IMPORTANT:
+# Only one scanner run may access the SQLite database at a time.
+# ============================================================
+
 concurrency:
-  group: volume-khat-v76
+  group: volume-khat-v78
   cancel-in-progress: false
 
 permissions:
@@ -28,6 +33,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
 
       # ======================================================
       # PYTHON
@@ -44,21 +50,46 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -e
+
           python -m pip install --upgrade pip
           pip install requests numpy
+
+      # ======================================================
+      # DATABASE CHECK BEFORE SCANNER
+      # ======================================================
+
+      - name: Check persistent database
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "CHECKING VOLUME-KHAT v7.8 DATABASE"
+          echo "============================================================"
+
+          if [ -f volume_khat_100_v78.db ]; then
+            echo "Existing database found:"
+            ls -lh volume_khat_100_v78.db
+          else
+            echo "No existing v7.8 database found."
+            echo "Scanner will initialize a new database."
+          fi
+
+          echo "============================================================"
 
       # ======================================================
       # RUN SCANNER
       # ======================================================
 
-      - name: Run VOLUME-KHAT 100 v7.6
+      - name: Run VOLUME-KHAT 100 v7.8
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           set -e
+
           echo "============================================================"
-          echo "VOLUME-KHAT 100 v7.6"
+          echo "VOLUME-KHAT 100 v7.8"
           echo "============================================================"
           echo "Started: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "============================================================"
@@ -70,6 +101,100 @@ jobs:
           echo "============================================================"
 
       # ======================================================
+      # SQLITE CHECKPOINT
+      #
+      # Important because SQLite may use WAL mode.
+      # We checkpoint the WAL before committing the DB to Git.
+      # ======================================================
+
+      - name: Finalize SQLite database
+        run: |
+          set -e
+
+          echo "============================================================"
+          echo "FINALIZING SQLITE DATABASE"
+          echo "============================================================"
+
+          if [ ! -f volume_khat_100_v78.db ]; then
+            echo "ERROR: volume_khat_100_v78.db not found."
+            exit 1
+          fi
+
+          python - <<'PY'
+          import sqlite3
+          import os
+
+          db = "volume_khat_100_v78.db"
+
+          print(f"Database: {db}")
+          print(f"Size before checkpoint: {os.path.getsize(db)} bytes")
+
+          conn = sqlite3.connect(db)
+
+          try:
+              # Move all WAL changes into the main database file.
+              result = conn.execute("PRAGMA wal_checkpoint(TRUNCATE);").fetchone()
+              print("WAL checkpoint result:", result)
+
+              conn.commit()
+
+          finally:
+              conn.close()
+
+          print(f"Size after checkpoint: {os.path.getsize(db)} bytes")
+          PY
+
+          echo ""
+          echo "Database files:"
+          ls -lah volume_khat_100_v78.db volume_khat_100_v78.db-* 2>/dev/null || true
+
+          echo "============================================================"
+
+      # ======================================================
+      # VERIFY DATABASE CONTENT
+      # ======================================================
+
+      - name: Verify database state
+        run: |
+          set -e
+
+          python - <<'PY'
+          import sqlite3
+          import os
+
+          db = "volume_khat_100_v78.db"
+
+          if not os.path.exists(db):
+              raise SystemExit("ERROR: Database does not exist.")
+
+          conn = sqlite3.connect(db)
+
+          try:
+              total = conn.execute(
+                  "SELECT COUNT(*) FROM trades"
+              ).fetchone()[0]
+
+              open_count = conn.execute(
+                  "SELECT COUNT(*) FROM trades WHERE status='OPEN'"
+              ).fetchone()[0]
+
+              closed_count = conn.execute(
+                  "SELECT COUNT(*) FROM trades WHERE status='CLOSED'"
+              ).fetchone()[0]
+
+              print("============================================================")
+              print("DATABASE STATE BEFORE GIT COMMIT")
+              print("============================================================")
+              print(f"Total trades : {total}")
+              print(f"Open trades  : {open_count}")
+              print(f"Closed trades: {closed_count}")
+              print("============================================================")
+
+          finally:
+              conn.close()
+          PY
+
+      # ======================================================
       # PERSIST SQLITE DATABASE
       # ======================================================
 
@@ -77,24 +202,42 @@ jobs:
         run: |
           set -e
 
+          echo "============================================================"
+          echo "PERSISTING VOLUME-KHAT v7.8 DATABASE"
+          echo "============================================================"
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          echo "Checking database..."
-
-          if [ -f volume_khat_100_v76.db ]; then
-            echo "Database found:"
-            ls -lh volume_khat_100_v76.db
-          else
-            echo "ERROR: volume_khat_100_v76.db not found."
+          if [ ! -f volume_khat_100_v78.db ]; then
+            echo "ERROR: volume_khat_100_v78.db not found."
             exit 1
           fi
 
-          git add -f volume_khat_100_v76.db
+          echo "Database:"
+          ls -lh volume_khat_100_v78.db
+
+          # Make sure the repository is up to date
+          # before creating the persistence commit.
+          git fetch origin
+
+          CURRENT_BRANCH="${GITHUB_REF_NAME}"
+
+          echo "Current branch: ${CURRENT_BRANCH}"
+
+          git pull --rebase origin "${CURRENT_BRANCH}"
+
+          # Add ONLY the persistent database.
+          git add -f volume_khat_100_v78.db
 
           if git diff --cached --quiet; then
             echo "No database changes to commit."
           else
-            git commit -m "Persist VOLUME-KHAT v7.6 database"
-            git push
+            git commit -m "Persist VOLUME-KHAT v7.8 database"
+
+            git push origin "HEAD:${CURRENT_BRANCH}"
+
+            echo "Database successfully persisted."
           fi
+
+          echo "============================================================"
