@@ -1,31 +1,38 @@
 # ============================================================
-# DOGE REVERSE-TENKAN v1.0
+# DOGE REVERSE-TENKAN v1.1
 # ============================================================
 #
-# PURPOSE:
-#   Independent strategy.
-#   NOT connected to VOLUME-KHAT 100.
+# INDEPENDENT STRATEGY
 #
-# IDEA:
-#   When DOGE moves far enough away from Tenkan-sen,
-#   look for a reversal back toward Tenkan.
+# NOT CONNECTED TO VOLUME-KHAT
 #
 # MARKET:
 #   Kraken Futures
 #   DOGE/USD
-#   5M
 #
-# TEST:
-#   Last 30 days
-#   Multiple Tenkan-distance thresholds
+# TIMEFRAME:
+#   5 minutes
+#
+# LOOKBACK:
+#   30 days
+#
+# IDEA:
+#   When price moves unusually far away from Tenkan,
+#   look for a reversal back toward Tenkan.
 #
 # CLOSED CANDLES ONLY
+#
+# NO REAL TRADING
+# NO ORDERS
+# NO TELEGRAM
+#
 # ============================================================
 
 import time
 import requests
 import pandas as pd
 import numpy as np
+
 from datetime import datetime, timedelta, timezone
 
 
@@ -34,14 +41,18 @@ from datetime import datetime, timedelta, timezone
 # ============================================================
 
 SYMBOL = "PF_DOGEUSD"
-INTERVAL_MINUTES = 5
+
+RESOLUTION = "5m"
 
 LOOKBACK_DAYS = 30
 
-# Ichimoku Tenkan period
 TENKAN_PERIOD = 9
 
-# Thresholds to test
+
+# ------------------------------------------------------------
+# DISTANCE THRESHOLDS TO TEST
+# ------------------------------------------------------------
+
 DISTANCE_THRESHOLDS = [
     0.50,
     0.75,
@@ -52,115 +63,166 @@ DISTANCE_THRESHOLDS = [
     2.50,
 ]
 
-# After extreme distance is reached,
-# require a reversal candle before entry.
+
+# ------------------------------------------------------------
+# REVERSAL CONFIRMATION
+# ------------------------------------------------------------
+
 USE_REVERSAL_CONFIRMATION = True
 
-# Maximum candles allowed for price to return to Tenkan
+
+# ------------------------------------------------------------
+# RETURN WINDOWS
+# ------------------------------------------------------------
+
 RETURN_WINDOWS = [
     5,
     10,
     20,
 ]
 
-# Maximum candles to wait for an eventual result
+
 MAX_HOLD_CANDLES = 20
 
-# Small buffer around Tenkan to count as "reached"
+
+# ------------------------------------------------------------
+# TENKAN TOUCH BUFFER
+# ------------------------------------------------------------
+
 TENKAN_TOUCH_BUFFER_PCT = 0.05
 
-# Prevent duplicate signals during the same excursion
+
+# ------------------------------------------------------------
+# SIGNAL COOLDOWN
+# ------------------------------------------------------------
+
 MIN_BARS_BETWEEN_SIGNALS = 3
 
 
 # ============================================================
-# KRAKEN FUTURES API
+# KRAKEN FUTURES
 # ============================================================
 
-BASE_URL = "https://futures.kraken.com/derivatives/api/v3"
+BASE_URL = "https://futures.kraken.com"
 
 
-def get_ohlc(symbol, interval, since, until):
-    """
-    Download Kraken Futures OHLC data.
+# ============================================================
+# DOWNLOAD KRAKEN FUTURES CANDLES
+# ============================================================
 
-    Kraken may return data in chunks, so pagination is handled
-    by repeatedly requesting subsequent periods.
-    """
+def get_ohlc(symbol, resolution, since, until):
 
-    all_rows = []
+    url = (
+        f"{BASE_URL}"
+        f"/api/charts/v1/trade/"
+        f"{symbol}/"
+        f"{resolution}"
+    )
 
-    current_since = int(since)
-    final_until = int(until)
+    params = {
+        "from": int(since),
+        "to": int(until),
+    }
 
-    while current_since < final_until:
+    print()
+    print("Requesting:")
+    print(url)
 
-        params = {
-            "symbol": symbol,
-            "interval": interval,
-            "since": current_since,
-        }
+    print()
+    print("From:")
+    print(
+        datetime.fromtimestamp(
+            since,
+            timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S UTC")
+    )
 
-        response = requests.get(
-            f"{BASE_URL}/ohlc",
-            params=params,
-            timeout=20,
-        )
+    print("To:")
+    print(
+        datetime.fromtimestamp(
+            until,
+            timezone.utc
+        ).strftime("%Y-%m-%d %H:%M:%S UTC")
+    )
+
+    response = requests.get(
+        url,
+        params=params,
+        timeout=60,
+    )
+
+    if response.status_code != 200:
+
+        print()
+        print("Kraken HTTP error:")
+        print(response.status_code)
+
+        print()
+        print("Response:")
+        print(response.text[:2000])
 
         response.raise_for_status()
-        data = response.json()
 
-        candles = data.get("candles", [])
+    data = response.json()
 
-        if not candles:
-            break
+    # --------------------------------------------------------
+    # Kraken response
+    # --------------------------------------------------------
 
-        for candle in candles:
+    candles = data.get("candles", [])
 
-            # Kraken Futures candle format can vary.
-            # Handle the standard fields defensively.
+    if not candles:
 
-            ts = candle.get("time")
+        raise RuntimeError(
+            "Kraken returned no candles."
+        )
 
-            if ts is None:
-                ts = candle.get("timestamp")
+    rows = []
 
-            if ts is None:
+    for candle in candles:
+
+        try:
+
+            timestamp = candle.get("time")
+
+            if timestamp is None:
                 continue
 
-            ts = int(ts)
-
-            if ts > final_until:
-                continue
-
-            all_rows.append({
-                "timestamp": ts,
+            rows.append({
+                "timestamp": int(timestamp),
                 "open": float(candle["open"]),
                 "high": float(candle["high"]),
                 "low": float(candle["low"]),
                 "close": float(candle["close"]),
-                "volume": float(candle.get("volume", 0)),
+                "volume": float(
+                    candle.get("volume", 0)
+                ),
             })
 
-        last_ts = max(
-            int(c.get("time", c.get("timestamp", 0)))
-            for c in candles
+        except (
+            KeyError,
+            TypeError,
+            ValueError
+        ):
+
+            continue
+
+    if not rows:
+
+        raise RuntimeError(
+            "Kraken returned candles, "
+            "but none could be parsed."
         )
 
-        if last_ts <= current_since:
-            break
+    df = pd.DataFrame(rows)
 
-        current_since = last_ts + INTERVAL_MINUTES * 60
+    df = df.drop_duplicates(
+        subset=["timestamp"]
+    )
 
-        time.sleep(0.15)
-
-    if not all_rows:
-        raise RuntimeError("No OHLC data returned from Kraken.")
-
-    df = pd.DataFrame(all_rows)
-
-    df = df.drop_duplicates("timestamp")
-    df = df.sort_values("timestamp")
+    df = df.sort_values(
+        "timestamp"
+    )
 
     df["datetime"] = pd.to_datetime(
         df["timestamp"],
@@ -168,11 +230,17 @@ def get_ohlc(symbol, interval, since, until):
         utc=True,
     )
 
-    df = df.set_index("datetime")
+    df = df.set_index(
+        "datetime"
+    )
 
-    # Keep only requested period
+    # --------------------------------------------------------
+    # Remove candles outside requested range
+    # --------------------------------------------------------
+
     df = df[
-        (df["timestamp"] >= since) &
+        (df["timestamp"] >= since)
+        &
         (df["timestamp"] <= until)
     ]
 
@@ -187,32 +255,39 @@ def calculate_tenkan(df):
 
     highest_high = (
         df["high"]
-        .rolling(TENKAN_PERIOD)
+        .rolling(
+            TENKAN_PERIOD
+        )
         .max()
     )
 
     lowest_low = (
         df["low"]
-        .rolling(TENKAN_PERIOD)
+        .rolling(
+            TENKAN_PERIOD
+        )
         .min()
     )
 
     df["tenkan"] = (
-        highest_high + lowest_low
+        highest_high
+        + lowest_low
     ) / 2.0
 
     return df
 
 
 # ============================================================
-# DISTANCE
+# DISTANCE FROM TENKAN
 # ============================================================
 
 def calculate_distance(df):
 
     df["distance_pct"] = (
-        (df["close"] - df["tenkan"])
-        .abs()
+        (
+            df["close"]
+            - df["tenkan"]
+        ).abs()
         / df["tenkan"]
         * 100.0
     )
@@ -234,26 +309,38 @@ def calculate_distance(df):
 # REVERSAL CONFIRMATION
 # ============================================================
 
-def reversal_confirmed(df, i, side):
+def reversal_confirmed(
+    df,
+    index,
+    side
+):
 
-    if i < 1:
+    if index < 1:
         return False
 
-    current = df.iloc[i]
-    previous = df.iloc[i - 1]
+    current = df.iloc[index]
 
-    # LONG:
-    # Price is below Tenkan and current candle shows upward
-    # reversal pressure.
+    previous = df.iloc[index - 1]
+
+    # ========================================================
+    # LONG
+    # ========================================================
 
     if side == "LONG":
 
-        current_bullish = current["close"] > current["open"]
+        current_bullish = (
+            current["close"]
+            > current["open"]
+        )
 
-        previous_bearish = previous["close"] < previous["open"]
+        previous_bearish = (
+            previous["close"]
+            < previous["open"]
+        )
 
         close_recovered = (
-            current["close"] > previous["close"]
+            current["close"]
+            > previous["close"]
         )
 
         return (
@@ -262,18 +349,25 @@ def reversal_confirmed(df, i, side):
             and close_recovered
         )
 
-    # SHORT:
-    # Price is above Tenkan and current candle shows downward
-    # reversal pressure.
+    # ========================================================
+    # SHORT
+    # ========================================================
 
     if side == "SHORT":
 
-        current_bearish = current["close"] < current["open"]
+        current_bearish = (
+            current["close"]
+            < current["open"]
+        )
 
-        previous_bullish = previous["close"] > previous["open"]
+        previous_bullish = (
+            previous["close"]
+            > previous["open"]
+        )
 
         close_rejected = (
-            current["close"] < previous["close"]
+            current["close"]
+            < previous["close"]
         )
 
         return (
@@ -286,64 +380,119 @@ def reversal_confirmed(df, i, side):
 
 
 # ============================================================
-# TENKAN RETURN TEST
+# TEST RETURN TO TENKAN
 # ============================================================
 
-def test_signal(df, entry_index, side):
+def test_signal(
+    df,
+    entry_index,
+    side
+):
 
-    entry = df.iloc[entry_index]
-    entry_price = entry["close"]
-    entry_tenkan = entry["tenkan"]
+    entry = df.iloc[
+        entry_index
+    ]
 
-    result = {
-        "entry_index": entry_index,
-        "entry_time": df.index[entry_index],
-        "side": side,
-        "entry_price": entry_price,
-        "entry_tenkan": entry_tenkan,
-        "max_favorable_pct": 0.0,
-        "max_adverse_pct": 0.0,
-        "return_5": False,
-        "return_10": False,
-        "return_20": False,
-        "eventual_return": False,
-        "bars_to_tenkan": None,
-    }
-
-    end = min(
-        len(df),
-        entry_index + MAX_HOLD_CANDLES + 1,
+    entry_price = (
+        entry["close"]
     )
 
-    for j in range(entry_index + 1, end):
+    entry_tenkan = (
+        entry["tenkan"]
+    )
+
+    result = {
+
+        "entry_index":
+            entry_index,
+
+        "entry_time":
+            df.index[entry_index],
+
+        "side":
+            side,
+
+        "entry_price":
+            entry_price,
+
+        "entry_tenkan":
+            entry_tenkan,
+
+        "max_favorable_pct":
+            0.0,
+
+        "max_adverse_pct":
+            0.0,
+
+        "return_5":
+            False,
+
+        "return_10":
+            False,
+
+        "return_20":
+            False,
+
+        "eventual_return":
+            False,
+
+        "bars_to_tenkan":
+            None,
+    }
+
+    end_index = min(
+        len(df),
+        entry_index
+        + MAX_HOLD_CANDLES
+        + 1,
+    )
+
+    for j in range(
+        entry_index + 1,
+        end_index
+    ):
 
         candle = df.iloc[j]
 
-        # ----------------------------------------------------
+        # ====================================================
         # LONG
-        # ----------------------------------------------------
+        # ====================================================
 
         if side == "LONG":
 
             favorable = (
-                (candle["high"] - entry_price)
+                (
+                    candle["high"]
+                    - entry_price
+                )
                 / entry_price
-                * 100
+                * 100.0
             )
 
             adverse = (
-                (candle["low"] - entry_price)
+                (
+                    candle["low"]
+                    - entry_price
+                )
                 / entry_price
-                * 100
+                * 100.0
             )
 
-            result["max_favorable_pct"] = max(
-                result["max_favorable_pct"],
+            result[
+                "max_favorable_pct"
+            ] = max(
+                result[
+                    "max_favorable_pct"
+                ],
                 favorable,
             )
 
-            result["max_adverse_pct"] = min(
-                result["max_adverse_pct"],
+            result[
+                "max_adverse_pct"
+            ] = min(
+                result[
+                    "max_adverse_pct"
+                ],
                 adverse,
             )
 
@@ -352,35 +501,50 @@ def test_signal(df, entry_index, side):
                 >= candle["tenkan"]
                 * (
                     1
-                    - TENKAN_TOUCH_BUFFER_PCT / 100
+                    - TENKAN_TOUCH_BUFFER_PCT
+                    / 100.0
                 )
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # SHORT
-        # ----------------------------------------------------
+        # ====================================================
 
         else:
 
             favorable = (
-                (entry_price - candle["low"])
+                (
+                    entry_price
+                    - candle["low"]
+                )
                 / entry_price
-                * 100
+                * 100.0
             )
 
             adverse = (
-                (entry_price - candle["high"])
+                (
+                    entry_price
+                    - candle["high"]
+                )
                 / entry_price
-                * 100
+                * 100.0
             )
 
-            result["max_favorable_pct"] = max(
-                result["max_favorable_pct"],
+            result[
+                "max_favorable_pct"
+            ] = max(
+                result[
+                    "max_favorable_pct"
+                ],
                 favorable,
             )
 
-            result["max_adverse_pct"] = min(
-                result["max_adverse_pct"],
+            result[
+                "max_adverse_pct"
+            ] = min(
+                result[
+                    "max_adverse_pct"
+                ],
                 adverse,
             )
 
@@ -389,30 +553,47 @@ def test_signal(df, entry_index, side):
                 <= candle["tenkan"]
                 * (
                     1
-                    + TENKAN_TOUCH_BUFFER_PCT / 100
+                    + TENKAN_TOUCH_BUFFER_PCT
+                    / 100.0
                 )
             )
 
-        # ----------------------------------------------------
-        # RETURN TO TENKAN
-        # ----------------------------------------------------
+        # ====================================================
+        # TENKAN RETURN
+        # ====================================================
 
         if tenkan_touch:
 
-            bars = j - entry_index
+            bars = (
+                j
+                - entry_index
+            )
 
-            result["eventual_return"] = True
+            result[
+                "eventual_return"
+            ] = True
 
-            result["bars_to_tenkan"] = bars
+            result[
+                "bars_to_tenkan"
+            ] = bars
 
             if bars <= 5:
-                result["return_5"] = True
+
+                result[
+                    "return_5"
+                ] = True
 
             if bars <= 10:
-                result["return_10"] = True
+
+                result[
+                    "return_10"
+                ] = True
 
             if bars <= 20:
-                result["return_20"] = True
+
+                result[
+                    "return_20"
+                ] = True
 
             break
 
@@ -420,23 +601,35 @@ def test_signal(df, entry_index, side):
 
 
 # ============================================================
-# BACKTEST ONE THRESHOLD
+# BACKTEST ONE DISTANCE THRESHOLD
 # ============================================================
 
-def backtest_threshold(df, threshold):
+def backtest_threshold(
+    df,
+    threshold
+):
 
     signals = []
 
-    last_signal_index = -999999
+    last_signal_index = (
+        -999999
+    )
 
-    for i in range(1, len(df)):
+    for i in range(
+        1,
+        len(df)
+    ):
 
         row = df.iloc[i]
 
-        if pd.isna(row["tenkan"]):
+        if pd.isna(
+            row["tenkan"]
+        ):
             continue
 
-        distance = row["distance_pct"]
+        distance = (
+            row["distance_pct"]
+        )
 
         if distance < threshold:
             continue
@@ -446,9 +639,13 @@ def backtest_threshold(df, threshold):
         if side == "NONE":
             continue
 
-        # Avoid repeatedly entering during the same excursion.
+        # ----------------------------------------------------
+        # Prevent repeated signals
+        # ----------------------------------------------------
+
         if (
-            i - last_signal_index
+            i
+            - last_signal_index
             < MIN_BARS_BETWEEN_SIGNALS
         ):
             continue
@@ -464,6 +661,7 @@ def backtest_threshold(df, threshold):
                 i,
                 side,
             ):
+
                 continue
 
         result = test_signal(
@@ -472,61 +670,129 @@ def backtest_threshold(df, threshold):
             side,
         )
 
-        result["threshold"] = threshold
+        result[
+            "threshold"
+        ] = threshold
 
-        signals.append(result)
+        signals.append(
+            result
+        )
 
         last_signal_index = i
 
-    return pd.DataFrame(signals)
+    if not signals:
+
+        return pd.DataFrame()
+
+    return pd.DataFrame(
+        signals
+    )
 
 
 # ============================================================
 # STATISTICS
 # ============================================================
 
-def calculate_stats(results):
+def calculate_stats(
+    results
+):
 
     if results.empty:
 
         return {
-            "signals": 0,
-            "return_5": 0.0,
-            "return_10": 0.0,
-            "return_20": 0.0,
-            "eventual_return": 0.0,
-            "avg_bars": None,
-            "avg_favorable": 0.0,
-            "avg_adverse": 0.0,
+
+            "signals":
+                0,
+
+            "longs":
+                0,
+
+            "shorts":
+                0,
+
+            "return_5":
+                0.0,
+
+            "return_10":
+                0.0,
+
+            "return_20":
+                0.0,
+
+            "eventual_return":
+                0.0,
+
+            "avg_bars":
+                None,
+
+            "avg_favorable":
+                0.0,
+
+            "avg_adverse":
+                0.0,
         }
 
-    count = len(results)
+    count = len(
+        results
+    )
 
     return {
-        "signals": count,
+
+        "signals":
+            count,
+
+        "longs":
+            int(
+                (
+                    results["side"]
+                    == "LONG"
+                ).sum()
+            ),
+
+        "shorts":
+            int(
+                (
+                    results["side"]
+                    == "SHORT"
+                ).sum()
+            ),
 
         "return_5":
-            results["return_5"].mean() * 100,
+            results[
+                "return_5"
+            ].mean() * 100.0,
 
         "return_10":
-            results["return_10"].mean() * 100,
+            results[
+                "return_10"
+            ].mean() * 100.0,
 
         "return_20":
-            results["return_20"].mean() * 100,
+            results[
+                "return_20"
+            ].mean() * 100.0,
 
         "eventual_return":
-            results["eventual_return"].mean() * 100,
+            results[
+                "eventual_return"
+            ].mean() * 100.0,
 
         "avg_bars":
-            results["bars_to_tenkan"]
+            results[
+                "bars_to_tenkan"
+            ]
             .dropna()
             .mean(),
 
         "avg_favorable":
-            results["max_favorable_pct"].mean(),
+            results[
+                "max_favorable_pct"
+            ].mean(),
 
         "avg_adverse":
-            results["max_adverse_pct"].mean(),
+            results[
+                "max_adverse_pct"
+            ].mean(),
     }
 
 
@@ -536,106 +802,231 @@ def calculate_stats(results):
 
 def main():
 
-    now = datetime.now(timezone.utc)
-
-    start = now - timedelta(
-        days=LOOKBACK_DAYS
-    )
-
-    since = int(start.timestamp())
-    until = int(now.timestamp())
-
     print()
     print("=" * 72)
-    print("DOGE REVERSE-TENKAN v1.0")
+    print("DOGE REVERSE-TENKAN v1.1")
     print("=" * 72)
 
-    print(f"Symbol       : {SYMBOL}")
-    print(f"Timeframe    : {INTERVAL_MINUTES}M")
-    print(f"Lookback     : {LOOKBACK_DAYS} days")
-    print(f"Tenkan       : {TENKAN_PERIOD}")
+    print(
+        "Independent strategy"
+    )
+
+    print(
+        "No VOLUME-KHAT connection"
+    )
+
+    print(
+        "No real trading"
+    )
+
+    # ========================================================
+    # TIME RANGE
+    # ========================================================
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    start = (
+        now
+        - timedelta(
+            days=LOOKBACK_DAYS
+        )
+    )
+
+    since = int(
+        start.timestamp()
+    )
+
+    until = int(
+        now.timestamp()
+    )
+
+    print()
+    print(
+        f"Symbol       : {SYMBOL}"
+    )
+
+    print(
+        f"Timeframe    : {RESOLUTION}"
+    )
+
+    print(
+        f"Lookback     : "
+        f"{LOOKBACK_DAYS} days"
+    )
+
+    print(
+        f"Tenkan       : "
+        f"{TENKAN_PERIOD}"
+    )
+
     print(
         f"Confirmation : "
         f"{USE_REVERSAL_CONFIRMATION}"
     )
 
+    # ========================================================
+    # DOWNLOAD
+    # ========================================================
+
     print()
-    print("Downloading Kraken Futures data...")
+    print(
+        "Downloading Kraken Futures data..."
+    )
 
     df = get_ohlc(
         SYMBOL,
-        INTERVAL_MINUTES,
+        RESOLUTION,
         since,
         until,
     )
 
-    print(
-        f"Candles received: {len(df):,}"
-    )
+    if df.empty:
 
-    df = calculate_tenkan(df)
-    df = calculate_distance(df)
+        raise RuntimeError(
+            "No market data available."
+        )
 
     print()
+    print(
+        f"Candles received: "
+        f"{len(df):,}"
+    )
 
     # ========================================================
-    # TEST ALL THRESHOLDS
+    # REMOVE POSSIBLE OPEN CANDLE
+    # ========================================================
+
+    current_time = int(
+        datetime.now(
+            timezone.utc
+        ).timestamp()
+    )
+
+    candle_seconds = (
+        5 * 60
+    )
+
+    if len(df) > 0:
+
+        last_timestamp = int(
+            df.iloc[-1]["timestamp"]
+        )
+
+        if (
+            current_time
+            - last_timestamp
+            < candle_seconds
+        ):
+
+            print(
+                "Removing current "
+                "possibly-open candle."
+            )
+
+            df = df.iloc[:-1]
+
+    # ========================================================
+    # INDICATORS
+    # ========================================================
+
+    df = calculate_tenkan(
+        df
+    )
+
+    df = calculate_distance(
+        df
+    )
+
+    # ========================================================
+    # THRESHOLD TEST
     # ========================================================
 
     summary = []
 
     all_results = {}
 
-    for threshold in DISTANCE_THRESHOLDS:
+    for threshold in (
+        DISTANCE_THRESHOLDS
+    ):
 
-        results = backtest_threshold(
-            df,
-            threshold,
+        print()
+        print(
+            f"Testing threshold "
+            f"{threshold:.2f}%..."
         )
 
-        all_results[threshold] = results
+        results = (
+            backtest_threshold(
+                df,
+                threshold,
+            )
+        )
 
-        stats = calculate_stats(results)
+        all_results[
+            threshold
+        ] = results
+
+        stats = (
+            calculate_stats(
+                results
+            )
+        )
 
         summary.append({
-            "threshold": threshold,
+
+            "threshold":
+                threshold,
+
             **stats,
         })
 
-    summary_df = pd.DataFrame(summary)
+    summary_df = (
+        pd.DataFrame(
+            summary
+        )
+    )
 
     # ========================================================
-    # DISPLAY
+    # SUMMARY TABLE
     # ========================================================
 
+    print()
     print("=" * 72)
-    print("THRESHOLD COMPARISON")
+    print(
+        "THRESHOLD COMPARISON"
+    )
     print("=" * 72)
 
     print(
         f"{'Dist':>7} "
         f"{'Signals':>8} "
+        f"{'LONG':>7} "
+        f"{'SHORT':>7} "
         f"{'5B':>8} "
         f"{'10B':>8} "
         f"{'20B':>8} "
-        f"{'Return':>9} "
-        f"{'AvgFav':>9} "
-        f"{'AvgAdv':>9}"
+        f"{'Return':>9}"
     )
 
-    print("-" * 72)
+    print(
+        "-" * 72
+    )
 
-    for _, row in summary_df.iterrows():
+    for _, row in (
+        summary_df.iterrows()
+    ):
 
         print(
             f"{row['threshold']:>6.2f}% "
             f"{int(row['signals']):>8} "
+            f"{int(row['longs']):>7} "
+            f"{int(row['shorts']):>7} "
             f"{row['return_5']:>7.1f}% "
             f"{row['return_10']:>7.1f}% "
             f"{row['return_20']:>7.1f}% "
-            f"{row['eventual_return']:>8.1f}% "
-            f"{row['avg_favorable']:>8.2f}% "
-            f"{row['avg_adverse']:>8.2f}%"
+            f"{row['eventual_return']:>8.1f}%"
         )
 
     # ========================================================
@@ -643,22 +1034,29 @@ def main():
     # ========================================================
 
     valid = summary_df[
-        summary_df["signals"] >= 5
+        summary_df["signals"]
+        >= 5
     ]
 
     if not valid.empty:
 
-        best = valid.sort_values(
-            [
-                "return_10",
-                "eventual_return",
-            ],
-            ascending=False,
-        ).iloc[0]
+        best = (
+            valid
+            .sort_values(
+                [
+                    "return_10",
+                    "eventual_return",
+                ],
+                ascending=False,
+            )
+            .iloc[0]
+        )
 
         print()
         print("=" * 72)
-        print("BEST CANDIDATE")
+        print(
+            "BEST CANDIDATE"
+        )
         print("=" * 72)
 
         print(
@@ -669,6 +1067,16 @@ def main():
         print(
             f"Signals         : "
             f"{int(best['signals'])}"
+        )
+
+        print(
+            f"LONG            : "
+            f"{int(best['longs'])}"
+        )
+
+        print(
+            f"SHORT           : "
+            f"{int(best['shorts'])}"
         )
 
         print(
@@ -691,7 +1099,9 @@ def main():
             f"{best['eventual_return']:.1f}%"
         )
 
-        if pd.notna(best["avg_bars"]):
+        if pd.notna(
+            best["avg_bars"]
+        ):
 
             print(
                 f"Avg bars        : "
@@ -708,16 +1118,40 @@ def main():
             f"{best['avg_adverse']:.2f}%"
         )
 
+    else:
+
+        print()
+        print("=" * 72)
+        print(
+            "NO VALID THRESHOLD"
+        )
+        print("=" * 72)
+
+        print(
+            "No threshold produced "
+            "at least 5 signals."
+        )
+
     # ========================================================
-    # SAVE RESULTS
+    # SAVE SUMMARY
     # ========================================================
 
+    summary_file = (
+        "doge_reverse_tenkan_summary.csv"
+    )
+
     summary_df.to_csv(
-        "doge_reverse_tenkan_summary.csv",
+        summary_file,
         index=False,
     )
 
-    for threshold, results in all_results.items():
+    # ========================================================
+    # SAVE INDIVIDUAL RESULTS
+    # ========================================================
+
+    for threshold, results in (
+        all_results.items()
+    ):
 
         filename = (
             "doge_reverse_tenkan_"
@@ -729,44 +1163,77 @@ def main():
             index=False,
         )
 
-    print()
-    print("Files saved:")
-    print("  doge_reverse_tenkan_summary.csv")
-    print("  doge_reverse_tenkan_*.csv")
-    print()
-
     # ========================================================
-    # CURRENT LIVE SETUP
+    # CURRENT STATUS
     # ========================================================
 
-    latest = df.iloc[-1]
+    if not df.empty:
 
+        latest = df.iloc[-1]
+
+        print()
+        print("=" * 72)
+        print(
+            "CURRENT DOGE STATUS"
+        )
+        print("=" * 72)
+
+        print(
+            f"Time       : "
+            f"{df.index[-1]}"
+        )
+
+        print(
+            f"Price      : "
+            f"{latest['close']:.8f}"
+        )
+
+        print(
+            f"Tenkan     : "
+            f"{latest['tenkan']:.8f}"
+        )
+
+        print(
+            f"Distance   : "
+            f"{latest['distance_pct']:.3f}%"
+        )
+
+        print(
+            f"Direction  : "
+            f"{latest['side']}"
+        )
+
+    # ========================================================
+    # FINISHED
+    # ========================================================
+
+    print()
     print("=" * 72)
-    print("CURRENT DOGE STATUS")
+    print(
+        "BACKTEST COMPLETE"
+    )
     print("=" * 72)
 
+    print()
     print(
-        f"Price      : "
-        f"{latest['close']:.8f}"
+        "Saved:"
     )
 
     print(
-        f"Tenkan     : "
-        f"{latest['tenkan']:.8f}"
+        f"  {summary_file}"
     )
 
     print(
-        f"Distance   : "
-        f"{latest['distance_pct']:.3f}%"
+        "  doge_reverse_tenkan_*.csv"
     )
 
-    print(
-        f"Direction   : "
-        f"{latest['side']}"
-    )
+    print()
 
-    print("=" * 72)
 
+# ============================================================
+# RUN
+# ============================================================
 
 if __name__ == "__main__":
+
     main()
