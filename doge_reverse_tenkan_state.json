@@ -1,0 +1,10 @@
+{
+  "active_trade": null,
+  "last_signal_candle": null,
+  "last_status_candle": null,
+  "signals_total": 0,
+  "wins": 0,
+  "losses": 0,
+  "timeouts": 0,
+  "net_pnl_pct": 0.0
+}
