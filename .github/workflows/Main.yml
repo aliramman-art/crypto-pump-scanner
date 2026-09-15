@@ -8,8 +8,7 @@ on:
 
 # ============================================================
 # IMPORTANT:
-# Only one v7.8 scanner run may access/persist the SQLite DB
-# at a time.
+# Only one scanner run may access the SQLite database at a time.
 # ============================================================
 
 concurrency:
@@ -52,21 +51,20 @@ jobs:
       - name: Install dependencies
         run: |
           set -e
-
           python -m pip install --upgrade pip
           pip install requests numpy
 
       # ======================================================
-      # SYNC REPOSITORY BEFORE SCANNER
+      # SYNC LATEST REMOTE DATABASE
       #
       # IMPORTANT:
-      # The latest persistent database MUST be present before
+      # The latest committed database must exist BEFORE
       # scanner.py starts.
       #
-      # We do NOT pull/rebase after scanner.py has modified DB.
+      # No git pull/rebase is performed after scanner.py.
       # ======================================================
 
-      - name: Sync latest persistent database
+      - name: Sync latest repository state
         run: |
           set -e
 
@@ -74,87 +72,26 @@ jobs:
           echo "SYNCING LATEST VOLUME-KHAT v7.8 DATABASE"
           echo "============================================================"
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           CURRENT_BRANCH="${GITHUB_REF_NAME}"
 
-          echo "Current branch: ${CURRENT_BRANCH}"
+          echo "Branch: ${CURRENT_BRANCH}"
 
-          # Get the absolute latest remote state.
           git fetch origin "${CURRENT_BRANCH}"
 
-          # Make sure the working tree starts exactly from the
-          # latest remote branch before scanner.py touches DB.
           git reset --hard "origin/${CURRENT_BRANCH}"
 
           echo ""
           echo "Repository synchronized with origin/${CURRENT_BRANCH}"
 
           echo ""
-          echo "Database status before scanner:"
+          echo "Database status:"
 
           if [ -f volume_khat_100_v78.db ]; then
-            echo "Existing v7.8 database found."
+            echo "Existing database found."
             ls -lh volume_khat_100_v78.db
           else
-            echo "No existing v7.8 database found."
-            echo "Scanner will initialize a new database."
-          fi
-
-          echo "============================================================"
-
-      # ======================================================
-      # DATABASE CHECK BEFORE SCANNER
-      # ======================================================
-
-      - name: Check persistent database
-        run: |
-          set -e
-
-          echo "============================================================"
-          echo "CHECKING VOLUME-KHAT v7.8 DATABASE"
-          echo "============================================================"
-
-          if [ -f volume_khat_100_v78.db ]; then
-
-            echo "Existing database found:"
-            ls -lh volume_khat_100_v78.db
-
-            python - <<'PY'
-            import sqlite3
-
-            db = "volume_khat_100_v78.db"
-
-            conn = sqlite3.connect(db)
-
-            try:
-                total = conn.execute(
-                    "SELECT COUNT(*) FROM trades"
-                ).fetchone()[0]
-
-                open_count = conn.execute(
-                    "SELECT COUNT(*) FROM trades WHERE status='OPEN'"
-                ).fetchone()[0]
-
-                closed_count = conn.execute(
-                    "SELECT COUNT(*) FROM trades WHERE status='CLOSED'"
-                ).fetchone()[0]
-
-                print("Database state BEFORE scanner:")
-                print(f"Total trades : {total}")
-                print(f"Open trades  : {open_count}")
-                print(f"Closed trades: {closed_count}")
-
-            finally:
-                conn.close()
-            PY
-
-          else
-
-            echo "No existing v7.8 database found."
-            echo "Scanner will initialize a new database."
-
+            echo "No existing database found."
+            echo "scanner.py will create a new database."
           fi
 
           echo "============================================================"
@@ -188,7 +125,7 @@ jobs:
       # ======================================================
       # FINALIZE SQLITE DATABASE
       #
-      # Force SQLite WAL changes into the main DB file.
+      # Make sure SQLite changes are written to the main DB file.
       # ======================================================
 
       - name: Finalize SQLite database
@@ -204,145 +141,53 @@ jobs:
             exit 1
           fi
 
-          python - <<'PY'
-          import sqlite3
-          import os
-
-          db = "volume_khat_100_v78.db"
-
-          print(f"Database: {db}")
-          print(f"Size before checkpoint: {os.path.getsize(db)} bytes")
-
-          conn = sqlite3.connect(db)
-
-          try:
-              result = conn.execute(
-                  "PRAGMA wal_checkpoint(TRUNCATE);"
-              ).fetchone()
-
-              print("WAL checkpoint result:", result)
-
-              conn.commit()
-
-          finally:
-              conn.close()
-
-          print(f"Size after checkpoint: {os.path.getsize(db)} bytes")
-          PY
+          sqlite3 volume_khat_100_v78.db \
+            "PRAGMA wal_checkpoint(TRUNCATE);" || true
 
           echo ""
-          echo "Database files after checkpoint:"
-          ls -lah volume_khat_100_v78.db volume_khat_100_v78.db-* 2>/dev/null || true
+          echo "Database files:"
+          ls -lah volume_khat_100_v78.db* 2>/dev/null || true
 
           echo "============================================================"
 
       # ======================================================
-      # VERIFY DATABASE AFTER SCANNER
-      #
-      # This is the exact state that will be persisted.
+      # VERIFY DATABASE FILE
       # ======================================================
 
-      - name: Verify database state
+      - name: Verify database file
         run: |
           set -e
 
-          python - <<'PY'
-          import sqlite3
-          import os
+          echo "============================================================"
+          echo "VERIFYING DATABASE"
+          echo "============================================================"
 
-          db = "volume_khat_100_v78.db"
+          if [ ! -f volume_khat_100_v78.db ]; then
+            echo "ERROR: Database file does not exist."
+            exit 1
+          fi
 
-          if not os.path.exists(db):
-              raise SystemExit(
-                  "ERROR: volume_khat_100_v78.db does not exist."
-              )
+          DB_SIZE=$(stat -c%s volume_khat_100_v78.db)
 
-          conn = sqlite3.connect(db)
+          echo "Database size: ${DB_SIZE} bytes"
 
-          try:
-              total = conn.execute(
-                  "SELECT COUNT(*) FROM trades"
-              ).fetchone()[0]
+          if [ "${DB_SIZE}" -le 0 ]; then
+            echo "ERROR: Database file is empty."
+            exit 1
+          fi
 
-              open_count = conn.execute(
-                  "SELECT COUNT(*) FROM trades WHERE status='OPEN'"
-              ).fetchone()[0]
+          echo "Database file is valid and non-empty."
 
-              closed_count = conn.execute(
-                  "SELECT COUNT(*) FROM trades WHERE status='CLOSED'"
-              ).fetchone()[0]
-
-              print("============================================================")
-              print("DATABASE STATE AFTER SCANNER")
-              print("============================================================")
-              print(f"Total trades : {total}")
-              print(f"Open trades  : {open_count}")
-              print(f"Closed trades: {closed_count}")
-              print("============================================================")
-
-              print("")
-              print("OPEN TRADES:")
-
-              rows = conn.execute("""
-                  SELECT
-                      id,
-                      symbol,
-                      side,
-                      entry_price,
-                      sl,
-                      tp,
-                      status,
-                      entry_time
-                  FROM trades
-                  WHERE status='OPEN'
-                  ORDER BY id
-              """).fetchall()
-
-              if rows:
-                  for row in rows:
-                      print(row)
-              else:
-                  print("None")
-
-              print("")
-              print("CLOSED TRADES:")
-
-              rows = conn.execute("""
-                  SELECT
-                      id,
-                      symbol,
-                      side,
-                      entry_price,
-                      exit_price,
-                      exit_reason,
-                      pnl_pct,
-                      status,
-                      entry_time,
-                      exit_time
-                  FROM trades
-                  WHERE status='CLOSED'
-                  ORDER BY id DESC
-                  LIMIT 20
-              """).fetchall()
-
-              if rows:
-                  for row in rows:
-                      print(row)
-              else:
-                  print("None")
-
-          finally:
-              conn.close()
-          PY
+          echo "============================================================"
 
       # ======================================================
-      # PERSIST SQLITE DATABASE
+      # PERSIST DATABASE
       #
       # IMPORTANT:
-      # No git pull/rebase is performed after scanner.py.
+      # We DO NOT run git pull/rebase here.
       #
-      # The database is committed exactly as produced by this
-      # scanner run.
+      # The database was loaded from the latest remote state
+      # BEFORE scanner.py ran.
       # ======================================================
 
       - name: Persist SQLite database
@@ -358,7 +203,7 @@ jobs:
 
           CURRENT_BRANCH="${GITHUB_REF_NAME}"
 
-          echo "Current branch: ${CURRENT_BRANCH}"
+          echo "Branch: ${CURRENT_BRANCH}"
 
           if [ ! -f volume_khat_100_v78.db ]; then
             echo "ERROR: volume_khat_100_v78.db not found."
@@ -366,13 +211,10 @@ jobs:
           fi
 
           echo ""
-          echo "Database to persist:"
+          echo "Database:"
           ls -lh volume_khat_100_v78.db
 
-          # ====================================================
-          # ADD ONLY THE PERSISTENT DATABASE
-          # ====================================================
-
+          # Add ONLY the persistent database.
           git add -f volume_khat_100_v78.db
 
           echo ""
@@ -380,7 +222,7 @@ jobs:
           git status --short
 
           # ====================================================
-          # COMMIT DATABASE
+          # COMMIT
           # ====================================================
 
           if git diff --cached --quiet; then
@@ -392,7 +234,7 @@ jobs:
           else
 
             echo ""
-            echo "Creating persistence commit..."
+            echo "Creating database persistence commit..."
 
             git commit -m "Persist VOLUME-KHAT v7.8 database"
 
@@ -410,35 +252,35 @@ jobs:
 
       # ======================================================
       # FINAL REMOTE VERIFICATION
-      #
-      # Confirm that the persistence commit reached origin.
       # ======================================================
 
-      - name: Verify persistence commit
+      - name: Verify remote persistence
         run: |
           set -e
 
-          CURRENT_BRANCH="${GITHUB_REF_NAME}"
+          echo "============================================================"
+          echo "VERIFYING REMOTE DATABASE PERSISTENCE"
+          echo "============================================================"
 
-          echo "============================================================"
-          echo "VERIFYING DATABASE PERSISTENCE"
-          echo "============================================================"
+          CURRENT_BRANCH="${GITHUB_REF_NAME}"
 
           git fetch origin "${CURRENT_BRANCH}"
 
-          LOCAL_DB_COMMIT="$(git log -1 --format='%H' -- volume_khat_100_v78.db)"
-          REMOTE_DB_COMMIT="$(git log -1 --format='%H' "origin/${CURRENT_BRANCH}" -- volume_khat_100_v78.db)"
+          LOCAL_COMMIT=$(git log -1 --format="%H" -- volume_khat_100_v78.db)
 
-          echo "Latest local DB commit : ${LOCAL_DB_COMMIT}"
-          echo "Latest remote DB commit: ${REMOTE_DB_COMMIT}"
+          REMOTE_COMMIT=$(git log -1 --format="%H" \
+            "origin/${CURRENT_BRANCH}" -- volume_khat_100_v78.db)
 
-          if [ "${LOCAL_DB_COMMIT}" != "${REMOTE_DB_COMMIT}" ]; then
+          echo "Latest local DB commit : ${LOCAL_COMMIT}"
+          echo "Latest remote DB commit: ${REMOTE_COMMIT}"
+
+          if [ "${LOCAL_COMMIT}" != "${REMOTE_COMMIT}" ]; then
             echo ""
-            echo "ERROR: Remote database commit does not match local database commit."
+            echo "ERROR: Remote database is not synchronized."
             exit 1
           fi
 
           echo ""
-          echo "SUCCESS: v7.8 database is persisted on the remote branch."
+          echo "SUCCESS: VOLUME-KHAT v7.8 database is persisted."
 
           echo "============================================================"
