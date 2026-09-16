@@ -1,5 +1,5 @@
 # ============================================================
-# SUI/USDT - ICHIMOKU + PIVOT BACKTEST
+# SUI/USDT ICHIMOKU + PIVOT BACKTEST
 # ============================================================
 #
 # TIMEFRAME: 5 MINUTES
@@ -7,25 +7,38 @@
 # LONG:
 #   1. Tenkan crosses above Kijun
 #   2. Chikou crosses above price
-#   3. Price closes above Kumo
-#   4. Kumo is bullish after cloud shift
-#   5. SL = last confirmed Pivot Low (5 left / 5 right)
-#   6. TP = nearest confirmed Pivot High above entry
-#   7. RR must be > 1
+#   3. Price above Ichimoku cloud
+#   4. Cloud is bullish
 #
 # SHORT:
-#   Exact inverse logic
+#   1. Tenkan crosses below Kijun
+#   2. Chikou crosses below price
+#   3. Price below Ichimoku cloud
+#   4. Cloud is bearish
+#
+# STOP LOSS:
+#   Latest confirmed valid Pivot Low for LONG
+#   Latest confirmed valid Pivot High for SHORT
+#
+# PIVOT:
+#   5 candles LEFT
+#   5 candles RIGHT
 #
 # IMPORTANT:
-#   - CLOSED CANDLES ONLY
-#   - NO LOOK-AHEAD BIAS
-#   - PIVOTS REQUIRE 5 RIGHT-SIDE CANDLES
-#   - ENTRY AT SIGNAL CANDLE CLOSE
+#   A pivot is usable only after the 5 right candles
+#   have closed. No look-ahead bias.
+#
+# TAKE PROFIT:
+#   Nearest valid Pivot High above entry for LONG
+#   Nearest valid Pivot Low below entry for SHORT
+#
+# RR:
+#   TP distance must be strictly greater than SL distance
 #
 # DATA:
 #   Binance USD-M Futures
-#   SUIUSDT
-#   5m
+#   Monthly archives for completed months
+#   Daily archives for current month
 #
 # ============================================================
 
@@ -33,9 +46,11 @@ import io
 import os
 import zipfile
 import requests
-import pandas as pd
 import numpy as np
+import pandas as pd
+
 from datetime import datetime, timedelta, timezone
+from dateutil.relativedelta import relativedelta
 
 
 # ============================================================
@@ -45,125 +60,366 @@ from datetime import datetime, timedelta, timezone
 SYMBOL = "SUIUSDT"
 INTERVAL = "5m"
 
-# One year
 END_DATE = datetime.now(timezone.utc).date()
 START_DATE = END_DATE - timedelta(days=365)
+
+INITIAL_CAPITAL = 1000.0
+
+# Binance Futures taker fee approximation
+FEE_RATE = 0.0004
+
+# Slippage approximation
+SLIPPAGE_RATE = 0.0001
 
 # Ichimoku
 TENKAN_PERIOD = 9
 KIJUN_PERIOD = 26
 SENKOU_B_PERIOD = 52
-DISPLACEMENT = 26
+ICHIMOKU_DISPLACEMENT = 26
 
 # Pivot
 PIVOT_LEFT = 5
 PIVOT_RIGHT = 5
 
-# Trading
-INITIAL_CAPITAL = 1000.0
-POSITION_SIZE_PCT = 1.0
-
-# Fees
-FEE_RATE = 0.0004
-
-# Slippage
-SLIPPAGE_RATE = 0.0001
-
 # Minimum RR
 MIN_RR = 1.0
 
-# Output
-TRADES_FILE = "sui_ichimoku_pivot_trades.csv"
-SUMMARY_FILE = "sui_ichimoku_pivot_summary.csv"
+# Only one position at a time
+MAX_OPEN_POSITIONS = 1
 
 
 # ============================================================
-# BINANCE DATA
+# BINANCE DATA URL
+# ============================================================
+
+BASE_URL = "https://data.binance.vision/data/futures/um"
+
+
+# ============================================================
+# PRINT HEADER
+# ============================================================
+
+def print_header():
+    print("=" * 70)
+    print("SUI/USDT ICHIMOKU + PIVOT BACKTEST")
+    print("=" * 70)
+    print(f"Symbol       : {SYMBOL}")
+    print(f"Interval     : {INTERVAL}")
+    print(f"Start        : {START_DATE}")
+    print(f"End          : {END_DATE}")
+    print(f"Initial Cash : ${INITIAL_CAPITAL:,.2f}")
+    print(f"Fee          : {FEE_RATE * 100:.4f}%")
+    print(f"Slippage     : {SLIPPAGE_RATE * 100:.4f}%")
+    print(f"Pivot        : {PIVOT_LEFT} left / {PIVOT_RIGHT} right")
+    print(f"Minimum RR   : > {MIN_RR:.2f}")
+    print("=" * 70)
+
+
+# ============================================================
+# DOWNLOAD FILE
+# ============================================================
+
+def download_file(url):
+    try:
+        response = requests.get(
+            url,
+            timeout=60,
+            headers={
+                "User-Agent": "Mozilla/5.0"
+            }
+        )
+
+        if response.status_code != 200:
+            return None
+
+        if len(response.content) == 0:
+            return None
+
+        return response.content
+
+    except Exception as e:
+        print(f"  Download error: {e}")
+        return None
+
+
+# ============================================================
+# BINANCE COLUMN NAMES
+# ============================================================
+
+BINANCE_COLUMNS = [
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "close_time",
+    "quote_volume",
+    "trade_count",
+    "taker_buy_volume",
+    "taker_buy_quote_volume",
+    "ignore",
+]
+
+
+# ============================================================
+# PARSE CSV FROM ZIP
+# ============================================================
+
+def parse_binance_zip(content, source_name=""):
+    """
+    Parse Binance ZIP archive.
+
+    Handles both:
+      - files with header
+      - files without header
+    """
+
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as z:
+            csv_files = [
+                name for name in z.namelist()
+                if name.lower().endswith(".csv")
+            ]
+
+            if not csv_files:
+                print(f"  No CSV inside archive: {source_name}")
+                return None
+
+            csv_name = csv_files[0]
+
+            with z.open(csv_name) as f:
+                df = pd.read_csv(
+                    f,
+                    header=None,
+                    names=BINANCE_COLUMNS
+                )
+
+        # ----------------------------------------------------
+        # Remove possible header row
+        # ----------------------------------------------------
+
+        if len(df) > 0:
+            df = df[
+                df["open_time"].astype(str).str.lower() != "open_time"
+            ]
+
+        # ----------------------------------------------------
+        # Numeric conversion
+        # ----------------------------------------------------
+
+        numeric_columns = [
+            "open_time",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_volume",
+            "trade_count",
+            "taker_buy_volume",
+            "taker_buy_quote_volume",
+        ]
+
+        for col in numeric_columns:
+            df[col] = pd.to_numeric(
+                df[col],
+                errors="coerce"
+            )
+
+        # ----------------------------------------------------
+        # Remove malformed rows
+        # ----------------------------------------------------
+
+        df = df.dropna(
+            subset=[
+                "open_time",
+                "open",
+                "high",
+                "low",
+                "close"
+            ]
+        )
+
+        if df.empty:
+            return None
+
+        # ----------------------------------------------------
+        # Convert timestamp
+        # ----------------------------------------------------
+
+        df["open_time"] = pd.to_datetime(
+            df["open_time"].astype("int64"),
+            unit="ms",
+            utc=True
+        )
+
+        # ----------------------------------------------------
+        # Sort
+        # ----------------------------------------------------
+
+        df = df.sort_values("open_time")
+
+        return df
+
+    except Exception as e:
+        print(f"  Parse error [{source_name}]: {e}")
+        return None
+
+
+# ============================================================
+# DOWNLOAD MONTHLY DATA
 # ============================================================
 
 def download_month(year, month):
-    """
-    Download Binance USD-M Futures monthly 5m klines.
-    """
-
-    url = (
-        "https://data.binance.vision/data/futures/um/monthly/"
-        f"klines/{SYMBOL}/{INTERVAL}/"
-        f"{SYMBOL}-{INTERVAL}-{year}-{month:02d}.zip"
+    filename = (
+        f"{SYMBOL}-{INTERVAL}-{year:04d}-{month:02d}.zip"
     )
 
-    print(f"Downloading: {year}-{month:02d}")
+    url = (
+        f"{BASE_URL}/monthly/klines/"
+        f"{SYMBOL}/{INTERVAL}/{filename}"
+    )
 
-    response = requests.get(url, timeout=60)
+    print(f"Downloading monthly: {year:04d}-{month:02d}")
 
-    if response.status_code != 200:
-        print(
-            f"  No monthly file "
-            f"(HTTP {response.status_code})"
-        )
-        return pd.DataFrame()
+    content = download_file(url)
 
-    with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-        csv_files = [
-            name for name in z.namelist()
-            if name.endswith(".csv")
-        ]
+    if content is None:
+        print("  No monthly file")
+        return None
 
-        if not csv_files:
-            return pd.DataFrame()
+    return parse_binance_zip(
+        content,
+        source_name=filename
+    )
 
-        with z.open(csv_files[0]) as f:
-            df = pd.read_csv(f, header=None)
 
-    return df
+# ============================================================
+# DOWNLOAD DAILY DATA
+# ============================================================
 
+def download_day(year, month, day):
+    filename = (
+        f"{SYMBOL}-{INTERVAL}-"
+        f"{year:04d}-{month:02d}-{day:02d}.zip"
+    )
+
+    url = (
+        f"{BASE_URL}/daily/klines/"
+        f"{SYMBOL}/{INTERVAL}/{filename}"
+    )
+
+    print(f"Downloading daily: {year:04d}-{month:02d}-{day:02d}")
+
+    content = download_file(url)
+
+    if content is None:
+        return None
+
+    return parse_binance_zip(
+        content,
+        source_name=filename
+    )
+
+
+# ============================================================
+# LOAD DATA
+# ============================================================
 
 def load_data():
-    columns = [
-        "open_time",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-        "close_time",
-        "quote_volume",
-        "trades",
-        "taker_buy_volume",
-        "taker_buy_quote_volume",
-        "ignore"
-    ]
+
+    print("\nLoading Binance Futures data...")
+    print(
+        f"Requested range: "
+        f"{START_DATE} -> {END_DATE}"
+    )
 
     frames = []
 
-    current = START_DATE.replace(day=1)
-    last = END_DATE.replace(day=1)
+    # --------------------------------------------------------
+    # Determine months
+    # --------------------------------------------------------
 
-    while current <= last:
+    current = datetime(
+        START_DATE.year,
+        START_DATE.month,
+        1
+    )
 
-        df = download_month(
-            current.year,
-            current.month
+    end_month = datetime(
+        END_DATE.year,
+        END_DATE.month,
+        1
+    )
+
+    while current <= end_month:
+
+        year = current.year
+        month = current.month
+
+        # ----------------------------------------------------
+        # Current month:
+        # Binance monthly archive may not exist yet.
+        # Use daily files instead.
+        # ----------------------------------------------------
+
+        is_current_month = (
+            year == END_DATE.year
+            and month == END_DATE.month
         )
 
-        if not df.empty:
-            df.columns = columns
-            frames.append(df)
+        if is_current_month:
 
-        if current.month == 12:
-            current = current.replace(
-                year=current.year + 1,
-                month=1
-            )
+            first_day = 1
+
+            if (
+                year == START_DATE.year
+                and month == START_DATE.month
+            ):
+                first_day = START_DATE.day
+
+            for day in range(
+                first_day,
+                END_DATE.day + 1
+            ):
+
+                df_day = download_day(
+                    year,
+                    month,
+                    day
+                )
+
+                if df_day is not None:
+                    frames.append(df_day)
+
         else:
-            current = current.replace(
-                month=current.month + 1
+
+            # ------------------------------------------------
+            # Completed month
+            # ------------------------------------------------
+
+            df_month = download_month(
+                year,
+                month
             )
+
+            if df_month is not None:
+                frames.append(df_month)
+
+        current += relativedelta(months=1)
+
+    # --------------------------------------------------------
+    # Validate
+    # --------------------------------------------------------
 
     if not frames:
         raise RuntimeError(
             "No Binance data was downloaded."
         )
+
+    print("\nCombining downloaded data...")
 
     df = pd.concat(
         frames,
@@ -171,60 +427,30 @@ def load_data():
     )
 
     # --------------------------------------------------------
-    # CLEAN
+    # Sort and remove duplicates
     # --------------------------------------------------------
 
-    df["open_time"] = pd.to_datetime(
-        df["open_time"],
-        unit="ms",
-        utc=True
-    )
-
-    df["close_time"] = pd.to_datetime(
-        df["close_time"],
-        unit="ms",
-        utc=True
-    )
-
-    numeric_columns = [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume"
-    ]
-
-    for col in numeric_columns:
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce"
-        )
-
-    df = df.dropna(
-        subset=numeric_columns
-    )
-
-    # Remove duplicate candles
-    df = df.drop_duplicates(
-        subset=["open_time"]
-    )
-
-    # Sort
     df = df.sort_values(
         "open_time"
-    ).reset_index(drop=True)
+    )
 
-    # Requested period
+    df = df.drop_duplicates(
+        subset=["open_time"],
+        keep="first"
+    )
+
+    # --------------------------------------------------------
+    # Exact requested date range
+    # --------------------------------------------------------
+
     start_ts = pd.Timestamp(
         START_DATE,
         tz="UTC"
     )
 
+    # Include the entire END_DATE
     end_ts = (
-        pd.Timestamp(
-            END_DATE,
-            tz="UTC"
-        )
+        pd.Timestamp(END_DATE, tz="UTC")
         + pd.Timedelta(days=1)
     )
 
@@ -233,21 +459,54 @@ def load_data():
         & (df["open_time"] < end_ts)
     ].copy()
 
-    df.reset_index(
-        drop=True,
-        inplace=True
+    # --------------------------------------------------------
+    # Sort again
+    # --------------------------------------------------------
+
+    df = df.sort_values(
+        "open_time"
+    ).reset_index(drop=True)
+
+    # --------------------------------------------------------
+    # Sanity check
+    # --------------------------------------------------------
+
+    if df.empty:
+        raise RuntimeError(
+            "Data is empty after date filtering."
+        )
+
+    print("\nData loaded successfully.")
+    print(
+        f"Rows        : {len(df):,}"
+    )
+    print(
+        f"First candle : {df['open_time'].iloc[0]}"
+    )
+    print(
+        f"Last candle  : {df['open_time'].iloc[-1]}"
     )
 
-    print()
-    print("=" * 70)
-    print("DATA")
-    print("=" * 70)
-    print(f"Symbol       : {SYMBOL}")
-    print(f"Interval     : {INTERVAL}")
-    print(f"Start        : {df['open_time'].iloc[0]}")
-    print(f"End          : {df['open_time'].iloc[-1]}")
-    print(f"Candles      : {len(df):,}")
-    print("=" * 70)
+    # --------------------------------------------------------
+    # Expected approximate number of 5m candles
+    # --------------------------------------------------------
+
+    expected_days = (
+        df["open_time"].iloc[-1]
+        - df["open_time"].iloc[0]
+    ).total_seconds() / 86400
+
+    expected_candles = expected_days * 288
+
+    coverage = (
+        len(df) / expected_candles * 100
+        if expected_candles > 0
+        else 0
+    )
+
+    print(
+        f"Approx coverage: {coverage:.2f}%"
+    )
 
     return df
 
@@ -262,436 +521,540 @@ def calculate_ichimoku(df):
     low = df["low"]
     close = df["close"]
 
+    # --------------------------------------------------------
     # Tenkan
+    # --------------------------------------------------------
+
+    tenkan_high = (
+        high.rolling(
+            TENKAN_PERIOD
+        ).max()
+    )
+
+    tenkan_low = (
+        low.rolling(
+            TENKAN_PERIOD
+        ).min()
+    )
+
     df["tenkan"] = (
-        high.rolling(TENKAN_PERIOD).max()
-        +
-        low.rolling(TENKAN_PERIOD).min()
-    ) / 2
-
-    # Kijun
-    df["kijun"] = (
-        high.rolling(KIJUN_PERIOD).max()
-        +
-        low.rolling(KIJUN_PERIOD).min()
-    ) / 2
-
-    # Senkou A
-    df["senkou_a_raw"] = (
-        df["tenkan"] + df["kijun"]
-    ) / 2
-
-    # Senkou B
-    df["senkou_b_raw"] = (
-        high.rolling(SENKOU_B_PERIOD).max()
-        +
-        low.rolling(SENKOU_B_PERIOD).min()
-    ) / 2
+        tenkan_high + tenkan_low
+    ) / 2.0
 
     # --------------------------------------------------------
-    # IMPORTANT
+    # Kijun
+    # --------------------------------------------------------
+
+    kijun_high = (
+        high.rolling(
+            KIJUN_PERIOD
+        ).max()
+    )
+
+    kijun_low = (
+        low.rolling(
+            KIJUN_PERIOD
+        ).min()
+    )
+
+    df["kijun"] = (
+        kijun_high + kijun_low
+    ) / 2.0
+
+    # --------------------------------------------------------
+    # Senkou Span A RAW
+    # --------------------------------------------------------
+
+    senkou_a_raw = (
+        df["tenkan"] + df["kijun"]
+    ) / 2.0
+
+    # --------------------------------------------------------
+    # Senkou Span B RAW
+    # --------------------------------------------------------
+
+    senkou_b_raw = (
+        high.rolling(
+            SENKOU_B_PERIOD
+        ).max()
+        +
+        low.rolling(
+            SENKOU_B_PERIOD
+        ).min()
+    ) / 2.0
+
+    # --------------------------------------------------------
+    # Visible cloud
     #
-    # These are the values that are plotted 26 candles ahead.
-    # For a real-time signal at candle i, we need the cloud
-    # that is currently visible at candle i.
+    # The cloud visible at current candle was calculated
+    # 26 candles earlier.
     #
-    # Therefore:
-    # current cloud = raw cloud calculated 26 candles ago.
+    # This avoids using future data.
     # --------------------------------------------------------
 
     df["senkou_a"] = (
-        df["senkou_a_raw"]
-        .shift(DISPLACEMENT)
+        senkou_a_raw.shift(
+            ICHIMOKU_DISPLACEMENT
+        )
     )
 
     df["senkou_b"] = (
-        df["senkou_b_raw"]
-        .shift(DISPLACEMENT)
+        senkou_b_raw.shift(
+            ICHIMOKU_DISPLACEMENT
+        )
     )
 
-    # Chikou:
-    # plotted 26 candles backward.
-    # At current candle i, compare current close with
-    # the price 26 candles ago.
-    df["chikou_price"] = (
-        df["close"].shift(DISPLACEMENT)
-    )
+    # --------------------------------------------------------
+    # Cloud top / bottom
+    # --------------------------------------------------------
 
-    # Bullish / bearish cloud
+    df["cloud_top"] = df[
+        ["senkou_a", "senkou_b"]
+    ].max(axis=1)
+
+    df["cloud_bottom"] = df[
+        ["senkou_a", "senkou_b"]
+    ].min(axis=1)
+
+    # --------------------------------------------------------
+    # Cloud direction
+    # --------------------------------------------------------
+
     df["bullish_cloud"] = (
-        df["senkou_a"] > df["senkou_b"]
+        df["senkou_a"]
+        >
+        df["senkou_b"]
     )
 
     df["bearish_cloud"] = (
-        df["senkou_a"] < df["senkou_b"]
+        df["senkou_a"]
+        <
+        df["senkou_b"]
+    )
+
+    # --------------------------------------------------------
+    # Chikou reference
+    #
+    # Current Chikou value is current close plotted 26
+    # candles backwards.
+    #
+    # For signal testing we compare current price with
+    # the price from 26 candles ago.
+    # --------------------------------------------------------
+
+    df["chikou_price"] = (
+        close.shift(
+            ICHIMOKU_DISPLACEMENT
+        )
     )
 
     return df
 
 
 # ============================================================
-# PIVOTS
+# PIVOT DETECTION
 # ============================================================
 
 def detect_pivots(df):
 
-    highs = df["high"].values
-    lows = df["low"].values
+    n = len(df)
 
-    pivot_high = np.full(
-        len(df),
-        np.nan
-    )
-
-    pivot_low = np.full(
-        len(df),
-        np.nan
-    )
+    df["pivot_high"] = np.nan
+    df["pivot_low"] = np.nan
 
     # --------------------------------------------------------
-    # A pivot at index i is only known at:
+    # Pivot at candle i is confirmed at candle i + 5.
     #
-    # i + PIVOT_RIGHT
+    # Therefore:
     #
-    # This prevents look-ahead bias.
+    # pivot_high[confirmation_index] = pivot price
+    #
+    # The pivot becomes available only after the right-side
+    # candles have closed.
     # --------------------------------------------------------
 
     for i in range(
         PIVOT_LEFT,
-        len(df) - PIVOT_RIGHT
+        n - PIVOT_RIGHT
     ):
 
-        left_highs = highs[
-            i - PIVOT_LEFT:i
+        left_start = i - PIVOT_LEFT
+        left_end = i
+
+        right_start = i + 1
+        right_end = i + PIVOT_RIGHT + 1
+
+        current_high = df["high"].iloc[i]
+        current_low = df["low"].iloc[i]
+
+        left_highs = df["high"].iloc[
+            left_start:left_end
         ]
 
-        right_highs = highs[
-            i + 1:i + PIVOT_RIGHT + 1
+        right_highs = df["high"].iloc[
+            right_start:right_end
         ]
 
-        left_lows = lows[
-            i - PIVOT_LEFT:i
+        left_lows = df["low"].iloc[
+            left_start:left_end
         ]
 
-        right_lows = lows[
-            i + 1:i + PIVOT_RIGHT + 1
+        right_lows = df["low"].iloc[
+            right_start:right_end
         ]
 
-        if (
-            highs[i] > left_highs.max()
+        # ----------------------------------------------------
+        # Pivot High
+        # ----------------------------------------------------
+
+        is_pivot_high = (
+            current_high > left_highs.max()
             and
-            highs[i] > right_highs.max()
-        ):
-            pivot_high[
-                i + PIVOT_RIGHT
-            ] = highs[i]
+            current_high > right_highs.max()
+        )
 
-        if (
-            lows[i] < left_lows.min()
+        # ----------------------------------------------------
+        # Pivot Low
+        # ----------------------------------------------------
+
+        is_pivot_low = (
+            current_low < left_lows.min()
             and
-            lows[i] < right_lows.min()
-        ):
-            pivot_low[
-                i + PIVOT_RIGHT
-            ] = lows[i]
+            current_low < right_lows.min()
+        )
 
-    df["confirmed_pivot_high"] = pivot_high
-    df["confirmed_pivot_low"] = pivot_low
+        confirmation_index = (
+            i + PIVOT_RIGHT
+        )
+
+        if is_pivot_high:
+            df.loc[
+                confirmation_index,
+                "pivot_high"
+            ] = current_high
+
+        if is_pivot_low:
+            df.loc[
+                confirmation_index,
+                "pivot_low"
+            ] = current_low
 
     return df
 
 
 # ============================================================
-# SIGNAL LOGIC
+# LONG SIGNAL
 # ============================================================
 
 def long_signal(df, i):
 
-    if i < 1:
+    if i < 2:
         return False
 
-    # Required data
-    values = [
-        df.at[i, "tenkan"],
-        df.at[i, "kijun"],
-        df.at[i, "senkou_a"],
-        df.at[i, "senkou_b"],
-        df.at[i, "chikou_price"]
+    row = df.iloc[i]
+    prev = df.iloc[i - 1]
+
+    # --------------------------------------------------------
+    # Required indicator values
+    # --------------------------------------------------------
+
+    required = [
+        row["tenkan"],
+        row["kijun"],
+        row["senkou_a"],
+        row["senkou_b"],
+        prev["tenkan"],
+        prev["kijun"],
+        row["chikou_price"],
+        prev["chikou_price"],
     ]
 
-    if any(pd.isna(x) for x in values):
+    if any(pd.isna(x) for x in required):
         return False
 
     # --------------------------------------------------------
-    # 1. Tenkan crosses ABOVE Kijun
+    # 1. Tenkan crosses upward through Kijun
     # --------------------------------------------------------
 
-    tenkan_cross = (
-        df.at[i - 1, "tenkan"]
-        <=
-        df.at[i - 1, "kijun"]
+    tenkan_cross_up = (
+        prev["tenkan"] <= prev["kijun"]
         and
-        df.at[i, "tenkan"]
-        >
-        df.at[i, "kijun"]
+        row["tenkan"] > row["kijun"]
     )
 
-    if not tenkan_cross:
+    if not tenkan_cross_up:
         return False
 
     # --------------------------------------------------------
-    # 2. Chikou crosses ABOVE price
+    # 2. Chikou crosses upward through price
     #
-    # Current Chikou = current close projected backward.
-    # Therefore compare current close with close 26 candles ago.
-    #
-    # We require the crossover to happen on this candle.
+    # Current close > close 26 candles ago
+    # Previous close <= close 27 candles ago
     # --------------------------------------------------------
 
-    if i < DISPLACEMENT + 1:
+    if i < 27:
         return False
 
-    previous_chikou = df.at[
-        i - 1,
-        "close"
-    ]
+    current_close = df["close"].iloc[i]
+    previous_close = df["close"].iloc[i - 1]
 
-    previous_price_reference = df.at[
-        i - DISPLACEMENT - 1,
-        "close"
-    ]
+    close_26 = df["close"].iloc[i - 26]
+    close_27 = df["close"].iloc[i - 27]
 
-    current_chikou = df.at[
-        i,
-        "close"
-    ]
-
-    current_price_reference = df.at[
-        i - DISPLACEMENT,
-        "close"
-    ]
-
-    chikou_cross = (
-        previous_chikou
-        <=
-        previous_price_reference
+    chikou_cross_up = (
+        previous_close <= close_27
         and
-        current_chikou
-        >
-        current_price_reference
+        current_close > close_26
     )
 
-    if not chikou_cross:
+    if not chikou_cross_up:
         return False
 
     # --------------------------------------------------------
-    # 3. Price above Kumo
+    # 3. Price above cloud
     # --------------------------------------------------------
 
-    cloud_top = max(
-        df.at[i, "senkou_a"],
-        df.at[i, "senkou_b"]
-    )
-
-    if df.at[i, "close"] <= cloud_top:
+    if row["close"] <= row["cloud_top"]:
         return False
 
     # --------------------------------------------------------
-    # 4. Bullish Kumo
+    # 4. Bullish cloud
     # --------------------------------------------------------
 
-    if not df.at[i, "bullish_cloud"]:
+    if not row["bullish_cloud"]:
         return False
 
     return True
 
+
+# ============================================================
+# SHORT SIGNAL
+# ============================================================
 
 def short_signal(df, i):
 
-    if i < 1:
+    if i < 2:
         return False
 
-    values = [
-        df.at[i, "tenkan"],
-        df.at[i, "kijun"],
-        df.at[i, "senkou_a"],
-        df.at[i, "senkou_b"],
-        df.at[i, "chikou_price"]
+    row = df.iloc[i]
+    prev = df.iloc[i - 1]
+
+    required = [
+        row["tenkan"],
+        row["kijun"],
+        row["senkou_a"],
+        row["senkou_b"],
+        prev["tenkan"],
+        prev["kijun"],
+        row["chikou_price"],
+        prev["chikou_price"],
     ]
 
-    if any(pd.isna(x) for x in values):
+    if any(pd.isna(x) for x in required):
         return False
 
     # --------------------------------------------------------
-    # 1. Tenkan crosses BELOW Kijun
+    # 1. Tenkan crosses downward through Kijun
     # --------------------------------------------------------
 
-    tenkan_cross = (
-        df.at[i - 1, "tenkan"]
-        >=
-        df.at[i - 1, "kijun"]
+    tenkan_cross_down = (
+        prev["tenkan"] >= prev["kijun"]
         and
-        df.at[i, "tenkan"]
-        <
-        df.at[i, "kijun"]
+        row["tenkan"] < row["kijun"]
     )
 
-    if not tenkan_cross:
+    if not tenkan_cross_down:
         return False
 
     # --------------------------------------------------------
-    # 2. Chikou crosses BELOW price
+    # 2. Chikou crosses downward through price
     # --------------------------------------------------------
 
-    if i < DISPLACEMENT + 1:
+    if i < 27:
         return False
 
-    previous_chikou = df.at[
-        i - 1,
-        "close"
-    ]
+    current_close = df["close"].iloc[i]
+    previous_close = df["close"].iloc[i - 1]
 
-    previous_price_reference = df.at[
-        i - DISPLACEMENT - 1,
-        "close"
-    ]
+    close_26 = df["close"].iloc[i - 26]
+    close_27 = df["close"].iloc[i - 27]
 
-    current_chikou = df.at[
-        i,
-        "close"
-    ]
-
-    current_price_reference = df.at[
-        i - DISPLACEMENT,
-        "close"
-    ]
-
-    chikou_cross = (
-        previous_chikou
-        >=
-        previous_price_reference
+    chikou_cross_down = (
+        previous_close >= close_27
         and
-        current_chikou
-        <
-        current_price_reference
+        current_close < close_26
     )
 
-    if not chikou_cross:
+    if not chikou_cross_down:
         return False
 
     # --------------------------------------------------------
-    # 3. Price below Kumo
+    # 3. Price below cloud
     # --------------------------------------------------------
 
-    cloud_bottom = min(
-        df.at[i, "senkou_a"],
-        df.at[i, "senkou_b"]
-    )
-
-    if df.at[i, "close"] >= cloud_bottom:
+    if row["close"] >= row["cloud_bottom"]:
         return False
 
     # --------------------------------------------------------
-    # 4. Bearish Kumo
+    # 4. Bearish cloud
     # --------------------------------------------------------
 
-    if not df.at[i, "bearish_cloud"]:
+    if not row["bearish_cloud"]:
         return False
 
     return True
 
 
 # ============================================================
-# PIVOT SELECTION
+# FIND VALID PIVOT LOW FOR LONG SL
 # ============================================================
 
-def get_last_pivot_low(df, i):
+def get_long_stop(df, i, entry):
 
     values = df.loc[
         :i,
-        "confirmed_pivot_low"
+        "pivot_low"
     ].dropna()
 
     if values.empty:
         return None
 
-    return float(values.iloc[-1])
+    # --------------------------------------------------------
+    # Stop must be below entry.
+    # --------------------------------------------------------
 
-
-def get_last_pivot_high(df, i):
-
-    values = df.loc[
-        :i,
-        "confirmed_pivot_high"
-    ].dropna()
-
-    if values.empty:
-        return None
-
-    return float(values.iloc[-1])
-
-
-def get_next_pivot_high(df, i, entry):
-
-    values = df.loc[
-        :i,
-        "confirmed_pivot_high"
-    ].dropna()
-
-    values = values[
-        values > entry
-    ]
-
-    if values.empty:
-        return None
-
-    # nearest valid resistance
-    return float(values.iloc[-1])
-
-
-def get_next_pivot_low(df, i, entry):
-
-    values = df.loc[
-        :i,
-        "confirmed_pivot_low"
-    ].dropna()
-
-    values = values[
+    valid = values[
         values < entry
     ]
 
-    if values.empty:
+    if valid.empty:
         return None
 
-    # nearest valid support
-    return float(values.iloc[-1])
+    # Latest confirmed valid pivot low
+    return float(valid.iloc[-1])
 
 
 # ============================================================
-# EXECUTION
+# FIND VALID PIVOT HIGH FOR SHORT SL
+# ============================================================
+
+def get_short_stop(df, i, entry):
+
+    values = df.loc[
+        :i,
+        "pivot_high"
+    ].dropna()
+
+    if values.empty:
+        return None
+
+    valid = values[
+        values > entry
+    ]
+
+    if valid.empty:
+        return None
+
+    # Latest confirmed valid pivot high
+    return float(valid.iloc[-1])
+
+
+# ============================================================
+# FIND NEAREST PIVOT HIGH ABOVE ENTRY
+# ============================================================
+
+def get_long_target(df, i, entry):
+
+    values = df.loc[
+        :i,
+        "pivot_high"
+    ].dropna()
+
+    if values.empty:
+        return None
+
+    # Only resistance above entry
+    valid = values[
+        values > entry
+    ]
+
+    if valid.empty:
+        return None
+
+    # --------------------------------------------------------
+    # IMPORTANT FIX:
+    #
+    # Choose nearest resistance by PRICE,
+    # not simply the latest confirmed pivot.
+    # --------------------------------------------------------
+
+    nearest = valid.min()
+
+    return float(nearest)
+
+
+# ============================================================
+# FIND NEAREST PIVOT LOW BELOW ENTRY
+# ============================================================
+
+def get_short_target(df, i, entry):
+
+    values = df.loc[
+        :i,
+        "pivot_low"
+    ].dropna()
+
+    if values.empty:
+        return None
+
+    # Only support below entry
+    valid = values[
+        values < entry
+    ]
+
+    if valid.empty:
+        return None
+
+    # --------------------------------------------------------
+    # IMPORTANT FIX:
+    #
+    # Choose nearest support by PRICE.
+    # --------------------------------------------------------
+
+    nearest = valid.max()
+
+    return float(nearest)
+
+
+# ============================================================
+# APPLY ENTRY SLIPPAGE
 # ============================================================
 
 def apply_entry_slippage(price, side):
 
     if side == "LONG":
         return price * (
-            1 + SLIPPAGE_RATE
+            1.0 + SLIPPAGE_RATE
         )
 
     return price * (
-        1 - SLIPPAGE_RATE
+        1.0 - SLIPPAGE_RATE
     )
 
+
+# ============================================================
+# APPLY EXIT SLIPPAGE
+# ============================================================
 
 def apply_exit_slippage(price, side):
 
     if side == "LONG":
         return price * (
-            1 - SLIPPAGE_RATE
+            1.0 - SLIPPAGE_RATE
         )
 
     return price * (
-        1 + SLIPPAGE_RATE
+        1.0 + SLIPPAGE_RATE
     )
 
 
@@ -701,61 +1064,52 @@ def apply_exit_slippage(price, side):
 
 def run_backtest(df):
 
-    trades = []
-
     capital = INITIAL_CAPITAL
 
-    in_position = False
+    trades = []
+
     position = None
 
-    for i in range(len(df)):
+    signal_count = 0
+    rejected_no_sl = 0
+    rejected_no_tp = 0
+    rejected_rr = 0
 
-        # ----------------------------------------------------
-        # MANAGE OPEN POSITION
-        # ----------------------------------------------------
+    n = len(df)
 
-        if in_position:
+    for i in range(n):
 
-            candle_high = df.at[
-                i,
-                "high"
-            ]
+        row = df.iloc[i]
 
-            candle_low = df.at[
-                i,
-                "low"
-            ]
+        # ====================================================
+        # MANAGE EXISTING POSITION
+        # ====================================================
+
+        if position is not None:
 
             side = position["side"]
-
             sl = position["sl"]
             tp = position["tp"]
+
+            high = row["high"]
+            low = row["low"]
 
             exit_price = None
             exit_reason = None
 
-            # -----------------------------------------------
+            # ------------------------------------------------
             # LONG
-            # -----------------------------------------------
+            # ------------------------------------------------
 
             if side == "LONG":
 
-                hit_sl = (
-                    candle_low <= sl
-                )
-
-                hit_tp = (
-                    candle_high >= tp
-                )
+                hit_sl = low <= sl
+                hit_tp = high >= tp
 
                 # Conservative:
                 # if both occur in same candle,
                 # assume SL first.
-                if hit_sl and hit_tp:
-                    exit_price = sl
-                    exit_reason = "SL_AND_TP_SAME_CANDLE"
-
-                elif hit_sl:
+                if hit_sl:
                     exit_price = sl
                     exit_reason = "SL"
 
@@ -763,25 +1117,19 @@ def run_backtest(df):
                     exit_price = tp
                     exit_reason = "TP"
 
-            # -----------------------------------------------
+            # ------------------------------------------------
             # SHORT
-            # -----------------------------------------------
+            # ------------------------------------------------
 
             else:
 
-                hit_sl = (
-                    candle_high >= sl
-                )
+                hit_sl = high >= sl
+                hit_tp = low <= tp
 
-                hit_tp = (
-                    candle_low <= tp
-                )
-
-                if hit_sl and hit_tp:
-                    exit_price = sl
-                    exit_reason = "SL_AND_TP_SAME_CANDLE"
-
-                elif hit_sl:
+                # Conservative:
+                # if both occur in same candle,
+                # assume SL first.
+                if hit_sl:
                     exit_price = sl
                     exit_reason = "SL"
 
@@ -789,25 +1137,25 @@ def run_backtest(df):
                     exit_price = tp
                     exit_reason = "TP"
 
-            # -----------------------------------------------
-            # CLOSE TRADE
-            # -----------------------------------------------
+            # ------------------------------------------------
+            # EXIT
+            # ------------------------------------------------
 
             if exit_price is not None:
 
-                exit_price = apply_exit_slippage(
+                actual_exit = apply_exit_slippage(
                     exit_price,
                     side
                 )
 
                 entry_price = position[
-                    "entry"
+                    "entry_price"
                 ]
 
                 if side == "LONG":
 
                     gross_pct = (
-                        exit_price
+                        actual_exit
                         -
                         entry_price
                     ) / entry_price
@@ -817,455 +1165,757 @@ def run_backtest(df):
                     gross_pct = (
                         entry_price
                         -
-                        exit_price
+                        actual_exit
                     ) / entry_price
 
+                # ------------------------------------------------
                 # Fees
-                total_fee = (
-                    FEE_RATE * 2
+                # ------------------------------------------------
+
+                entry_fee = (
+                    position["capital_at_entry"]
+                    *
+                    FEE_RATE
+                )
+
+                exit_value = (
+                    position["capital_at_entry"]
+                    *
+                    (1.0 + gross_pct)
+                )
+
+                exit_fee = (
+                    exit_value
+                    *
+                    FEE_RATE
+                )
+
+                net_profit = (
+                    exit_value
+                    -
+                    position["capital_at_entry"]
+                    -
+                    entry_fee
+                    -
+                    exit_fee
                 )
 
                 net_pct = (
-                    gross_pct
-                    -
-                    total_fee
+                    net_profit
+                    /
+                    position["capital_at_entry"]
                 )
 
-                pnl = (
-                    capital
-                    *
-                    POSITION_SIZE_PCT
-                    *
-                    net_pct
-                )
-
-                capital += pnl
+                capital += net_profit
 
                 trades.append({
                     "entry_time":
                         position["entry_time"],
-
                     "exit_time":
-                        df.at[i, "open_time"],
-
+                        row["open_time"],
                     "side":
                         side,
-
                     "entry":
                         entry_price,
-
                     "sl":
-                        position["sl"],
-
+                        sl,
                     "tp":
-                        position["tp"],
-
+                        tp,
                     "exit":
-                        exit_price,
-
-                    "gross_pct":
-                        gross_pct * 100,
-
-                    "net_pct":
-                        net_pct * 100,
-
-                    "pnl":
-                        pnl,
-
-                    "rr":
-                        position["rr"],
-
+                        actual_exit,
                     "exit_reason":
                         exit_reason,
-
-                    "capital":
-                        capital
+                    "sl_pct":
+                        position["sl_pct"],
+                    "tp_pct":
+                        position["tp_pct"],
+                    "rr":
+                        position["rr"],
+                    "gross_pct":
+                        gross_pct * 100.0,
+                    "net_pct":
+                        net_pct * 100.0,
+                    "profit":
+                        net_profit,
+                    "capital_after":
+                        capital,
                 })
 
-                in_position = False
                 position = None
 
-                # Do not open a new position
-                # on the same candle.
-                continue
+        # ====================================================
+        # NO NEW POSITION IF ONE IS OPEN
+        # ====================================================
 
-        # ----------------------------------------------------
-        # SEARCH FOR NEW SIGNAL
-        # ----------------------------------------------------
-
-        if in_position:
+        if position is not None:
             continue
 
-        if i < 100:
-            continue
-
-        entry_raw = df.at[
-            i,
-            "close"
-        ]
-
         # ====================================================
-        # LONG
+        # SIGNAL
         # ====================================================
+
+        side = None
 
         if long_signal(df, i):
+            side = "LONG"
 
-            sl = get_last_pivot_low(
-                df,
-                i
-            )
+        elif short_signal(df, i):
+            side = "SHORT"
 
-            if sl is not None:
+        if side is None:
+            continue
 
-                entry = apply_entry_slippage(
-                    entry_raw,
-                    "LONG"
-                )
-
-                if sl < entry:
-
-                    tp = get_next_pivot_high(
-                        df,
-                        i,
-                        entry
-                    )
-
-                    if tp is not None:
-
-                        risk = (
-                            entry - sl
-                        )
-
-                        reward = (
-                            tp - entry
-                        )
-
-                        if risk > 0:
-
-                            rr = (
-                                reward / risk
-                            )
-
-                            if rr > MIN_RR:
-
-                                position = {
-                                    "side":
-                                        "LONG",
-
-                                    "entry":
-                                        entry,
-
-                                    "sl":
-                                        sl,
-
-                                    "tp":
-                                        tp,
-
-                                    "rr":
-                                        rr,
-
-                                    "entry_time":
-                                        df.at[
-                                            i,
-                                            "open_time"
-                                        ]
-                                }
-
-                                in_position = True
-
-                                continue
+        signal_count += 1
 
         # ====================================================
-        # SHORT
+        # ENTRY
         # ====================================================
 
-        if short_signal(df, i):
+        raw_entry = float(
+            row["close"]
+        )
 
-            sl = get_last_pivot_high(
+        entry = apply_entry_slippage(
+            raw_entry,
+            side
+        )
+
+        # ====================================================
+        # STOP
+        # ====================================================
+
+        if side == "LONG":
+
+            sl = get_long_stop(
                 df,
-                i
+                i,
+                entry
             )
 
-            if sl is not None:
+            if sl is None:
+                rejected_no_sl += 1
+                continue
 
-                entry = apply_entry_slippage(
-                    entry_raw,
-                    "SHORT"
-                )
+            # SL must be below entry
+            if sl >= entry:
+                rejected_no_sl += 1
+                continue
 
-                if sl > entry:
+            sl_distance = (
+                entry - sl
+            )
 
-                    tp = get_next_pivot_low(
-                        df,
-                        i,
-                        entry
-                    )
+            sl_pct = (
+                sl_distance
+                /
+                entry
+            )
 
-                    if tp is not None:
+            tp = get_long_target(
+                df,
+                i,
+                entry
+            )
 
-                        risk = (
-                            sl - entry
-                        )
+            if tp is None:
+                rejected_no_tp += 1
+                continue
 
-                        reward = (
-                            entry - tp
-                        )
+            if tp <= entry:
+                rejected_no_tp += 1
+                continue
 
-                        if risk > 0:
+            tp_distance = (
+                tp - entry
+            )
 
-                            rr = (
-                                reward / risk
-                            )
+        else:
 
-                            if rr > MIN_RR:
+            sl = get_short_stop(
+                df,
+                i,
+                entry
+            )
 
-                                position = {
-                                    "side":
-                                        "SHORT",
+            if sl is None:
+                rejected_no_sl += 1
+                continue
 
-                                    "entry":
-                                        entry,
+            if sl <= entry:
+                rejected_no_sl += 1
+                continue
 
-                                    "sl":
-                                        sl,
+            sl_distance = (
+                sl - entry
+            )
 
-                                    "tp":
-                                        tp,
+            sl_pct = (
+                sl_distance
+                /
+                entry
+            )
 
-                                    "rr":
-                                        rr,
+            tp = get_short_target(
+                df,
+                i,
+                entry
+            )
 
-                                    "entry_time":
-                                        df.at[
-                                            i,
-                                            "open_time"
-                                        ]
-                                }
+            if tp is None:
+                rejected_no_tp += 1
+                continue
 
-                                in_position = True
+            if tp >= entry:
+                rejected_no_tp += 1
+                continue
 
-                                continue
+            tp_distance = (
+                entry - tp
+            )
 
-    return pd.DataFrame(trades), capital
+        # ====================================================
+        # RR
+        # ====================================================
+
+        tp_pct = (
+            tp_distance
+            /
+            entry
+        )
+
+        rr = (
+            tp_distance
+            /
+            sl_distance
+        )
+
+        if rr <= MIN_RR:
+            rejected_rr += 1
+            continue
+
+        # ====================================================
+        # OPEN POSITION
+        # ====================================================
+
+        position = {
+            "side":
+                side,
+            "entry_time":
+                row["open_time"],
+            "entry_price":
+                entry,
+            "sl":
+                sl,
+            "tp":
+                tp,
+            "sl_pct":
+                sl_pct * 100.0,
+            "tp_pct":
+                tp_pct * 100.0,
+            "rr":
+                rr,
+            "capital_at_entry":
+                capital,
+        }
+
+    # ========================================================
+    # IMPORTANT:
+    # Do NOT artificially close an open trade at the end.
+    # It is excluded from completed-trade statistics.
+    # ========================================================
+
+    return (
+        trades,
+        capital,
+        signal_count,
+        rejected_no_sl,
+        rejected_no_tp,
+        rejected_rr,
+        position
+    )
+
+
+# ============================================================
+# MAX DRAW DOWN
+# ============================================================
+
+def calculate_max_drawdown(equity):
+
+    if not equity:
+        return 0.0
+
+    series = pd.Series(
+        equity,
+        dtype=float
+    )
+
+    peak = series.cummax()
+
+    drawdown = (
+        series - peak
+    ) / peak
+
+    return float(
+        drawdown.min() * 100.0
+    )
 
 
 # ============================================================
 # STATISTICS
 # ============================================================
 
-def calculate_statistics(trades, final_capital):
+def calculate_statistics(
+    trades,
+    final_capital,
+    signal_count,
+    rejected_no_sl,
+    rejected_no_tp,
+    rejected_rr,
+    open_position
+):
 
-    if trades.empty:
-
-        print()
-        print("NO TRADES")
-        return
+    print("\n")
+    print("=" * 70)
+    print("BACKTEST RESULTS")
+    print("=" * 70)
 
     total = len(trades)
 
-    wins = (
-        trades["net_pct"] > 0
-    ).sum()
+    if total == 0:
 
-    losses = (
-        trades["net_pct"] <= 0
-    ).sum()
+        print("Completed trades : 0")
+        print(
+            f"Raw signals      : {signal_count}"
+        )
+        print(
+            f"Rejected no SL   : {rejected_no_sl}"
+        )
+        print(
+            f"Rejected no TP   : {rejected_no_tp}"
+        )
+        print(
+            f"Rejected RR      : {rejected_rr}"
+        )
 
-    win_rate = (
-        wins / total * 100
+        summary = pd.DataFrame([
+            {
+                "Trades": 0,
+                "Long": 0,
+                "Short": 0,
+                "Wins": 0,
+                "Losses": 0,
+                "WinRate_%": 0.0,
+                "ProfitFactor": 0.0,
+                "NetPnL_%": (
+                    final_capital
+                    /
+                    INITIAL_CAPITAL
+                    -
+                    1.0
+                ) * 100.0,
+                "FinalCapital": final_capital,
+                "MaxDD_%": 0.0,
+                "AvgRR": 0.0,
+                "RawSignals": signal_count,
+                "Rejected_NoSL": rejected_no_sl,
+                "Rejected_NoTP": rejected_no_tp,
+                "Rejected_RR": rejected_rr,
+                "OpenPosition": (
+                    1
+                    if open_position
+                    else 0
+                ),
+            }
+        ])
+
+        return summary
+
+    trades_df = pd.DataFrame(
+        trades
     )
 
-    gross_profit = trades.loc[
-        trades["pnl"] > 0,
-        "pnl"
-    ].sum()
+    # --------------------------------------------------------
+    # Wins / losses
+    # --------------------------------------------------------
 
-    gross_loss = abs(
-        trades.loc[
-            trades["pnl"] < 0,
-            "pnl"
-        ].sum()
+    wins = trades_df[
+        trades_df["profit"] > 0
+    ]
+
+    losses = trades_df[
+        trades_df["profit"] < 0
+    ]
+
+    win_count = len(wins)
+    loss_count = len(losses)
+
+    win_rate = (
+        win_count / total * 100.0
+    )
+
+    # --------------------------------------------------------
+    # Profit factor
+    # --------------------------------------------------------
+
+    gross_profit = (
+        wins["profit"].sum()
+        if not wins.empty
+        else 0.0
+    )
+
+    gross_loss = (
+        abs(losses["profit"].sum())
+        if not losses.empty
+        else 0.0
     )
 
     if gross_loss > 0:
         profit_factor = (
-            gross_profit /
+            gross_profit
+            /
             gross_loss
         )
     else:
         profit_factor = np.inf
 
-    net_profit = (
+    # --------------------------------------------------------
+    # Equity curve
+    # --------------------------------------------------------
+
+    equity = [
+        INITIAL_CAPITAL
+    ]
+
+    equity.extend(
+        trades_df[
+            "capital_after"
+        ].tolist()
+    )
+
+    max_dd = calculate_max_drawdown(
+        equity
+    )
+
+    # --------------------------------------------------------
+    # Long / Short
+    # --------------------------------------------------------
+
+    long_count = len(
+        trades_df[
+            trades_df["side"] == "LONG"
+        ]
+    )
+
+    short_count = len(
+        trades_df[
+            trades_df["side"] == "SHORT"
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Exit reasons
+    # --------------------------------------------------------
+
+    tp_count = len(
+        trades_df[
+            trades_df["exit_reason"] == "TP"
+        ]
+    )
+
+    sl_count = len(
+        trades_df[
+            trades_df["exit_reason"] == "SL"
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Average RR
+    # --------------------------------------------------------
+
+    avg_rr = trades_df[
+        "rr"
+    ].mean()
+
+    avg_win = (
+        wins["net_pct"].mean()
+        if not wins.empty
+        else 0.0
+    )
+
+    avg_loss = (
+        losses["net_pct"].mean()
+        if not losses.empty
+        else 0.0
+    )
+
+    net_pnl_pct = (
         final_capital
+        /
+        INITIAL_CAPITAL
         -
-        INITIAL_CAPITAL
-    )
-
-    net_pct = (
-        net_profit /
-        INITIAL_CAPITAL
-        * 100
-    )
+        1.0
+    ) * 100.0
 
     # --------------------------------------------------------
-    # EQUITY / MAX DD
+    # Print
     # --------------------------------------------------------
-
-    equity = (
-        INITIAL_CAPITAL
-        +
-        trades["pnl"].cumsum()
-    )
-
-    peak = equity.cummax()
-
-    drawdown = (
-        equity - peak
-    ) / peak * 100
-
-    max_dd = drawdown.min()
-
-    avg_rr = trades["rr"].mean()
-
-    long_trades = (
-        trades["side"] == "LONG"
-    ).sum()
-
-    short_trades = (
-        trades["side"] == "SHORT"
-    ).sum()
-
-    avg_win = trades.loc[
-        trades["net_pct"] > 0,
-        "net_pct"
-    ].mean()
-
-    avg_loss = trades.loc[
-        trades["net_pct"] <= 0,
-        "net_pct"
-    ].mean()
-
-    # --------------------------------------------------------
-    # REPORT
-    # --------------------------------------------------------
-
-    print()
-    print("=" * 70)
-    print("SUI ICHIMOKU + PIVOT BACKTEST")
-    print("=" * 70)
-
-    print(f"Period          : {START_DATE} -> {END_DATE}")
-    print(f"Timeframe       : {INTERVAL}")
-
-    print()
-    print(f"Initial Capital : ${INITIAL_CAPITAL:,.2f}")
-    print(f"Final Capital   : ${final_capital:,.2f}")
-    print(f"Net PnL         : ${net_profit:,.2f}")
-    print(f"Net PnL %       : {net_pct:.2f}%")
-
-    print()
-    print(f"Trades          : {total}")
-    print(f"Long            : {long_trades}")
-    print(f"Short           : {short_trades}")
-
-    print()
-    print(f"Wins            : {wins}")
-    print(f"Losses          : {losses}")
-    print(f"Win Rate        : {win_rate:.2f}%")
-
-    print()
-    print(f"Profit Factor   : {profit_factor:.3f}")
-    print(f"Average RR      : {avg_rr:.2f}")
-    print(f"Average Win     : {avg_win:.2f}%")
-    print(f"Average Loss    : {avg_loss:.2f}%")
-
-    print()
-    print(f"Max Drawdown    : {max_dd:.2f}%")
-
-    print("=" * 70)
-
-    # --------------------------------------------------------
-    # EXIT BREAKDOWN
-    # --------------------------------------------------------
-
-    print()
-    print("EXIT BREAKDOWN")
-    print("-" * 70)
 
     print(
-        trades["exit_reason"]
-        .value_counts()
-        .to_string()
+        f"Completed trades : {total}"
+    )
+
+    print(
+        f"Long trades      : {long_count}"
+    )
+
+    print(
+        f"Short trades     : {short_count}"
+    )
+
+    print(
+        f"Wins             : {win_count}"
+    )
+
+    print(
+        f"Losses           : {loss_count}"
+    )
+
+    print(
+        f"Win Rate         : {win_rate:.2f}%"
+    )
+
+    if np.isinf(profit_factor):
+        print(
+            "Profit Factor    : INF"
+        )
+    else:
+        print(
+            f"Profit Factor    : "
+            f"{profit_factor:.3f}"
+        )
+
+    print(
+        f"Net PnL          : "
+        f"{net_pnl_pct:.2f}%"
+    )
+
+    print(
+        f"Final Capital    : "
+        f"${final_capital:,.2f}"
+    )
+
+    print(
+        f"Max Drawdown     : "
+        f"{max_dd:.2f}%"
+    )
+
+    print(
+        f"Average RR       : "
+        f"{avg_rr:.2f}"
+    )
+
+    print(
+        f"Average Win      : "
+        f"{avg_win:.2f}%"
+    )
+
+    print(
+        f"Average Loss     : "
+        f"{avg_loss:.2f}%"
+    )
+
+    print(
+        f"TP exits         : "
+        f"{tp_count}"
+    )
+
+    print(
+        f"SL exits         : "
+        f"{sl_count}"
+    )
+
+    print("\nSignal diagnostics")
+
+    print(
+        f"Raw signals      : "
+        f"{signal_count}"
+    )
+
+    print(
+        f"No valid SL      : "
+        f"{rejected_no_sl}"
+    )
+
+    print(
+        f"No valid TP      : "
+        f"{rejected_no_tp}"
+    )
+
+    print(
+        f"RR <= {MIN_RR:.2f}        : "
+        f"{rejected_rr}"
+    )
+
+    if open_position is not None:
+
+        print("\nOpen position at end:")
+        print(
+            f"Side             : "
+            f"{open_position['side']}"
+        )
+        print(
+            f"Entry            : "
+            f"{open_position['entry_price']:.8f}"
+        )
+        print(
+            f"SL               : "
+            f"{open_position['sl']:.8f}"
+        )
+        print(
+            f"TP               : "
+            f"{open_position['tp']:.8f}"
+        )
+        print(
+            f"RR               : "
+            f"{open_position['rr']:.2f}"
+        )
+
+    # --------------------------------------------------------
+    # Summary dataframe
+    # --------------------------------------------------------
+
+    summary = pd.DataFrame([
+        {
+            "Trades":
+                total,
+
+            "Long":
+                long_count,
+
+            "Short":
+                short_count,
+
+            "Wins":
+                win_count,
+
+            "Losses":
+                loss_count,
+
+            "WinRate_%":
+                win_rate,
+
+            "ProfitFactor":
+                profit_factor,
+
+            "NetPnL_%":
+                net_pnl_pct,
+
+            "FinalCapital":
+                final_capital,
+
+            "MaxDD_%":
+                max_dd,
+
+            "AvgRR":
+                avg_rr,
+
+            "AvgWin_%":
+                avg_win,
+
+            "AvgLoss_%":
+                avg_loss,
+
+            "TP_Exits":
+                tp_count,
+
+            "SL_Exits":
+                sl_count,
+
+            "RawSignals":
+                signal_count,
+
+            "Rejected_NoSL":
+                rejected_no_sl,
+
+            "Rejected_NoTP":
+                rejected_no_tp,
+
+            "Rejected_RR":
+                rejected_rr,
+
+            "OpenPosition":
+                (
+                    1
+                    if open_position
+                    else 0
+                ),
+        }
+    ])
+
+    return summary
+
+
+# ============================================================
+# SAVE RESULTS
+# ============================================================
+
+def save_results(
+    trades,
+    summary
+):
+
+    trades_file = (
+        "sui_ichimoku_pivot_trades.csv"
+    )
+
+    summary_file = (
+        "sui_ichimoku_pivot_summary.csv"
     )
 
     # --------------------------------------------------------
-    # SAVE SUMMARY
+    # Trades
     # --------------------------------------------------------
 
-    summary = pd.DataFrame([{
-        "symbol":
-            SYMBOL,
+    if trades:
 
-        "interval":
-            INTERVAL,
+        trades_df = pd.DataFrame(
+            trades
+        )
 
-        "start_date":
-            str(START_DATE),
+        trades_df.to_csv(
+            trades_file,
+            index=False
+        )
 
-        "end_date":
-            str(END_DATE),
+        print(
+            f"\nSaved trades: "
+            f"{trades_file}"
+        )
 
-        "trades":
-            total,
+    else:
 
-        "long":
-            long_trades,
+        pd.DataFrame().to_csv(
+            trades_file,
+            index=False
+        )
 
-        "short":
-            short_trades,
+        print(
+            f"\nNo completed trades."
+        )
 
-        "wins":
-            wins,
-
-        "losses":
-            losses,
-
-        "win_rate_pct":
-            win_rate,
-
-        "profit_factor":
-            profit_factor,
-
-        "net_pnl":
-            net_profit,
-
-        "net_pnl_pct":
-            net_pct,
-
-        "max_drawdown_pct":
-            max_dd,
-
-        "average_rr":
-            avg_rr,
-
-        "average_win_pct":
-            avg_win,
-
-        "average_loss_pct":
-            avg_loss,
-
-        "final_capital":
-            final_capital
-    }])
+    # --------------------------------------------------------
+    # Summary
+    # --------------------------------------------------------
 
     summary.to_csv(
-        SUMMARY_FILE,
+        summary_file,
         index=False
     )
 
-    print()
-    print(f"Saved: {TRADES_FILE}")
-    print(f"Saved: {SUMMARY_FILE}")
+    print(
+        f"Saved summary: "
+        f"{summary_file}"
+    )
 
 
 # ============================================================
@@ -1274,43 +1924,88 @@ def calculate_statistics(trades, final_capital):
 
 def main():
 
-    print("=" * 70)
-    print("SUI/USDT ICHIMOKU + PIVOT BACKTEST")
-    print("=" * 70)
+    print_header()
+
+    # --------------------------------------------------------
+    # Load data
+    # --------------------------------------------------------
 
     df = load_data()
 
-    print()
-    print("Calculating Ichimoku...")
+    # --------------------------------------------------------
+    # Ichimoku
+    # --------------------------------------------------------
+
+    print("\nCalculating Ichimoku...")
 
     df = calculate_ichimoku(
         df
     )
 
-    print("Calculating confirmed pivots...")
+    # --------------------------------------------------------
+    # Pivots
+    # --------------------------------------------------------
+
+    print("Detecting pivots...")
 
     df = detect_pivots(
         df
     )
 
-    print("Running backtest...")
+    # --------------------------------------------------------
+    # Backtest
+    # --------------------------------------------------------
 
-    trades, final_capital = run_backtest(
+    print("\nRunning backtest...")
+
+    (
+        trades,
+        final_capital,
+        signal_count,
+        rejected_no_sl,
+        rejected_no_tp,
+        rejected_rr,
+        open_position
+    ) = run_backtest(
         df
     )
 
-    if not trades.empty:
+    # --------------------------------------------------------
+    # Statistics
+    # --------------------------------------------------------
 
-        trades.to_csv(
-            TRADES_FILE,
-            index=False
-        )
-
-    calculate_statistics(
-        trades,
-        final_capital
+    summary = calculate_statistics(
+        trades=trades,
+        final_capital=final_capital,
+        signal_count=signal_count,
+        rejected_no_sl=rejected_no_sl,
+        rejected_no_tp=rejected_no_tp,
+        rejected_rr=rejected_rr,
+        open_position=open_position
     )
 
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+
+    save_results(
+        trades,
+        summary
+    )
+
+    # --------------------------------------------------------
+    # Final
+    # --------------------------------------------------------
+
+    print("\n")
+    print("=" * 70)
+    print("BACKTEST FINISHED")
+    print("=" * 70)
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
