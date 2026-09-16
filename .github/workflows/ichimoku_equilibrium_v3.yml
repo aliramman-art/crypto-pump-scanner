@@ -1,4 +1,4 @@
-name: ICHIMOKU EQUILIBRIUM v1.0 - 1Y BACKTEST
+name: ICHIMOKU EQUILIBRIUM v3.0 - DOGE 12M BACKTEST
 
 on:
   workflow_dispatch:
@@ -7,7 +7,6 @@ permissions:
   contents: read
 
 jobs:
-
   backtest:
 
     runs-on: ubuntu-latest
@@ -25,13 +24,13 @@ jobs:
       # PYTHON
       # ======================================================
 
-      - name: Setup Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       # ======================================================
-      # INSTALL
+      # INSTALL DEPENDENCIES
       # ======================================================
 
       - name: Install dependencies
@@ -40,23 +39,44 @@ jobs:
           pip install requests pandas numpy
 
       # ======================================================
-      # RUN 1 YEAR BACKTEST
+      # RUN BACKTEST
       # ======================================================
 
-      - name: Run ICHIMOKU EQUILIBRIUM 1Y Backtest
+      - name: Run Ichimoku Equilibrium v3 Backtest
         run: |
-          python ichimoku_equilibrium_backtest_v1.py
+          python ichimoku_equilibrium_v3.py
 
       # ======================================================
-      # UPLOAD RESULTS
+      # SHOW GENERATED FILES
       # ======================================================
 
-      - name: Upload Backtest Results
+      - name: Check output files
+        if: always()
+        run: |
+          echo "=============================================="
+          echo "GENERATED FILES"
+          echo "=============================================="
+
+          ls -lah
+
+          echo ""
+          echo "Checking Ichimoku Equilibrium output..."
+
+          if [ -f "ichimoku_equilibrium_v3_trades.csv" ]; then
+            echo "OK: ichimoku_equilibrium_v3_trades.csv"
+          else
+            echo "MISSING: ichimoku_equilibrium_v3_trades.csv"
+          fi
+
+      # ======================================================
+      # UPLOAD BACKTEST ARTIFACT
+      # ======================================================
+
+      - name: Upload backtest artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ichimoku-equilibrium-v1-1y-backtest
+          name: ichimoku-equilibrium-v3-results
           path: |
-            doge_ichimoku_equilibrium_12m_trades.csv
-            doge_ichimoku_equilibrium_12m_equity.csv
-            doge_ichimoku_equilibrium_12m_report.txt
-          if-no-files-found: error
+            ichimoku_equilibrium_v3_trades.csv
+          if-no-files-found: warn
