@@ -1,6 +1,7 @@
 # ============================================================
 # TENKAN + KIJUN + DISTANCE BACKTEST
-# FULL DATA COVERAGE VERSION
+# TP = 1R TEST
+# FULL 30-DAY DATA COVERAGE
 # ============================================================
 
 import requests
@@ -28,40 +29,70 @@ RESOLUTIONS = {
     "5m": 300,
 }
 
-# Kraken request limit
 MAX_CANDLES_PER_REQUEST = 2000
 
-# Ichimoku
+
+# ============================================================
+# ICHIMOKU
+# ============================================================
+
 TENKAN_PERIOD = 9
 KIJUN_PERIOD = 26
 
-# Strategy filters
+
+# ============================================================
+# STRATEGY FILTERS
+# ============================================================
+
 MIN_DISTANCE_PCT = 0.20
+
 MIN_DISTANCE_EXPANSION = 0.00
 
 MAX_TENKAN_DISTANCE_PCT = 0.25
 
-# Confirmation
 MIN_CONFIRM_BODY_RATIO = 0.20
 
-# SL
+
+# ============================================================
+# STOP LOSS
+# ============================================================
+
 MIN_SL_PCT = 0.20
+
 MAX_SL_PCT = 1.50
+
 SL_BUFFER_PCT = 0.05
 
-# TP
-MIN_RR = 1.50
 
-# Backtest
+# ============================================================
+# TAKE PROFIT
+# ============================================================
+#
+# TEST VERSION:
+# TP = 1R
+#
+# Previous version:
+# MIN_RR = 1.50
+#
+# Everything else remains unchanged.
+# ============================================================
+
+MIN_RR = 1.00
+
+
+# ============================================================
+# BACKTEST
+# ============================================================
+
 INITIAL_BALANCE = 1000.0
+
 RISK_PER_TRADE_PCT = 1.0
 
-# Maximum holding period
 MAX_HOLD_BARS = 288
 
 
 # ============================================================
-# SESSION
+# HTTP SESSION
 # ============================================================
 
 session = requests.Session()
@@ -72,16 +103,10 @@ session.headers.update({
 
 
 # ============================================================
-# DOWNLOAD KRAKEN DATA
+# DOWNLOAD KRAKEN CANDLES
 # ============================================================
 
 def download_kraken_candles(symbol, resolution, days):
-    """
-    Download the COMPLETE requested period.
-
-    Kraken limits each response to a finite number of candles,
-    therefore the requested period is split into multiple chunks.
-    """
 
     print(f"\nDownloading {symbol} {resolution}...")
 
@@ -92,6 +117,7 @@ def download_kraken_candles(symbol, resolution, days):
     start_time = end_time - timedelta(days=days)
 
     start_ts = int(start_time.timestamp())
+
     end_ts = int(end_time.timestamp())
 
     all_candles = []
@@ -104,9 +130,9 @@ def download_kraken_candles(symbol, resolution, days):
 
         request_number += 1
 
-        # Number of seconds represented by max candles
         chunk_seconds = (
-            MAX_CANDLES_PER_REQUEST * seconds_per_candle
+            MAX_CANDLES_PER_REQUEST
+            * seconds_per_candle
         )
 
         current_to = min(
@@ -134,34 +160,26 @@ def download_kraken_candles(symbol, resolution, days):
             f"{datetime.fromtimestamp(current_to, tz=timezone.utc)}"
         )
 
-        try:
+        response = session.get(
+            url,
+            params=params,
+            timeout=30
+        )
 
-            response = session.get(
-                url,
-                params=params,
-                timeout=30
+        if response.status_code != 200:
+
+            print(
+                f"  ERROR HTTP {response.status_code}"
             )
 
-            if response.status_code != 200:
+            print(response.text[:500])
 
-                print(
-                    f"  ERROR HTTP {response.status_code}"
-                )
+            raise RuntimeError(
+                f"Kraken API error "
+                f"{response.status_code}"
+            )
 
-                print(response.text[:500])
-
-                raise RuntimeError(
-                    f"Kraken API error "
-                    f"{response.status_code}"
-                )
-
-            data = response.json()
-
-        except Exception as e:
-
-            print(f"  Request failed: {e}")
-
-            raise
+        data = response.json()
 
         candles = data.get("candles", [])
 
@@ -177,43 +195,44 @@ def download_kraken_candles(symbol, resolution, days):
 
         all_candles.extend(candles)
 
-        # ----------------------------------------------------
-        # Determine next timestamp from returned candles
-        # ----------------------------------------------------
-
         returned_times = []
 
         for candle in candles:
 
             try:
+
                 returned_times.append(
                     int(candle["time"]) // 1000
                 )
+
             except Exception:
+
                 pass
 
         if not returned_times:
+
             break
 
         latest_returned = max(returned_times)
 
-        # Move forward by one candle
-        next_from = latest_returned + seconds_per_candle
+        next_from = (
+            latest_returned
+            + seconds_per_candle
+        )
 
-        # Safety against infinite loops
         if next_from <= current_from:
 
             next_from = current_to + 1
 
         current_from = next_from
 
-        # Small pause to be polite to API
         time.sleep(0.15)
 
     if not all_candles:
 
         raise RuntimeError(
-            f"No data returned for {symbol} {resolution}"
+            f"No data returned for "
+            f"{symbol} {resolution}"
         )
 
     # ========================================================
@@ -227,19 +246,27 @@ def download_kraken_candles(symbol, resolution, days):
         try:
 
             rows.append({
+
                 "time": pd.to_datetime(
                     int(candle["time"]),
                     unit="ms",
                     utc=True
                 ),
+
                 "open": float(candle["open"]),
+
                 "high": float(candle["high"]),
+
                 "low": float(candle["low"]),
+
                 "close": float(candle["close"]),
+
                 "volume": float(candle["volume"]),
+
             })
 
         except Exception:
+
             continue
 
     df = pd.DataFrame(rows)
@@ -263,11 +290,12 @@ def download_kraken_candles(symbol, resolution, days):
     )
 
     # ========================================================
-    # EXACT REQUESTED PERIOD
+    # EXACT PERIOD
     # ========================================================
 
     df = df[
-        (df["time"] >= pd.Timestamp(start_time)) &
+        (df["time"] >= pd.Timestamp(start_time))
+        &
         (df["time"] <= pd.Timestamp(end_time))
     ].copy()
 
@@ -292,11 +320,13 @@ def download_kraken_candles(symbol, resolution, days):
         )
 
     # ========================================================
-    # EXPECTED COVERAGE
+    # COVERAGE
     # ========================================================
 
     expected = int(
-        days * 86400 / seconds_per_candle
+        days
+        * 86400
+        / seconds_per_candle
     )
 
     actual = len(df)
@@ -323,6 +353,10 @@ def add_ichimoku(df):
 
     df = df.copy()
 
+    # --------------------------------------------------------
+    # TENKAN
+    # --------------------------------------------------------
+
     highest_high = (
         df["high"]
         .rolling(TENKAN_PERIOD)
@@ -336,8 +370,14 @@ def add_ichimoku(df):
     )
 
     df["tenkan"] = (
-        highest_high + lowest_low
+        highest_high
+        +
+        lowest_low
     ) / 2
+
+    # --------------------------------------------------------
+    # KIJUN
+    # --------------------------------------------------------
 
     highest_high_kijun = (
         df["high"]
@@ -352,39 +392,51 @@ def add_ichimoku(df):
     )
 
     df["kijun"] = (
-        highest_high_kijun +
+        highest_high_kijun
+        +
         lowest_low_kijun
     ) / 2
 
-    # ========================================================
+    # --------------------------------------------------------
     # TENKAN / KIJUN DISTANCE
-    # ========================================================
+    # --------------------------------------------------------
 
     df["tk_distance_pct"] = (
+
         (
-            (df["tenkan"] - df["kijun"])
-            .abs()
-            /
-            df["kijun"].abs()
-        )
-        * 100
+            df["tenkan"]
+            -
+            df["kijun"]
+        ).abs()
+
+        /
+
+        df["kijun"].abs()
+
+        *
+
+        100
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # DISTANCE EXPANSION
-    # ========================================================
+    # --------------------------------------------------------
 
     df["tk_distance_expansion"] = (
+
         df["tk_distance_pct"]
+
         -
+
         df["tk_distance_pct"].shift(1)
+
     )
 
     return df
 
 
 # ============================================================
-# LOAD ALL TIMEFRAMES
+# DOWNLOAD DATA
 # ============================================================
 
 df_1h = download_kraken_candles(
@@ -407,7 +459,7 @@ df_5m = download_kraken_candles(
 
 
 # ============================================================
-# INDICATORS
+# ADD INDICATORS
 # ============================================================
 
 df_1h = add_ichimoku(df_1h)
@@ -418,11 +470,7 @@ df_5m = add_ichimoku(df_5m)
 
 
 # ============================================================
-# HIGHER TIMEFRAME ALIGNMENT
-# ============================================================
-#
-# Shift HTF indicators by one completed candle to prevent
-# lookahead.
+# PREPARE 1H
 # ============================================================
 
 htf_1h = df_1h[
@@ -437,11 +485,19 @@ htf_1h = df_1h[
 
 htf_1h = htf_1h.rename(
     columns={
-        "tenkan": "tenkan_1h",
-        "kijun": "kijun_1h",
-        "tk_distance_pct": "distance_1h",
+
+        "tenkan":
+            "tenkan_1h",
+
+        "kijun":
+            "kijun_1h",
+
+        "tk_distance_pct":
+            "distance_1h",
+
         "tk_distance_expansion":
             "distance_expansion_1h",
+
     }
 )
 
@@ -463,6 +519,8 @@ htf_1h[
 
 
 # ============================================================
+# PREPARE 15M
+# ============================================================
 
 htf_15m = df_15m[
     [
@@ -476,11 +534,19 @@ htf_15m = df_15m[
 
 htf_15m = htf_15m.rename(
     columns={
-        "tenkan": "tenkan_15m",
-        "kijun": "kijun_15m",
-        "tk_distance_pct": "distance_15m",
+
+        "tenkan":
+            "tenkan_15m",
+
+        "kijun":
+            "kijun_15m",
+
+        "tk_distance_pct":
+            "distance_15m",
+
         "tk_distance_expansion":
             "distance_expansion_15m",
+
     }
 )
 
@@ -506,10 +572,15 @@ htf_15m[
 # ============================================================
 
 df = pd.merge_asof(
+
     df_5m.sort_values("time"),
+
     htf_1h.sort_values("time"),
+
     on="time",
+
     direction="backward"
+
 )
 
 
@@ -518,41 +589,60 @@ df = pd.merge_asof(
 # ============================================================
 
 df = pd.merge_asof(
+
     df.sort_values("time"),
+
     htf_15m.sort_values("time"),
+
     on="time",
+
     direction="backward"
+
 )
 
 
 # ============================================================
-# REMOVE INVALID INDICATOR ROWS
+# REMOVE INVALID DATA
 # ============================================================
 
 df = df.dropna(
+
     subset=[
+
         "tenkan",
+
         "kijun",
+
         "tenkan_1h",
+
         "kijun_1h",
+
         "tenkan_15m",
+
         "kijun_15m",
+
         "distance_15m",
+
         "distance_expansion_15m",
+
     ]
+
 ).reset_index(drop=True)
 
 
 print()
+
 print("=" * 70)
+
 print(
     f"Backtest 5M candles: {len(df)}"
 )
+
 print("=" * 70)
 
 
 # ============================================================
-# TRADE SIMULATION
+# BACKTEST
 # ============================================================
 
 trades = []
@@ -577,6 +667,7 @@ while i < len(df) - 1:
 
     kijun = row["kijun"]
 
+
     # ========================================================
     # 1H DIRECTION
     # ========================================================
@@ -592,11 +683,12 @@ while i < len(df) - 1:
     else:
 
         i += 1
+
         continue
 
 
     # ========================================================
-    # 15M DISTANCE FILTER
+    # 15M DISTANCE
     # ========================================================
 
     distance_15m = row["distance_15m"]
@@ -606,26 +698,36 @@ while i < len(df) - 1:
     )
 
     if (
+
         pd.isna(distance_15m)
+
         or
+
         distance_15m < MIN_DISTANCE_PCT
+
     ):
 
         i += 1
+
         continue
 
 
     # ========================================================
-    # 15M DISTANCE EXPANSION
+    # 15M EXPANSION
     # ========================================================
 
     if (
+
         pd.isna(expansion_15m)
+
         or
+
         expansion_15m < MIN_DISTANCE_EXPANSION
+
     ):
 
         i += 1
+
         continue
 
 
@@ -636,22 +738,35 @@ while i < len(df) - 1:
     if pd.isna(tenkan):
 
         i += 1
+
         continue
 
+
     tenkan_distance_pct = (
+
         abs(close - tenkan)
+
         /
+
         abs(tenkan)
-        * 100
+
+        *
+
+        100
+
     )
 
+
     if (
+
         tenkan_distance_pct
         >
         MAX_TENKAN_DISTANCE_PCT
+
     ):
 
         i += 1
+
         continue
 
 
@@ -664,20 +779,34 @@ while i < len(df) - 1:
     if candle_range <= 0:
 
         i += 1
+
         continue
 
-    body = abs(close - row["open"])
 
-    body_ratio = body / candle_range
+    body = abs(
+        close - row["open"]
+    )
 
-    if body_ratio < MIN_CONFIRM_BODY_RATIO:
+    body_ratio = (
+        body
+        /
+        candle_range
+    )
+
+
+    if (
+        body_ratio
+        <
+        MIN_CONFIRM_BODY_RATIO
+    ):
 
         i += 1
+
         continue
 
 
     # ========================================================
-    # TREND CONFIRMATION
+    # TENKAN CONFIRMATION
     # ========================================================
 
     if direction == "LONG":
@@ -685,6 +814,7 @@ while i < len(df) - 1:
         if close <= tenkan:
 
             i += 1
+
             continue
 
     else:
@@ -692,6 +822,7 @@ while i < len(df) - 1:
         if close >= tenkan:
 
             i += 1
+
             continue
 
 
@@ -703,59 +834,89 @@ while i < len(df) - 1:
 
 
     # ========================================================
-    # SL
+    # STOP LOSS
     # ========================================================
 
     if direction == "LONG":
 
         sl = kijun
 
-        if pd.isna(sl) or sl >= entry:
+        if (
+            pd.isna(sl)
+            or
+            sl >= entry
+        ):
 
             recent_low = (
+
                 df["low"]
                 .iloc[
-                    max(0, i - 10):i + 1
+                    max(0, i - 10):
+                    i + 1
                 ]
                 .min()
+
             )
 
             sl = recent_low
 
+
         sl = sl * (
-            1 - SL_BUFFER_PCT / 100
+            1
+            -
+            SL_BUFFER_PCT / 100
         )
 
+
         sl_distance_pct = (
+
             (entry - sl)
-            / entry
-            * 100
+            /
+            entry
+            *
+            100
+
         )
 
     else:
 
         sl = kijun
 
-        if pd.isna(sl) or sl <= entry:
+        if (
+            pd.isna(sl)
+            or
+            sl <= entry
+        ):
 
             recent_high = (
+
                 df["high"]
                 .iloc[
-                    max(0, i - 10):i + 1
+                    max(0, i - 10):
+                    i + 1
                 ]
                 .max()
+
             )
 
             sl = recent_high
 
+
         sl = sl * (
-            1 + SL_BUFFER_PCT / 100
+            1
+            +
+            SL_BUFFER_PCT / 100
         )
 
+
         sl_distance_pct = (
+
             (sl - entry)
-            / entry
-            * 100
+            /
+            entry
+            *
+            100
+
         )
 
 
@@ -764,40 +925,62 @@ while i < len(df) - 1:
     # ========================================================
 
     if (
-        sl_distance_pct < MIN_SL_PCT
+
+        sl_distance_pct
+        <
+        MIN_SL_PCT
+
         or
-        sl_distance_pct > MAX_SL_PCT
+
+        sl_distance_pct
+        >
+        MAX_SL_PCT
+
     ):
 
         i += 1
+
         continue
 
 
     # ========================================================
-    # TP = FIXED RR
+    # TP
+    # ========================================================
+    #
+    # NOW = 1R
     # ========================================================
 
     if direction == "LONG":
 
         tp = (
+
             entry
+
             +
+
             (entry - sl)
-            * MIN_RR
+            *
+            MIN_RR
+
         )
 
     else:
 
         tp = (
+
             entry
+
             -
+
             (sl - entry)
-            * MIN_RR
+            *
+            MIN_RR
+
         )
 
 
     # ========================================================
-    # TRADE SIMULATION
+    # SIMULATE TRADE
     # ========================================================
 
     exit_price = None
@@ -806,14 +989,17 @@ while i < len(df) - 1:
 
     result = None
 
-    pnl_pct = None
-
     R = None
 
+
     max_j = min(
+
         len(df),
+
         i + 1 + MAX_HOLD_BARS
+
     )
+
 
     for j in range(i + 1, max_j):
 
@@ -822,6 +1008,7 @@ while i < len(df) - 1:
         future_high = future["high"]
 
         future_low = future["low"]
+
 
         # ====================================================
         # LONG
@@ -837,9 +1024,10 @@ while i < len(df) - 1:
                 future_high >= tp
             )
 
-            # Conservative assumption:
+
+            # Conservative:
             # if both happen in same candle,
-            # SL is considered first.
+            # SL first.
             if hit_sl and hit_tp:
 
                 exit_price = sl
@@ -847,6 +1035,7 @@ while i < len(df) - 1:
                 result = "LOSS"
 
                 R = -1.0
+
 
             elif hit_sl:
 
@@ -856,6 +1045,7 @@ while i < len(df) - 1:
 
                 R = -1.0
 
+
             elif hit_tp:
 
                 exit_price = tp
@@ -863,6 +1053,7 @@ while i < len(df) - 1:
                 result = "WIN"
 
                 R = MIN_RR
+
 
         # ====================================================
         # SHORT
@@ -878,6 +1069,7 @@ while i < len(df) - 1:
                 future_low <= tp
             )
 
+
             if hit_sl and hit_tp:
 
                 exit_price = sl
@@ -886,6 +1078,7 @@ while i < len(df) - 1:
 
                 R = -1.0
 
+
             elif hit_sl:
 
                 exit_price = sl
@@ -893,6 +1086,7 @@ while i < len(df) - 1:
                 result = "LOSS"
 
                 R = -1.0
+
 
             elif hit_tp:
 
@@ -930,41 +1124,58 @@ while i < len(df) - 1:
 
         result = "TIME"
 
+
         if direction == "LONG":
 
             R = (
+
                 (exit_price - entry)
+
                 /
+
                 (entry - sl)
+
             )
 
         else:
 
             R = (
+
                 (entry - exit_price)
+
                 /
+
                 (sl - entry)
+
             )
 
 
     # ========================================================
-    # PNL
+    # PNL %
     # ========================================================
 
     if direction == "LONG":
 
         pnl_pct = (
+
             (exit_price - entry)
-            / entry
-            * 100
+            /
+            entry
+            *
+            100
+
         )
 
     else:
 
         pnl_pct = (
+
             (entry - exit_price)
-            / entry
-            * 100
+            /
+            entry
+            *
+            100
+
         )
 
 
@@ -973,60 +1184,75 @@ while i < len(df) - 1:
     # ========================================================
 
     risk_amount = (
+
         balance
+
         *
+
         RISK_PER_TRADE_PCT
+
         /
+
         100
+
     )
 
-    balance += risk_amount * R
+    balance += (
+        risk_amount
+        *
+        R
+    )
 
     equity_curve.append(balance)
 
 
     # ========================================================
-    # STORE TRADE
+    # SAVE TRADE
     # ========================================================
 
     trades.append({
 
-        "entry_time": row["time"],
+        "entry_time":
+            row["time"],
 
-        "direction": direction,
+        "direction":
+            direction,
 
-        "entry": entry,
+        "entry":
+            entry,
 
-        "sl": sl,
+        "sl":
+            sl,
 
-        "tp": tp,
+        "tp":
+            tp,
 
-        "exit_time": exit_time,
+        "exit_time":
+            exit_time,
 
-        "exit": exit_price,
+        "exit":
+            exit_price,
 
-        "result": result,
+        "result":
+            result,
 
-        "pnl_pct": pnl_pct,
+        "pnl_pct":
+            pnl_pct,
 
-        "R": R,
+        "R":
+            R,
 
-        "balance": balance,
+        "balance":
+            balance,
 
     })
 
 
     # ========================================================
-    # MOVE AFTER TRADE
+    # NEXT TRADE
     # ========================================================
 
-    if result in ["WIN", "LOSS", "TIME"]:
-
-        i = j + 1
-
-    else:
-
-        i += 1
+    i = j + 1
 
 
 # ============================================================
@@ -1037,10 +1263,13 @@ trades_df = pd.DataFrame(trades)
 
 
 print()
+
 print("=" * 70)
+
 print(
     "TENKAN + KIJUN + DISTANCE BACKTEST RESULTS"
 )
+
 print("=" * 70)
 
 
@@ -1050,78 +1279,126 @@ if trades_df.empty:
 
 else:
 
-    total_trades = len(trades_df)
+    total_trades = len(
+        trades_df
+    )
 
     wins = (
-        trades_df["result"] == "WIN"
+        trades_df["result"]
+        ==
+        "WIN"
     ).sum()
 
     losses = (
-        trades_df["result"] == "LOSS"
+        trades_df["result"]
+        ==
+        "LOSS"
     ).sum()
 
     time_exits = (
-        trades_df["result"] == "TIME"
+        trades_df["result"]
+        ==
+        "TIME"
     ).sum()
 
+
     win_rate = (
-        wins / total_trades * 100
+
+        wins
+        /
+        total_trades
+        *
+        100
+
     )
 
+
     gross_profit = (
+
         trades_df.loc[
             trades_df["R"] > 0,
             "R"
         ].sum()
+
     )
 
+
     gross_loss = abs(
+
         trades_df.loc[
             trades_df["R"] < 0,
             "R"
         ].sum()
+
     )
 
+
     profit_factor = (
-        gross_profit / gross_loss
+
+        gross_profit
+        /
+        gross_loss
+
         if gross_loss > 0
+
         else np.inf
+
     )
+
 
     net_r = trades_df["R"].sum()
 
+
     net_pnl_pct = (
-        (balance - INITIAL_BALANCE)
+
+        (
+            balance
+            -
+            INITIAL_BALANCE
+        )
         /
         INITIAL_BALANCE
-        * 100
+        *
+        100
+
     )
+
 
     average_r = (
         trades_df["R"].mean()
     )
+
 
     # ========================================================
     # MAX DRAWDOWN
     # ========================================================
 
     equity = pd.Series(
+
         [INITIAL_BALANCE]
         +
         equity_curve
+
     )
 
     peak = equity.cummax()
 
     drawdown = (
+
         (equity - peak)
         /
         peak
-        * 100
+        *
+        100
+
     )
 
     max_drawdown = drawdown.min()
 
+
+    # ========================================================
+    # MAIN REPORT
+    # ========================================================
 
     print(
         f"Symbol              : {SYMBOL}"
@@ -1129,6 +1406,10 @@ else:
 
     print(
         f"Period              : {DAYS} days"
+    )
+
+    print(
+        f"TP RR                : {MIN_RR:.2f}R"
     )
 
     print(
@@ -1196,39 +1477,59 @@ else:
     # ========================================================
 
     print()
-    print("DIRECTION STATISTICS")
+
+    print(
+        "DIRECTION STATISTICS"
+    )
+
     print("-" * 70)
 
-    for direction in ["LONG", "SHORT"]:
+
+    for direction in [
+        "LONG",
+        "SHORT"
+    ]:
 
         d = trades_df[
             trades_df["direction"]
-            == direction
+            ==
+            direction
         ]
+
 
         if len(d) == 0:
 
             continue
 
+
         d_wins = (
-            d["result"] == "WIN"
+            d["result"]
+            ==
+            "WIN"
         ).sum()
 
+
         d_wr = (
+
             d_wins
             /
             len(d)
             *
             100
+
         )
 
-        d_pnl = d["R"].sum()
+
+        d_r = d["R"].sum()
+
 
         print(
+
             f"{direction:<8} "
             f"Trades={len(d):<5} "
             f"WR={d_wr:6.2f}% "
-            f"R={d_pnl:+.3f}"
+            f"R={d_r:+.3f}"
+
         )
 
 
@@ -1237,10 +1538,16 @@ else:
     # ========================================================
 
     print()
-    print("LAST 20 TRADES")
-    print("-" * 70)
 
     print(
+        "LAST 20 TRADES"
+    )
+
+    print("-" * 70)
+
+
+    print(
+
         trades_df[
             [
                 "entry_time",
@@ -1253,22 +1560,28 @@ else:
                 "pnl_pct",
                 "R",
             ]
-        ].tail(20).to_string(
-            index=False
-        )
+        ]
+        .tail(20)
+        .to_string(index=False)
+
     )
 
 
     # ========================================================
-    # SAVE
+    # SAVE CSV
     # ========================================================
 
     trades_df.to_csv(
+
         "tenkan_kijun_backtest.csv",
+
         index=False
+
     )
 
+
     print()
+
     print(
         "Trade history saved: "
         "tenkan_kijun_backtest.csv"
