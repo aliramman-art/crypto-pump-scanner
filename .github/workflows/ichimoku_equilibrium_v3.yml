@@ -7,6 +7,7 @@ permissions:
   contents: read
 
 jobs:
+
   backtest:
 
     runs-on: ubuntu-latest
@@ -30,7 +31,7 @@ jobs:
           python-version: "3.11"
 
       # ======================================================
-      # INSTALL DEPENDENCIES
+      # INSTALL
       # ======================================================
 
       - name: Install dependencies
@@ -42,41 +43,65 @@ jobs:
       # RUN BACKTEST
       # ======================================================
 
-      - name: Run Ichimoku Equilibrium v3 Backtest
+      - name: Run Ichimoku Equilibrium v3
         run: |
           python ichimoku_equilibrium_v3.py
 
       # ======================================================
-      # SHOW GENERATED FILES
+      # CHECK OUTPUT FILES
       # ======================================================
 
-      - name: Check output files
+      - name: Check generated files
         if: always()
         run: |
           echo "=============================================="
-          echo "GENERATED FILES"
+          echo "ICHIMOKU EQUILIBRIUM OUTPUT FILES"
           echo "=============================================="
 
-          ls -lah
+          echo ""
+          echo "Trades:"
+          if [ -f doge_ichimoku_equilibrium_12m_trades.csv ]; then
+            ls -lh doge_ichimoku_equilibrium_12m_trades.csv
+          else
+            echo "MISSING: doge_ichimoku_equilibrium_12m_trades.csv"
+          fi
 
           echo ""
-          echo "Checking Ichimoku Equilibrium output..."
-
-          if [ -f "ichimoku_equilibrium_v3_trades.csv" ]; then
-            echo "OK: ichimoku_equilibrium_v3_trades.csv"
+          echo "Equity:"
+          if [ -f doge_ichimoku_equilibrium_12m_equity.csv ]; then
+            ls -lh doge_ichimoku_equilibrium_12m_equity.csv
           else
-            echo "MISSING: ichimoku_equilibrium_v3_trades.csv"
+            echo "MISSING: doge_ichimoku_equilibrium_12m_equity.csv"
+          fi
+
+          echo ""
+          echo "Report:"
+          if [ -f doge_ichimoku_equilibrium_12m_report.txt ]; then
+            ls -lh doge_ichimoku_equilibrium_12m_report.txt
+          else
+            echo "MISSING: doge_ichimoku_equilibrium_12m_report.txt"
+          fi
+
+          echo ""
+          echo "=============================================="
+          echo "REPORT"
+          echo "=============================================="
+
+          if [ -f doge_ichimoku_equilibrium_12m_report.txt ]; then
+            cat doge_ichimoku_equilibrium_12m_report.txt
           fi
 
       # ======================================================
-      # UPLOAD BACKTEST ARTIFACT
+      # UPLOAD BACKTEST RESULTS
       # ======================================================
 
       - name: Upload backtest artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ichimoku-equilibrium-v3-results
+          name: ichimoku-equilibrium-v3-doge-12m
           path: |
-            ichimoku_equilibrium_v3_trades.csv
-          if-no-files-found: warn
+            doge_ichimoku_equilibrium_12m_trades.csv
+            doge_ichimoku_equilibrium_12m_equity.csv
+            doge_ichimoku_equilibrium_12m_report.txt
+          if-no-files-found: error
