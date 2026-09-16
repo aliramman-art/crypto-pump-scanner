@@ -14,9 +14,14 @@
 #
 # Telegram:
 #   Sends one status message every 5 minutes
+#   ALSO reports why no signal was generated
 #
 # REAL TRADING:
 #   DISABLED
+#
+# IMPORTANT:
+#   Strategy logic is unchanged.
+#   Only rejection diagnostics were added.
 #
 # ============================================================
 
@@ -80,8 +85,15 @@ ROUND_TRIP_FEE = ENTRY_FEE + EXIT_FEE
 # Telegram
 # ------------------------------------------------------------
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+)
 
 STATE_FILE = "doge_reverse_tenkan_state.json"
 
@@ -108,19 +120,23 @@ def safe_float(x):
 def pct(a, b):
     if b == 0 or pd.isna(a) or pd.isna(b):
         return np.nan
+
     return ((a / b) - 1.0) * 100.0
 
 
 def fmt_price(x):
     if pd.isna(x):
         return "-"
+
     return f"{x:.8f}"
 
 
 def fmt_pct(x):
     if pd.isna(x):
         return "-"
+
     sign = "+" if x >= 0 else ""
+
     return f"{sign}{x:.2f}%"
 
 
@@ -129,9 +145,12 @@ def fmt_pct(x):
 # ============================================================
 
 def telegram_send(text):
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+
         print("Telegram credentials are missing.")
         print(text)
+
         return False
 
     url = (
@@ -146,6 +165,7 @@ def telegram_send(text):
     }
 
     try:
+
         r = requests.post(
             url,
             json=payload,
@@ -153,13 +173,23 @@ def telegram_send(text):
         )
 
         if r.status_code != 200:
-            print("Telegram error:", r.text)
+
+            print(
+                "Telegram error:",
+                r.text
+            )
+
             return False
 
         return True
 
     except Exception as e:
-        print("Telegram exception:", e)
+
+        print(
+            "Telegram exception:",
+            e
+        )
+
         return False
 
 
@@ -168,6 +198,7 @@ def telegram_send(text):
 # ============================================================
 
 def default_state():
+
     return {
         "active_trade": None,
         "last_signal_candle": None,
@@ -181,25 +212,42 @@ def default_state():
 
 
 def load_state():
+
     if not os.path.exists(STATE_FILE):
+
         return default_state()
 
     try:
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
+
+        with open(
+            STATE_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             data = json.load(f)
 
         state = default_state()
+
         state.update(data)
+
         return state
 
     except Exception:
+
         return default_state()
 
 
 def save_state(state):
+
     tmp = STATE_FILE + ".tmp"
 
-    with open(tmp, "w", encoding="utf-8") as f:
+    with open(
+        tmp,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
         json.dump(
             state,
             f,
@@ -207,7 +255,10 @@ def save_state(state):
             ensure_ascii=False
         )
 
-    os.replace(tmp, STATE_FILE)
+    os.replace(
+        tmp,
+        STATE_FILE
+    )
 
 
 # ============================================================
@@ -219,19 +270,27 @@ def fetch_kraken_candles(
     resolution,
     lookback_bars=500
 ):
+
     end_dt = utc_now()
 
-    minutes = 5 if resolution == "5m" else 15
+    minutes = (
+        5
+        if resolution == "5m"
+        else 15
+    )
 
     start_dt = (
-        end_dt -
-        timedelta(
-            minutes=minutes * (lookback_bars + 20)
+        end_dt
+        - timedelta(
+            minutes=minutes * (
+                lookback_bars + 20
+            )
         )
     )
 
     url = (
-        f"{KRAKEN_BASE}/trade/{symbol}/{resolution}"
+        f"{KRAKEN_BASE}/trade/"
+        f"{symbol}/{resolution}"
     )
 
     params = {
@@ -250,11 +309,16 @@ def fetch_kraken_candles(
 
     data = r.json()
 
-    candles = data.get("candles", [])
+    candles = data.get(
+        "candles",
+        []
+    )
 
     if not candles:
+
         raise RuntimeError(
-            f"No candles returned for {symbol} {resolution}"
+            f"No candles returned for "
+            f"{symbol} {resolution}"
         )
 
     rows = []
@@ -299,10 +363,18 @@ def fetch_kraken_candles(
     df = pd.DataFrame(rows)
 
     if df.empty:
-        raise RuntimeError("Empty dataframe.")
+
+        raise RuntimeError(
+            "Empty dataframe."
+        )
 
     # Kraken may return milliseconds
-    if df["timestamp"].median() > 10_000_000_000:
+
+    if (
+        df["timestamp"].median()
+        > 10_000_000_000
+    ):
+
         df["timestamp"] /= 1000.0
 
     df["timestamp"] = pd.to_datetime(
@@ -326,14 +398,18 @@ def fetch_kraken_candles(
 
     cutoff = (
         utc_now()
-        - timedelta(minutes=candle_minutes)
+        - timedelta(
+            minutes=candle_minutes
+        )
     )
 
     df = df[
         df["timestamp"] <= cutoff
     ].copy()
 
-    return df.reset_index(drop=True)
+    return df.reset_index(
+        drop=True
+    )
 
 
 # ============================================================
@@ -341,6 +417,7 @@ def fetch_kraken_candles(
 # ============================================================
 
 def calculate_tenkan(df):
+
     high = (
         df["high"]
         .rolling(TENKAN_PERIOD)
@@ -353,19 +430,29 @@ def calculate_tenkan(df):
         .min()
     )
 
-    return (high + low) / 2.0
+    return (
+        high + low
+    ) / 2.0
 
 
 # ============================================================
 # RSI
 # ============================================================
 
-def calculate_rsi(series, period=14):
+def calculate_rsi(
+    series,
+    period=14
+):
 
     delta = series.diff()
 
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
+    gain = delta.clip(
+        lower=0
+    )
+
+    loss = -delta.clip(
+        upper=0
+    )
 
     avg_gain = (
         gain
@@ -385,7 +472,14 @@ def calculate_rsi(series, period=14):
         .mean()
     )
 
-    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rs = (
+        avg_gain
+        /
+        avg_loss.replace(
+            0,
+            np.nan
+        )
+    )
 
     rsi = 100 - (
         100 / (1 + rs)
@@ -402,48 +496,66 @@ def add_5m_indicators(df):
 
     df = df.copy()
 
-    df["tenkan"] = calculate_tenkan(df)
+    df["tenkan"] = (
+        calculate_tenkan(df)
+    )
 
-    df["rsi"] = calculate_rsi(
-        df["close"],
-        RSI_PERIOD
+    df["rsi"] = (
+        calculate_rsi(
+            df["close"],
+            RSI_PERIOD
+        )
     )
 
     df["body"] = (
-        df["close"] - df["open"]
+        df["close"]
+        - df["open"]
     ).abs()
 
     df["range"] = (
-        df["high"] - df["low"]
+        df["high"]
+        - df["low"]
     )
 
     df["avg_body"] = (
         df["body"]
-        .rolling(AVG_BODY_PERIOD)
+        .rolling(
+            AVG_BODY_PERIOD
+        )
         .mean()
     )
 
     df["avg_range"] = (
         df["range"]
-        .rolling(AVG_RANGE_PERIOD)
+        .rolling(
+            AVG_RANGE_PERIOD
+        )
         .mean()
     )
 
     df["rvol"] = (
-        df["volume"] /
         df["volume"]
-        .rolling(RVOL_PERIOD)
+        /
+        df["volume"]
+        .rolling(
+            RVOL_PERIOD
+        )
         .mean()
     )
 
     df["distance_pct"] = (
-        (df["close"] - df["tenkan"])
-        / df["tenkan"]
+        (
+            df["close"]
+            - df["tenkan"]
+        )
+        /
+        df["tenkan"]
         * 100
     )
 
     df["distance_abs"] = (
-        df["distance_pct"].abs()
+        df["distance_pct"]
+        .abs()
     )
 
     df["tenkan_slope"] = (
@@ -453,25 +565,35 @@ def add_5m_indicators(df):
 
     df["distance_contracting"] = (
         df["distance_abs"]
-        < df["distance_abs"].shift(1)
+        <
+        df["distance_abs"].shift(1)
     )
 
     df["close_position"] = np.where(
         df["range"] > 0,
         (
-            df["close"] - df["low"]
-        ) / df["range"],
+            df["close"]
+            - df["low"]
+        )
+        /
+        df["range"],
         0.5
     )
 
     df["no_explosion"] = (
-        (df["body"] <=
-         df["avg_body"] *
-         MAX_BODY_MULTIPLIER)
+        (
+            df["body"]
+            <=
+            df["avg_body"]
+            * MAX_BODY_MULTIPLIER
+        )
         &
-        (df["range"] <=
-         df["avg_range"] *
-         MAX_RANGE_MULTIPLIER)
+        (
+            df["range"]
+            <=
+            df["avg_range"]
+            * MAX_RANGE_MULTIPLIER
+        )
     )
 
     return df
@@ -524,7 +646,9 @@ def merge_15m_context(
 
     right["available_at"] = (
         right["timestamp"]
-        + pd.Timedelta(minutes=15)
+        + pd.Timedelta(
+            minutes=15
+        )
     )
 
     right = right[
@@ -544,12 +668,18 @@ def merge_15m_context(
 
     left["available_at"] = (
         left["timestamp"]
-        + pd.Timedelta(minutes=5)
+        + pd.Timedelta(
+            minutes=5
+        )
     )
 
     merged = pd.merge_asof(
-        left.sort_values("available_at"),
-        right.sort_values("available_at"),
+        left.sort_values(
+            "available_at"
+        ),
+        right.sort_values(
+            "available_at"
+        ),
         on="available_at",
         direction="backward"
     )
@@ -596,10 +726,16 @@ def calculate_signal(row):
     # TENKAN SLOPE
     # --------------------------------------------------------
 
-    if distance < 0 and row["tenkan_slope"] >= 0:
+    if (
+        distance < 0
+        and row["tenkan_slope"] >= 0
+    ):
         score_long += 2
 
-    if distance > 0 and row["tenkan_slope"] <= 0:
+    if (
+        distance > 0
+        and row["tenkan_slope"] <= 0
+    ):
         score_short += 2
 
     # --------------------------------------------------------
@@ -624,10 +760,16 @@ def calculate_signal(row):
         and row["close_position"] <= 0.45
     )
 
-    if distance < 0 and bullish_reversal:
+    if (
+        distance < 0
+        and bullish_reversal
+    ):
         score_long += 2
 
-    if distance > 0 and bearish_reversal:
+    if (
+        distance > 0
+        and bearish_reversal
+    ):
         score_short += 2
 
     # --------------------------------------------------------
@@ -653,7 +795,9 @@ def calculate_signal(row):
     # --------------------------------------------------------
 
     rvol_ok = (
-        RVOL_MIN <= row["rvol"] <= RVOL_MAX
+        RVOL_MIN
+        <= row["rvol"]
+        <= RVOL_MAX
     )
 
     if rvol_ok:
@@ -682,13 +826,15 @@ def calculate_signal(row):
 
     if (
         distance < 0
-        and row["close_15m"] >= row["ema20_15m"]
+        and row["close_15m"]
+        >= row["ema20_15m"]
     ):
         score_long += 2
 
     if (
         distance > 0
-        and row["close_15m"] <= row["ema20_15m"]
+        and row["close_15m"]
+        <= row["ema20_15m"]
     ):
         score_short += 2
 
@@ -711,6 +857,224 @@ def calculate_signal(row):
     return None, max(
         score_long,
         score_short
+    )
+
+
+# ============================================================
+# REJECTION DIAGNOSTICS
+#
+# IMPORTANT:
+# This function DOES NOT participate in signal generation.
+# It only explains the existing result.
+# ============================================================
+
+def get_rejection_reason(row):
+
+    distance = row["distance_pct"]
+
+    score_long = 0
+    score_short = 0
+
+    # --------------------------------------------------------
+    # If data required for the strategy is missing
+    # --------------------------------------------------------
+
+    required = [
+        "tenkan",
+        "rsi",
+        "rvol",
+        "ema20_15m",
+        "close_15m",
+        "prev_close",
+        "prev_high",
+        "prev_low",
+        "prev_rsi"
+    ]
+
+    for col in required:
+
+        if pd.isna(row[col]):
+
+            return (
+                f"Missing indicator data: {col}"
+            )
+
+    # --------------------------------------------------------
+    # Distance
+    # --------------------------------------------------------
+
+    if distance <= -MIN_DISTANCE_PCT:
+
+        direction = "LONG"
+
+    elif distance >= MIN_DISTANCE_PCT:
+
+        direction = "SHORT"
+
+    elif abs(distance) < MIN_DISTANCE_PCT:
+
+        return (
+            "Entry distance below minimum "
+            f"({abs(distance):.2f}% < "
+            f"{MIN_DISTANCE_PCT:.2f}%)"
+        )
+
+    else:
+
+        return "No valid direction"
+
+    # --------------------------------------------------------
+    # Calculate EXACT SAME SCORE LOGIC
+    # --------------------------------------------------------
+
+    if distance <= -MIN_DISTANCE_PCT:
+        score_long += 2
+
+    if distance >= MIN_DISTANCE_PCT:
+        score_short += 2
+
+    if row["distance_contracting"]:
+
+        if distance < 0:
+            score_long += 2
+
+        if distance > 0:
+            score_short += 2
+
+    if (
+        distance < 0
+        and row["tenkan_slope"] >= 0
+    ):
+        score_long += 2
+
+    if (
+        distance > 0
+        and row["tenkan_slope"] <= 0
+    ):
+        score_short += 2
+
+    prev_close = row["prev_close"]
+    prev_high = row["prev_high"]
+    prev_low = row["prev_low"]
+
+    bullish_reversal = (
+        row["close"] > row["open"]
+        and row["close"] > prev_close
+        and row["high"] > prev_high
+        and row["close_position"] >= 0.55
+    )
+
+    bearish_reversal = (
+        row["close"] < row["open"]
+        and row["close"] < prev_close
+        and row["low"] < prev_low
+        and row["close_position"] <= 0.45
+    )
+
+    if (
+        distance < 0
+        and bullish_reversal
+    ):
+        score_long += 2
+
+    if (
+        distance > 0
+        and bearish_reversal
+    ):
+        score_short += 2
+
+    if (
+        distance < 0
+        and row["rsi"] < 35
+        and row["rsi"] > row["prev_rsi"]
+    ):
+        score_long += 2
+
+    if (
+        distance > 0
+        and row["rsi"] > 65
+        and row["rsi"] < row["prev_rsi"]
+    ):
+        score_short += 2
+
+    rvol_ok = (
+        RVOL_MIN
+        <= row["rvol"]
+        <= RVOL_MAX
+    )
+
+    if rvol_ok:
+
+        if distance < 0:
+            score_long += 1
+
+        if distance > 0:
+            score_short += 1
+
+    if row["no_explosion"]:
+
+        if distance < 0:
+            score_long += 1
+
+        if distance > 0:
+            score_short += 1
+
+    if (
+        distance < 0
+        and row["close_15m"]
+        >= row["ema20_15m"]
+    ):
+        score_long += 2
+
+    if (
+        distance > 0
+        and row["close_15m"]
+        <= row["ema20_15m"]
+    ):
+        score_short += 2
+
+    # --------------------------------------------------------
+    # Exact reason for current direction
+    # --------------------------------------------------------
+
+    score = (
+        score_long
+        if direction == "LONG"
+        else score_short
+    )
+
+    if score < MIN_SCORE:
+
+        return (
+            f"{direction} score below minimum "
+            f"({score}/{14} < {MIN_SCORE})"
+        )
+
+    # --------------------------------------------------------
+    # This means score passed but final strategy
+    # condition somehow failed.
+    # This is only diagnostic.
+    # --------------------------------------------------------
+
+    if direction == "LONG":
+
+        if distance > -MIN_DISTANCE_PCT:
+
+            return (
+                "LONG distance condition failed"
+            )
+
+    if direction == "SHORT":
+
+        if distance < MIN_DISTANCE_PCT:
+
+            return (
+                "SHORT distance condition failed"
+            )
+
+    return (
+        f"{direction} did not pass final "
+        "signal condition"
     )
 
 
@@ -749,6 +1113,7 @@ def generate_signal(df):
     if side == "LONG":
 
         tp = tenkan
+
         sl = entry * (
             1 - SL_PCT / 100
         )
@@ -760,6 +1125,7 @@ def generate_signal(df):
     else:
 
         tp = tenkan
+
         sl = entry * (
             1 + SL_PCT / 100
         )
@@ -772,17 +1138,25 @@ def generate_signal(df):
     # TP must be in the profitable direction
     # --------------------------------------------------------
 
-    if side == "LONG" and tp <= entry:
+    if (
+        side == "LONG"
+        and tp <= entry
+    ):
         return None
 
-    if side == "SHORT" and tp >= entry:
+    if (
+        side == "SHORT"
+        and tp >= entry
+    ):
         return None
 
     # --------------------------------------------------------
     # Net TP after round-trip LBank fees
     # --------------------------------------------------------
 
-    gross_tp_pct = abs(tp_distance)
+    gross_tp_pct = abs(
+        tp_distance
+    )
 
     net_tp_pct = (
         gross_tp_pct
@@ -805,9 +1179,15 @@ def generate_signal(df):
         "net_tp_pct": net_tp_pct,
         "net_sl_pct": net_sl_pct,
         "timestamp": row["timestamp"].isoformat(),
-        "distance_pct": float(row["distance_pct"]),
-        "rsi": float(row["rsi"]),
-        "rvol": float(row["rvol"])
+        "distance_pct": float(
+            row["distance_pct"]
+        ),
+        "rsi": float(
+            row["rsi"]
+        ),
+        "rvol": float(
+            row["rvol"]
+        )
     }
 
 
@@ -821,28 +1201,40 @@ def check_active_trade(
     current_time
 ):
 
-    trade = state.get("active_trade")
+    trade = state.get(
+        "active_trade"
+    )
 
     if not trade:
         return None
 
     side = trade["side"]
 
-    entry = float(trade["entry"])
-    tp = float(trade["tp"])
-    sl = float(trade["sl"])
+    entry = float(
+        trade["entry"]
+    )
+
+    tp = float(
+        trade["tp"]
+    )
+
+    sl = float(
+        trade["sl"]
+    )
 
     opened_at = datetime.fromisoformat(
         trade["timestamp"]
     )
 
     if opened_at.tzinfo is None:
+
         opened_at = opened_at.replace(
             tzinfo=timezone.utc
         )
 
     age_hours = (
-        current_time - opened_at
+        current_time
+        - opened_at
     ).total_seconds() / 3600
 
     result = None
@@ -850,35 +1242,46 @@ def check_active_trade(
     if side == "LONG":
 
         if current_price <= sl:
+
             result = "SL"
 
         elif current_price >= tp:
+
             result = "TP"
 
     else:
 
         if current_price >= sl:
+
             result = "SL"
 
         elif current_price <= tp:
+
             result = "TP"
 
-    if result is None and age_hours >= 12:
+    if (
+        result is None
+        and age_hours >= 12
+    ):
+
         result = "TIMEOUT"
 
     if result is None:
+
         return None
 
     if side == "LONG":
 
         gross_pct = (
-            current_price / entry - 1
+            current_price / entry
+            - 1
         ) * 100
 
     else:
 
         gross_pct = (
-            1 - current_price / entry
+            1
+            - current_price / entry
         ) * 100
 
     net_pct = (
@@ -889,18 +1292,24 @@ def check_active_trade(
     trade["exit"] = current_price
     trade["result"] = result
     trade["net_pnl_pct"] = net_pct
-    trade["closed_at"] = current_time.isoformat()
+    trade["closed_at"] = (
+        current_time.isoformat()
+    )
 
     if result == "TP":
+
         state["wins"] += 1
 
     elif result == "SL":
+
         state["losses"] += 1
 
     else:
+
         state["timeouts"] += 1
 
     state["net_pnl_pct"] += net_pct
+
     state["active_trade"] = None
 
     return trade
@@ -916,12 +1325,19 @@ def open_trade(
 ):
 
     state["active_trade"] = {
+
         "side": signal["side"],
+
         "score": signal["score"],
+
         "entry": signal["entry"],
+
         "tp": signal["tp"],
+
         "sl": signal["sl"],
+
         "tenkan": signal["tenkan"],
+
         "timestamp": signal["timestamp"]
     }
 
@@ -936,12 +1352,16 @@ def build_message(
     df,
     state,
     signal,
-    closed_trade
+    closed_trade,
+    rejection_reason=None
 ):
 
     row = df.iloc[-1]
 
-    price = float(row["close"])
+    price = float(
+        row["close"]
+    )
+
     timestamp = row["timestamp"]
 
     lines = []
@@ -977,7 +1397,8 @@ def build_message(
         )
 
         lines.append(
-            f"{emoji} CLOSED {closed_trade['side']}"
+            f"{emoji} CLOSED "
+            f"{closed_trade['side']}"
         )
 
         lines.append(
@@ -985,7 +1406,7 @@ def build_message(
         )
 
         lines.append(
-            f"Net P&L: "
+            "Net P&L: "
             f"{fmt_pct(closed_trade['net_pnl_pct'])}"
         )
 
@@ -1013,34 +1434,65 @@ def build_message(
         )
 
         lines.append(
-            f"Entry: {fmt_price(signal['entry'])}"
+            f"Entry: "
+            f"{fmt_price(signal['entry'])}"
         )
 
         tp_pct = (
-            signal["tp"] / signal["entry"] - 1
+            signal["tp"]
+            /
+            signal["entry"]
+            - 1
         ) * 100
 
         sl_pct = (
-            signal["sl"] / signal["entry"] - 1
+            signal["sl"]
+            /
+            signal["entry"]
+            - 1
         ) * 100
 
         if signal["side"] == "SHORT":
+
             tp_pct = abs(tp_pct)
+
             sl_pct = abs(sl_pct)
 
         lines.append(
-            f"TP: {fmt_price(signal['tp'])} "
+            f"TP: "
+            f"{fmt_price(signal['tp'])} "
             f"({tp_pct:+.2f}%)"
         )
 
         lines.append(
-            f"SL: {fmt_price(signal['sl'])} "
+            f"SL: "
+            f"{fmt_price(signal['sl'])} "
             f"(-{abs(sl_pct):.2f}%)"
         )
 
         lines.append(
-            f"Net TP after LBank fee: "
+            "Net TP after LBank fee: "
             f"{signal['net_tp_pct']:+.2f}%"
+        )
+
+        lines.append("")
+
+    # --------------------------------------------------------
+    # NO SIGNAL
+    # --------------------------------------------------------
+
+    if (
+        signal is None
+        and rejection_reason
+        and state.get("active_trade") is None
+    ):
+
+        lines.append(
+            "❌ NO SIGNAL"
+        )
+
+        lines.append(
+            f"Reason: {rejection_reason}"
         )
 
         lines.append("")
@@ -1049,7 +1501,9 @@ def build_message(
     # ACTIVE TRADE
     # --------------------------------------------------------
 
-    trade = state.get("active_trade")
+    trade = state.get(
+        "active_trade"
+    )
 
     if trade:
 
@@ -1061,20 +1515,30 @@ def build_message(
             else "🔴"
         )
 
-        entry = float(trade["entry"])
-        tp = float(trade["tp"])
-        sl = float(trade["sl"])
+        entry = float(
+            trade["entry"]
+        )
+
+        tp = float(
+            trade["tp"]
+        )
+
+        sl = float(
+            trade["sl"]
+        )
 
         if side == "LONG":
 
             current_pnl = (
-                price / entry - 1
+                price / entry
+                - 1
             ) * 100
 
         else:
 
             current_pnl = (
-                1 - price / entry
+                1
+                - price / entry
             ) * 100
 
         lines.append(
@@ -1082,11 +1546,13 @@ def build_message(
         )
 
         lines.append(
-            f"Entry: {fmt_price(entry)}"
+            f"Entry: "
+            f"{fmt_price(entry)}"
         )
 
         lines.append(
-            f"Current: {fmt_price(price)} "
+            f"Current: "
+            f"{fmt_price(price)} "
             f"({current_pnl:+.2f}%)"
         )
 
@@ -1118,11 +1584,13 @@ def build_message(
 
         wr = (
             state["wins"]
-            / total_closed
+            /
+            total_closed
             * 100
         )
 
     else:
+
         wr = 0
 
     lines.append("")
@@ -1132,15 +1600,17 @@ def build_message(
     )
 
     lines.append(
-        f"Signals: {state['signals_total']}"
+        f"Signals: "
+        f"{state['signals_total']}"
     )
 
     lines.append(
-        f"Closed: {total_closed}"
+        f"Closed: "
+        f"{total_closed}"
     )
 
     lines.append(
-        f"W/L/T: "
+        "W/L/T: "
         f"{state['wins']}/"
         f"{state['losses']}/"
         f"{state['timeouts']}"
@@ -1151,7 +1621,7 @@ def build_message(
     )
 
     lines.append(
-        f"Net P&L: "
+        "Net P&L: "
         f"{state['net_pnl_pct']:+.2f}%"
     )
 
@@ -1176,7 +1646,11 @@ def build_message(
 def main():
 
     print("=" * 60)
-    print("DOGE REVERSE-TENKAN v1.5")
+
+    print(
+        "DOGE REVERSE-TENKAN v1.5"
+    )
+
     print("=" * 60)
 
     state = load_state()
@@ -1201,8 +1675,13 @@ def main():
     # INDICATORS
     # --------------------------------------------------------
 
-    df5 = add_5m_indicators(df5)
-    df15 = add_15m_indicators(df15)
+    df5 = add_5m_indicators(
+        df5
+    )
+
+    df15 = add_15m_indicators(
+        df15
+    )
 
     df = merge_15m_context(
         df5,
@@ -1230,6 +1709,7 @@ def main():
     )
 
     if len(df) < 50:
+
         raise RuntimeError(
             "Not enough valid candles."
         )
@@ -1240,7 +1720,10 @@ def main():
 
     row = df.iloc[-1]
 
-    current_price = float(row["close"])
+    current_price = float(
+        row["close"]
+    )
+
     current_time = row["timestamp"]
 
     print(
@@ -1262,17 +1745,38 @@ def main():
     # CLOSE ACTIVE TRADE
     # --------------------------------------------------------
 
-    closed_trade = check_active_trade(
-        state,
-        current_price,
-        current_time
+    closed_trade = (
+        check_active_trade(
+            state,
+            current_price,
+            current_time
+        )
     )
 
     # --------------------------------------------------------
     # NEW SIGNAL
     # --------------------------------------------------------
 
-    signal = generate_signal(df)
+    signal = generate_signal(
+        df
+    )
+
+    # --------------------------------------------------------
+    # REJECTION REASON
+    #
+    # IMPORTANT:
+    # This only reports why the existing strategy
+    # did not generate a signal.
+    # It does NOT modify signal generation.
+    # --------------------------------------------------------
+
+    rejection_reason = None
+
+    if signal is None:
+
+        rejection_reason = (
+            get_rejection_reason(row)
+        )
 
     # --------------------------------------------------------
     # DUPLICATE PROTECTION
@@ -1280,21 +1784,37 @@ def main():
 
     if signal:
 
-        signal_candle = signal["timestamp"]
+        signal_candle = (
+            signal["timestamp"]
+        )
 
         if (
             state["last_signal_candle"]
             == signal_candle
         ):
+
             signal = None
+
+            rejection_reason = (
+                "Duplicate signal candle"
+            )
 
     # --------------------------------------------------------
     # DO NOT OPEN NEW TRADE WHILE ONE IS ACTIVE
     # --------------------------------------------------------
 
-    if state.get("active_trade") is not None:
+    if (
+        state.get("active_trade")
+        is not None
+    ):
 
-        signal = None
+        if signal is not None:
+
+            signal = None
+
+        rejection_reason = (
+            "Active trade already open"
+        )
 
     # --------------------------------------------------------
     # OPEN
@@ -1317,6 +1837,17 @@ def main():
             signal["score"]
         )
 
+    else:
+
+        print(
+            "NO SIGNAL:"
+        )
+
+        print(
+            rejection_reason
+            or "No signal"
+        )
+
     # --------------------------------------------------------
     # MESSAGE
     # --------------------------------------------------------
@@ -1325,20 +1856,26 @@ def main():
         df,
         state,
         signal,
-        closed_trade
+        closed_trade,
+        rejection_reason
     )
 
     print()
     print(message)
 
-    telegram_send(message)
+    telegram_send(
+        message
+    )
 
     # --------------------------------------------------------
     # SAVE
     # --------------------------------------------------------
 
-    save_state(state)
+    save_state(
+        state
+    )
 
 
 if __name__ == "__main__":
+
     main()
