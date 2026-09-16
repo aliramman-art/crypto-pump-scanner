@@ -1,0 +1,104 @@
+name: NDS Algorithmic v1 Backtest
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+
+  workflow_dispatch:
+
+concurrency:
+  group: nds-algorithmic-v1
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  backtest:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ======================================================
+      # INSTALL DEPENDENCIES
+      # ======================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests
+
+      # ======================================================
+      # RUN NDS BACKTEST
+      # ======================================================
+
+      - name: Run NDS Algorithmic v1
+        run: |
+          python nds_algorithmic_v1.py
+
+      # ======================================================
+      # SHOW REPORT
+      # ======================================================
+
+      - name: Show backtest report
+        if: always()
+        run: |
+          echo "============================================================"
+          echo "NDS ALGORITHMIC v1 BACKTEST REPORT"
+          echo "============================================================"
+
+          if [ -f doge_nds_algorithmic_v1_report.txt ]; then
+            cat doge_nds_algorithmic_v1_report.txt
+          else
+            echo "Report file not found."
+          fi
+
+      # ======================================================
+      # CHECK OUTPUT FILES
+      # ======================================================
+
+      - name: Check output files
+        if: always()
+        run: |
+          echo "============================================================"
+          echo "OUTPUT FILES"
+          echo "============================================================"
+
+          ls -lh \
+            doge_nds_algorithmic_v1_trades.csv \
+            doge_nds_algorithmic_v1_equity.csv \
+            doge_nds_algorithmic_v1_report.txt \
+            2>/dev/null || true
+
+      # ======================================================
+      # UPLOAD BACKTEST RESULTS
+      # ======================================================
+
+      - name: Upload backtest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nds-algorithmic-v1-results
+          path: |
+            doge_nds_algorithmic_v1_trades.csv
+            doge_nds_algorithmic_v1_equity.csv
+            doge_nds_algorithmic_v1_report.txt
+          if-no-files-found: warn
+          retention-days: 30
