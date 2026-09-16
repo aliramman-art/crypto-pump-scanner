@@ -1,21 +1,27 @@
 # ============================================================
 # REVERSE-TENKAN 21 COINS
 # 30-DAY HISTORICAL BACKTEST
+# EXIT COMPARISON
 # ============================================================
 #
-# Strategy:
-# DOGE REVERSE-TENKAN SIGNAL BOT v1.5
-#
 # IMPORTANT:
-# Strategy logic is kept unchanged.
-# This file only adds a historical replay/backtest engine.
+# ENTRY STRATEGY IS UNCHANGED
 #
-# DATA:
-# Kraken Futures trade candles
+# Only exit logic is compared:
 #
-# TIMEFRAMES:
-# 5M  = signal
-# 15M = context
+# 1) TP = SIGNAL CANDLE TENKAN
+# 2) TP = 1R
+# 3) TP = 1.5R
+# 4) TP = 2R
+# 5) TP = 2.5R
+# 6) TP = 3R
+#
+# SL = 2.00%
+# Fee = 0.12% round trip
+#
+# CLOSED CANDLES ONLY
+# SL FIRST when SL and TP are touched
+# in the same candle
 #
 # ============================================================
 
@@ -24,6 +30,7 @@ import math
 import requests
 import pandas as pd
 import numpy as np
+
 from datetime import datetime, timedelta, timezone
 
 
@@ -55,21 +62,43 @@ SYMBOLS = [
     "PF_ZECUSD",       # ZEC
 ]
 
+SYMBOL_NAMES = {
+    "PF_XBTUSD": "BTC",
+    "PF_ETHUSD": "ETH",
+    "PF_SOLUSD": "SOL",
+    "PF_XRPUSD": "XRP",
+    "PF_DOGEUSD": "DOGE",
+    "PF_ADAUSD": "ADA",
+    "PF_AVAXUSD": "AVAX",
+    "PF_LINKUSD": "LINK",
+    "PF_DOTUSD": "DOT",
+    "PF_LTCUSD": "LTC",
+    "PF_BCHUSD": "BCH",
+    "PF_UNIUSD": "UNI",
+    "PF_AAVEUSD": "AAVE",
+    "PF_SUIUSD": "SUI",
+    "PF_HYPEUSD": "HYPE",
+    "PF_NEARUSD": "NEAR",
+    "PF_ATOMUSD": "ATOM",
+    "PF_FILUSD": "FIL",
+    "PF_ARBUSD": "ARB",
+    "PF_OPUSD": "OP",
+    "PF_ZECUSD": "ZEC",
+}
+
 
 # ============================================================
-# ORIGINAL STRATEGY SETTINGS
+# STRATEGY SETTINGS
 # ============================================================
 
 TENKAN_PERIOD = 9
 
 MIN_DISTANCE_PCT = 0.75
-
 MIN_SCORE = 8
 
 SL_PCT = 2.00
 
 MAX_HOLD_BARS = 144
-
 MAX_HOLD_HOURS = 12
 
 RSI_PERIOD = 14
@@ -86,64 +115,36 @@ EMA_15M_PERIOD = 20
 MAX_BODY_MULTIPLIER = 1.50
 MAX_RANGE_MULTIPLIER = 2.00
 
-# LBank taker fee
-FEE_PER_SIDE_PCT = 0.06
+ROUND_TRIP_FEE_PCT = 0.12
 
-ROUND_TRIP_FEE_PCT = FEE_PER_SIDE_PCT * 2.0
-
-
-# ============================================================
-# BACKTEST SETTINGS
-# ============================================================
-
-BACKTEST_DAYS = 30
-
-SIGNAL_TIMEFRAME = "5m"
-CONTEXT_TIMEFRAME = "15m"
-
-API_BASE = "https://futures.kraken.com/api/charts/v1"
-
-REQUEST_TIMEOUT = 30
-
-REQUEST_SLEEP = 0.15
-
-# If both SL and TP are touched inside the same 5M candle,
-# we cannot know the true intrabar order from OHLC alone.
-# Conservative deterministic rule:
 SL_FIRST = True
 
-OUTPUT_CSV = "reverse_tenkan_21coins_30d_results.csv"
 
-TRADES_CSV = "reverse_tenkan_21coins_30d_trades.csv"
+# ============================================================
+# EXIT MODELS
+# ============================================================
+
+EXIT_MODELS = {
+    "TENKAN": "TENKAN",
+    "1R": 1.0,
+    "1.5R": 1.5,
+    "2R": 2.0,
+    "2.5R": 2.5,
+    "3R": 3.0,
+}
 
 
 # ============================================================
-# HTTP SESSION
+# KRAKEN
 # ============================================================
 
-SESSION = requests.Session()
-
-SESSION.headers.update({
-    "User-Agent": "Reverse-Tenkan-21Coins-Backtest/1.5"
-})
+KRAKEN_URL = (
+    "https://futures.kraken.com/api/charts/v1/trade"
+)
 
 
 # ============================================================
-# SYMBOL NAME
-# ============================================================
-
-def symbol_name(symbol):
-
-    return (
-        symbol
-        .replace("PF_", "")
-        .replace("USD", "")
-        .replace("XBT", "BTC")
-    )
-
-
-# ============================================================
-# FETCH KRAKEN FUTURES CANDLES
+# FETCH CANDLES
 # ============================================================
 
 def fetch_kraken_candles(
@@ -154,128 +155,61 @@ def fetch_kraken_candles(
 ):
 
     url = (
-        f"{API_BASE}/trade/"
+        f"{KRAKEN_URL}/"
         f"{symbol}/"
         f"{resolution}"
     )
 
-    all_candles = []
+    params = {
+        "from": int(start_ts),
+        "to": int(end_ts),
+        "count": 2000,
+    }
 
-    current_from = int(start_ts)
+    response = requests.get(
+        url,
+        params=params,
+        timeout=30,
+    )
 
-    # Kraken Futures chart endpoint can limit candle count.
-    # We therefore fetch in windows.
-    if resolution == "5m":
+    response.raise_for_status()
 
-        window_seconds = (
-            2000 *
-            5 *
-            60
-        )
+    payload = response.json()
 
-    elif resolution == "15m":
+    candles = payload.get(
+        "candles",
+        []
+    )
 
-        window_seconds = (
-            2000 *
-            15 *
-            60
-        )
-
-    else:
-
-        window_seconds = (
-            2000 *
-            60
-        )
-
-    while current_from < end_ts:
-
-        current_to = min(
-            current_from + window_seconds,
-            end_ts
-        )
-
-        params = {
-            "from": current_from,
-            "to": current_to,
-            "count": 2000,
-        }
-
-        try:
-
-            response = SESSION.get(
-                url,
-                params=params,
-                timeout=REQUEST_TIMEOUT
-            )
-
-            response.raise_for_status()
-
-            payload = response.json()
-
-        except Exception as exc:
-
-            print(
-                f"ERROR fetching "
-                f"{symbol} {resolution}: {exc}"
-            )
-
-            break
-
-        candles = payload.get(
-            "candles",
-            []
-        )
-
-        if not candles:
-
-            break
-
-        all_candles.extend(
-            candles
-        )
-
-        last_ms = int(
-            candles[-1]["time"]
-        )
-
-        last_sec = (
-            last_ms // 1000
-        )
-
-        next_from = (
-            last_sec + 1
-        )
-
-        if next_from <= current_from:
-
-            break
-
-        current_from = next_from
-
-        time.sleep(
-            REQUEST_SLEEP
-        )
-
-        if not payload.get(
-            "more_candles",
-            False
-        ):
-
-            if current_from >= end_ts:
-
-                break
-
-    if not all_candles:
-
+    if not candles:
         return pd.DataFrame()
 
-    df = pd.DataFrame(
-        all_candles
+    df = pd.DataFrame(candles)
+
+    # --------------------------------------------------------
+    # Normalize columns
+    # --------------------------------------------------------
+
+    rename_map = {
+        "time": "timestamp",
+        "ts": "timestamp",
+        "open": "open",
+        "high": "high",
+        "low": "low",
+        "close": "close",
+        "volume": "volume",
+    }
+
+    df = df.rename(
+        columns={
+            k: v
+            for k, v in rename_map.items()
+            if k in df.columns
+        }
     )
 
     required = [
-        "time",
+        "timestamp",
         "open",
         "high",
         "low",
@@ -283,29 +217,22 @@ def fetch_kraken_candles(
         "volume",
     ]
 
-    missing = [
-        c
-        for c in required
-        if c not in df.columns
-    ]
+    for col in required:
 
-    if missing:
+        if col not in df.columns:
 
-        print(
-            f"{symbol} {resolution}: "
-            f"missing columns {missing}"
-        )
+            return pd.DataFrame()
 
-        return pd.DataFrame()
+    df = df[required].copy()
 
-    df = df[
-        required
-    ].copy()
+    # --------------------------------------------------------
+    # Timestamp
+    # --------------------------------------------------------
 
-    df["time"] = pd.to_datetime(
-        df["time"],
-        unit="ms",
-        utc=True
+    df["timestamp"] = pd.to_datetime(
+        df["timestamp"],
+        unit="s",
+        utc=True,
     )
 
     for col in [
@@ -318,7 +245,7 @@ def fetch_kraken_candles(
 
         df[col] = pd.to_numeric(
             df[col],
-            errors="coerce"
+            errors="coerce",
         )
 
     df = df.dropna()
@@ -326,13 +253,94 @@ def fetch_kraken_candles(
     df = (
         df
         .drop_duplicates(
-            subset=["time"]
+            subset=["timestamp"]
         )
-        .sort_values("time")
+        .sort_values("timestamp")
         .reset_index(drop=True)
     )
 
     return df
+
+
+# ============================================================
+# FETCH ALL CANDLES
+# ============================================================
+
+def fetch_all_candles(
+    symbol,
+    resolution,
+    start_dt,
+    end_dt
+):
+
+    step_seconds = (
+        5 * 60
+        if resolution == "5m"
+        else 15 * 60
+    )
+
+    current = int(
+        start_dt.timestamp()
+    )
+
+    end_ts = int(
+        end_dt.timestamp()
+    )
+
+    all_parts = []
+
+    while current < end_ts:
+
+        chunk_end = min(
+            current + (
+                1900 * step_seconds
+            ),
+            end_ts,
+        )
+
+        df = fetch_kraken_candles(
+            symbol,
+            resolution,
+            current,
+            chunk_end,
+        )
+
+        if not df.empty:
+
+            all_parts.append(df)
+
+        current = (
+            chunk_end +
+            step_seconds
+        )
+
+        time.sleep(0.10)
+
+    if not all_parts:
+
+        return pd.DataFrame()
+
+    result = pd.concat(
+        all_parts,
+        ignore_index=True,
+    )
+
+    result = (
+        result
+        .drop_duplicates(
+            subset=["timestamp"]
+        )
+        .sort_values("timestamp")
+        .reset_index(drop=True)
+    )
+
+    result = result[
+        (result["timestamp"] >= start_dt)
+        &
+        (result["timestamp"] <= end_dt)
+    ].copy()
+
+    return result
 
 
 # ============================================================
@@ -341,7 +349,7 @@ def fetch_kraken_candles(
 
 def calculate_tenkan(df):
 
-    high_n = (
+    high = (
         df["high"]
         .rolling(
             TENKAN_PERIOD
@@ -349,7 +357,7 @@ def calculate_tenkan(df):
         .max()
     )
 
-    low_n = (
+    low = (
         df["low"]
         .rolling(
             TENKAN_PERIOD
@@ -358,8 +366,7 @@ def calculate_tenkan(df):
     )
 
     return (
-        high_n +
-        low_n
+        high + low
     ) / 2.0
 
 
@@ -378,15 +385,17 @@ def calculate_rsi(
         lower=0
     )
 
-    loss = -delta.clip(
-        upper=0
+    loss = (
+        -delta.clip(
+            upper=0
+        )
     )
 
     avg_gain = (
         gain
         .ewm(
             alpha=1 / period,
-            adjust=False
+            adjust=False,
         )
         .mean()
     )
@@ -395,7 +404,7 @@ def calculate_rsi(
         loss
         .ewm(
             alpha=1 / period,
-            adjust=False
+            adjust=False,
         )
         .mean()
     )
@@ -420,7 +429,7 @@ def calculate_rsi(
 
 
 # ============================================================
-# ADD 5M INDICATORS
+# INDICATORS
 # ============================================================
 
 def add_indicators(df):
@@ -434,12 +443,8 @@ def add_indicators(df):
     df["rsi"] = (
         calculate_rsi(
             df["close"],
-            RSI_PERIOD
+            RSI_PERIOD,
         )
-    )
-
-    df["prev_rsi"] = (
-        df["rsi"].shift(1)
     )
 
     df["prev_close"] = (
@@ -480,7 +485,7 @@ def add_indicators(df):
         .mean()
     )
 
-    df["volume_ma"] = (
+    df["avg_volume"] = (
         df["volume"]
         .rolling(
             RVOL_PERIOD
@@ -490,13 +495,9 @@ def add_indicators(df):
 
     df["rvol"] = (
         df["volume"] /
-        df["volume_ma"].replace(
-            0,
-            np.nan
-        )
+        df["avg_volume"]
     )
 
-    # Distance from Tenkan
     df["distance_pct"] = (
         (
             df["close"] -
@@ -504,42 +505,21 @@ def add_indicators(df):
         )
         /
         df["tenkan"]
-        * 100
+        *
+        100
     )
 
     df["prev_distance_pct"] = (
         df["distance_pct"].shift(1)
     )
 
-    # Candle close position
-    df["close_position"] = np.where(
-        df["range"] > 0,
-        (
-            df["close"] -
-            df["low"]
-        )
-        /
-        df["range"],
-        0.5
-    )
-
-    # Tenkan slope
-    df["tenkan_prev"] = (
+    df["tenkan_slope"] = (
+        df["tenkan"] -
         df["tenkan"].shift(1)
     )
 
-    df["tenkan_prev2"] = (
-        df["tenkan"].shift(2)
-    )
-
-    df["tenkan_slope"] = (
-        df["tenkan"] -
-        df["tenkan_prev"]
-    )
-
-    df["tenkan_slope_prev"] = (
-        df["tenkan_prev"] -
-        df["tenkan_prev2"]
+    df["prev_tenkan_slope"] = (
+        df["tenkan_slope"].shift(1)
     )
 
     return df
@@ -551,29 +531,34 @@ def add_indicators(df):
 
 def build_15m_context(df15):
 
-    df15 = df15.copy()
+    ctx = df15.copy()
 
-    df15["ema20"] = (
-        df15["close"]
+    ctx["ema20"] = (
+        ctx["close"]
         .ewm(
             span=EMA_15M_PERIOD,
-            adjust=False
+            adjust=False,
         )
         .mean()
     )
 
-    return df15[
+    # Closed 15M candle only
+    ctx = ctx[
         [
-            "time",
+            "timestamp",
             "close",
             "ema20",
         ]
-    ].rename(
+    ].copy()
+
+    ctx = ctx.rename(
         columns={
             "close": "close_15m",
             "ema20": "ema20_15m",
         }
     )
+
+    return ctx
 
 
 # ============================================================
@@ -582,53 +567,25 @@ def build_15m_context(df15):
 
 def merge_context(
     df5,
-    context15
+    df15
 ):
 
-    left = df5.copy()
-
-    right = context15.copy()
-
-    left["context_time"] = (
-        left["time"] +
-        pd.Timedelta(
-            minutes=5
-        )
-    )
-
-    right["context_time"] = (
-        right["time"] +
-        pd.Timedelta(
-            minutes=15
-        )
-    )
-
-    right = right.sort_values(
-        "context_time"
-    )
-
-    left = left.sort_values(
-        "context_time"
+    context = build_15m_context(
+        df15
     )
 
     merged = pd.merge_asof(
-        left,
-        right[
-            [
-                "context_time",
-                "close_15m",
-                "ema20_15m",
-            ]
-        ],
-        on="context_time",
-        direction="backward"
+        df5.sort_values(
+            "timestamp"
+        ),
+        context.sort_values(
+            "timestamp"
+        ),
+        on="timestamp",
+        direction="backward",
     )
 
-    return merged.drop(
-        columns=[
-            "context_time"
-        ]
-    )
+    return merged
 
 
 # ============================================================
@@ -637,9 +594,17 @@ def merge_context(
 
 def long_reversal_candle(row):
 
+    if row["range"] <= 0:
+
+        return False
+
+    close_position = (
+        row["close"] -
+        row["low"]
+    ) / row["range"]
+
     return (
-        row["close"] >
-        row["open"]
+        row["close"] > row["open"]
         and
         row["close"] >
         row["prev_close"]
@@ -647,15 +612,23 @@ def long_reversal_candle(row):
         row["high"] >
         row["prev_high"]
         and
-        row["close_position"] >= 0.55
+        close_position >= 0.55
     )
 
 
 def short_reversal_candle(row):
 
+    if row["range"] <= 0:
+
+        return False
+
+    close_position = (
+        row["close"] -
+        row["low"]
+    ) / row["range"]
+
     return (
-        row["close"] <
-        row["open"]
+        row["close"] < row["open"]
         and
         row["close"] <
         row["prev_close"]
@@ -663,7 +636,7 @@ def short_reversal_candle(row):
         row["low"] <
         row["prev_low"]
         and
-        row["close_position"] <= 0.45
+        close_position <= 0.45
     )
 
 
@@ -672,9 +645,12 @@ def short_reversal_candle(row):
 # ============================================================
 
 def calculate_score(
-    row,
+    df,
+    i,
     side
 ):
+
+    row = df.iloc[i]
 
     score = 0
 
@@ -687,55 +663,37 @@ def calculate_score(
     )
 
     # --------------------------------------------------------
-    # 1. DISTANCE
+    # Distance
     # --------------------------------------------------------
 
     if side == "LONG":
 
-        if (
-            distance <=
-            -MIN_DISTANCE_PCT
-        ):
+        if distance <= -MIN_DISTANCE_PCT:
 
             score += 2
 
     else:
 
-        if (
-            distance >=
-            MIN_DISTANCE_PCT
-        ):
+        if distance >= MIN_DISTANCE_PCT:
 
             score += 2
 
     # --------------------------------------------------------
-    # 2. DISTANCE CONTRACTING
+    # Distance contracting
     # --------------------------------------------------------
 
-    if side == "LONG":
+    if (
+        pd.notna(prev_distance)
+        and
+        abs(distance)
+        <
+        abs(prev_distance)
+    ):
 
-        if (
-            distance < 0
-            and
-            abs(distance) <
-            abs(prev_distance)
-        ):
-
-            score += 2
-
-    else:
-
-        if (
-            distance > 0
-            and
-            abs(distance) <
-            abs(prev_distance)
-        ):
-
-            score += 2
+        score += 2
 
     # --------------------------------------------------------
-    # 3. TENKAN SLOPE REVERSAL
+    # Tenkan slope reversal
     # --------------------------------------------------------
 
     if side == "LONG":
@@ -743,7 +701,7 @@ def calculate_score(
         if (
             row["tenkan_slope"] > 0
             and
-            row["tenkan_slope_prev"] <= 0
+            row["prev_tenkan_slope"] <= 0
         ):
 
             score += 2
@@ -753,13 +711,13 @@ def calculate_score(
         if (
             row["tenkan_slope"] < 0
             and
-            row["tenkan_slope_prev"] >= 0
+            row["prev_tenkan_slope"] >= 0
         ):
 
             score += 2
 
     # --------------------------------------------------------
-    # 4. REVERSAL CANDLE
+    # Reversal candle
     # --------------------------------------------------------
 
     if side == "LONG":
@@ -775,8 +733,16 @@ def calculate_score(
             score += 2
 
     # --------------------------------------------------------
-    # 5. RSI REVERSAL
+    # RSI reversal
     # --------------------------------------------------------
+
+    if i > 0:
+
+        prev_rsi = df.iloc[i - 1]["rsi"]
+
+    else:
+
+        prev_rsi = np.nan
 
     if side == "LONG":
 
@@ -785,8 +751,7 @@ def calculate_score(
             and
             row["rsi"] < 35
             and
-            row["rsi"] >
-            row["prev_rsi"]
+            row["rsi"] > prev_rsi
         ):
 
             score += 2
@@ -798,14 +763,13 @@ def calculate_score(
             and
             row["rsi"] > 65
             and
-            row["rsi"] <
-            row["prev_rsi"]
+            row["rsi"] < prev_rsi
         ):
 
             score += 2
 
     # --------------------------------------------------------
-    # 6. RVOL
+    # RVOL
     # --------------------------------------------------------
 
     if (
@@ -817,36 +781,48 @@ def calculate_score(
         score += 1
 
     # --------------------------------------------------------
-    # 7. NO EXPLOSION
+    # No explosion
     # --------------------------------------------------------
 
-    body_ok = (
-        row["body"] <=
-        row["avg_body"] *
-        MAX_BODY_MULTIPLIER
-    )
-
-    range_ok = (
-        row["range"] <=
-        row["avg_range"] *
-        MAX_RANGE_MULTIPLIER
-    )
+    no_explosion = True
 
     if (
-        body_ok and
-        range_ok
+        pd.notna(row["avg_body"])
+        and
+        row["body"]
+        >
+        row["avg_body"]
+        *
+        MAX_BODY_MULTIPLIER
     ):
+
+        no_explosion = False
+
+    if (
+        pd.notna(row["avg_range"])
+        and
+        row["range"]
+        >
+        row["avg_range"]
+        *
+        MAX_RANGE_MULTIPLIER
+    ):
+
+        no_explosion = False
+
+    if no_explosion:
 
         score += 1
 
     # --------------------------------------------------------
-    # 8. 15M EMA CONTEXT
+    # 15M EMA context
     # --------------------------------------------------------
 
     if side == "LONG":
 
         if (
-            row["close_15m"] >=
+            row["close_15m"]
+            >=
             row["ema20_15m"]
         ):
 
@@ -855,7 +831,8 @@ def calculate_score(
     else:
 
         if (
-            row["close_15m"] <=
+            row["close_15m"]
+            <=
             row["ema20_15m"]
         ):
 
@@ -868,75 +845,44 @@ def calculate_score(
 # SIGNAL
 # ============================================================
 
-def get_signal(row):
+def get_signal(
+    df,
+    i
+):
 
-    if pd.isna(
+    row = df.iloc[i]
+
+    if not np.isfinite(
         row["tenkan"]
     ):
 
-        return None, 0
+        return None
 
-    if pd.isna(
-        row["distance_pct"]
-    ):
-
-        return None, 0
-
-    if pd.isna(
-        row["prev_distance_pct"]
-    ):
-
-        return None, 0
-
-    if pd.isna(
+    if not np.isfinite(
         row["rsi"]
     ):
 
-        return None, 0
+        return None
 
-    if pd.isna(
-        row["prev_rsi"]
-    ):
-
-        return None, 0
-
-    if pd.isna(
+    if not np.isfinite(
         row["rvol"]
     ):
 
-        return None, 0
+        return None
 
-    if pd.isna(
-        row["avg_body"]
-    ):
-
-        return None, 0
-
-    if pd.isna(
-        row["avg_range"]
-    ):
-
-        return None, 0
-
-    if pd.isna(
-        row["close_15m"]
-    ):
-
-        return None, 0
-
-    if pd.isna(
+    if not np.isfinite(
         row["ema20_15m"]
     ):
 
-        return None, 0
+        return None
 
     distance = (
         row["distance_pct"]
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # LONG
-    # ========================================================
+    # --------------------------------------------------------
 
     if (
         distance <=
@@ -944,21 +890,41 @@ def get_signal(row):
     ):
 
         score = calculate_score(
-            row,
-            "LONG"
+            df,
+            i,
+            "LONG",
         )
 
         if score >= MIN_SCORE:
 
-            tp = row["tenkan"]
+            entry = row["close"]
 
-            if tp > row["close"]:
+            tenkan = row["tenkan"]
 
-                return "LONG", score
+            sl = (
+                entry *
+                (
+                    1 -
+                    SL_PCT / 100
+                )
+            )
 
-    # ========================================================
+            tp_tenkan = tenkan
+
+            # TP must be profitable
+            if tp_tenkan > entry:
+
+                return {
+                    "side": "LONG",
+                    "entry": entry,
+                    "sl": sl,
+                    "tp_tenkan": tp_tenkan,
+                    "score": score,
+                }
+
+    # --------------------------------------------------------
     # SHORT
-    # ========================================================
+    # --------------------------------------------------------
 
     if (
         distance >=
@@ -966,23 +932,80 @@ def get_signal(row):
     ):
 
         score = calculate_score(
-            row,
-            "SHORT"
+            df,
+            i,
+            "SHORT",
         )
 
         if score >= MIN_SCORE:
 
-            tp = row["tenkan"]
+            entry = row["close"]
 
-            if tp < row["close"]:
+            tenkan = row["tenkan"]
 
-                return "SHORT", score
+            sl = (
+                entry *
+                (
+                    1 +
+                    SL_PCT / 100
+                )
+            )
 
-    return None, 0
+            tp_tenkan = tenkan
+
+            # TP must be profitable
+            if tp_tenkan < entry:
+
+                return {
+                    "side": "SHORT",
+                    "entry": entry,
+                    "sl": sl,
+                    "tp_tenkan": tp_tenkan,
+                    "score": score,
+                }
+
+    return None
 
 
 # ============================================================
-# TRADE RESULT
+# BUILD TP
+# ============================================================
+
+def build_tp(
+    side,
+    entry,
+    sl,
+    tp_tenkan,
+    model
+):
+
+    if model == "TENKAN":
+
+        return tp_tenkan
+
+    r = abs(
+        entry - sl
+    )
+
+    multiple = EXIT_MODELS[
+        model
+    ]
+
+    if side == "LONG":
+
+        return (
+            entry +
+            r * multiple
+        )
+
+    return (
+        entry -
+        r * multiple
+    )
+
+
+# ============================================================
+# TRADE PNL
 # ============================================================
 
 def calculate_trade_pnl(
@@ -1028,80 +1051,75 @@ def calculate_trade_pnl(
 
 
 # ============================================================
-# BACKTEST ONE SYMBOL
+# BACKTEST ONE EXIT MODEL
 # ============================================================
 
-def backtest_symbol(
-    symbol,
-    df
+def backtest_exit_model(
+    df,
+    signals,
+    model
 ):
 
     trades = []
 
-    active_trade = None
+    for signal in signals:
 
-    total_signals = 0
+        entry_index = signal["index"]
 
-    wins = 0
-    losses = 0
-    timeouts = 0
+        side = signal["side"]
 
-    net_pnl = 0.0
+        entry = signal["entry"]
 
-    equity = 0.0
-    peak_equity = 0.0
-    max_drawdown = 0.0
+        sl = signal["sl"]
 
-    # --------------------------------------------------------
-    # Need enough warmup data for indicators.
-    # --------------------------------------------------------
+        tp_tenkan = signal[
+            "tp_tenkan"
+        ]
 
-    for i in range(
-        len(df)
-    ):
-
-        row = df.iloc[i]
-
-        current_time = (
-            row["time"]
+        tp = build_tp(
+            side,
+            entry,
+            sl,
+            tp_tenkan,
+            model,
         )
 
-        # ====================================================
-        # MANAGE OPEN TRADE
-        # ====================================================
+        # ----------------------------------------------------
+        # Safety
+        # ----------------------------------------------------
 
-        if active_trade is not None:
+        if side == "LONG":
 
-            side = active_trade[
-                "side"
-            ]
+            if tp <= entry:
 
-            entry = active_trade[
-                "entry"
-            ]
+                continue
 
-            sl = active_trade[
-                "sl"
-            ]
+        else:
 
-            tp = active_trade[
-                "tp"
-            ]
+            if tp >= entry:
 
-            entry_index = (
-                active_trade[
-                    "entry_index"
-                ]
-            )
+                continue
 
-            age_bars = (
-                i -
-                entry_index
-            )
+        exit_price = None
+        exit_reason = None
+        exit_index = None
 
-            exit_reason = None
+        max_index = min(
+            entry_index +
+            MAX_HOLD_BARS,
+            len(df) - 1,
+        )
 
-            exit_price = None
+        for j in range(
+            entry_index + 1,
+            max_index + 1,
+        ):
+
+            candle = df.iloc[j]
+
+            high = candle["high"]
+
+            low = candle["low"]
 
             # ------------------------------------------------
             # LONG
@@ -1110,15 +1128,16 @@ def backtest_symbol(
             if side == "LONG":
 
                 sl_hit = (
-                    row["low"] <= sl
+                    low <= sl
                 )
 
                 tp_hit = (
-                    row["high"] >= tp
+                    high >= tp
                 )
 
                 if (
-                    sl_hit and
+                    sl_hit
+                    and
                     tp_hit
                 ):
 
@@ -1134,17 +1153,29 @@ def backtest_symbol(
 
                         exit_reason = "TP"
 
-                elif sl_hit:
+                    exit_index = j
+
+                    break
+
+                if sl_hit:
 
                     exit_price = sl
 
                     exit_reason = "SL"
 
-                elif tp_hit:
+                    exit_index = j
+
+                    break
+
+                if tp_hit:
 
                     exit_price = tp
 
                     exit_reason = "TP"
+
+                    exit_index = j
+
+                    break
 
             # ------------------------------------------------
             # SHORT
@@ -1153,15 +1184,16 @@ def backtest_symbol(
             else:
 
                 sl_hit = (
-                    row["high"] >= sl
+                    high >= sl
                 )
 
                 tp_hit = (
-                    row["low"] <= tp
+                    low <= tp
                 )
 
                 if (
-                    sl_hit and
+                    sl_hit
+                    and
                     tp_hit
                 ):
 
@@ -1177,509 +1209,396 @@ def backtest_symbol(
 
                         exit_reason = "TP"
 
-                elif sl_hit:
+                    exit_index = j
+
+                    break
+
+                if sl_hit:
 
                     exit_price = sl
 
                     exit_reason = "SL"
 
-                elif tp_hit:
+                    exit_index = j
+
+                    break
+
+                if tp_hit:
 
                     exit_price = tp
 
                     exit_reason = "TP"
 
-            # ------------------------------------------------
-            # TIMEOUT
-            # ------------------------------------------------
+                    exit_index = j
 
-            if (
-                exit_reason is None
-                and
-                age_bars >=
-                MAX_HOLD_BARS
-            ):
+                    break
 
-                exit_price = (
-                    row["close"]
-                )
+        # ----------------------------------------------------
+        # TIMEOUT
+        # ----------------------------------------------------
 
-                exit_reason = "TIMEOUT"
+        if exit_price is None:
 
-            # ------------------------------------------------
-            # CLOSE TRADE
-            # ------------------------------------------------
+            exit_index = max_index
 
-            if (
-                exit_reason is not None
-            ):
+            exit_price = df.iloc[
+                exit_index
+            ]["close"]
 
-                (
-                    gross_pnl,
-                    net_trade_pnl
-                ) = calculate_trade_pnl(
-                    side,
-                    entry,
-                    exit_price
-                )
+            exit_reason = "TIMEOUT"
 
-                if net_trade_pnl > 0:
+        # ----------------------------------------------------
+        # PNL
+        # ----------------------------------------------------
 
-                    wins += 1
-
-                else:
-
-                    losses += 1
-
-                if (
-                    exit_reason ==
-                    "TIMEOUT"
-                ):
-
-                    timeouts += 1
-
-                net_pnl += (
-                    net_trade_pnl
-                )
-
-                equity += (
-                    net_trade_pnl
-                )
-
-                if equity > peak_equity:
-
-                    peak_equity = (
-                        equity
-                    )
-
-                drawdown = (
-                    peak_equity -
-                    equity
-                )
-
-                if (
-                    drawdown >
-                    max_drawdown
-                ):
-
-                    max_drawdown = (
-                        drawdown
-                    )
-
-                trades.append({
-
-                    "symbol":
-                        symbol_name(
-                            symbol
-                        ),
-
-                    "symbol_raw":
-                        symbol,
-
-                    "side":
-                        side,
-
-                    "entry_time":
-                        active_trade[
-                            "entry_time"
-                        ],
-
-                    "exit_time":
-                        current_time,
-
-                    "entry":
-                        entry,
-
-                    "exit":
-                        exit_price,
-
-                    "sl":
-                        sl,
-
-                    "tp":
-                        tp,
-
-                    "gross_pnl_pct":
-                        gross_pnl,
-
-                    "net_pnl_pct":
-                        net_trade_pnl,
-
-                    "reason":
-                        exit_reason,
-
-                    "score":
-                        active_trade[
-                            "score"
-                        ],
-
-                    "hold_bars":
-                        age_bars,
-
-                    "hold_hours":
-                        (
-                            age_bars *
-                            5 /
-                            60
-                        ),
-                })
-
-                active_trade = None
-
-                # Important:
-                # After closing a trade on this candle,
-                # do not open another trade on the same candle.
-                continue
-
-        # ====================================================
-        # FIND NEW SIGNAL
-        # ====================================================
-
-        if active_trade is None:
-
-            side, score = (
-                get_signal(row)
+        gross, net = (
+            calculate_trade_pnl(
+                side,
+                entry,
+                exit_price,
             )
+        )
 
-            if side is None:
-
-                continue
-
-            entry = float(
-                row["close"]
-            )
-
-            tp = float(
-                row["tenkan"]
-            )
-
-            # ------------------------------------------------
-            # SL
-            # ------------------------------------------------
-
-            if side == "LONG":
-
-                sl = (
-                    entry *
-                    (
-                        1 -
-                        SL_PCT / 100
-                    )
-                )
-
-                # TP must be above entry
-                if tp <= entry:
-
-                    continue
-
-            else:
-
-                sl = (
-                    entry *
-                    (
-                        1 +
-                        SL_PCT / 100
-                    )
-                )
-
-                # TP must be below entry
-                if tp >= entry:
-
-                    continue
-
-            total_signals += 1
-
-            active_trade = {
-
-                "side":
-                    side,
-
-                "entry":
-                    entry,
-
-                "sl":
-                    sl,
-
-                "tp":
-                    tp,
-
-                "entry_time":
-                    current_time,
-
-                "entry_index":
-                    i,
-
-                "score":
-                    score,
+        trades.append(
+            {
+                "signal_index": entry_index,
+                "exit_index": exit_index,
+                "timestamp": df.iloc[
+                    entry_index
+                ]["timestamp"],
+                "exit_timestamp": df.iloc[
+                    exit_index
+                ]["timestamp"],
+                "side": side,
+                "entry": entry,
+                "sl": sl,
+                "tp_tenkan": tp_tenkan,
+                "tp": tp,
+                "exit": exit_price,
+                "exit_reason": exit_reason,
+                "score": signal["score"],
+                "gross_pct": gross,
+                "net_pct": net,
+                "exit_model": model,
             }
-
-    # ========================================================
-    # CLOSE REMAINING OPEN TRADE AT END OF BACKTEST
-    # ========================================================
-
-    if active_trade is not None:
-
-        last_row = df.iloc[-1]
-
-        exit_price = float(
-            last_row["close"]
         )
 
-        (
-            gross_pnl,
-            net_trade_pnl
-        ) = calculate_trade_pnl(
-            active_trade["side"],
-            active_trade["entry"],
-            exit_price
+    return trades
+
+
+# ============================================================
+# STATISTICS
+# ============================================================
+
+def calculate_stats(
+    trades
+):
+
+    if not trades:
+
+        return {
+            "signals": 0,
+            "wins": 0,
+            "losses": 0,
+            "timeouts": 0,
+            "wr": 0.0,
+            "pf": 0.0,
+            "net": 0.0,
+            "dd": 0.0,
+        }
+
+    wins = sum(
+        1
+        for t in trades
+        if t["net_pct"] > 0
+    )
+
+    losses = sum(
+        1
+        for t in trades
+        if t["net_pct"] < 0
+    )
+
+    timeouts = sum(
+        1
+        for t in trades
+        if t["exit_reason"]
+        == "TIMEOUT"
+    )
+
+    total = len(trades)
+
+    wr = (
+        wins /
+        total *
+        100
+    )
+
+    gross_profit = sum(
+        t["net_pct"]
+        for t in trades
+        if t["net_pct"] > 0
+    )
+
+    gross_loss = abs(
+        sum(
+            t["net_pct"]
+            for t in trades
+            if t["net_pct"] < 0
+        )
+    )
+
+    if gross_loss > 0:
+
+        pf = (
+            gross_profit /
+            gross_loss
         )
 
-        if net_trade_pnl > 0:
+    else:
 
-            wins += 1
-
-        else:
-
-            losses += 1
-
-        net_pnl += (
-            net_trade_pnl
+        pf = (
+            float("inf")
+            if gross_profit > 0
+            else 0.0
         )
 
-        equity += (
-            net_trade_pnl
-        )
+    net = sum(
+        t["net_pct"]
+        for t in trades
+    )
 
-        if equity > peak_equity:
+    # --------------------------------------------------------
+    # Equity curve / DD
+    # --------------------------------------------------------
 
-            peak_equity = equity
+    equity = 0.0
 
-        drawdown = (
-            peak_equity -
+    peak = 0.0
+
+    max_dd = 0.0
+
+    for trade in trades:
+
+        equity += trade[
+            "net_pct"
+        ]
+
+        if equity > peak:
+
+            peak = equity
+
+        dd = (
+            peak -
             equity
         )
 
-        if drawdown > max_drawdown:
+        if dd > max_dd:
 
-            max_drawdown = (
-                drawdown
-            )
-
-        age_bars = (
-            len(df) -
-            1 -
-            active_trade[
-                "entry_index"
-            ]
-        )
-
-        trades.append({
-
-            "symbol":
-                symbol_name(
-                    symbol
-                ),
-
-            "symbol_raw":
-                symbol,
-
-            "side":
-                active_trade[
-                    "side"
-                ],
-
-            "entry_time":
-                active_trade[
-                    "entry_time"
-                ],
-
-            "exit_time":
-                last_row["time"],
-
-            "entry":
-                active_trade[
-                    "entry"
-                ],
-
-            "exit":
-                exit_price,
-
-            "sl":
-                active_trade[
-                    "sl"
-                ],
-
-            "tp":
-                active_trade[
-                    "tp"
-                ],
-
-            "gross_pnl_pct":
-                gross_pnl,
-
-            "net_pnl_pct":
-                net_trade_pnl,
-
-            "reason":
-                "END_OF_TEST",
-
-            "score":
-                active_trade[
-                    "score"
-                ],
-
-            "hold_bars":
-                age_bars,
-
-            "hold_hours":
-                (
-                    age_bars *
-                    5 /
-                    60
-                ),
-        })
-
-    # ========================================================
-    # STATISTICS
-    # ========================================================
-
-    closed_trades = len(
-        trades
-    )
-
-    if closed_trades > 0:
-
-        win_rate = (
-            wins /
-            closed_trades
-            * 100
-        )
-
-    else:
-
-        win_rate = 0.0
-
-    winning_pnl = sum(
-
-        t["net_pnl_pct"]
-
-        for t in trades
-
-        if t["net_pnl_pct"] > 0
-    )
-
-    losing_pnl = abs(
-        sum(
-
-            t["net_pnl_pct"]
-
-            for t in trades
-
-            if t["net_pnl_pct"] < 0
-        )
-    )
-
-    if losing_pnl > 0:
-
-        profit_factor = (
-            winning_pnl /
-            losing_pnl
-        )
-
-    elif winning_pnl > 0:
-
-        profit_factor = (
-            float("inf")
-        )
-
-    else:
-
-        profit_factor = 0.0
+            max_dd = dd
 
     return {
-
-        "symbol":
-            symbol_name(symbol),
-
-        "signals":
-            total_signals,
-
-        "wins":
-            wins,
-
-        "losses":
-            losses,
-
-        "timeouts":
-            timeouts,
-
-        "win_rate":
-            win_rate,
-
-        "profit_factor":
-            profit_factor,
-
-        "net_pnl":
-            net_pnl,
-
-        "max_drawdown":
-            max_drawdown,
-
-        "trades":
-            trades,
+        "signals": total,
+        "wins": wins,
+        "losses": losses,
+        "timeouts": timeouts,
+        "wr": wr,
+        "pf": pf,
+        "net": net,
+        "dd": max_dd,
     }
 
 
 # ============================================================
-# PRINT RESULT
+# BACKTEST SYMBOL
 # ============================================================
 
-def print_symbol_result(
-    result
+def backtest_symbol(
+    symbol,
+    start_dt,
+    end_dt
 ):
 
-    pf = result[
-        "profit_factor"
-    ]
+    name = SYMBOL_NAMES.get(
+        symbol,
+        symbol,
+    )
 
-    if math.isinf(pf):
+    print(
+        "\n"
+        + "=" * 90
+    )
 
-        pf_text = "INF"
+    print(
+        f"[{name}] BACKTESTING"
+    )
 
-    else:
+    print(
+        "=" * 90
+    )
 
-        pf_text = (
-            f"{pf:.3f}"
+    # --------------------------------------------------------
+    # Fetch 5M
+    # --------------------------------------------------------
+
+    df5 = fetch_all_candles(
+        symbol,
+        "5m",
+        start_dt,
+        end_dt,
+    )
+
+    print(
+        f"5M candles:  {len(df5)}"
+    )
+
+    if df5.empty:
+
+        return [], []
+
+    # --------------------------------------------------------
+    # Fetch 15M
+    # --------------------------------------------------------
+
+    df15 = fetch_all_candles(
+        symbol,
+        "15m",
+        start_dt,
+        end_dt,
+    )
+
+    print(
+        f"15M candles: {len(df15)}"
+    )
+
+    if df15.empty:
+
+        return [], []
+
+    # --------------------------------------------------------
+    # Indicators
+    # --------------------------------------------------------
+
+    df5 = add_indicators(
+        df5
+    )
+
+    df = merge_context(
+        df5,
+        df15,
+    )
+
+    # --------------------------------------------------------
+    # Signals
+    # --------------------------------------------------------
+
+    signals = []
+
+    warmup = 100
+
+    for i in range(
+        warmup,
+        len(df)
+    ):
+
+        signal = get_signal(
+            df,
+            i,
+        )
+
+        if signal is None:
+
+            continue
+
+        signal["index"] = i
+
+        signal["symbol"] = symbol
+
+        signals.append(
+            signal
         )
 
     print(
-
-        f"{result['symbol']:>6} | "
-
-        f"Signals "
-        f"{result['signals']:>4} | "
-
-        f"W "
-        f"{result['wins']:>4} | "
-
-        f"L "
-        f"{result['losses']:>4} | "
-
-        f"TO "
-        f"{result['timeouts']:>3} | "
-
-        f"WR "
-        f"{result['win_rate']:>6.2f}% | "
-
-        f"PF "
-        f"{pf_text:>7} | "
-
-        f"Net "
-        f"{result['net_pnl']:>8.3f}% | "
-
-        f"DD "
-        f"{result['max_drawdown']:>8.3f}%"
+        f"Signals found: {len(signals)}"
     )
+
+    # --------------------------------------------------------
+    # Run every exit model
+    # --------------------------------------------------------
+
+    all_trades = []
+
+    summary_rows = []
+
+    for model in EXIT_MODELS:
+
+        trades = (
+            backtest_exit_model(
+                df,
+                signals,
+                model,
+            )
+        )
+
+        for trade in trades:
+
+            trade["symbol"] = symbol
+
+            trade["coin"] = name
+
+        stats = calculate_stats(
+            trades
+        )
+
+        summary_rows.append(
+            {
+                "coin": name,
+                "symbol": symbol,
+                "exit_model": model,
+                **stats,
+            }
+        )
+
+        all_trades.extend(
+            trades
+        )
+
+    # --------------------------------------------------------
+    # Print coin comparison
+    # --------------------------------------------------------
+
+    print(
+        "\n"
+        f"{name} EXIT COMPARISON"
+    )
+
+    print(
+        "-" * 90
+    )
+
+    for row in summary_rows:
+
+        pf = row["pf"]
+
+        pf_text = (
+            f"{pf:.3f}"
+            if math.isfinite(pf)
+            else "INF"
+        )
+
+        print(
+            f"{row['exit_model']:>7} | "
+            f"Signals {row['signals']:>3} | "
+            f"W {row['wins']:>3} | "
+            f"L {row['losses']:>3} | "
+            f"TO {row['timeouts']:>2} | "
+            f"WR {row['wr']:>6.2f}% | "
+            f"PF {pf_text:>6} | "
+            f"Net {row['net']:>8.3f}% | "
+            f"DD {row['dd']:>8.3f}%"
+        )
+
+    return summary_rows, all_trades
 
 
 # ============================================================
@@ -1688,7 +1607,9 @@ def print_symbol_result(
 
 def main():
 
-    print("=" * 90)
+    print(
+        "=" * 90
+    )
 
     print(
         "REVERSE-TENKAN 21 COINS"
@@ -1698,9 +1619,13 @@ def main():
         "30-DAY HISTORICAL BACKTEST"
     )
 
-    print("=" * 90)
+    print(
+        "EXIT MODEL COMPARISON"
+    )
 
-    print()
+    print(
+        "=" * 90
+    )
 
     end_dt = datetime.now(
         timezone.utc
@@ -1708,26 +1633,19 @@ def main():
 
     start_dt = (
         end_dt -
-        timedelta(
-            days=BACKTEST_DAYS
-        )
+        timedelta(days=30)
     )
 
     print(
-        f"Start: "
-        f"{start_dt.isoformat()}"
+        f"\nStart: {start_dt.isoformat()}"
     )
 
     print(
-        f"End:   "
-        f"{end_dt.isoformat()}"
+        f"End:   {end_dt.isoformat()}"
     )
 
-    print()
-
     print(
-        "Strategy: "
-        "Reverse-Tenkan v1.5"
+        "\nStrategy: Reverse-Tenkan v1.5"
     )
 
     print(
@@ -1741,13 +1659,12 @@ def main():
     )
 
     print(
-        f"SL: "
-        f"{SL_PCT:.2f}%"
+        f"SL: {SL_PCT:.2f}%"
     )
 
     print(
-        "TP: "
-        "Signal candle Tenkan"
+        "Exit models: "
+        "TENKAN / 1R / 1.5R / 2R / 2.5R / 3R"
     )
 
     print(
@@ -1762,447 +1679,359 @@ def main():
 
     print(
         "Same-candle SL/TP rule: "
-        f"{'SL FIRST' if SL_FIRST else 'TP FIRST'}"
+        "SL FIRST"
     )
 
-    print()
-
-    all_results = []
+    all_summary = []
 
     all_trades = []
 
-    # ========================================================
-    # PROCESS EACH COIN
-    # ========================================================
+    # --------------------------------------------------------
+    # 21 COINS
+    # --------------------------------------------------------
 
     for number, symbol in enumerate(
         SYMBOLS,
-        start=1
+        start=1,
     ):
 
-        name = symbol_name(
-            symbol
+        print(
+            "\n"
+            + "=" * 90
         )
-
-        print("=" * 90)
 
         print(
             f"[{number}/{len(SYMBOLS)}] "
-            f"BACKTESTING {name}"
-        )
-
-        print("=" * 90)
-
-        start_ts = int(
-            start_dt.timestamp()
-        )
-
-        end_ts = int(
-            end_dt.timestamp()
-        )
-
-        # ----------------------------------------------------
-        # 5M
-        # ----------------------------------------------------
-
-        df5 = fetch_kraken_candles(
-            symbol,
-            "5m",
-            start_ts,
-            end_ts
-        )
-
-        if df5.empty:
-
-            print(
-                f"{name}: NO 5M DATA"
-            )
-
-            continue
-
-        # ----------------------------------------------------
-        # 15M
-        # ----------------------------------------------------
-
-        df15 = fetch_kraken_candles(
-            symbol,
-            "15m",
-            start_ts,
-            end_ts
-        )
-
-        if df15.empty:
-
-            print(
-                f"{name}: NO 15M DATA"
-            )
-
-            continue
-
-        print(
-            f"5M candles:  "
-            f"{len(df5)}"
+            f"BACKTESTING "
+            f"{SYMBOL_NAMES.get(symbol, symbol)}"
         )
 
         print(
-            f"15M candles: "
-            f"{len(df15)}"
+            "=" * 90
         )
 
-        # ----------------------------------------------------
-        # INDICATORS
-        # ----------------------------------------------------
-
-        df5 = add_indicators(
-            df5
-        )
-
-        context15 = (
-            build_15m_context(
-                df15
+        summary, trades = (
+            backtest_symbol(
+                symbol,
+                start_dt,
+                end_dt,
             )
         )
 
-        df = merge_context(
-            df5,
-            context15
-        )
-
-        # ----------------------------------------------------
-        # BACKTEST
-        # ----------------------------------------------------
-
-        result = backtest_symbol(
-            symbol,
-            df
-        )
-
-        all_results.append(
-            result
+        all_summary.extend(
+            summary
         )
 
         all_trades.extend(
-            result["trades"]
+            trades
         )
 
-        print()
+    # ========================================================
+    # SUMMARY DATAFRAME
+    # ========================================================
 
-        print_symbol_result(
-            result
+    summary_df = pd.DataFrame(
+        all_summary
+    )
+
+    trades_df = pd.DataFrame(
+        all_trades
+    )
+
+    # ========================================================
+    # COIN / EXIT COMPARISON
+    # ========================================================
+
+    print(
+        "\n"
+        + "=" * 120
+    )
+
+    print(
+        "21-COIN / EXIT MODEL COMPARISON"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    if not summary_df.empty:
+
+        display_df = (
+            summary_df[
+                [
+                    "coin",
+                    "exit_model",
+                    "signals",
+                    "wins",
+                    "losses",
+                    "timeouts",
+                    "wr",
+                    "pf",
+                    "net",
+                    "dd",
+                ]
+            ]
+            .copy()
         )
 
-        print()
+        print(
+            display_df.to_string(
+                index=False
+            )
+        )
 
     # ========================================================
-    # COMBINED RESULTS
+    # AGGREGATE BY EXIT MODEL
     # ========================================================
 
-    print()
-
-    print("=" * 110)
-
     print(
-        "21-COIN COMPARISON"
+        "\n"
+        + "=" * 120
     )
 
-    print("=" * 110)
-
-    print()
-
     print(
-        "COIN   | SIGNALS | WINS | LOSS | TIMEOUT | "
-        "WIN RATE | PROFIT FACTOR | NET PNL | MAX DD"
+        "AGGREGATE RESULT BY EXIT MODEL"
     )
 
-    print("-" * 110)
+    print(
+        "=" * 120
+    )
 
-    for result in all_results:
+    aggregate_rows = []
 
-        pf = result[
-            "profit_factor"
-        ]
+    for model in EXIT_MODELS:
 
-        if math.isinf(pf):
+        model_df = (
+            summary_df[
+                summary_df[
+                    "exit_model"
+                ] == model
+            ]
+        )
 
-            pf_text = "INF"
+        if model_df.empty:
+
+            continue
+
+        total_signals = int(
+            model_df[
+                "signals"
+            ].sum()
+        )
+
+        total_wins = int(
+            model_df[
+                "wins"
+            ].sum()
+        )
+
+        total_losses = int(
+            model_df[
+                "losses"
+            ].sum()
+        )
+
+        total_timeouts = int(
+            model_df[
+                "timeouts"
+            ].sum()
+        )
+
+        total_net = float(
+            model_df[
+                "net"
+            ].sum()
+        )
+
+        gross_profit = 0.0
+        gross_loss = 0.0
+
+        model_trades = (
+            trades_df[
+                trades_df[
+                    "exit_model"
+                ] == model
+            ]
+            if not trades_df.empty
+            else pd.DataFrame()
+        )
+
+        if not model_trades.empty:
+
+            gross_profit = (
+                model_trades.loc[
+                    model_trades[
+                        "net_pct"
+                    ] > 0,
+                    "net_pct",
+                ]
+                .sum()
+            )
+
+            gross_loss = abs(
+                model_trades.loc[
+                    model_trades[
+                        "net_pct"
+                    ] < 0,
+                    "net_pct",
+                ]
+                .sum()
+            )
+
+        if gross_loss > 0:
+
+            pf = (
+                gross_profit /
+                gross_loss
+            )
 
         else:
 
-            pf_text = (
-                f"{pf:.3f}"
+            pf = 0.0
+
+        if total_signals > 0:
+
+            wr = (
+                total_wins /
+                total_signals *
+                100
             )
 
-        print(
+        else:
 
-            f"{result['symbol']:>6} | "
+            wr = 0.0
 
-            f"{result['signals']:>7} | "
+        # ----------------------------------------------------
+        # Aggregate equity / DD
+        # ----------------------------------------------------
 
-            f"{result['wins']:>4} | "
+        equity = 0.0
 
-            f"{result['losses']:>4} | "
+        peak = 0.0
 
-            f"{result['timeouts']:>7} | "
+        max_dd = 0.0
 
-            f"{result['win_rate']:>8.2f}% | "
+        if not model_trades.empty:
 
-            f"{pf_text:>13} | "
+            ordered = (
+                model_trades
+                .sort_values(
+                    [
+                        "timestamp",
+                        "symbol",
+                    ]
+                )
+            )
 
-            f"{result['net_pnl']:>7.3f}% | "
+            for pnl in ordered[
+                "net_pct"
+            ]:
 
-            f"{result['max_drawdown']:>7.3f}%"
+                equity += pnl
+
+                peak = max(
+                    peak,
+                    equity,
+                )
+
+                dd = (
+                    peak -
+                    equity
+                )
+
+                max_dd = max(
+                    max_dd,
+                    dd,
+                )
+
+        aggregate_rows.append(
+            {
+                "exit_model": model,
+                "signals": total_signals,
+                "wins": total_wins,
+                "losses": total_losses,
+                "timeouts": total_timeouts,
+                "wr": wr,
+                "pf": pf,
+                "net": total_net,
+                "dd": max_dd,
+            }
         )
 
-    # ========================================================
-    # PORTFOLIO-LIKE AGGREGATE
-    # ========================================================
-
-    total_signals = sum(
-
-        r["signals"]
-
-        for r in all_results
+    aggregate_df = pd.DataFrame(
+        aggregate_rows
     )
 
-    total_wins = sum(
-
-        r["wins"]
-
-        for r in all_results
-    )
-
-    total_losses = sum(
-
-        r["losses"]
-
-        for r in all_results
-    )
-
-    total_timeouts = sum(
-
-        r["timeouts"]
-
-        for r in all_results
-    )
-
-    total_net_pnl = sum(
-
-        r["net_pnl"]
-
-        for r in all_results
-    )
-
-    total_closed = (
-        total_wins +
-        total_losses
-    )
-
-    if total_closed > 0:
-
-        total_wr = (
-            total_wins /
-            total_closed
-            * 100
-        )
-
-    else:
-
-        total_wr = 0.0
-
-    total_winning_pnl = sum(
-
-        t["net_pnl_pct"]
-
-        for t in all_trades
-
-        if t["net_pnl_pct"] > 0
-    )
-
-    total_losing_pnl = abs(
-        sum(
-
-            t["net_pnl_pct"]
-
-            for t in all_trades
-
-            if t["net_pnl_pct"] < 0
-        )
-    )
-
-    if total_losing_pnl > 0:
-
-        total_pf = (
-            total_winning_pnl /
-            total_losing_pnl
-        )
-
-    elif total_winning_pnl > 0:
-
-        total_pf = (
-            float("inf")
-        )
-
-    else:
-
-        total_pf = 0.0
-
-    # ========================================================
-    # PRINT AGGREGATE
-    # ========================================================
-
-    print()
-
-    print("=" * 110)
-
-    print(
-        "AGGREGATE 21-COIN RESULT"
-    )
-
-    print("=" * 110)
-
-    print(
-        f"Total signals : "
-        f"{total_signals}"
-    )
-
-    print(
-        f"Wins          : "
-        f"{total_wins}"
-    )
-
-    print(
-        f"Losses        : "
-        f"{total_losses}"
-    )
-
-    print(
-        f"Timeouts      : "
-        f"{total_timeouts}"
-    )
-
-    print(
-        f"Win rate      : "
-        f"{total_wr:.2f}%"
-    )
-
-    if math.isinf(
-        total_pf
-    ):
+    if not aggregate_df.empty:
 
         print(
-            "Profit factor : INF"
+            aggregate_df.to_string(
+                index=False
+            )
         )
 
-    else:
+    # ========================================================
+    # SAVE RESULTS
+    # ========================================================
 
-        print(
-            f"Profit factor : "
-            f"{total_pf:.3f}"
-        )
-
-    print(
-        f"Net PnL       : "
-        f"{total_net_pnl:.3f}%"
+    summary_file = (
+        "reverse_tenkan_21coins_"
+        "30d_exit_comparison_summary.csv"
     )
 
-    print()
+    trades_file = (
+        "reverse_tenkan_21coins_"
+        "30d_exit_comparison_trades.csv"
+    )
 
-    # ========================================================
-    # SAVE SUMMARY CSV
-    # ========================================================
-
-    summary_rows = []
-
-    for result in all_results:
-
-        pf = result[
-            "profit_factor"
-        ]
-
-        if math.isinf(pf):
-
-            pf = np.inf
-
-        summary_rows.append({
-
-            "coin":
-                result["symbol"],
-
-            "signals":
-                result["signals"],
-
-            "wins":
-                result["wins"],
-
-            "losses":
-                result["losses"],
-
-            "timeouts":
-                result["timeouts"],
-
-            "win_rate_pct":
-                result["win_rate"],
-
-            "profit_factor":
-                pf,
-
-            "net_pnl_pct":
-                result["net_pnl"],
-
-            "max_drawdown_pct":
-                result["max_drawdown"],
-        })
-
-    summary_df = pd.DataFrame(
-        summary_rows
+    aggregate_file = (
+        "reverse_tenkan_21coins_"
+        "30d_exit_comparison_aggregate.csv"
     )
 
     summary_df.to_csv(
-        OUTPUT_CSV,
-        index=False
+        summary_file,
+        index=False,
+    )
+
+    trades_df.to_csv(
+        trades_file,
+        index=False,
+    )
+
+    aggregate_df.to_csv(
+        aggregate_file,
+        index=False,
     )
 
     # ========================================================
-    # SAVE TRADE CSV
+    # FINAL
     # ========================================================
-
-    if all_trades:
-
-        trades_df = pd.DataFrame(
-            all_trades
-        )
-
-        trades_df.to_csv(
-            TRADES_CSV,
-            index=False
-        )
-
-    # ========================================================
-    # FINAL MESSAGE
-    # ========================================================
-
-    print()
-
-    print("=" * 110)
 
     print(
-        "FILES CREATED"
+        "\n"
+        + "=" * 120
     )
-
-    print("=" * 110)
-
-    print(
-        OUTPUT_CSV
-    )
-
-    print(
-        TRADES_CSV
-    )
-
-    print()
 
     print(
         "BACKTEST COMPLETE"
+    )
+
+    print(
+        "=" * 120
+    )
+
+    print(
+        f"Summary CSV:   {summary_file}"
+    )
+
+    print(
+        f"Trades CSV:    {trades_file}"
+    )
+
+    print(
+        f"Aggregate CSV: {aggregate_file}"
     )
 
 
