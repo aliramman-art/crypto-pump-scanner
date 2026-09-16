@@ -1,43 +1,13 @@
 # ============================================================
 # TENKAN + KIJUN + DISTANCE BACKTEST
-# Kraken Futures
-# ============================================================
-#
-# STRATEGY
-#
-# 1H:
-#   Tenkan > Kijun  -> LONG bias
-#   Tenkan < Kijun  -> SHORT bias
-#
-# 15M:
-#   Tenkan/Kijun distance >= minimum
-#   Distance must be expanding
-#
-# 5M:
-#   Price pulls back to Tenkan
-#   Candle closes back in trend direction
-#
-# ENTRY:
-#   Close of confirmation candle
-#
-# SL:
-#   Kijun or recent swing
-#
-# TP:
-#   Fixed RR
-#
-# CLOSED CANDLES ONLY
-#
-# If SL and TP are both touched on the same candle,
-# SL is assumed first.
-#
+# FULL DATA COVERAGE VERSION
 # ============================================================
 
 import requests
 import pandas as pd
 import numpy as np
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 
 # ============================================================
@@ -48,152 +18,100 @@ SYMBOL = "PF_DOGEUSD"
 
 DAYS = 30
 
-# ------------------------------------------------------------
-# ICHIMOKU
-# ------------------------------------------------------------
+TICK_TYPE = "trade"
 
+BASE_URL = "https://futures.kraken.com/api/charts/v1"
+
+RESOLUTIONS = {
+    "1h": 3600,
+    "15m": 900,
+    "5m": 300,
+}
+
+# Kraken request limit
+MAX_CANDLES_PER_REQUEST = 2000
+
+# Ichimoku
 TENKAN_PERIOD = 9
 KIJUN_PERIOD = 26
 
-# ------------------------------------------------------------
-# 15M DISTANCE
-# ------------------------------------------------------------
-
+# Strategy filters
 MIN_DISTANCE_PCT = 0.20
-
-# Current distance must be greater than previous distance
-MIN_DISTANCE_EXPANSION_PCT = 0.00
-
-# ------------------------------------------------------------
-# 5M ENTRY
-# ------------------------------------------------------------
+MIN_DISTANCE_EXPANSION = 0.00
 
 MAX_TENKAN_DISTANCE_PCT = 0.25
 
-MIN_BODY_RATIO = 0.20
+# Confirmation
+MIN_CONFIRM_BODY_RATIO = 0.20
 
-# ------------------------------------------------------------
 # SL
-# ------------------------------------------------------------
-
-SWING_LOOKBACK = 6
-
 MIN_SL_PCT = 0.20
 MAX_SL_PCT = 1.50
-
 SL_BUFFER_PCT = 0.05
 
-# ------------------------------------------------------------
 # TP
-# ------------------------------------------------------------
-
 MIN_RR = 1.50
 
-# ------------------------------------------------------------
-# TRADE
-# ------------------------------------------------------------
-
-START_BALANCE = 1000.0
-
+# Backtest
+INITIAL_BALANCE = 1000.0
 RISK_PER_TRADE_PCT = 1.0
 
+# Maximum holding period
 MAX_HOLD_BARS = 288
-# 288 x 5M = 24 hours
-
-COOLDOWN_BARS = 1
-
-ALLOW_LONG = True
-ALLOW_SHORT = True
 
 
 # ============================================================
-# KRAKEN FUTURES CHARTS API
+# SESSION
 # ============================================================
 
-BASE_URL = (
-    "https://futures.kraken.com"
-    "/api/charts/v1"
-)
+session = requests.Session()
 
-TICK_TYPE = "trade"
-
-
-# ============================================================
-# RESOLUTION MAP
-# ============================================================
-
-RESOLUTION_SECONDS = {
-    "1m": 60,
-    "5m": 300,
-    "15m": 900,
-    "30m": 1800,
-    "1h": 3600,
-    "4h": 14400,
-    "12h": 43200,
-    "1d": 86400,
-    "1w": 604800,
-}
+session.headers.update({
+    "User-Agent": "Tenkan-Kijun-Backtest/1.0"
+})
 
 
 # ============================================================
-# FETCH KRAKEN CANDLES
+# DOWNLOAD KRAKEN DATA
 # ============================================================
 
-def fetch_kraken_ohlc(
-    symbol,
-    resolution,
-    days
-):
+def download_kraken_candles(symbol, resolution, days):
+    """
+    Download the COMPLETE requested period.
 
-    if resolution not in RESOLUTION_SECONDS:
-        raise ValueError(
-            f"Unsupported resolution: {resolution}"
+    Kraken limits each response to a finite number of candles,
+    therefore the requested period is split into multiple chunks.
+    """
+
+    print(f"\nDownloading {symbol} {resolution}...")
+
+    seconds_per_candle = RESOLUTIONS[resolution]
+
+    end_time = datetime.now(timezone.utc)
+
+    start_time = end_time - timedelta(days=days)
+
+    start_ts = int(start_time.timestamp())
+    end_ts = int(end_time.timestamp())
+
+    all_candles = []
+
+    current_from = start_ts
+
+    request_number = 0
+
+    while current_from < end_ts:
+
+        request_number += 1
+
+        # Number of seconds represented by max candles
+        chunk_seconds = (
+            MAX_CANDLES_PER_REQUEST * seconds_per_candle
         )
 
-    step = RESOLUTION_SECONDS[
-        resolution
-    ]
-
-    now = int(time.time())
-
-    start = (
-        now
-        -
-        days * 86400
-    )
-
-    print(
-        f"\nDownloading "
-        f"{symbol} {resolution}..."
-    )
-
-    rows = []
-
-    # --------------------------------------------------------
-    # Kraken chart endpoint supports from/to/count.
-    # We use chunks to avoid requesting an excessively large
-    # time range in one call.
-    # --------------------------------------------------------
-
-    chunk_seconds = (
-        step * 5000
-    )
-
-    current = start
-
-    session = requests.Session()
-
-    session.headers.update({
-        "Accept": "application/json",
-        "User-Agent":
-            "Tenkan-Kijun-Backtest/1.0"
-    })
-
-    while current < now:
-
-        chunk_end = min(
-            current + chunk_seconds,
-            now
+        current_to = min(
+            current_from + chunk_seconds,
+            end_ts
         )
 
         url = (
@@ -204,9 +122,17 @@ def fetch_kraken_ohlc(
         )
 
         params = {
-            "from": current,
-            "to": chunk_end,
+            "from": current_from,
+            "to": current_to,
+            "count": MAX_CANDLES_PER_REQUEST,
         }
+
+        print(
+            f"  Request {request_number}: "
+            f"{datetime.fromtimestamp(current_from, tz=timezone.utc)} "
+            f"-> "
+            f"{datetime.fromtimestamp(current_to, tz=timezone.utc)}"
+        )
 
         try:
 
@@ -216,210 +142,175 @@ def fetch_kraken_ohlc(
                 timeout=30
             )
 
-        except requests.RequestException as e:
+            if response.status_code != 200:
 
-            print(
-                "Network error:",
-                e
-            )
+                print(
+                    f"  ERROR HTTP {response.status_code}"
+                )
 
-            time.sleep(5)
+                print(response.text[:500])
 
-            continue
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # Do NOT retry 404 forever.
-        # ----------------------------------------------------
-
-        if response.status_code == 404:
-
-            print(
-                "\nERROR 404:"
-            )
-
-            print(
-                "Kraken did not find "
-                f"symbol/resolution: "
-                f"{symbol} / {resolution}"
-            )
-
-            print(
-                "URL:",
-                response.url
-            )
-
-            raise RuntimeError(
-                "Kraken Charts API returned 404. "
-                "Check the Futures symbol."
-            )
-
-        if response.status_code != 200:
-
-            print(
-                f"HTTP {response.status_code}: "
-                f"{response.text[:500]}"
-            )
-
-            raise RuntimeError(
-                "Kraken Charts API request failed."
-            )
-
-        try:
+                raise RuntimeError(
+                    f"Kraken API error "
+                    f"{response.status_code}"
+                )
 
             data = response.json()
 
-        except Exception:
+        except Exception as e:
 
-            print(
-                "Invalid JSON response:"
-            )
-
-            print(
-                response.text[:500]
-            )
+            print(f"  Request failed: {e}")
 
             raise
 
-        candles = data.get(
-            "candles",
-            []
-        )
+        candles = data.get("candles", [])
 
         if not candles:
 
-            # No candles in this chunk.
-            # Move forward instead of looping.
-            current = (
-                chunk_end + step
-            )
+            print("  No candles returned.")
 
-            continue
-
-        rows.extend(
-            candles
-        )
-
-        # ----------------------------------------------------
-        # Move to next chunk.
-        # ----------------------------------------------------
-
-        current = (
-            chunk_end + step
-        )
+            break
 
         print(
-            f"  received "
-            f"{len(candles)} candles"
+            f"  received {len(candles)} candles"
         )
 
+        all_candles.extend(candles)
+
+        # ----------------------------------------------------
+        # Determine next timestamp from returned candles
+        # ----------------------------------------------------
+
+        returned_times = []
+
+        for candle in candles:
+
+            try:
+                returned_times.append(
+                    int(candle["time"]) // 1000
+                )
+            except Exception:
+                pass
+
+        if not returned_times:
+            break
+
+        latest_returned = max(returned_times)
+
+        # Move forward by one candle
+        next_from = latest_returned + seconds_per_candle
+
+        # Safety against infinite loops
+        if next_from <= current_from:
+
+            next_from = current_to + 1
+
+        current_from = next_from
+
+        # Small pause to be polite to API
         time.sleep(0.15)
 
-    if not rows:
+    if not all_candles:
 
         raise RuntimeError(
-            f"No candles returned "
-            f"for {symbol} {resolution}"
+            f"No data returned for {symbol} {resolution}"
         )
 
     # ========================================================
-    # BUILD DATAFRAME
+    # PARSE
     # ========================================================
+
+    rows = []
+
+    for candle in all_candles:
+
+        try:
+
+            rows.append({
+                "time": pd.to_datetime(
+                    int(candle["time"]),
+                    unit="ms",
+                    utc=True
+                ),
+                "open": float(candle["open"]),
+                "high": float(candle["high"]),
+                "low": float(candle["low"]),
+                "close": float(candle["close"]),
+                "volume": float(candle["volume"]),
+            })
+
+        except Exception:
+            continue
 
     df = pd.DataFrame(rows)
 
-    required = [
-        "time",
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-    ]
-
-    missing = [
-        x for x in required
-        if x not in df.columns
-    ]
-
-    if missing:
+    if df.empty:
 
         raise RuntimeError(
-            "Kraken response is missing "
-            f"columns: {missing}"
+            f"Parsed dataframe empty for "
+            f"{symbol} {resolution}"
         )
 
-    df = df[
-        required
-    ].copy()
+    # ========================================================
+    # REMOVE DUPLICATES
+    # ========================================================
 
-    # Kraken returns epoch milliseconds
-    df["time"] = pd.to_numeric(
-        df["time"],
-        errors="coerce"
+    df = (
+        df
+        .drop_duplicates(subset=["time"])
+        .sort_values("time")
+        .reset_index(drop=True)
     )
 
-    df["datetime"] = pd.to_datetime(
-        df["time"],
-        unit="ms",
-        utc=True
-    )
-
-    for col in [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-    ]:
-
-        df[col] = pd.to_numeric(
-            df[col],
-            errors="coerce"
-        )
-
-    df = df.dropna()
-
-    df = df.sort_values(
-        "datetime"
-    )
-
-    df = df.drop_duplicates(
-        subset=["datetime"]
-    )
-
-    df = df.reset_index(
-        drop=True
-    )
-
-    # Keep only requested period
-    cutoff = pd.Timestamp.now(
-        tz="UTC"
-    ) - pd.Timedelta(
-        days=days
-    )
+    # ========================================================
+    # EXACT REQUESTED PERIOD
+    # ========================================================
 
     df = df[
-        df["datetime"] >= cutoff
+        (df["time"] >= pd.Timestamp(start_time)) &
+        (df["time"] <= pd.Timestamp(end_time))
     ].copy()
 
-    df = df.reset_index(
-        drop=True
+    df = (
+        df
+        .drop_duplicates(subset=["time"])
+        .sort_values("time")
+        .reset_index(drop=True)
     )
 
     print(
-        f"Final {resolution} candles: "
-        f"{len(df)}"
+        f"Final {resolution} candles: {len(df)}"
     )
 
     if not df.empty:
 
         print(
             f"Range: "
-            f"{df['datetime'].iloc[0]} "
+            f"{df['time'].iloc[0]} "
             f"-> "
-            f"{df['datetime'].iloc[-1]}"
+            f"{df['time'].iloc[-1]}"
         )
+
+    # ========================================================
+    # EXPECTED COVERAGE
+    # ========================================================
+
+    expected = int(
+        days * 86400 / seconds_per_candle
+    )
+
+    actual = len(df)
+
+    coverage = (
+        actual / expected * 100
+        if expected > 0
+        else 0
+    )
+
+    print(
+        f"Expected ~{expected} candles | "
+        f"Coverage: {coverage:.1f}%"
+    )
 
     return df
 
@@ -432,1200 +323,829 @@ def add_ichimoku(df):
 
     df = df.copy()
 
-    df["tenkan"] = (
+    highest_high = (
         df["high"]
-        .rolling(
-            TENKAN_PERIOD
-        )
+        .rolling(TENKAN_PERIOD)
         .max()
-        +
+    )
+
+    lowest_low = (
         df["low"]
-        .rolling(
-            TENKAN_PERIOD
-        )
+        .rolling(TENKAN_PERIOD)
         .min()
+    )
+
+    df["tenkan"] = (
+        highest_high + lowest_low
     ) / 2
+
+    highest_high_kijun = (
+        df["high"]
+        .rolling(KIJUN_PERIOD)
+        .max()
+    )
+
+    lowest_low_kijun = (
+        df["low"]
+        .rolling(KIJUN_PERIOD)
+        .min()
+    )
 
     df["kijun"] = (
-        df["high"]
-        .rolling(
-            KIJUN_PERIOD
-        )
-        .max()
-        +
-        df["low"]
-        .rolling(
-            KIJUN_PERIOD
-        )
-        .min()
+        highest_high_kijun +
+        lowest_low_kijun
     ) / 2
 
+    # ========================================================
+    # TENKAN / KIJUN DISTANCE
+    # ========================================================
+
     df["tk_distance_pct"] = (
-        abs(
-            df["tenkan"]
-            -
-            df["kijun"]
+        (
+            (df["tenkan"] - df["kijun"])
+            .abs()
+            /
+            df["kijun"].abs()
         )
-        /
-        df["kijun"].replace(
-            0,
-            np.nan
-        )
-        *
-        100
+        * 100
     )
 
-    df["tk_distance_prev"] = (
-        df["tk_distance_pct"]
-        .shift(1)
-    )
+    # ========================================================
+    # DISTANCE EXPANSION
+    # ========================================================
 
     df["tk_distance_expansion"] = (
         df["tk_distance_pct"]
         -
-        df["tk_distance_prev"]
+        df["tk_distance_pct"].shift(1)
     )
 
     return df
 
 
 # ============================================================
-# PREPARE MULTI TIMEFRAME DATA
+# LOAD ALL TIMEFRAMES
 # ============================================================
 
-def prepare_data(
-    df_1h,
-    df_15m,
-    df_5m
-):
+df_1h = download_kraken_candles(
+    SYMBOL,
+    "1h",
+    DAYS
+)
 
-    df_1h = add_ichimoku(
-        df_1h
-    )
+df_15m = download_kraken_candles(
+    SYMBOL,
+    "15m",
+    DAYS
+)
 
-    df_15m = add_ichimoku(
-        df_15m
-    )
+df_5m = download_kraken_candles(
+    SYMBOL,
+    "5m",
+    DAYS
+)
 
-    df_5m = add_ichimoku(
-        df_5m
-    )
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # Shift higher timeframe data by one candle before merge.
-    #
-    # This prevents using a higher-TF candle that is still
-    # forming when the 5M candle is being evaluated.
-    # --------------------------------------------------------
+# ============================================================
+# INDICATORS
+# ============================================================
 
-    h1 = df_1h[
-        [
-            "datetime",
-            "tenkan",
-            "kijun",
-            "tk_distance_pct",
-            "tk_distance_expansion",
-        ]
-    ].copy()
+df_1h = add_ichimoku(df_1h)
 
-    h1[
-        [
-            "tenkan",
-            "kijun",
-            "tk_distance_pct",
-            "tk_distance_expansion",
-        ]
-    ] = h1[
-        [
-            "tenkan",
-            "kijun",
-            "tk_distance_pct",
-            "tk_distance_expansion",
-        ]
-    ].shift(1)
+df_15m = add_ichimoku(df_15m)
 
-    h1.columns = [
-        "datetime",
-        "h1_tenkan",
-        "h1_kijun",
-        "h1_distance",
-        "h1_expansion",
+df_5m = add_ichimoku(df_5m)
+
+
+# ============================================================
+# HIGHER TIMEFRAME ALIGNMENT
+# ============================================================
+#
+# Shift HTF indicators by one completed candle to prevent
+# lookahead.
+# ============================================================
+
+htf_1h = df_1h[
+    [
+        "time",
+        "tenkan",
+        "kijun",
+        "tk_distance_pct",
+        "tk_distance_expansion",
     ]
+].copy()
 
-    m15 = df_15m[
-        [
-            "datetime",
-            "tenkan",
-            "kijun",
-            "tk_distance_pct",
-            "tk_distance_expansion",
-        ]
-    ].copy()
+htf_1h = htf_1h.rename(
+    columns={
+        "tenkan": "tenkan_1h",
+        "kijun": "kijun_1h",
+        "tk_distance_pct": "distance_1h",
+        "tk_distance_expansion":
+            "distance_expansion_1h",
+    }
+)
 
-    m15[
-        [
-            "tenkan",
-            "kijun",
-            "tk_distance_pct",
-            "tk_distance_expansion",
-        ]
-    ] = m15[
-        [
-            "tenkan",
-            "kijun",
-            "tk_distance_pct",
-            "tk_distance_expansion",
-        ]
-    ].shift(1)
-
-    m15.columns = [
-        "datetime",
-        "m15_tenkan",
-        "m15_kijun",
-        "m15_distance",
-        "m15_expansion",
+htf_1h[
+    [
+        "tenkan_1h",
+        "kijun_1h",
+        "distance_1h",
+        "distance_expansion_1h",
     ]
-
-    m5 = df_5m.copy()
-
-    # --------------------------------------------------------
-    # Merge 1H
-    # --------------------------------------------------------
-
-    result = pd.merge_asof(
-        m5.sort_values(
-            "datetime"
-        ),
-        h1.sort_values(
-            "datetime"
-        ),
-        on="datetime",
-        direction="backward",
-    )
-
-    # --------------------------------------------------------
-    # Merge 15M
-    # --------------------------------------------------------
-
-    result = pd.merge_asof(
-        result.sort_values(
-            "datetime"
-        ),
-        m15.sort_values(
-            "datetime"
-        ),
-        on="datetime",
-        direction="backward",
-    )
-
-    result = result.reset_index(
-        drop=True
-    )
-
-    return result
+] = htf_1h[
+    [
+        "tenkan_1h",
+        "kijun_1h",
+        "distance_1h",
+        "distance_expansion_1h",
+    ]
+].shift(1)
 
 
 # ============================================================
-# BODY RATIO
+
+htf_15m = df_15m[
+    [
+        "time",
+        "tenkan",
+        "kijun",
+        "tk_distance_pct",
+        "tk_distance_expansion",
+    ]
+].copy()
+
+htf_15m = htf_15m.rename(
+    columns={
+        "tenkan": "tenkan_15m",
+        "kijun": "kijun_15m",
+        "tk_distance_pct": "distance_15m",
+        "tk_distance_expansion":
+            "distance_expansion_15m",
+    }
+)
+
+htf_15m[
+    [
+        "tenkan_15m",
+        "kijun_15m",
+        "distance_15m",
+        "distance_expansion_15m",
+    ]
+] = htf_15m[
+    [
+        "tenkan_15m",
+        "kijun_15m",
+        "distance_15m",
+        "distance_expansion_15m",
+    ]
+].shift(1)
+
+
+# ============================================================
+# MERGE 1H
 # ============================================================
 
-def body_ratio(row):
+df = pd.merge_asof(
+    df_5m.sort_values("time"),
+    htf_1h.sort_values("time"),
+    on="time",
+    direction="backward"
+)
 
-    candle_range = (
-        row["high"]
-        -
-        row["low"]
+
+# ============================================================
+# MERGE 15M
+# ============================================================
+
+df = pd.merge_asof(
+    df.sort_values("time"),
+    htf_15m.sort_values("time"),
+    on="time",
+    direction="backward"
+)
+
+
+# ============================================================
+# REMOVE INVALID INDICATOR ROWS
+# ============================================================
+
+df = df.dropna(
+    subset=[
+        "tenkan",
+        "kijun",
+        "tenkan_1h",
+        "kijun_1h",
+        "tenkan_15m",
+        "kijun_15m",
+        "distance_15m",
+        "distance_expansion_15m",
+    ]
+).reset_index(drop=True)
+
+
+print()
+print("=" * 70)
+print(
+    f"Backtest 5M candles: {len(df)}"
+)
+print("=" * 70)
+
+
+# ============================================================
+# TRADE SIMULATION
+# ============================================================
+
+trades = []
+
+balance = INITIAL_BALANCE
+
+equity_curve = []
+
+i = 0
+
+while i < len(df) - 1:
+
+    row = df.iloc[i]
+
+    close = row["close"]
+
+    high = row["high"]
+
+    low = row["low"]
+
+    tenkan = row["tenkan"]
+
+    kijun = row["kijun"]
+
+    # ========================================================
+    # 1H DIRECTION
+    # ========================================================
+
+    if row["tenkan_1h"] > row["kijun_1h"]:
+
+        direction = "LONG"
+
+    elif row["tenkan_1h"] < row["kijun_1h"]:
+
+        direction = "SHORT"
+
+    else:
+
+        i += 1
+        continue
+
+
+    # ========================================================
+    # 15M DISTANCE FILTER
+    # ========================================================
+
+    distance_15m = row["distance_15m"]
+
+    expansion_15m = (
+        row["distance_expansion_15m"]
     )
+
+    if (
+        pd.isna(distance_15m)
+        or
+        distance_15m < MIN_DISTANCE_PCT
+    ):
+
+        i += 1
+        continue
+
+
+    # ========================================================
+    # 15M DISTANCE EXPANSION
+    # ========================================================
+
+    if (
+        pd.isna(expansion_15m)
+        or
+        expansion_15m < MIN_DISTANCE_EXPANSION
+    ):
+
+        i += 1
+        continue
+
+
+    # ========================================================
+    # 5M TENKAN DISTANCE
+    # ========================================================
+
+    if pd.isna(tenkan):
+
+        i += 1
+        continue
+
+    tenkan_distance_pct = (
+        abs(close - tenkan)
+        /
+        abs(tenkan)
+        * 100
+    )
+
+    if (
+        tenkan_distance_pct
+        >
+        MAX_TENKAN_DISTANCE_PCT
+    ):
+
+        i += 1
+        continue
+
+
+    # ========================================================
+    # CONFIRMATION CANDLE
+    # ========================================================
+
+    candle_range = high - low
 
     if candle_range <= 0:
 
-        return 0.0
+        i += 1
+        continue
 
-    body = abs(
-        row["close"]
-        -
-        row["open"]
-    )
+    body = abs(close - row["open"])
 
-    return (
-        body
-        /
-        candle_range
-    )
+    body_ratio = body / candle_range
 
+    if body_ratio < MIN_CONFIRM_BODY_RATIO:
 
-# ============================================================
-# LONG CONFIRMATION
-# ============================================================
+        i += 1
+        continue
 
-def is_long_confirmation(
-    row
-):
 
-    if row["close"] <= row["open"]:
+    # ========================================================
+    # TREND CONFIRMATION
+    # ========================================================
 
-        return False
+    if direction == "LONG":
 
-    return (
-        body_ratio(row)
-        >=
-        MIN_BODY_RATIO
-    )
-
-
-# ============================================================
-# SHORT CONFIRMATION
-# ============================================================
-
-def is_short_confirmation(
-    row
-):
-
-    if row["close"] >= row["open"]:
-
-        return False
-
-    return (
-        body_ratio(row)
-        >=
-        MIN_BODY_RATIO
-    )
-
-
-# ============================================================
-# LONG SIGNAL
-# ============================================================
-
-def long_signal(
-    df,
-    i
-):
-
-    row = df.iloc[i]
-
-    required = [
-        "h1_tenkan",
-        "h1_kijun",
-        "m15_distance",
-        "m15_expansion",
-        "tenkan",
-    ]
-
-    for col in required:
-
-        if pd.isna(
-            row[col]
-        ):
-
-            return False
-
-    # --------------------------------------------------------
-    # 1H DIRECTION
-    # --------------------------------------------------------
-
-    if (
-        row["h1_tenkan"]
-        <=
-        row["h1_kijun"]
-    ):
-
-        return False
-
-    # --------------------------------------------------------
-    # 15M DISTANCE
-    # --------------------------------------------------------
-
-    if (
-        row["m15_distance"]
-        <
-        MIN_DISTANCE_PCT
-    ):
-
-        return False
-
-    # --------------------------------------------------------
-    # DISTANCE EXPANSION
-    # --------------------------------------------------------
-
-    if (
-        row["m15_expansion"]
-        <
-        MIN_DISTANCE_EXPANSION_PCT
-    ):
-
-        return False
-
-    # --------------------------------------------------------
-    # 5M TENKAN
-    # --------------------------------------------------------
-
-    tenkan = row["tenkan"]
-
-    if tenkan <= 0:
-
-        return False
-
-    distance = (
-        abs(
-            row["close"]
-            -
-            tenkan
-        )
-        /
-        tenkan
-        *
-        100
-    )
-
-    if (
-        distance
-        >
-        MAX_TENKAN_DISTANCE_PCT
-    ):
-
-        return False
-
-    # Price closes above Tenkan
-    if (
-        row["close"]
-        <=
-        tenkan
-    ):
-
-        return False
-
-    # Confirmation candle
-    if not is_long_confirmation(
-        row
-    ):
-
-        return False
-
-    return True
-
-
-# ============================================================
-# SHORT SIGNAL
-# ============================================================
-
-def short_signal(
-    df,
-    i
-):
-
-    row = df.iloc[i]
-
-    required = [
-        "h1_tenkan",
-        "h1_kijun",
-        "m15_distance",
-        "m15_expansion",
-        "tenkan",
-    ]
-
-    for col in required:
-
-        if pd.isna(
-            row[col]
-        ):
-
-            return False
-
-    # --------------------------------------------------------
-    # 1H DIRECTION
-    # --------------------------------------------------------
-
-    if (
-        row["h1_tenkan"]
-        >=
-        row["h1_kijun"]
-    ):
-
-        return False
-
-    # --------------------------------------------------------
-    # 15M DISTANCE
-    # --------------------------------------------------------
-
-    if (
-        row["m15_distance"]
-        <
-        MIN_DISTANCE_PCT
-    ):
-
-        return False
-
-    # --------------------------------------------------------
-    # DISTANCE EXPANSION
-    # --------------------------------------------------------
-
-    if (
-        row["m15_expansion"]
-        <
-        MIN_DISTANCE_EXPANSION_PCT
-    ):
-
-        return False
-
-    # --------------------------------------------------------
-    # 5M TENKAN
-    # --------------------------------------------------------
-
-    tenkan = row["tenkan"]
-
-    if tenkan <= 0:
-
-        return False
-
-    distance = (
-        abs(
-            row["close"]
-            -
-            tenkan
-        )
-        /
-        tenkan
-        *
-        100
-    )
-
-    if (
-        distance
-        >
-        MAX_TENKAN_DISTANCE_PCT
-    ):
-
-        return False
-
-    # Price closes below Tenkan
-    if (
-        row["close"]
-        >=
-        tenkan
-    ):
-
-        return False
-
-    # Confirmation candle
-    if not is_short_confirmation(
-        row
-    ):
-
-        return False
-
-    return True
-
-
-# ============================================================
-# LONG SL
-# ============================================================
-
-def calculate_long_sl(
-    df,
-    i
-):
-
-    row = df.iloc[i]
-
-    start = max(
-        0,
-        i - SWING_LOOKBACK
-    )
-
-    recent_low = (
-        df.iloc[
-            start:i + 1
-        ]["low"]
-        .min()
-    )
-
-    candidates = []
-
-    if pd.notna(
-        row["kijun"]
-    ):
-
-        candidates.append(
-            row["kijun"]
-        )
-
-    candidates.append(
-        recent_low
-    )
-
-    valid = [
-        x
-        for x in candidates
-        if x < row["close"]
-    ]
-
-    if not valid:
-
-        return None
-
-    sl = max(valid)
-
-    sl *= (
-        1
-        -
-        SL_BUFFER_PCT / 100
-    )
-
-    return sl
-
-
-# ============================================================
-# SHORT SL
-# ============================================================
-
-def calculate_short_sl(
-    df,
-    i
-):
-
-    row = df.iloc[i]
-
-    start = max(
-        0,
-        i - SWING_LOOKBACK
-    )
-
-    recent_high = (
-        df.iloc[
-            start:i + 1
-        ]["high"]
-        .max()
-    )
-
-    candidates = []
-
-    if pd.notna(
-        row["kijun"]
-    ):
-
-        candidates.append(
-            row["kijun"]
-        )
-
-    candidates.append(
-        recent_high
-    )
-
-    valid = [
-        x
-        for x in candidates
-        if x > row["close"]
-    ]
-
-    if not valid:
-
-        return None
-
-    sl = min(valid)
-
-    sl *= (
-        1
-        +
-        SL_BUFFER_PCT / 100
-    )
-
-    return sl
-
-
-# ============================================================
-# SIMULATE TRADE
-# ============================================================
-
-def simulate_trade(
-    df,
-    entry_index,
-    direction,
-    entry,
-    sl,
-    tp
-):
-
-    max_index = min(
-        len(df) - 1,
-        entry_index
-        +
-        MAX_HOLD_BARS
-    )
-
-    for j in range(
-        entry_index + 1,
-        max_index + 1
-    ):
-
-        row = df.iloc[j]
-
-        high = row["high"]
-        low = row["low"]
-
-        if direction == "LONG":
-
-            hit_sl = (
-                low <= sl
-            )
-
-            hit_tp = (
-                high >= tp
-            )
-
-            # Conservative assumption
-            if hit_sl:
-
-                return {
-                    "exit_index": j,
-                    "exit_time":
-                        row["datetime"],
-                    "exit_price": sl,
-                    "result": "LOSS",
-                }
-
-            if hit_tp:
-
-                return {
-                    "exit_index": j,
-                    "exit_time":
-                        row["datetime"],
-                    "exit_price": tp,
-                    "result": "WIN",
-                }
-
-        else:
-
-            hit_sl = (
-                high >= sl
-            )
-
-            hit_tp = (
-                low <= tp
-            )
-
-            # Conservative assumption
-            if hit_sl:
-
-                return {
-                    "exit_index": j,
-                    "exit_time":
-                        row["datetime"],
-                    "exit_price": sl,
-                    "result": "LOSS",
-                }
-
-            if hit_tp:
-
-                return {
-                    "exit_index": j,
-                    "exit_time":
-                        row["datetime"],
-                    "exit_price": tp,
-                    "result": "WIN",
-                }
-
-    # --------------------------------------------------------
-    # TIME EXIT
-    # --------------------------------------------------------
-
-    last_row = df.iloc[
-        max_index
-    ]
-
-    return {
-        "exit_index":
-            max_index,
-
-        "exit_time":
-            last_row["datetime"],
-
-        "exit_price":
-            last_row["close"],
-
-        "result":
-            "TIME",
-    }
-
-
-# ============================================================
-# BACKTEST
-# ============================================================
-
-def run_backtest(df):
-
-    balance = START_BALANCE
-
-    equity_curve = [
-        balance
-    ]
-
-    trades = []
-
-    i = 1
-
-    cooldown_until = -1
-
-    while (
-        i <
-        len(df) - 1
-    ):
-
-        if (
-            i
-            <=
-            cooldown_until
-        ):
+        if close <= tenkan:
 
             i += 1
             continue
 
-        row = df.iloc[i]
+    else:
 
-        direction = None
-
-        # ----------------------------------------------------
-        # SIGNAL
-        # ----------------------------------------------------
-
-        if (
-            ALLOW_LONG
-            and
-            long_signal(
-                df,
-                i
-            )
-        ):
-
-            direction = "LONG"
-
-        elif (
-            ALLOW_SHORT
-            and
-            short_signal(
-                df,
-                i
-            )
-        ):
-
-            direction = "SHORT"
-
-        if direction is None:
+        if close >= tenkan:
 
             i += 1
             continue
 
-        entry = row["close"]
 
-        # ----------------------------------------------------
-        # SL
-        # ----------------------------------------------------
+    # ========================================================
+    # ENTRY
+    # ========================================================
 
-        if direction == "LONG":
+    entry = close
 
-            sl = calculate_long_sl(
-                df,
-                i
+
+    # ========================================================
+    # SL
+    # ========================================================
+
+    if direction == "LONG":
+
+        sl = kijun
+
+        if pd.isna(sl) or sl >= entry:
+
+            recent_low = (
+                df["low"]
+                .iloc[
+                    max(0, i - 10):i + 1
+                ]
+                .min()
             )
 
-        else:
+            sl = recent_low
 
-            sl = calculate_short_sl(
-                df,
-                i
-            )
-
-        if sl is None:
-
-            i += 1
-            continue
-
-        # ----------------------------------------------------
-        # SL DISTANCE
-        # ----------------------------------------------------
+        sl = sl * (
+            1 - SL_BUFFER_PCT / 100
+        )
 
         sl_distance_pct = (
-            abs(
-                entry - sl
-            )
-            /
-            entry
-            *
-            100
-        )
-
-        if (
-            sl_distance_pct
-            <
-            MIN_SL_PCT
-        ):
-
-            i += 1
-            continue
-
-        if (
-            sl_distance_pct
-            >
-            MAX_SL_PCT
-        ):
-
-            i += 1
-            continue
-
-        # ----------------------------------------------------
-        # TP
-        # ----------------------------------------------------
-
-        risk = abs(
-            entry - sl
-        )
-
-        if direction == "LONG":
-
-            tp = (
-                entry
-                +
-                risk * MIN_RR
-            )
-
-        else:
-
-            tp = (
-                entry
-                -
-                risk * MIN_RR
-            )
-
-        tp_distance_pct = (
-            abs(
-                tp - entry
-            )
-            /
-            entry
-            *
-            100
-        )
-
-        # ----------------------------------------------------
-        # SIMULATE
-        # ----------------------------------------------------
-
-        outcome = simulate_trade(
-            df,
-            i,
-            direction,
-            entry,
-            sl,
-            tp
-        )
-
-        exit_price = (
-            outcome["exit_price"]
-        )
-
-        # ----------------------------------------------------
-        # PNL
-        # ----------------------------------------------------
-
-        if direction == "LONG":
-
-            pnl_pct = (
-                exit_price
-                -
-                entry
-            ) / entry * 100
-
-            risk_price = (
-                entry - sl
-            )
-
-            reward_price = (
-                exit_price - entry
-            )
-
-        else:
-
-            pnl_pct = (
-                entry
-                -
-                exit_price
-            ) / entry * 100
-
-            risk_price = (
-                sl - entry
-            )
-
-            reward_price = (
-                entry - exit_price
-            )
-
-        if risk_price > 0:
-
-            r_multiple = (
-                reward_price
-                /
-                risk_price
-            )
-
-        else:
-
-            r_multiple = 0.0
-
-        # ----------------------------------------------------
-        # ACCOUNT PNL
-        # ----------------------------------------------------
-
-        account_pnl = (
-            balance
-            *
-            (
-                RISK_PER_TRADE_PCT
-                /
-                100
-            )
-            *
-            r_multiple
-        )
-
-        balance += account_pnl
-
-        equity_curve.append(
-            balance
-        )
-
-        # ----------------------------------------------------
-        # SAVE TRADE
-        # ----------------------------------------------------
-
-        trades.append({
-
-            "entry_time":
-                row["datetime"],
-
-            "exit_time":
-                outcome["exit_time"],
-
-            "direction":
-                direction,
-
-            "entry":
-                entry,
-
-            "sl":
-                sl,
-
-            "tp":
-                tp,
-
-            "exit":
-                exit_price,
-
-            "sl_pct":
-                sl_distance_pct,
-
-            "tp_pct":
-                tp_distance_pct,
-
-            "rr":
-                MIN_RR,
-
-            "result":
-                outcome["result"],
-
-            "pnl_pct":
-                pnl_pct,
-
-            "R":
-                r_multiple,
-
-            "account_pnl":
-                account_pnl,
-
-            "balance":
-                balance,
-
-        })
-
-        # ----------------------------------------------------
-        # MOVE TO AFTER EXIT
-        # ----------------------------------------------------
-
-        cooldown_until = (
-            outcome["exit_index"]
-            +
-            COOLDOWN_BARS
-        )
-
-        i = (
-            outcome["exit_index"]
-            +
-            1
-        )
-
-    return (
-        pd.DataFrame(trades),
-        equity_curve
-    )
-
-
-# ============================================================
-# PERFORMANCE
-# ============================================================
-
-def calculate_performance(
-    trades,
-    equity_curve
-):
-
-    print("\n")
-    print("=" * 70)
-    print(
-        "TENKAN + KIJUN + DISTANCE "
-        "BACKTEST RESULTS"
-    )
-    print("=" * 70)
-
-    if trades.empty:
-
-        print(
-            "\nNO TRADES FOUND."
-        )
-
-        print(
-            "The strategy produced "
-            "zero valid entries."
-        )
-
-        return
-
-    total = len(trades)
-
-    wins = len(
-        trades[
-            trades["result"]
-            ==
-            "WIN"
-        ]
-    )
-
-    losses = len(
-        trades[
-            trades["result"]
-            ==
-            "LOSS"
-        ]
-    )
-
-    time_exits = len(
-        trades[
-            trades["result"]
-            ==
-            "TIME"
-        ]
-    )
-
-    win_rate = (
-        wins
-        /
-        total
-        *
-        100
-    )
-
-    gross_profit = trades.loc[
-        trades["account_pnl"] > 0,
-        "account_pnl"
-    ].sum()
-
-    gross_loss = abs(
-        trades.loc[
-            trades["account_pnl"] < 0,
-            "account_pnl"
-        ].sum()
-    )
-
-    if gross_loss > 0:
-
-        profit_factor = (
-            gross_profit
-            /
-            gross_loss
+            (entry - sl)
+            / entry
+            * 100
         )
 
     else:
 
-        profit_factor = np.inf
+        sl = kijun
 
-    final_balance = (
-        equity_curve[-1]
+        if pd.isna(sl) or sl <= entry:
+
+            recent_high = (
+                df["high"]
+                .iloc[
+                    max(0, i - 10):i + 1
+                ]
+                .max()
+            )
+
+            sl = recent_high
+
+        sl = sl * (
+            1 + SL_BUFFER_PCT / 100
+        )
+
+        sl_distance_pct = (
+            (sl - entry)
+            / entry
+            * 100
+        )
+
+
+    # ========================================================
+    # SL VALIDATION
+    # ========================================================
+
+    if (
+        sl_distance_pct < MIN_SL_PCT
+        or
+        sl_distance_pct > MAX_SL_PCT
+    ):
+
+        i += 1
+        continue
+
+
+    # ========================================================
+    # TP = FIXED RR
+    # ========================================================
+
+    if direction == "LONG":
+
+        tp = (
+            entry
+            +
+            (entry - sl)
+            * MIN_RR
+        )
+
+    else:
+
+        tp = (
+            entry
+            -
+            (sl - entry)
+            * MIN_RR
+        )
+
+
+    # ========================================================
+    # TRADE SIMULATION
+    # ========================================================
+
+    exit_price = None
+
+    exit_time = None
+
+    result = None
+
+    pnl_pct = None
+
+    R = None
+
+    max_j = min(
+        len(df),
+        i + 1 + MAX_HOLD_BARS
     )
 
-    net_pnl = (
-        final_balance
-        -
-        START_BALANCE
-    )
+    for j in range(i + 1, max_j):
 
-    net_pnl_pct = (
-        net_pnl
-        /
-        START_BALANCE
+        future = df.iloc[j]
+
+        future_high = future["high"]
+
+        future_low = future["low"]
+
+        # ====================================================
+        # LONG
+        # ====================================================
+
+        if direction == "LONG":
+
+            hit_sl = (
+                future_low <= sl
+            )
+
+            hit_tp = (
+                future_high >= tp
+            )
+
+            # Conservative assumption:
+            # if both happen in same candle,
+            # SL is considered first.
+            if hit_sl and hit_tp:
+
+                exit_price = sl
+
+                result = "LOSS"
+
+                R = -1.0
+
+            elif hit_sl:
+
+                exit_price = sl
+
+                result = "LOSS"
+
+                R = -1.0
+
+            elif hit_tp:
+
+                exit_price = tp
+
+                result = "WIN"
+
+                R = MIN_RR
+
+        # ====================================================
+        # SHORT
+        # ====================================================
+
+        else:
+
+            hit_sl = (
+                future_high >= sl
+            )
+
+            hit_tp = (
+                future_low <= tp
+            )
+
+            if hit_sl and hit_tp:
+
+                exit_price = sl
+
+                result = "LOSS"
+
+                R = -1.0
+
+            elif hit_sl:
+
+                exit_price = sl
+
+                result = "LOSS"
+
+                R = -1.0
+
+            elif hit_tp:
+
+                exit_price = tp
+
+                result = "WIN"
+
+                R = MIN_RR
+
+
+        # ====================================================
+        # EXIT FOUND
+        # ====================================================
+
+        if result is not None:
+
+            exit_time = future["time"]
+
+            break
+
+
+    # ========================================================
+    # TIME EXIT
+    # ========================================================
+
+    if result is None:
+
+        j = max_j - 1
+
+        future = df.iloc[j]
+
+        exit_price = future["close"]
+
+        exit_time = future["time"]
+
+        result = "TIME"
+
+        if direction == "LONG":
+
+            R = (
+                (exit_price - entry)
+                /
+                (entry - sl)
+            )
+
+        else:
+
+            R = (
+                (entry - exit_price)
+                /
+                (sl - entry)
+            )
+
+
+    # ========================================================
+    # PNL
+    # ========================================================
+
+    if direction == "LONG":
+
+        pnl_pct = (
+            (exit_price - entry)
+            / entry
+            * 100
+        )
+
+    else:
+
+        pnl_pct = (
+            (entry - exit_price)
+            / entry
+            * 100
+        )
+
+
+    # ========================================================
+    # BALANCE
+    # ========================================================
+
+    risk_amount = (
+        balance
         *
+        RISK_PER_TRADE_PCT
+        /
         100
     )
 
-    # --------------------------------------------------------
-    # DRAWDOWN
-    # --------------------------------------------------------
+    balance += risk_amount * R
 
-    equity = np.array(
-        equity_curve,
-        dtype=float
+    equity_curve.append(balance)
+
+
+    # ========================================================
+    # STORE TRADE
+    # ========================================================
+
+    trades.append({
+
+        "entry_time": row["time"],
+
+        "direction": direction,
+
+        "entry": entry,
+
+        "sl": sl,
+
+        "tp": tp,
+
+        "exit_time": exit_time,
+
+        "exit": exit_price,
+
+        "result": result,
+
+        "pnl_pct": pnl_pct,
+
+        "R": R,
+
+        "balance": balance,
+
+    })
+
+
+    # ========================================================
+    # MOVE AFTER TRADE
+    # ========================================================
+
+    if result in ["WIN", "LOSS", "TIME"]:
+
+        i = j + 1
+
+    else:
+
+        i += 1
+
+
+# ============================================================
+# RESULTS
+# ============================================================
+
+trades_df = pd.DataFrame(trades)
+
+
+print()
+print("=" * 70)
+print(
+    "TENKAN + KIJUN + DISTANCE BACKTEST RESULTS"
+)
+print("=" * 70)
+
+
+if trades_df.empty:
+
+    print("No trades generated.")
+
+else:
+
+    total_trades = len(trades_df)
+
+    wins = (
+        trades_df["result"] == "WIN"
+    ).sum()
+
+    losses = (
+        trades_df["result"] == "LOSS"
+    ).sum()
+
+    time_exits = (
+        trades_df["result"] == "TIME"
+    ).sum()
+
+    win_rate = (
+        wins / total_trades * 100
     )
 
-    peaks = np.maximum.accumulate(
-        equity
+    gross_profit = (
+        trades_df.loc[
+            trades_df["R"] > 0,
+            "R"
+        ].sum()
     )
 
-    drawdowns = (
-        equity
-        -
-        peaks
-    ) / peaks * 100
+    gross_loss = abs(
+        trades_df.loc[
+            trades_df["R"] < 0,
+            "R"
+        ].sum()
+    )
 
-    max_drawdown = (
-        drawdowns.min()
+    profit_factor = (
+        gross_profit / gross_loss
+        if gross_loss > 0
+        else np.inf
+    )
+
+    net_r = trades_df["R"].sum()
+
+    net_pnl_pct = (
+        (balance - INITIAL_BALANCE)
+        /
+        INITIAL_BALANCE
+        * 100
     )
 
     average_r = (
-        trades["R"].mean()
+        trades_df["R"].mean()
+    )
+
+    # ========================================================
+    # MAX DRAWDOWN
+    # ========================================================
+
+    equity = pd.Series(
+        [INITIAL_BALANCE]
+        +
+        equity_curve
+    )
+
+    peak = equity.cummax()
+
+    drawdown = (
+        (equity - peak)
+        /
+        peak
+        * 100
+    )
+
+    max_drawdown = drawdown.min()
+
+
+    print(
+        f"Symbol              : {SYMBOL}"
     )
 
     print(
-        f"Symbol              : "
-        f"{SYMBOL}"
-    )
-
-    print(
-        f"Period              : "
-        f"{DAYS} days"
+        f"Period              : {DAYS} days"
     )
 
     print(
         f"Initial Balance     : "
-        f"${START_BALANCE:.2f}"
+        f"${INITIAL_BALANCE:.2f}"
     )
 
     print(
         f"Final Balance       : "
-        f"${final_balance:.2f}"
+        f"${balance:.2f}"
     )
 
     print("-" * 70)
 
     print(
         f"Trades              : "
-        f"{total}"
+        f"{total_trades}"
     )
 
     print(
@@ -1670,283 +1190,86 @@ def calculate_performance(
 
     print("=" * 70)
 
-    # --------------------------------------------------------
-    # LONG / SHORT
-    # --------------------------------------------------------
 
-    print(
-        "\nDIRECTION STATISTICS"
-    )
+    # ========================================================
+    # DIRECTION STATISTICS
+    # ========================================================
 
+    print()
+    print("DIRECTION STATISTICS")
     print("-" * 70)
 
-    for direction in [
-        "LONG",
-        "SHORT"
-    ]:
+    for direction in ["LONG", "SHORT"]:
 
-        d = trades[
-            trades["direction"]
-            ==
-            direction
+        d = trades_df[
+            trades_df["direction"]
+            == direction
         ]
 
-        if d.empty:
-
-            print(
-                f"{direction}: "
-                f"0 trades"
-            )
+        if len(d) == 0:
 
             continue
 
-        dw = len(
-            d[
-                d["result"]
-                ==
-                "WIN"
-            ]
-        )
+        d_wins = (
+            d["result"] == "WIN"
+        ).sum()
 
-        dwr = (
-            dw
+        d_wr = (
+            d_wins
             /
             len(d)
             *
             100
         )
 
-        dpnl = d[
-            "account_pnl"
-        ].sum()
+        d_pnl = d["R"].sum()
 
         print(
             f"{direction:<8} "
             f"Trades={len(d):<5} "
-            f"WR={dwr:>6.2f}% "
-            f"PnL=${dpnl:+.2f}"
+            f"WR={d_wr:6.2f}% "
+            f"R={d_pnl:+.3f}"
         )
 
-    print("=" * 70)
 
-    # --------------------------------------------------------
-    # LAST 20
-    # --------------------------------------------------------
+    # ========================================================
+    # LAST 20 TRADES
+    # ========================================================
 
-    print(
-        "\nLAST 20 TRADES"
-    )
-
+    print()
+    print("LAST 20 TRADES")
     print("-" * 70)
 
-    cols = [
-        "entry_time",
-        "direction",
-        "entry",
-        "sl",
-        "tp",
-        "exit",
-        "result",
-        "pnl_pct",
-        "R",
-    ]
-
     print(
-        trades[
-            cols
+        trades_df[
+            [
+                "entry_time",
+                "direction",
+                "entry",
+                "sl",
+                "tp",
+                "exit",
+                "result",
+                "pnl_pct",
+                "R",
+            ]
         ].tail(20).to_string(
             index=False
         )
     )
 
-    print("=" * 70)
 
+    # ========================================================
+    # SAVE
+    # ========================================================
 
-# ============================================================
-# SAVE RESULTS
-# ============================================================
-
-def save_results(
-    trades
-):
-
-    if trades.empty:
-
-        print(
-            "\nNo trade CSV created."
-        )
-
-        return
-
-    filename = (
-        "tenkan_kijun_backtest.csv"
-    )
-
-    trades.to_csv(
-        filename,
+    trades_df.to_csv(
+        "tenkan_kijun_backtest.csv",
         index=False
     )
 
+    print()
     print(
-        f"\nTrade history saved: "
-        f"{filename}"
+        "Trade history saved: "
+        "tenkan_kijun_backtest.csv"
     )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print("=" * 70)
-    print(
-        "TENKAN + KIJUN + DISTANCE "
-        "BACKTEST"
-    )
-    print("=" * 70)
-
-    print(
-        f"Symbol: {SYMBOL}"
-    )
-
-    print(
-        f"Days: {DAYS}"
-    )
-
-    print(
-        "Data: Kraken Futures Charts API"
-    )
-
-    print(
-        "1H: Tenkan/Kijun direction"
-    )
-
-    print(
-        f"15M minimum distance: "
-        f"{MIN_DISTANCE_PCT:.2f}%"
-    )
-
-    print(
-        f"15M minimum expansion: "
-        f"{MIN_DISTANCE_EXPANSION_PCT:.2f}%"
-    )
-
-    print(
-        f"5M maximum Tenkan distance: "
-        f"{MAX_TENKAN_DISTANCE_PCT:.2f}%"
-    )
-
-    print(
-        f"Minimum RR: "
-        f"{MIN_RR:.2f}"
-    )
-
-    print("=" * 70)
-
-    # ========================================================
-    # DOWNLOAD
-    # ========================================================
-
-    df_1h = fetch_kraken_ohlc(
-        SYMBOL,
-        "1h",
-        DAYS
-    )
-
-    df_15m = fetch_kraken_ohlc(
-        SYMBOL,
-        "15m",
-        DAYS
-    )
-
-    df_5m = fetch_kraken_ohlc(
-        SYMBOL,
-        "5m",
-        DAYS
-    )
-
-    # ========================================================
-    # VALIDATION
-    # ========================================================
-
-    if len(df_1h) < 50:
-
-        raise RuntimeError(
-            "Not enough 1H candles."
-        )
-
-    if len(df_15m) < 100:
-
-        raise RuntimeError(
-            "Not enough 15M candles."
-        )
-
-    if len(df_5m) < 200:
-
-        raise RuntimeError(
-            "Not enough 5M candles."
-        )
-
-    # ========================================================
-    # PREPARE
-    # ========================================================
-
-    df = prepare_data(
-        df_1h,
-        df_15m,
-        df_5m
-    )
-
-    # --------------------------------------------------------
-    # Remove latest 5M candle.
-    # --------------------------------------------------------
-
-    if len(df) > 1:
-
-        df = df.iloc[:-1].copy()
-
-    df = df.reset_index(
-        drop=True
-    )
-
-    print(
-        f"\nBacktest 5M candles: "
-        f"{len(df)}"
-    )
-
-    if df.empty:
-
-        raise RuntimeError(
-            "Prepared dataframe is empty."
-        )
-
-    # ========================================================
-    # BACKTEST
-    # ========================================================
-
-    trades, equity_curve = (
-        run_backtest(df)
-    )
-
-    # ========================================================
-    # RESULTS
-    # ========================================================
-
-    calculate_performance(
-        trades,
-        equity_curve
-    )
-
-    save_results(
-        trades
-    )
-
-
-# ============================================================
-# START
-# ============================================================
-
-if __name__ == "__main__":
-
-    main()
