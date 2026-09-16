@@ -1,4 +1,4 @@
-name: Reverse-Tenkan 6 Coins 180D Backtest
+name: ICHIMOKU EQUILIBRIUM v1.0 - 1Y BACKTEST
 
 on:
   workflow_dispatch:
@@ -7,6 +7,7 @@ permissions:
   contents: read
 
 jobs:
+
   backtest:
 
     runs-on: ubuntu-latest
@@ -24,38 +25,38 @@ jobs:
       # PYTHON
       # ======================================================
 
-      - name: Set up Python
+      - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       # ======================================================
-      # DEPENDENCIES
+      # INSTALL
       # ======================================================
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests
+          pip install requests pandas numpy
 
       # ======================================================
-      # RUN 180 DAY BACKTEST
+      # RUN 1 YEAR BACKTEST
       # ======================================================
 
-      - name: Run Reverse-Tenkan 6 Coins 180D Backtest
+      - name: Run ICHIMOKU EQUILIBRIUM 1Y Backtest
         run: |
-          python reverse_tenkan_6coins_backtest_90d.py
+          python ichimoku_equilibrium_backtest_v1.py
 
       # ======================================================
       # UPLOAD RESULTS
       # ======================================================
 
-      - name: Upload backtest results
+      - name: Upload Backtest Results
         uses: actions/upload-artifact@v4
         with:
-          name: reverse-tenkan-6coins-180d-results
+          name: ichimoku-equilibrium-v1-1y-backtest
           path: |
-            reverse_tenkan_6coins_180d_summary.csv
-            reverse_tenkan_6coins_180d_trades.csv
-            reverse_tenkan_6coins_180d_aggregate.csv
+            doge_ichimoku_equilibrium_12m_trades.csv
+            doge_ichimoku_equilibrium_12m_equity.csv
+            doge_ichimoku_equilibrium_12m_report.txt
           if-no-files-found: error
