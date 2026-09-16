@@ -1,0 +1,222 @@
+{
+  "symbols": {
+    "PF_XBTUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_ETHUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_SOLUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_XRPUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_DOGEUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_ADAUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_AVAXUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_LINKUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_DOTUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_LTCUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_BCHUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_UNIUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_AAVEUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_SUIUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_HYPEUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_NEARUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_ATOMUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_FILUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_ARBUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_OPUSD": {
+      "active_trade": null,
+      "last_signal_candle": null,
+      "last_status_candle": null,
+      "signals_total": 0,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    },
+    "PF_ZECUSD": {
+      "active_trade": {
+        "side": "SHORT",
+        "score": 10,
+        "entry": 1236.28,
+        "tp": 1220.6,
+        "sl": 1261.0056,
+        "tenkan": 1220.6,
+        "timestamp": "2026-09-16T11:45:00+00:00"
+      },
+      "last_signal_candle": "2026-09-16T11:45:00+00:00",
+      "last_status_candle": null,
+      "signals_total": 1,
+      "wins": 0,
+      "losses": 0,
+      "timeouts": 0,
+      "net_pnl_pct": 0.0
+    }
+  }
+}
