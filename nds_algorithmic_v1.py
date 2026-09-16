@@ -1,291 +1,464 @@
 # ============================================================
-# KRAKEN FUTURES - NDS ALGORITHMIC v1
-# ============================================================
+# NDS ALGORITHMIC v1
+# Nodal Displacement Sequencing - Algorithmic Prototype
 #
-# NDS = Nodal Displacement Sequencing
+# IMPORTANT:
+# This is an NDS-INSPIRED mechanical backtest.
+# It is NOT claimed to be the official/proprietary NDS system.
 #
-# THIS IS AN ALGORITHMIC NDS-INSPIRED IMPLEMENTATION.
-# IT IS NOT CLAIMED TO BE THE OFFICIAL / PROPRIETARY
-# IMPLEMENTATION OF DR. IRAJ JAFARIAN'S NDS.
+# MARKET:
+# Kraken Futures
 #
-# CORE IDEA:
+# TIMEFRAMES:
+# 1H  = Market Structure
+# 15M = Displacement + Retracement
+# 5M  = Flag + Breakout Confirmation
 #
-# 1H  = FRACTAL MARKET STRUCTURE
-# 15M = DISPLACEMENT -> RETRACEMENT
-# 5M  = 123 FLAG -> BREAKOUT
+# FEATURES:
+# - Full Kraken historical pagination
+# - 365-day backtest
+# - 30-day warm-up
+# - Closed candles only
+# - No incomplete 1H / 15M candle usage
+# - No look-ahead in higher-timeframe structure
+# - LONG / SHORT
+# - One active trade
+# - Fixed 1.5R target
+# - ATR-based stop
+# - 0.06% fee per side
+# - Real trading disabled
 #
-# LONG:
-#   Higher TF bullish structure
-#   Strong bullish displacement
-#   Retracement
-#   Flag
-#   Breakout above flag
-#
-# SHORT:
-#   Higher TF bearish structure
-#   Strong bearish displacement
-#   Retracement
-#   Flag
-#   Breakout below flag
-#
-# CLOSED CANDLES ONLY
-# NO LOOKAHEAD
-# REAL TRADING DISABLED
-#
+# OUTPUT:
+# doge_nds_algorithmic_v1_trades.csv
+# doge_nds_algorithmic_v1_equity.csv
+# doge_nds_algorithmic_v1_report.txt
 # ============================================================
 
+import os
 import time
 import math
 import requests
-import pandas as pd
 import numpy as np
-from datetime import datetime, timezone, timedelta
+import pandas as pd
+from datetime import datetime, timedelta, timezone
+
 
 # ============================================================
-# CONFIG
+# SETTINGS
 # ============================================================
 
-VERSION = "NDS ALGORITHMIC v1"
+VERSION = "NDS Algorithmic v1"
 
 SYMBOL = "pf_dogeusd"
-DISPLAY_SYMBOL = "DOGE/USDT"
 
 INITIAL_CAPITAL = 100.0
 
 REAL_TRADING = False
 
-# ------------------------------------------------------------
-# Kraken Charts API
-# ------------------------------------------------------------
-
-BASE_URL = "https://futures.kraken.com/api/charts/v1/trade"
-
-TF_1H = "1h"
-TF_15M = "15m"
-TF_5M = "5m"
-
-# ------------------------------------------------------------
-# Backtest
-# ------------------------------------------------------------
-
 BACKTEST_DAYS = 365
 WARMUP_DAYS = 30
 
-# ------------------------------------------------------------
-# Fees
-# ------------------------------------------------------------
-
-FEE_PER_SIDE = 0.00060
-ROUND_TRIP_FEE = FEE_PER_SIDE * 2
+FEE_RATE = 0.0006
+ROUND_TRIP_FEE = FEE_RATE * 2
 
 # ------------------------------------------------------------
-# Structure
-# ------------------------------------------------------------
-
-PIVOT_LEFT = 3
-PIVOT_RIGHT = 3
-
-# Higher TF structure
-STRUCTURE_LOOKBACK = 80
-
-# 15M displacement
-DISPLACEMENT_LOOKBACK = 30
-
-# Minimum displacement relative to ATR
-MIN_DISPLACEMENT_ATR = 1.20
-
-# Retracement must give back part of displacement
-MIN_RETRACEMENT = 0.25
-MAX_RETRACEMENT = 0.75
-
-# Flag
-FLAG_LOOKBACK = 12
-
-# Flag must not be too large relative to displacement
-MAX_FLAG_TO_DISPLACEMENT = 0.60
-
-# 5M breakout buffer
-BREAKOUT_BUFFER_PCT = 0.02
-
-# ------------------------------------------------------------
-# Risk management
+# NDS PARAMETERS
 # ------------------------------------------------------------
 
 ATR_PERIOD = 14
 
-SL_BUFFER_ATR = 0.20
+HTF_PIVOT_SWING = 3
 
-MIN_SL_PCT = 0.25
-MAX_SL_PCT = 2.50
+DISPLACEMENT_LOOKBACK = 20
+DISPLACEMENT_ATR_MULT = 1.0
+
+RETRACEMENT_LOOKBACK = 12
+MIN_RETRACEMENT = 0.25
+MAX_RETRACEMENT = 0.75
+
+FLAG_LOOKBACK = 12
+FLAG_MAX_RANGE_ATR = 1.50
+
+BREAKOUT_LOOKBACK = 3
+
+SL_ATR_BUFFER = 0.25
 
 MIN_RR = 1.50
 
-MAX_TP_PCT = 8.00
+# One active trade only
+MAX_ACTIVE_TRADES = 1
 
-# One active position at a time
-MAX_OPEN_TRADES = 1
 
 # ============================================================
-# HTTP SESSION
+# OUTPUT FILES
+# ============================================================
+
+TRADES_FILE = "doge_nds_algorithmic_v1_trades.csv"
+EQUITY_FILE = "doge_nds_algorithmic_v1_equity.csv"
+REPORT_FILE = "doge_nds_algorithmic_v1_report.txt"
+
+
+# ============================================================
+# KRAKEN API
+# ============================================================
+
+KRAKEN_URL = (
+    "https://futures.kraken.com/api/charts/v1/"
+    "trade/{symbol}/{resolution}"
+)
+
+
+RESOLUTION_SECONDS = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "30m": 1800,
+    "1h": 3600,
+    "4h": 14400,
+    "12h": 43200,
+    "1d": 86400,
+    "1w": 604800,
+}
+
+
+# ============================================================
+# GLOBAL SESSION
 # ============================================================
 
 SESSION = requests.Session()
+
 SESSION.headers.update(
     {
-        "User-Agent": "NDS-Algorithmic-Backtest/1.0"
+        "Accept": "application/json",
+        "User-Agent": "NDS-Algorithmic-v1/1.0",
     }
 )
 
 
 # ============================================================
-# KRAKEN DATA
+# HELPERS
+# ============================================================
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def safe_float(value):
+    try:
+        return float(value)
+    except Exception:
+        return np.nan
+
+
+# ============================================================
+# FETCH KRAKEN CANDLES
 # ============================================================
 
 def fetch_kraken_candles(
     symbol,
     resolution,
     start_ts,
-    end_ts
+    end_ts,
 ):
     """
-    Fetch Kraken Futures chart candles.
+    Download complete Kraken Futures historical candles.
 
-    Kraken chart endpoint has a practical candle limit,
-    therefore data is fetched in chunks.
+    Kraken Charts API:
+        /api/charts/v1/trade/{symbol}/{resolution}
+
+    Query:
+        from = epoch seconds
+        to   = epoch seconds
+        count = number of candles
+
+    Response:
+        candle time is epoch milliseconds.
+
+    Pagination is performed using the timestamp of the
+    last candle actually returned.
+
+    This fixes the previous 2,000-candle limitation.
     """
 
-    all_rows = []
+    if resolution not in RESOLUTION_SECONDS:
+        raise ValueError(
+            f"Unsupported resolution: {resolution}"
+        )
+
+    step = RESOLUTION_SECONDS[resolution]
+
+    url = KRAKEN_URL.format(
+        symbol=symbol,
+        resolution=resolution,
+    )
 
     cursor = int(start_ts)
 
-    # Approximate number of seconds per candle
-    resolution_seconds = {
-        "1h": 3600,
-        "15m": 900,
-        "5m": 300
-    }[resolution]
+    all_candles = []
 
-    while cursor < end_ts:
+    request_no = 0
 
-        url = f"{BASE_URL}/{symbol}/{resolution}"
+    print()
+    print(
+        f"Downloading {resolution} candles..."
+    )
+
+    while cursor < int(end_ts):
+
+        request_no += 1
 
         params = {
-            "from": cursor,
-            "to": int(end_ts)
+            "from": int(cursor),
+            "to": int(end_ts),
+            "count": 2000,
         }
 
-        try:
-            r = SESSION.get(
-                url,
-                params=params,
-                timeout=30
-            )
+        print(
+            f"  {resolution} request #{request_no} "
+            f"from "
+            f"{pd.to_datetime(cursor, unit='s', utc=True)}"
+        )
 
-            r.raise_for_status()
+        response = SESSION.get(
+            url,
+            params=params,
+            timeout=60,
+        )
 
-            data = r.json()
+        response.raise_for_status()
 
-        except Exception as e:
-
-            print(
-                f"ERROR fetching {resolution}: {e}"
-            )
-
-            time.sleep(2)
-
-            continue
+        data = response.json()
 
         candles = data.get("candles", [])
 
         if not candles:
+            print(
+                f"  {resolution}: no more candles."
+            )
             break
 
-        for c in candles:
+        all_candles.extend(candles)
 
+        # ----------------------------------------------------
+        # Find latest candle timestamp
+        # ----------------------------------------------------
+
+        timestamps_ms = []
+
+        for candle in candles:
             try:
-
-                ts = int(
-                    c.get("time")
-                    or c.get("timestamp")
-                    or c.get("ts")
+                timestamps_ms.append(
+                    int(candle["time"])
                 )
-
-                o = float(c["open"])
-                h = float(c["high"])
-                l = float(c["low"])
-                cl = float(c["close"])
-
-                volume = float(
-                    c.get("volume", 0)
-                )
-
-                all_rows.append(
-                    [
-                        ts,
-                        o,
-                        h,
-                        l,
-                        cl,
-                        volume
-                    ]
-                )
-
-            except Exception:
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+            ):
                 continue
 
-        last_ts = max(
-            row[0]
-            for row in all_rows
+        if not timestamps_ms:
+            raise RuntimeError(
+                f"No valid timestamps returned for "
+                f"{resolution}"
+            )
+
+        latest_ms = max(timestamps_ms)
+
+        latest_ts = latest_ms // 1000
+
+        # ----------------------------------------------------
+        # Check pagination flag
+        # ----------------------------------------------------
+
+        more_candles = bool(
+            data.get("more_candles", False)
         )
 
-        next_cursor = (
-            last_ts
-            + resolution_seconds
-        )
+        if not more_candles:
+            break
+
+        # ----------------------------------------------------
+        # Move strictly beyond latest candle
+        # ----------------------------------------------------
+
+        next_cursor = latest_ts + step
 
         if next_cursor <= cursor:
-            break
+            raise RuntimeError(
+                f"Kraken pagination failed for {resolution}. "
+                f"Current cursor={cursor}, "
+                f"next={next_cursor}"
+            )
 
         cursor = next_cursor
 
-        time.sleep(0.05)
+        # Small pause to be polite to the API
+        time.sleep(0.10)
 
-    if not all_rows:
-        return pd.DataFrame(
-            columns=[
-                "timestamp",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume"
-            ]
+        # Safety
+        if request_no > 1000:
+            raise RuntimeError(
+                f"Too many API requests for {resolution}."
+            )
+
+    # ========================================================
+    # NO DATA
+    # ========================================================
+
+    if not all_candles:
+        raise RuntimeError(
+            f"No Kraken data received for "
+            f"{symbol} {resolution}"
         )
 
-    df = pd.DataFrame(
-        all_rows,
-        columns=[
-            "timestamp",
+    # ========================================================
+    # DATAFRAME
+    # ========================================================
+
+    df = pd.DataFrame(all_candles)
+
+    required = [
+        "time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]
+
+    missing = [
+        col for col in required
+        if col not in df.columns
+    ]
+
+    if missing:
+        raise RuntimeError(
+            f"Kraken response missing columns: {missing}"
+        )
+
+    df = df[required].copy()
+
+    # ========================================================
+    # TIME
+    # ========================================================
+
+    df["time"] = pd.to_datetime(
+        df["time"],
+        unit="ms",
+        utc=True,
+    )
+
+    # ========================================================
+    # NUMERIC
+    # ========================================================
+
+    for col in [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+    ]:
+        df[col] = pd.to_numeric(
+            df[col],
+            errors="coerce",
+        )
+
+    df = df.dropna(
+        subset=[
+            "time",
             "open",
             "high",
             "low",
             "close",
-            "volume"
+            "volume",
         ]
     )
 
+    # ========================================================
+    # REMOVE DUPLICATES
+    # ========================================================
+
     df = (
         df
-        .drop_duplicates("timestamp")
-        .sort_values("timestamp")
+        .drop_duplicates(
+            subset=["time"],
+            keep="last",
+        )
+        .sort_values("time")
         .reset_index(drop=True)
     )
 
-    df["datetime"] = pd.to_datetime(
-        df["timestamp"],
+    # ========================================================
+    # EXACT RANGE
+    # ========================================================
+
+    start_dt = pd.to_datetime(
+        start_ts,
         unit="s",
-        utc=True
+        utc=True,
     )
+
+    end_dt = pd.to_datetime(
+        end_ts,
+        unit="s",
+        utc=True,
+    )
+
+    df = df[
+        (df["time"] >= start_dt)
+        &
+        (df["time"] <= end_dt)
+    ].copy()
+
+    df = (
+        df
+        .drop_duplicates(
+            subset=["time"],
+            keep="last",
+        )
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
+
+    # ========================================================
+    # EXPECTED DATA CHECK
+    # ========================================================
+
+    expected = int(
+        (end_ts - start_ts) / step
+    )
+
+    actual = len(df)
+
+    print(
+        f"  {resolution} complete: "
+        f"{actual:,} candles"
+    )
+
+    if actual > 0:
+
+        print(
+            f"  Actual range: "
+            f"{df['time'].iloc[0]} "
+            f"-> "
+            f"{df['time'].iloc[-1]}"
+        )
+
+    print(
+        f"  Expected approximately: "
+        f"{expected:,}"
+    )
+
+    # Require at least 90% of expected data
+    if actual < expected * 0.90:
+
+        raise RuntimeError(
+            f"INSUFFICIENT DATA for {resolution}: "
+            f"received {actual:,}, "
+            f"expected approximately {expected:,}"
+        )
 
     return df
 
@@ -294,183 +467,181 @@ def fetch_kraken_candles(
 # ATR
 # ============================================================
 
-def add_atr(df, period=14):
+def calculate_atr(df, period=14):
 
-    df = df.copy()
+    high = df["high"]
+    low = df["low"]
+    close = df["close"]
 
-    prev_close = df["close"].shift(1)
+    previous_close = close.shift(1)
 
-    tr1 = df["high"] - df["low"]
+    tr1 = high - low
 
     tr2 = (
-        df["high"]
-        - prev_close
+        high - previous_close
     ).abs()
 
     tr3 = (
-        df["low"]
-        - prev_close
+        low - previous_close
     ).abs()
 
-    tr = pd.concat(
-        [tr1, tr2, tr3],
-        axis=1
+    true_range = pd.concat(
+        [
+            tr1,
+            tr2,
+            tr3,
+        ],
+        axis=1,
     ).max(axis=1)
 
-    df["atr"] = (
-        tr
+    atr = (
+        true_range
         .rolling(period)
         .mean()
     )
 
-    return df
+    return atr
 
 
 # ============================================================
 # PIVOTS
 # ============================================================
 
-def is_pivot_high(
-    highs,
-    i,
-    left=PIVOT_LEFT,
-    right=PIVOT_RIGHT
-):
-
-    if i < left:
-        return False
-
-    if i + right >= len(highs):
-        return False
-
-    center = highs[i]
-
-    left_values = highs[
-        i-left:i
-    ]
-
-    right_values = highs[
-        i+1:i+right+1
-    ]
-
-    return (
-        center > left_values.max()
-        and
-        center >= right_values.max()
-    )
-
-
-def is_pivot_low(
-    lows,
-    i,
-    left=PIVOT_LEFT,
-    right=PIVOT_RIGHT
-):
-
-    if i < left:
-        return False
-
-    if i + right >= len(lows):
-        return False
-
-    center = lows[i]
-
-    left_values = lows[
-        i-left:i
-    ]
-
-    right_values = lows[
-        i+1:i+right+1
-    ]
-
-    return (
-        center < left_values.min()
-        and
-        center <= right_values.min()
-    )
-
-
-def get_recent_pivots(
+def calculate_confirmed_pivots(
     df,
-    end_index,
-    lookback=80
+    swing=3,
 ):
+    """
+    A pivot is only considered confirmed after the required
+    candles to its right have closed.
 
-    start = max(
-        0,
-        end_index - lookback
+    This prevents future candles from being used as if they
+    were already known.
+    """
+
+    n = len(df)
+
+    pivot_high = np.full(
+        n,
+        np.nan,
     )
 
-    highs = []
-    lows = []
+    pivot_low = np.full(
+        n,
+        np.nan,
+    )
 
     for i in range(
-        start,
-        end_index
+        swing,
+        n - swing,
     ):
 
-        if is_pivot_high(
-            df["high"].values,
-            i
+        current_high = df["high"].iloc[i]
+        current_low = df["low"].iloc[i]
+
+        left_high = df["high"].iloc[
+            i - swing:i
+        ]
+
+        right_high = df["high"].iloc[
+            i + 1:i + swing + 1
+        ]
+
+        left_low = df["low"].iloc[
+            i - swing:i
+        ]
+
+        right_low = df["low"].iloc[
+            i + 1:i + swing + 1
+        ]
+
+        if (
+            current_high > left_high.max()
+            and
+            current_high > right_high.max()
         ):
+            pivot_high[i] = current_high
 
-            highs.append(
-                (
-                    i,
-                    float(df.iloc[i]["high"])
-                )
-            )
-
-        if is_pivot_low(
-            df["low"].values,
-            i
+        if (
+            current_low < left_low.min()
+            and
+            current_low < right_low.min()
         ):
+            pivot_low[i] = current_low
 
-            lows.append(
-                (
-                    i,
-                    float(df.iloc[i]["low"])
-                )
-            )
+    df = df.copy()
 
-    return highs, lows
+    df["pivot_high"] = pivot_high
+    df["pivot_low"] = pivot_low
+
+    # Pivot becomes usable only after right-side candles close.
+    df["confirmed_pivot_high"] = (
+        df["pivot_high"].shift(swing)
+    )
+
+    df["confirmed_pivot_low"] = (
+        df["pivot_low"].shift(swing)
+    )
+
+    return df
 
 
 # ============================================================
-# 1H FRACTAL STRUCTURE
+# MARKET STRUCTURE
 # ============================================================
 
 def get_market_structure(
     df,
-    index
+    current_index,
 ):
+    """
+    Uses only confirmed pivots available by current_index.
+    """
 
-    highs, lows = get_recent_pivots(
-        df,
-        index,
-        STRUCTURE_LOOKBACK
+    if current_index < 1:
+        return "NEUTRAL"
+
+    available = df.iloc[
+        :current_index + 1
+    ]
+
+    highs = (
+        available[
+            available["confirmed_pivot_high"]
+            .notna()
+        ]
+        ["confirmed_pivot_high"]
+        .tolist()
+    )
+
+    lows = (
+        available[
+            available["confirmed_pivot_low"]
+            .notna()
+        ]
+        ["confirmed_pivot_low"]
+        .tolist()
     )
 
     if len(highs) < 2 or len(lows) < 2:
-
         return "NEUTRAL"
 
-    h1 = highs[-2][1]
-    h2 = highs[-1][1]
+    last_high = highs[-1]
+    previous_high = highs[-2]
 
-    l1 = lows[-2][1]
-    l2 = lows[-1][1]
+    last_low = lows[-1]
+    previous_low = lows[-2]
 
     bullish = (
-        h2 > h1
+        last_high > previous_high
         and
-        l2 > l1
+        last_low > previous_low
     )
 
     bearish = (
-        h2 < h1
+        last_high < previous_high
         and
-        l2 < l1
+        last_low < previous_low
     )
 
     if bullish:
@@ -483,73 +654,71 @@ def get_market_structure(
 
 
 # ============================================================
-# 15M DISPLACEMENT
+# DISPLACEMENT
 # ============================================================
 
 def detect_displacement(
-    df,
-    index,
-    direction
+    df15,
+    idx,
 ):
+    """
+    Detect strong directional displacement on 15M.
 
-    if index < DISPLACEMENT_LOOKBACK + 2:
+    Current candle is already closed when evaluated.
+    """
+
+    if idx < DISPLACEMENT_LOOKBACK:
         return None
 
-    current_close = float(
-        df.iloc[index]["close"]
-    )
+    atr = df15["atr"].iloc[idx]
 
-    current_atr = float(
-        df.iloc[index]["atr"]
-    )
-
-    if not np.isfinite(current_atr):
+    if pd.isna(atr) or atr <= 0:
         return None
 
-    lookback_df = df.iloc[
-        index - DISPLACEMENT_LOOKBACK:index
+    current = df15.iloc[idx]
+
+    previous = df15.iloc[
+        idx - DISPLACEMENT_LOOKBACK:idx
     ]
 
-    if direction == "LONG":
+    previous_high = previous["high"].max()
+    previous_low = previous["low"].min()
 
-        origin = float(
-            lookback_df["low"].min()
-        )
-
-        displacement = (
-            current_close - origin
-        )
-
-        if displacement <= 0:
-            return None
-
-    else:
-
-        origin = float(
-            lookback_df["high"].max()
-        )
-
-        displacement = (
-            origin - current_close
-        )
-
-        if displacement <= 0:
-            return None
-
-    displacement_atr = (
-        displacement / current_atr
+    bullish_range = (
+        current["close"]
+        - previous_high
     )
 
-    if displacement_atr < MIN_DISPLACEMENT_ATR:
+    bearish_range = (
+        previous_low
+        - current["close"]
+    )
 
-        return None
+    bullish_body = (
+        current["close"]
+        - current["open"]
+    )
 
-    return {
-        "origin": origin,
-        "current": current_close,
-        "displacement": displacement,
-        "displacement_atr": displacement_atr
-    }
+    bearish_body = (
+        current["open"]
+        - current["close"]
+    )
+
+    if (
+        bullish_body > 0
+        and
+        bullish_range >= DISPLACEMENT_ATR_MULT * atr
+    ):
+        return "BULLISH"
+
+    if (
+        bearish_body > 0
+        and
+        bearish_range >= DISPLACEMENT_ATR_MULT * atr
+    ):
+        return "BEARISH"
+
+    return None
 
 
 # ============================================================
@@ -557,526 +726,304 @@ def detect_displacement(
 # ============================================================
 
 def detect_retracement(
-    df,
-    index,
-    displacement,
-    direction
+    df15,
+    idx,
+    direction,
 ):
+    """
+    Detect controlled retracement after displacement.
 
-    origin = displacement["origin"]
+    This is intentionally mechanical.
+    """
 
-    current = displacement["current"]
+    if idx < RETRACEMENT_LOOKBACK:
+        return False
 
-    total = displacement["displacement"]
-
-    if total <= 0:
-        return None
+    window = df15.iloc[
+        idx - RETRACEMENT_LOOKBACK:idx + 1
+    ]
 
     if direction == "LONG":
 
-        highest = current
+        displacement_low = window["low"].min()
+        displacement_high = window["high"].max()
 
-        retracement_low = float(
-            df.iloc[
-                max(0, index - 12):index + 1
-            ]["low"].min()
+        total_range = (
+            displacement_high
+            - displacement_low
         )
+
+        if total_range <= 0:
+            return False
+
+        current_price = df15["close"].iloc[idx]
 
         retracement = (
-            highest - retracement_low
-        )
-
-        ratio = (
-            retracement / total
-        )
-
-        if (
-            ratio < MIN_RETRACEMENT
-            or
-            ratio > MAX_RETRACEMENT
-        ):
-            return None
-
-        return {
-            "retracement_ratio": ratio,
-            "retracement_extreme": retracement_low
-        }
+            displacement_high
+            - current_price
+        ) / total_range
 
     else:
 
-        lowest = current
+        displacement_high = window["high"].max()
+        displacement_low = window["low"].min()
 
-        retracement_high = float(
-            df.iloc[
-                max(0, index - 12):index + 1
-            ]["high"].max()
+        total_range = (
+            displacement_high
+            - displacement_low
         )
+
+        if total_range <= 0:
+            return False
+
+        current_price = df15["close"].iloc[idx]
 
         retracement = (
-            retracement_high - lowest
-        )
+            current_price
+            - displacement_low
+        ) / total_range
 
-        ratio = (
-            retracement / total
-        )
-
-        if (
-            ratio < MIN_RETRACEMENT
-            or
-            ratio > MAX_RETRACEMENT
-        ):
-            return None
-
-        return {
-            "retracement_ratio": ratio,
-            "retracement_extreme": retracement_high
-        }
+    return (
+        MIN_RETRACEMENT
+        <= retracement
+        <= MAX_RETRACEMENT
+    )
 
 
 # ============================================================
-# 5M FLAG
+# FLAG
 # ============================================================
 
 def detect_flag(
-    df,
-    index,
-    direction
+    df5,
+    idx,
+    direction,
 ):
+    """
+    Detect a compact consolidation / flag before breakout.
+    """
 
-    if index < FLAG_LOOKBACK + 2:
+    if idx < FLAG_LOOKBACK + 1:
         return None
 
-    flag = df.iloc[
-        index - FLAG_LOOKBACK:index
+    window = df5.iloc[
+        idx - FLAG_LOOKBACK:idx
     ]
 
-    flag_high = float(
-        flag["high"].max()
-    )
+    atr = df5["atr"].iloc[idx]
 
-    flag_low = float(
-        flag["low"].min()
-    )
+    if pd.isna(atr) or atr <= 0:
+        return None
+
+    flag_high = window["high"].max()
+    flag_low = window["low"].min()
 
     flag_range = (
-        flag_high - flag_low
+        flag_high
+        - flag_low
     )
 
-    atr = float(
-        df.iloc[index]["atr"]
-    )
-
-    if not np.isfinite(atr) or atr <= 0:
+    if flag_range > FLAG_MAX_RANGE_ATR * atr:
         return None
 
-    # We use the displacement visible in the recent move
-    recent_high = float(
-        df.iloc[
-            max(0, index - 30):index
-        ]["high"].max()
-    )
-
-    recent_low = float(
-        df.iloc[
-            max(0, index - 30):index
-        ]["low"].min()
-    )
-
-    displacement_range = (
-        recent_high - recent_low
-    )
-
-    if displacement_range <= 0:
-        return None
-
-    if (
-        flag_range
-        >
-        displacement_range
-        * MAX_FLAG_TO_DISPLACEMENT
-    ):
-        return None
-
-    # A flag should be relatively compressed
-    if flag_range > atr * 5.0:
-        return None
-
-    return {
-        "flag_high": flag_high,
-        "flag_low": flag_low,
-        "flag_range": flag_range
-    }
-
-
-# ============================================================
-# 123 FLAG BREAKOUT
-# ============================================================
-
-def check_breakout(
-    df,
-    index,
-    flag,
-    direction
-):
-
-    current = float(
-        df.iloc[index]["close"]
-    )
-
-    previous = float(
-        df.iloc[index - 1]["close"]
-    )
+    current = df5.iloc[idx]
 
     if direction == "LONG":
 
-        breakout_level = (
-            flag["flag_high"]
-            *
-            (1 + BREAKOUT_BUFFER_PCT / 100)
+        breakout = (
+            current["close"]
+            > flag_high
         )
 
-        if (
-            previous <= flag["flag_high"]
-            and
-            current > breakout_level
-        ):
-            return True
+        if breakout:
+            return {
+                "flag_high": flag_high,
+                "flag_low": flag_low,
+            }
 
     else:
 
-        breakout_level = (
-            flag["flag_low"]
-            *
-            (1 - BREAKOUT_BUFFER_PCT / 100)
+        breakout = (
+            current["close"]
+            < flag_low
         )
 
-        if (
-            previous >= flag["flag_low"]
-            and
-            current < breakout_level
-        ):
-            return True
-
-    return False
-
-
-# ============================================================
-# SETUP DETECTION
-# ============================================================
-
-def detect_setup(
-    df1h,
-    df15,
-    df5,
-    i5
-):
-
-    time5 = df5.iloc[i5]["datetime"]
-
-    # --------------------------------------------------------
-    # Map 5M time to latest CLOSED 1H and 15M candles
-    # --------------------------------------------------------
-
-    i1h = (
-        df1h["datetime"]
-        .searchsorted(
-            time5,
-            side="right"
-        )
-        - 1
-    )
-
-    i15 = (
-        df15["datetime"]
-        .searchsorted(
-            time5,
-            side="right"
-        )
-        - 1
-    )
-
-    if i1h < 0 or i15 < 0:
-        return None
-
-    # We only use fully closed candles.
-    # Current 5M candle itself is closed because the
-    # backtest processes completed candles sequentially.
-
-    structure = get_market_structure(
-        df1h,
-        i1h
-    )
-
-    if structure not in (
-        "BULLISH",
-        "BEARISH"
-    ):
-        return None
-
-    # --------------------------------------------------------
-    # LONG
-    # --------------------------------------------------------
-
-    if structure == "BULLISH":
-
-        direction = "LONG"
-
-        displacement = detect_displacement(
-            df15,
-            i15,
-            direction
-        )
-
-        if displacement is None:
-            return None
-
-        retracement = detect_retracement(
-            df15,
-            i15,
-            displacement,
-            direction
-        )
-
-        if retracement is None:
-            return None
-
-        flag = detect_flag(
-            df5,
-            i5,
-            direction
-        )
-
-        if flag is None:
-            return None
-
-        if not check_breakout(
-            df5,
-            i5,
-            flag,
-            direction
-        ):
-            return None
-
-        return {
-            "direction": direction,
-            "flag_high": flag["flag_high"],
-            "flag_low": flag["flag_low"],
-            "displacement_atr":
-                displacement["displacement_atr"],
-            "retracement_ratio":
-                retracement["retracement_ratio"]
-        }
-
-    # --------------------------------------------------------
-    # SHORT
-    # --------------------------------------------------------
-
-    if structure == "BEARISH":
-
-        direction = "SHORT"
-
-        displacement = detect_displacement(
-            df15,
-            i15,
-            direction
-        )
-
-        if displacement is None:
-            return None
-
-        retracement = detect_retracement(
-            df15,
-            i15,
-            displacement,
-            direction
-        )
-
-        if retracement is None:
-            return None
-
-        flag = detect_flag(
-            df5,
-            i5,
-            direction
-        )
-
-        if flag is None:
-            return None
-
-        if not check_breakout(
-            df5,
-            i5,
-            flag,
-            direction
-        ):
-            return None
-
-        return {
-            "direction": direction,
-            "flag_high": flag["flag_high"],
-            "flag_low": flag["flag_low"],
-            "displacement_atr":
-                displacement["displacement_atr"],
-            "retracement_ratio":
-                retracement["retracement_ratio"]
-        }
+        if breakout:
+            return {
+                "flag_high": flag_high,
+                "flag_low": flag_low,
+            }
 
     return None
 
 
 # ============================================================
-# TRADE CREATION
+# CREATE TRADE
 # ============================================================
 
 def create_trade(
-    setup,
-    df5,
-    index,
-    capital
+    direction,
+    entry_time,
+    entry_price,
+    flag,
+    atr,
 ):
+    """
+    Creates fixed-risk 1.5R trade.
+    """
 
-    direction = setup["direction"]
-
-    entry = float(
-        df5.iloc[index]["close"]
-    )
-
-    atr = float(
-        df5.iloc[index]["atr"]
-    )
-
-    if not np.isfinite(atr):
+    if (
+        pd.isna(atr)
+        or
+        atr <= 0
+    ):
         return None
 
     if direction == "LONG":
 
-        structural_sl = (
-            setup["flag_low"]
-            -
-            atr * SL_BUFFER_ATR
+        stop_loss = (
+            flag["flag_low"]
+            - SL_ATR_BUFFER * atr
         )
 
-        sl_distance = (
-            entry - structural_sl
+        risk = (
+            entry_price
+            - stop_loss
         )
 
-        if sl_distance <= 0:
+        if risk <= 0:
             return None
 
-        stop_loss = structural_sl
-
-        tp_distance = (
-            sl_distance * MIN_RR
-        )
-
         take_profit = (
-            entry + tp_distance
+            entry_price
+            + MIN_RR * risk
         )
 
     else:
 
-        structural_sl = (
-            setup["flag_high"]
-            +
-            atr * SL_BUFFER_ATR
+        stop_loss = (
+            flag["flag_high"]
+            + SL_ATR_BUFFER * atr
         )
 
-        sl_distance = (
-            structural_sl - entry
+        risk = (
+            stop_loss
+            - entry_price
         )
 
-        if sl_distance <= 0:
+        if risk <= 0:
             return None
 
-        stop_loss = structural_sl
-
-        tp_distance = (
-            sl_distance * MIN_RR
-        )
-
         take_profit = (
-            entry - tp_distance
+            entry_price
+            - MIN_RR * risk
         )
 
-    sl_pct = (
-        sl_distance
-        / entry
-        * 100
-    )
+    if direction == "LONG":
 
-    tp_pct = (
-        tp_distance
-        / entry
-        * 100
-    )
+        if (
+            stop_loss >= entry_price
+            or
+            take_profit <= entry_price
+        ):
+            return None
 
-    if sl_pct < MIN_SL_PCT:
-        return None
+    else:
 
-    if sl_pct > MAX_SL_PCT:
-        return None
-
-    if tp_pct > MAX_TP_PCT:
-        return None
+        if (
+            stop_loss <= entry_price
+            or
+            take_profit >= entry_price
+        ):
+            return None
 
     return {
-        "entry_time":
-            df5.iloc[index]["datetime"],
-
-        "direction":
-            direction,
-
-        "entry":
-            entry,
-
-        "stop_loss":
-            stop_loss,
-
-        "take_profit":
-            take_profit,
-
-        "capital_before":
-            capital,
-
-        "sl_pct":
-            sl_pct,
-
-        "tp_pct":
-            tp_pct,
-
-        "rr":
-            MIN_RR,
-
-        "displacement_atr":
-            setup["displacement_atr"],
-
-        "retracement_ratio":
-            setup["retracement_ratio"],
-
-        "flag_high":
-            setup["flag_high"],
-
-        "flag_low":
-            setup["flag_low"]
+        "entry_time": entry_time,
+        "direction": direction,
+        "entry": float(entry_price),
+        "stop_loss": float(stop_loss),
+        "take_profit": float(take_profit),
+        "rr": float(MIN_RR),
     }
 
 
 # ============================================================
-# TRADE MANAGEMENT
+# EXIT TRADE
 # ============================================================
 
-def close_trade(
+def check_exit(
     trade,
-    exit_price,
-    exit_time,
-    reason
+    candle,
 ):
+    """
+    Conservative rule:
+    If both SL and TP are touched in the same candle,
+    SL is assumed to happen first.
+    """
 
     direction = trade["direction"]
 
-    entry = trade["entry"]
+    high = candle["high"]
+    low = candle["low"]
 
     if direction == "LONG":
+
+        stop_hit = (
+            low <= trade["stop_loss"]
+        )
+
+        tp_hit = (
+            high >= trade["take_profit"]
+        )
+
+        if stop_hit:
+            return (
+                trade["stop_loss"],
+                "SL",
+            )
+
+        if tp_hit:
+            return (
+                trade["take_profit"],
+                "TP",
+            )
+
+    else:
+
+        stop_hit = (
+            high >= trade["stop_loss"]
+        )
+
+        tp_hit = (
+            low <= trade["take_profit"]
+        )
+
+        if stop_hit:
+            return (
+                trade["stop_loss"],
+                "SL",
+            )
+
+        if tp_hit:
+            return (
+                trade["take_profit"],
+                "TP",
+            )
+
+    return None, None
+
+
+# ============================================================
+# TRADE PNL
+# ============================================================
+
+def calculate_trade_return(
+    trade,
+    exit_price,
+):
+    entry = trade["entry"]
+
+    if trade["direction"] == "LONG":
 
         gross_return = (
             exit_price - entry
@@ -1090,180 +1037,405 @@ def close_trade(
 
     net_return = (
         gross_return
-        -
-        ROUND_TRIP_FEE
+        - ROUND_TRIP_FEE
     )
 
-    pnl = (
-        trade["capital_before"]
-        * net_return
-    )
-
-    capital_after = (
-        trade["capital_before"]
-        + pnl
-    )
-
-    result = {
-        "entry_time":
-            trade["entry_time"],
-
-        "exit_time":
-            exit_time,
-
-        "direction":
-            direction,
-
-        "entry":
-            entry,
-
-        "stop_loss":
-            trade["stop_loss"],
-
-        "take_profit":
-            trade["take_profit"],
-
-        "exit":
-            exit_price,
-
-        "return_pct":
-            net_return * 100,
-
-        "pnl":
-            pnl,
-
-        "capital_after":
-            capital_after,
-
-        "exit_reason":
-            reason,
-
-        "rr":
-            trade["rr"],
-
-        "sl_pct":
-            trade["sl_pct"],
-
-        "tp_pct":
-            trade["tp_pct"],
-
-        "displacement_atr":
-            trade["displacement_atr"],
-
-        "retracement_ratio":
-            trade["retracement_ratio"]
-    }
-
-    return result
+    return net_return
 
 
 # ============================================================
-# BACKTEST
+# SAVE TRADE
+# ============================================================
+
+def finalize_trade(
+    trade,
+    exit_time,
+    exit_price,
+    exit_reason,
+    capital,
+):
+    return_pct = calculate_trade_return(
+        trade,
+        exit_price,
+    )
+
+    pnl = (
+        capital
+        * return_pct
+    )
+
+    capital_after = (
+        capital
+        + pnl
+    )
+
+    return {
+        "entry_time": trade["entry_time"],
+        "exit_time": exit_time,
+        "direction": trade["direction"],
+        "entry": trade["entry"],
+        "stop_loss": trade["stop_loss"],
+        "take_profit": trade["take_profit"],
+        "exit": float(exit_price),
+        "return_pct": return_pct * 100.0,
+        "pnl": pnl,
+        "capital_after": capital_after,
+        "exit_reason": exit_reason,
+        "rr": trade["rr"],
+    }
+
+
+# ============================================================
+# STATISTICS
+# ============================================================
+
+def calculate_stats(
+    trades_df,
+    initial_capital,
+    final_capital,
+    equity_df,
+):
+    if trades_df.empty:
+
+        return {
+            "initial_capital": initial_capital,
+            "final_capital": final_capital,
+            "net_return": (
+                final_capital
+                / initial_capital
+                - 1
+            ) * 100,
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "win_rate": 0,
+            "profit_factor": 0,
+            "gross_profit": 0,
+            "gross_loss": 0,
+            "avg_trade": 0,
+            "max_drawdown": 0,
+        }
+
+    wins_df = trades_df[
+        trades_df["pnl"] > 0
+    ]
+
+    losses_df = trades_df[
+        trades_df["pnl"] < 0
+    ]
+
+    wins = len(wins_df)
+    losses = len(losses_df)
+
+    gross_profit = (
+        wins_df["pnl"].sum()
+        if not wins_df.empty
+        else 0.0
+    )
+
+    gross_loss = (
+        abs(losses_df["pnl"].sum())
+        if not losses_df.empty
+        else 0.0
+    )
+
+    if gross_loss > 0:
+        profit_factor = (
+            gross_profit
+            / gross_loss
+        )
+    else:
+        profit_factor = (
+            float("inf")
+            if gross_profit > 0
+            else 0.0
+        )
+
+    trades = len(trades_df)
+
+    win_rate = (
+        wins / trades * 100
+        if trades > 0
+        else 0
+    )
+
+    avg_trade = (
+        trades_df["return_pct"].mean()
+        if trades > 0
+        else 0
+    )
+
+    if (
+        equity_df is not None
+        and
+        not equity_df.empty
+    ):
+
+        equity = (
+            equity_df["capital"]
+            .astype(float)
+        )
+
+        running_max = equity.cummax()
+
+        drawdown = (
+            equity
+            / running_max
+            - 1
+        )
+
+        max_drawdown = (
+            drawdown.min()
+            * 100
+        )
+
+    else:
+        max_drawdown = 0.0
+
+    return {
+        "initial_capital": initial_capital,
+        "final_capital": final_capital,
+        "net_return": (
+            final_capital
+            / initial_capital
+            - 1
+        ) * 100,
+        "trades": trades,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "profit_factor": profit_factor,
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "avg_trade": avg_trade,
+        "max_drawdown": max_drawdown,
+    }
+
+
+# ============================================================
+# DIRECTION STATISTICS
+# ============================================================
+
+def direction_stats(
+    trades_df,
+    direction,
+):
+    df = trades_df[
+        trades_df["direction"] == direction
+    ]
+
+    if df.empty:
+        return {
+            "trades": 0,
+            "wr": 0.0,
+            "pnl": 0.0,
+            "pf": 0.0,
+        }
+
+    wins = df[
+        df["pnl"] > 0
+    ]
+
+    losses = df[
+        df["pnl"] < 0
+    ]
+
+    gross_profit = (
+        wins["pnl"].sum()
+        if not wins.empty
+        else 0.0
+    )
+
+    gross_loss = (
+        abs(losses["pnl"].sum())
+        if not losses.empty
+        else 0.0
+    )
+
+    if gross_loss > 0:
+        pf = (
+            gross_profit
+            / gross_loss
+        )
+    else:
+        pf = (
+            float("inf")
+            if gross_profit > 0
+            else 0.0
+        )
+
+    return {
+        "trades": len(df),
+        "wr": (
+            len(wins)
+            / len(df)
+            * 100
+        ),
+        "pnl": df["pnl"].sum(),
+        "pf": pf,
+    }
+
+
+# ============================================================
+# FORMAT PF
+# ============================================================
+
+def format_pf(value):
+    if math.isinf(value):
+        return "INF"
+
+    return f"{value:.3f}"
+
+
+# ============================================================
+# MAIN BACKTEST
 # ============================================================
 
 def run_backtest():
 
-    now = datetime.now(
-        timezone.utc
+    print("=" * 62)
+    print(VERSION.upper())
+    print("=" * 62)
+
+    print(
+        f"REAL TRADING: "
+        f"{'ENABLED' if REAL_TRADING else 'DISABLED'}"
     )
+
+    if REAL_TRADING:
+        raise RuntimeError(
+            "REAL_TRADING must remain DISABLED "
+            "for this backtest."
+        )
+
+    # ========================================================
+    # TIME RANGE
+    # ========================================================
+
+    now = utc_now()
+
+    backtest_end = now
 
     backtest_start = (
         now
-        -
-        timedelta(
-            days=BACKTEST_DAYS
-        )
+        - timedelta(days=BACKTEST_DAYS)
     )
 
     data_start = (
         backtest_start
-        -
-        timedelta(
-            days=WARMUP_DAYS
-        )
+        - timedelta(days=WARMUP_DAYS)
     )
 
-    end_ts = now.timestamp()
-    start_ts = data_start.timestamp()
+    backtest_start_ts = int(
+        backtest_start.timestamp()
+    )
+
+    backtest_end_ts = int(
+        backtest_end.timestamp()
+    )
+
+    data_start_ts = int(
+        data_start.timestamp()
+    )
 
     print()
-    print("=" * 64)
-    print(VERSION)
-    print("=" * 64)
+    print("=" * 62)
+    print(VERSION.upper())
+    print("=" * 62)
 
     print(
-        f"Backtest start : {backtest_start.isoformat()}"
+        f"Backtest start : "
+        f"{backtest_start.isoformat()}"
     )
 
     print(
-        f"Data start     : {data_start.isoformat()}"
+        f"Data start     : "
+        f"{data_start.isoformat()}"
     )
 
     print(
-        f"Backtest end   : {now.isoformat()}"
+        f"Backtest end   : "
+        f"{backtest_end.isoformat()}"
     )
+
+    # ========================================================
+    # DOWNLOAD DATA
+    # ========================================================
 
     print()
     print("Downloading Kraken data...")
 
     df1h = fetch_kraken_candles(
         SYMBOL,
-        TF_1H,
-        start_ts,
-        end_ts
+        "1h",
+        data_start_ts,
+        backtest_end_ts,
     )
 
     df15 = fetch_kraken_candles(
         SYMBOL,
-        TF_15M,
-        start_ts,
-        end_ts
+        "15m",
+        data_start_ts,
+        backtest_end_ts,
     )
 
     df5 = fetch_kraken_candles(
         SYMBOL,
-        TF_5M,
-        start_ts,
-        end_ts
+        "5m",
+        data_start_ts,
+        backtest_end_ts,
     )
 
-    if (
-        df1h.empty
-        or df15.empty
-        or df5.empty
-    ):
+    # ========================================================
+    # INDICATORS
+    # ========================================================
 
-        raise RuntimeError(
-            "Kraken data download failed."
-        )
-
-    df1h = add_atr(
+    df1h["atr"] = calculate_atr(
         df1h,
-        ATR_PERIOD
+        ATR_PERIOD,
     )
 
-    df15 = add_atr(
+    df15["atr"] = calculate_atr(
         df15,
-        ATR_PERIOD
+        ATR_PERIOD,
     )
 
-    df5 = add_atr(
+    df5["atr"] = calculate_atr(
         df5,
-        ATR_PERIOD
+        ATR_PERIOD,
     )
 
-    # --------------------------------------------------------
-    # Only candles inside actual test period
-    # --------------------------------------------------------
+    # ========================================================
+    # CONFIRMED PIVOTS
+    # ========================================================
 
-    df5_test = df5[
-        df5["datetime"] >=
-        pd.Timestamp(
-            backtest_start
+    df1h = calculate_confirmed_pivots(
+        df1h,
+        HTF_PIVOT_SWING,
+    )
+
+    # ========================================================
+    # BACKTEST 5M RANGE
+    # ========================================================
+
+    test_mask = (
+        df5["time"]
+        >= pd.to_datetime(
+            backtest_start_ts,
+            unit="s",
+            utc=True,
         )
+    )
+
+    test_df = df5[
+        test_mask
     ].copy()
 
     print()
+    print("=" * 62)
+    print("DATA SUMMARY")
+    print("=" * 62)
+
     print(
         f"1H candles  : {len(df1h):,}"
     )
@@ -1277,646 +1449,652 @@ def run_backtest():
     )
 
     print(
-        f"Test 5M     : {len(df5_test):,}"
+        f"Test 5M     : {len(test_df):,}"
     )
 
-    # --------------------------------------------------------
-    # Backtest
-    # --------------------------------------------------------
+    # ========================================================
+    # EXPECTED APPROXIMATE COUNTS
+    # ========================================================
+
+    expected_1h = BACKTEST_DAYS * 24
+    expected_15m = BACKTEST_DAYS * 24 * 4
+    expected_5m = BACKTEST_DAYS * 24 * 12
+
+    print()
+    print(
+        "Expected approximate test-period candles:"
+    )
+
+    print(
+        f"  1H  : {expected_1h:,}"
+    )
+
+    print(
+        f"  15M : {expected_15m:,}"
+    )
+
+    print(
+        f"  5M  : {expected_5m:,}"
+    )
+
+    # ========================================================
+    # STATE
+    # ========================================================
 
     capital = INITIAL_CAPITAL
 
-    open_trade = None
+    active_trade = None
 
     trades = []
 
-    equity_rows = []
+    equity_records = []
 
-    last_entry_index = -999999
+    # ========================================================
+    # HIGHER TF POINTERS
+    #
+    # IMPORTANT:
+    # We use only HTF candles whose START TIME is strictly
+    # before the current 5M candle.
+    #
+    # Therefore:
+    #
+    # 5M 10:10
+    #
+    # does NOT use:
+    # 15M 10:00 candle
+    #
+    # because 10:00-10:15 is still incomplete.
+    #
+    # It uses the previous closed 15M candle.
+    #
+    # Same logic applies to 1H.
+    # ========================================================
 
-    for i in range(
-        max(
-            PIVOT_LEFT + PIVOT_RIGHT + 20,
-            100
-        ),
-        len(df5_test)
-    ):
+    times1h = (
+        df1h["time"]
+        .astype("int64")
+        .values
+    )
 
-        # Map test index to full df5 index
-        current_time = (
-            df5_test.iloc[i]["datetime"]
+    times15 = (
+        df15["time"]
+        .astype("int64")
+        .values
+    )
+
+    # ========================================================
+    # LOOP
+    # ========================================================
+
+    for idx5, row5 in test_df.iterrows():
+
+        current_time = row5["time"]
+
+        current_ns = (
+            current_time.value
         )
 
-        full_i5 = (
-            df5["datetime"]
-            .searchsorted(
-                current_time
+        # ----------------------------------------------------
+        # 1H CLOSED CANDLE
+        # ----------------------------------------------------
+
+        idx1h = (
+            np.searchsorted(
+                times1h,
+                current_ns,
+                side="left",
             )
+            - 1
         )
 
-        if full_i5 >= len(df5):
+        if idx1h < 0:
             continue
 
-        candle = df5.iloc[
-            full_i5
-        ]
-
-        high = float(
-            candle["high"]
-        )
-
-        low = float(
-            candle["low"]
-        )
-
-        close = float(
-            candle["close"]
-        )
-
-        current_time = candle["datetime"]
-
         # ----------------------------------------------------
-        # Manage existing trade
+        # 15M CLOSED CANDLE
         # ----------------------------------------------------
 
-        if open_trade is not None:
+        idx15 = (
+            np.searchsorted(
+                times15,
+                current_ns,
+                side="left",
+            )
+            - 1
+        )
 
-            direction = (
-                open_trade["direction"]
+        if idx15 < 0:
+            continue
+
+        # ----------------------------------------------------
+        # ACTIVE TRADE
+        # ----------------------------------------------------
+
+        if active_trade is not None:
+
+            exit_price, exit_reason = (
+                check_exit(
+                    active_trade,
+                    row5,
+                )
             )
 
-            if direction == "LONG":
+            if exit_price is not None:
 
-                sl_hit = (
-                    low
-                    <=
-                    open_trade["stop_loss"]
+                result = finalize_trade(
+                    active_trade,
+                    current_time,
+                    exit_price,
+                    exit_reason,
+                    capital,
                 )
 
-                tp_hit = (
-                    high
-                    >=
-                    open_trade["take_profit"]
+                capital = (
+                    result["capital_after"]
                 )
 
-                # Conservative assumption:
-                # if both happen in same candle,
-                # SL is counted first.
-                if sl_hit:
+                trades.append(result)
 
-                    result = close_trade(
-                        open_trade,
-                        open_trade["stop_loss"],
-                        current_time,
-                        "SL"
-                    )
-
-                    trades.append(result)
-
-                    capital = result[
-                        "capital_after"
-                    ]
-
-                    open_trade = None
-
-                elif tp_hit:
-
-                    result = close_trade(
-                        open_trade,
-                        open_trade["take_profit"],
-                        current_time,
-                        "TP"
-                    )
-
-                    trades.append(result)
-
-                    capital = result[
-                        "capital_after"
-                    ]
-
-                    open_trade = None
-
-            else:
-
-                sl_hit = (
-                    high
-                    >=
-                    open_trade["stop_loss"]
+                equity_records.append(
+                    {
+                        "time": current_time,
+                        "capital": capital,
+                    }
                 )
 
-                tp_hit = (
-                    low
-                    <=
-                    open_trade["take_profit"]
-                )
+                active_trade = None
 
-                if sl_hit:
-
-                    result = close_trade(
-                        open_trade,
-                        open_trade["stop_loss"],
-                        current_time,
-                        "SL"
-                    )
-
-                    trades.append(result)
-
-                    capital = result[
-                        "capital_after"
-                    ]
-
-                    open_trade = None
-
-                elif tp_hit:
-
-                    result = close_trade(
-                        open_trade,
-                        open_trade["take_profit"],
-                        current_time,
-                        "TP"
-                    )
-
-                    trades.append(result)
-
-                    capital = result[
-                        "capital_after"
-                    ]
-
-                    open_trade = None
-
-        # ----------------------------------------------------
-        # Search new setup only if flat
-        # ----------------------------------------------------
-
-        if open_trade is None:
-
-            # Prevent immediate repeated entry
-            if (
-                full_i5
-                <=
-                last_entry_index + 1
-            ):
+                # No new trade on same candle
                 continue
 
-            setup = detect_setup(
-                df1h,
-                df15,
-                df5,
-                full_i5
-            )
+        # ----------------------------------------------------
+        # DO NOT OPEN ANOTHER TRADE
+        # ----------------------------------------------------
 
-            if setup is not None:
+        if active_trade is not None:
+            continue
 
-                new_trade = create_trade(
-                    setup,
-                    df5,
-                    full_i5,
-                    capital
-                )
+        # ----------------------------------------------------
+        # NEED ENOUGH HISTORY
+        # ----------------------------------------------------
 
-                if new_trade is not None:
+        if idx1h < (
+            HTF_PIVOT_SWING * 2
+            + 10
+        ):
+            continue
 
-                    open_trade = new_trade
+        if idx15 < (
+            DISPLACEMENT_LOOKBACK
+            + RETRACEMENT_LOOKBACK
+            + 5
+        ):
+            continue
 
-                    last_entry_index = (
-                        full_i5
-                    )
+        # ----------------------------------------------------
+        # 1H MARKET STRUCTURE
+        # ----------------------------------------------------
 
-        equity_rows.append(
-            {
-                "time": current_time,
-                "capital": capital
-            }
+        structure = get_market_structure(
+            df1h,
+            idx1h,
         )
 
-    # --------------------------------------------------------
-    # Close open trade at end
-    # --------------------------------------------------------
+        if structure not in (
+            "BULLISH",
+            "BEARISH",
+        ):
+            continue
 
-    if open_trade is not None:
+        # ----------------------------------------------------
+        # 15M DISPLACEMENT
+        # ----------------------------------------------------
 
-        final_candle = df5.iloc[-1]
+        displacement = detect_displacement(
+            df15,
+            idx15,
+        )
 
-        result = close_trade(
-            open_trade,
-            float(
-                final_candle["close"]
-            ),
-            final_candle["datetime"],
-            "END_OF_BACKTEST"
+        if displacement is None:
+            continue
+
+        # ----------------------------------------------------
+        # STRUCTURE + DISPLACEMENT
+        # ----------------------------------------------------
+
+        if (
+            structure == "BULLISH"
+            and
+            displacement != "BULLISH"
+        ):
+            continue
+
+        if (
+            structure == "BEARISH"
+            and
+            displacement != "BEARISH"
+        ):
+            continue
+
+        # ----------------------------------------------------
+        # DIRECTION
+        # ----------------------------------------------------
+
+        if structure == "BULLISH":
+
+            direction = "LONG"
+
+        elif structure == "BEARISH":
+
+            direction = "SHORT"
+
+        else:
+            continue
+
+        # ----------------------------------------------------
+        # RETRACEMENT
+        # ----------------------------------------------------
+
+        if not detect_retracement(
+            df15,
+            idx15,
+            direction,
+        ):
+            continue
+
+        # ----------------------------------------------------
+        # 5M FLAG + BREAKOUT
+        # ----------------------------------------------------
+
+        flag = detect_flag(
+            df5,
+            idx5,
+            direction,
+        )
+
+        if flag is None:
+            continue
+
+        # ----------------------------------------------------
+        # ATR
+        # ----------------------------------------------------
+
+        atr = row5["atr"]
+
+        if pd.isna(atr) or atr <= 0:
+            continue
+
+        # ----------------------------------------------------
+        # ENTRY
+        #
+        # Signal is generated at the CLOSE of the closed
+        # 5M candle.
+        # ----------------------------------------------------
+
+        entry_price = float(
+            row5["close"]
+        )
+
+        # ----------------------------------------------------
+        # CREATE TRADE
+        # ----------------------------------------------------
+
+        trade = create_trade(
+            direction,
+            current_time,
+            entry_price,
+            flag,
+            atr,
+        )
+
+        if trade is None:
+            continue
+
+        active_trade = trade
+
+    # ========================================================
+    # CLOSE OPEN TRADE AT END
+    # ========================================================
+
+    if active_trade is not None:
+
+        last_row = test_df.iloc[-1]
+
+        exit_price = float(
+            last_row["close"]
+        )
+
+        result = finalize_trade(
+            active_trade,
+            last_row["time"],
+            exit_price,
+            "END_OF_BACKTEST",
+            capital,
+        )
+
+        capital = (
+            result["capital_after"]
         )
 
         trades.append(result)
 
-        capital = result[
-            "capital_after"
-        ]
+        equity_records.append(
+            {
+                "time": last_row["time"],
+                "capital": capital,
+            }
+        )
 
-        open_trade = None
+        active_trade = None
+
+    # ========================================================
+    # DATAFRAMES
+    # ========================================================
 
     trades_df = pd.DataFrame(
         trades
     )
 
     equity_df = pd.DataFrame(
-        equity_rows
+        equity_records
     )
 
-    return (
-        trades_df,
-        equity_df,
-        capital
-    )
+    # ========================================================
+    # SAVE TRADES
+    # ========================================================
 
-
-# ============================================================
-# STATISTICS
-# ============================================================
-
-def calculate_stats(
-    trades_df,
-    final_capital
-):
+    trade_columns = [
+        "entry_time",
+        "exit_time",
+        "direction",
+        "entry",
+        "stop_loss",
+        "take_profit",
+        "exit",
+        "return_pct",
+        "pnl",
+        "capital_after",
+        "exit_reason",
+        "rr",
+    ]
 
     if trades_df.empty:
 
-        return {
-            "trades": 0,
-            "wins": 0,
-            "losses": 0,
-            "wr": 0,
-            "pf": 0,
-            "net_return": 0,
-            "avg_trade": 0,
-            "max_dd": 0
-        }
-
-    wins = trades_df[
-        trades_df["pnl"] > 0
-    ]
-
-    losses = trades_df[
-        trades_df["pnl"] < 0
-    ]
-
-    gross_profit = wins[
-        "pnl"
-    ].sum()
-
-    gross_loss = abs(
-        losses["pnl"].sum()
-    )
-
-    if gross_loss > 0:
-
-        pf = (
-            gross_profit
-            /
-            gross_loss
+        trades_df = pd.DataFrame(
+            columns=trade_columns
         )
 
     else:
 
-        pf = float("inf")
-
-    capital_series = (
-        trades_df[
-            "capital_after"
+        trades_df = trades_df[
+            trade_columns
         ]
-        .astype(float)
+
+    trades_df.to_csv(
+        TRADES_FILE,
+        index=False,
     )
 
-    running_max = (
-        capital_series
-        .cummax()
+    # ========================================================
+    # SAVE EQUITY
+    # ========================================================
+
+    if equity_df.empty:
+
+        equity_df = pd.DataFrame(
+            columns=[
+                "time",
+                "capital",
+            ]
+        )
+
+    equity_df.to_csv(
+        EQUITY_FILE,
+        index=False,
     )
 
-    drawdown = (
-        capital_series
-        /
-        running_max
-        - 1
-    )
-
-    max_dd = (
-        drawdown.min()
-        * 100
-    )
-
-    stats = {
-
-        "trades":
-            len(trades_df),
-
-        "wins":
-            len(wins),
-
-        "losses":
-            len(losses),
-
-        "wr":
-            len(wins)
-            /
-            len(trades_df)
-            * 100,
-
-        "pf":
-            pf,
-
-        "gross_profit":
-            gross_profit,
-
-        "gross_loss":
-            gross_loss,
-
-        "net_pnl":
-            final_capital
-            -
-            INITIAL_CAPITAL,
-
-        "net_return":
-            (
-                final_capital
-                /
-                INITIAL_CAPITAL
-                - 1
-            )
-            * 100,
-
-        "avg_trade":
-            trades_df[
-                "return_pct"
-            ].mean(),
-
-        "max_dd":
-            max_dd
-    }
-
-    return stats
-
-
-# ============================================================
-# REPORT
-# ============================================================
-
-def print_report(
-    trades_df,
-    final_capital
-):
+    # ========================================================
+    # STATISTICS
+    # ========================================================
 
     stats = calculate_stats(
         trades_df,
-        final_capital
+        INITIAL_CAPITAL,
+        capital,
+        equity_df,
     )
 
-    print()
-    print("=" * 64)
-    print("NDS ALGORITHMIC v1 BACKTEST RESULTS")
-    print("=" * 64)
+    long_stats = direction_stats(
+        trades_df,
+        "LONG",
+    )
 
-    print(
+    short_stats = direction_stats(
+        trades_df,
+        "SHORT",
+    )
+
+    # ========================================================
+    # REPORT
+    # ========================================================
+
+    report_lines = []
+
+    report_lines.append(
+        "=" * 62
+    )
+
+    report_lines.append(
+        "NDS ALGORITHMIC v1 BACKTEST RESULTS"
+    )
+
+    report_lines.append(
+        "=" * 62
+    )
+
+    report_lines.append(
         f"Initial Capital : "
-        f"${INITIAL_CAPITAL:.2f}"
+        f"${stats['initial_capital']:.2f}"
     )
 
-    print(
+    report_lines.append(
         f"Final Capital   : "
-        f"${final_capital:.2f}"
+        f"${stats['final_capital']:.2f}"
     )
 
-    print(
+    report_lines.append(
         f"Net Return      : "
         f"{stats['net_return']:.3f}%"
     )
 
-    print(
+    report_lines.append(
         f"Trades          : "
         f"{stats['trades']}"
     )
 
-    print(
+    report_lines.append(
         f"Wins            : "
         f"{stats['wins']}"
     )
 
-    print(
+    report_lines.append(
         f"Losses          : "
         f"{stats['losses']}"
     )
 
-    print(
+    report_lines.append(
         f"Win Rate        : "
-        f"{stats['wr']:.2f}%"
+        f"{stats['win_rate']:.2f}%"
     )
 
-    print(
+    report_lines.append(
         f"Profit Factor   : "
-        f"{stats['pf']:.3f}"
+        f"{format_pf(stats['profit_factor'])}"
     )
 
-    print(
+    report_lines.append(
         f"Gross Profit    : "
         f"${stats['gross_profit']:.4f}"
     )
 
-    print(
+    report_lines.append(
         f"Gross Loss      : "
         f"${stats['gross_loss']:.4f}"
     )
 
-    print(
+    report_lines.append(
         f"Avg Trade       : "
         f"{stats['avg_trade']:.4f}%"
     )
 
-    print(
+    report_lines.append(
         f"Max Drawdown    : "
-        f"{stats['max_dd']:.3f}%"
+        f"{stats['max_drawdown']:.3f}%"
     )
 
-    # --------------------------------------------------------
-    # Direction stats
-    # --------------------------------------------------------
+    report_lines.append("")
+    report_lines.append("LONG")
 
-    for direction in [
-        "LONG",
-        "SHORT"
-    ]:
-
-        d = trades_df[
-            trades_df["direction"]
-            == direction
-        ]
-
-        if d.empty:
-            continue
-
-        wins = d[
-            d["pnl"] > 0
-        ]
-
-        gross_profit = wins[
-            "pnl"
-        ].sum()
-
-        gross_loss = abs(
-            d[
-                d["pnl"] < 0
-            ]["pnl"].sum()
-        )
-
-        pf = (
-            gross_profit
-            /
-            gross_loss
-            if gross_loss > 0
-            else float("inf")
-        )
-
-        print()
-        print(
-            f"{direction}"
-        )
-
-        print(
-            f"  Trades : {len(d)}"
-        )
-
-        print(
-            f"  WR     : "
-            f"{len(wins)/len(d)*100:.2f}%"
-        )
-
-        print(
-            f"  PnL    : "
-            f"${d['pnl'].sum():.4f}"
-        )
-
-        print(
-            f"  PF     : "
-            f"{pf:.3f}"
-        )
-
-    print()
-    print("=" * 64)
-
-
-# ============================================================
-# SAVE OUTPUTS
-# ============================================================
-
-def save_outputs(
-    trades_df,
-    equity_df
-):
-
-    trades_file = (
-        "doge_nds_algorithmic_v1_trades.csv"
+    report_lines.append(
+        f"  Trades : "
+        f"{long_stats['trades']}"
     )
 
-    equity_file = (
-        "doge_nds_algorithmic_v1_equity.csv"
+    report_lines.append(
+        f"  WR     : "
+        f"{long_stats['wr']:.2f}%"
     )
 
-    report_file = (
-        "doge_nds_algorithmic_v1_report.txt"
+    report_lines.append(
+        f"  PnL    : "
+        f"${long_stats['pnl']:.4f}"
     )
 
-    trades_df.to_csv(
-        trades_file,
-        index=False
+    report_lines.append(
+        f"  PF     : "
+        f"{format_pf(long_stats['pf'])}"
     )
 
-    equity_df.to_csv(
-        equity_file,
-        index=False
+    report_lines.append("")
+    report_lines.append("SHORT")
+
+    report_lines.append(
+        f"  Trades : "
+        f"{short_stats['trades']}"
     )
 
-    with open(
-        report_file,
-        "w",
-        encoding="utf-8"
-    ) as f:
+    report_lines.append(
+        f"  WR     : "
+        f"{short_stats['wr']:.2f}%"
+    )
 
-        f.write(
-            f"{VERSION}\n"
-        )
+    report_lines.append(
+        f"  PnL    : "
+        f"${short_stats['pnl']:.4f}"
+    )
 
-        f.write(
-            "=" * 64
-            + "\n"
-        )
+    report_lines.append(
+        f"  PF     : "
+        f"{format_pf(short_stats['pf'])}"
+    )
 
-        f.write(
-            "NDS-inspired algorithmic "
-            "implementation.\n"
-        )
+    report_lines.append("")
+    report_lines.append(
+        "=" * 62
+    )
 
-        f.write(
-            "Not claimed to be the official "
-            "proprietary NDS implementation.\n\n"
-        )
+    report_lines.append(
+        "DATA VALIDATION"
+    )
 
-        if trades_df.empty:
+    report_lines.append(
+        "=" * 62
+    )
 
-            f.write(
-                "No trades.\n"
-            )
+    report_lines.append(
+        f"1H candles  : {len(df1h):,}"
+    )
 
-        else:
+    report_lines.append(
+        f"15M candles : {len(df15):,}"
+    )
 
-            stats = calculate_stats(
-                trades_df,
-                float(
-                    trades_df.iloc[-1][
-                        "capital_after"
-                    ]
-                )
-            )
+    report_lines.append(
+        f"5M candles  : {len(df5):,}"
+    )
 
-            for key, value in stats.items():
+    report_lines.append(
+        f"Test 5M     : {len(test_df):,}"
+    )
 
-                f.write(
-                    f"{key}: {value}\n"
-                )
-
-    print()
-    print("OUTPUT FILES")
-    print("=" * 64)
-    print(trades_file)
-    print(equity_file)
-    print(report_file)
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-if __name__ == "__main__":
-
-    print()
-    print("=" * 64)
-    print(VERSION)
-    print("=" * 64)
-    print(
+    report_lines.append("")
+    report_lines.append(
         "REAL TRADING: DISABLED"
     )
 
-    trades_df, equity_df, final_capital = (
-        run_backtest()
+    report_lines.append(
+        "Closed candles only: YES"
     )
 
-    print_report(
-        trades_df,
-        final_capital
+    report_lines.append(
+        "Higher-TF incomplete candles: NOT USED"
     )
 
-    save_outputs(
-        trades_df,
-        equity_df
+    report_lines.append(
+        "Look-ahead protection: YES"
+    )
+
+    report_lines.append(
+        "NDS type: Algorithmic / Inspired"
+    )
+
+    report_lines.append(
+        "=" * 62
+    )
+
+    report = "\n".join(
+        report_lines
+    )
+
+    with open(
+        REPORT_FILE,
+        "w",
+        encoding="utf-8",
+    ) as f:
+
+        f.write(report)
+
+    # ========================================================
+    # PRINT RESULTS
+    # ========================================================
+
+    print()
+    print(report)
+
+    print()
+    print("=" * 62)
+    print("OUTPUT FILES")
+    print("=" * 62)
+
+    print(
+        TRADES_FILE
+    )
+
+    print(
+        EQUITY_FILE
+    )
+
+    print(
+        REPORT_FILE
     )
 
     print()
-    print(
-        "BACKTEST COMPLETE"
-    )
+    print("BACKTEST COMPLETE")
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
+if __name__ == "__main__":
+    run_backtest()
