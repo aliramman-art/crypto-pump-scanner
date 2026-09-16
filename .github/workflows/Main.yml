@@ -1,25 +1,16 @@
-name: VOLUME-KHAT 100 v7.8
+name: Tenkan-Kijun Distance Backtest
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"
-
   workflow_dispatch:
 
-# ============================================================
-# IMPORTANT:
-# Only one scanner run may access the SQLite database at a time.
-# ============================================================
-
-concurrency:
-  group: volume-khat-v78
-  cancel-in-progress: false
+  schedule:
+    - cron: "0 */6 * * *"
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  scanner:
+  backtest:
 
     runs-on: ubuntu-latest
 
@@ -31,256 +22,46 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
+
 
       # ======================================================
       # PYTHON
       # ======================================================
 
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+
       # ======================================================
-      # DEPENDENCIES
+      # INSTALL DEPENDENCIES
       # ======================================================
 
       - name: Install dependencies
         run: |
-          set -e
           python -m pip install --upgrade pip
-          pip install requests numpy
+          pip install requests pandas numpy
+
 
       # ======================================================
-      # SYNC LATEST REMOTE DATABASE
-      #
-      # IMPORTANT:
-      # The latest committed database must exist BEFORE
-      # scanner.py starts.
-      #
-      # No git pull/rebase is performed after scanner.py.
+      # RUN BACKTEST
       # ======================================================
 
-      - name: Sync latest repository state
+      - name: Run Tenkan-Kijun Backtest
         run: |
-          set -e
+          python tenkan_kijun_backtest.py
 
-          echo "============================================================"
-          echo "SYNCING LATEST VOLUME-KHAT v7.8 DATABASE"
-          echo "============================================================"
-
-          CURRENT_BRANCH="${GITHUB_REF_NAME}"
-
-          echo "Branch: ${CURRENT_BRANCH}"
-
-          git fetch origin "${CURRENT_BRANCH}"
-
-          git reset --hard "origin/${CURRENT_BRANCH}"
-
-          echo ""
-          echo "Repository synchronized with origin/${CURRENT_BRANCH}"
-
-          echo ""
-          echo "Database status:"
-
-          if [ -f volume_khat_100_v78.db ]; then
-            echo "Existing database found."
-            ls -lh volume_khat_100_v78.db
-          else
-            echo "No existing database found."
-            echo "scanner.py will create a new database."
-          fi
-
-          echo "============================================================"
 
       # ======================================================
-      # RUN SCANNER
+      # UPLOAD TRADE HISTORY
       # ======================================================
 
-      - name: Run VOLUME-KHAT 100 v7.8
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-
-        run: |
-          set -e
-
-          echo "============================================================"
-          echo "VOLUME-KHAT 100 v7.8"
-          echo "============================================================"
-
-          echo "Started: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-
-          echo "============================================================"
-
-          python scanner.py
-
-          echo "============================================================"
-          echo "Scanner finished: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "============================================================"
-
-      # ======================================================
-      # FINALIZE SQLITE DATABASE
-      #
-      # Make sure SQLite changes are written to the main DB file.
-      # ======================================================
-
-      - name: Finalize SQLite database
-        run: |
-          set -e
-
-          echo "============================================================"
-          echo "FINALIZING SQLITE DATABASE"
-          echo "============================================================"
-
-          if [ ! -f volume_khat_100_v78.db ]; then
-            echo "ERROR: volume_khat_100_v78.db not found."
-            exit 1
-          fi
-
-          sqlite3 volume_khat_100_v78.db \
-            "PRAGMA wal_checkpoint(TRUNCATE);" || true
-
-          echo ""
-          echo "Database files:"
-          ls -lah volume_khat_100_v78.db* 2>/dev/null || true
-
-          echo "============================================================"
-
-      # ======================================================
-      # VERIFY DATABASE FILE
-      # ======================================================
-
-      - name: Verify database file
-        run: |
-          set -e
-
-          echo "============================================================"
-          echo "VERIFYING DATABASE"
-          echo "============================================================"
-
-          if [ ! -f volume_khat_100_v78.db ]; then
-            echo "ERROR: Database file does not exist."
-            exit 1
-          fi
-
-          DB_SIZE=$(stat -c%s volume_khat_100_v78.db)
-
-          echo "Database size: ${DB_SIZE} bytes"
-
-          if [ "${DB_SIZE}" -le 0 ]; then
-            echo "ERROR: Database file is empty."
-            exit 1
-          fi
-
-          echo "Database file is valid and non-empty."
-
-          echo "============================================================"
-
-      # ======================================================
-      # PERSIST DATABASE
-      #
-      # IMPORTANT:
-      # We DO NOT run git pull/rebase here.
-      #
-      # The database was loaded from the latest remote state
-      # BEFORE scanner.py ran.
-      # ======================================================
-
-      - name: Persist SQLite database
-        run: |
-          set -e
-
-          echo "============================================================"
-          echo "PERSISTING VOLUME-KHAT v7.8 DATABASE"
-          echo "============================================================"
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          CURRENT_BRANCH="${GITHUB_REF_NAME}"
-
-          echo "Branch: ${CURRENT_BRANCH}"
-
-          if [ ! -f volume_khat_100_v78.db ]; then
-            echo "ERROR: volume_khat_100_v78.db not found."
-            exit 1
-          fi
-
-          echo ""
-          echo "Database:"
-          ls -lh volume_khat_100_v78.db
-
-          # Add ONLY the persistent database.
-          git add -f volume_khat_100_v78.db
-
-          echo ""
-          echo "Git status:"
-          git status --short
-
-          # ====================================================
-          # COMMIT
-          # ====================================================
-
-          if git diff --cached --quiet; then
-
-            echo ""
-            echo "No database changes detected."
-            echo "Nothing to commit."
-
-          else
-
-            echo ""
-            echo "Creating database persistence commit..."
-
-            git commit -m "Persist VOLUME-KHAT v7.8 database"
-
-            echo ""
-            echo "Pushing database to origin/${CURRENT_BRANCH}..."
-
-            git push origin "HEAD:${CURRENT_BRANCH}"
-
-            echo ""
-            echo "Database successfully persisted."
-
-          fi
-
-          echo "============================================================"
-
-      # ======================================================
-      # FINAL REMOTE VERIFICATION
-      # ======================================================
-
-      - name: Verify remote persistence
-        run: |
-          set -e
-
-          echo "============================================================"
-          echo "VERIFYING REMOTE DATABASE PERSISTENCE"
-          echo "============================================================"
-
-          CURRENT_BRANCH="${GITHUB_REF_NAME}"
-
-          git fetch origin "${CURRENT_BRANCH}"
-
-          LOCAL_COMMIT=$(git log -1 --format="%H" -- volume_khat_100_v78.db)
-
-          REMOTE_COMMIT=$(git log -1 --format="%H" \
-            "origin/${CURRENT_BRANCH}" -- volume_khat_100_v78.db)
-
-          echo "Latest local DB commit : ${LOCAL_COMMIT}"
-          echo "Latest remote DB commit: ${REMOTE_COMMIT}"
-
-          if [ "${LOCAL_COMMIT}" != "${REMOTE_COMMIT}" ]; then
-            echo ""
-            echo "ERROR: Remote database is not synchronized."
-            exit 1
-          fi
-
-          echo ""
-          echo "SUCCESS: VOLUME-KHAT v7.8 database is persisted."
-
-          echo "============================================================"
+      - name: Upload backtest results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tenkan-kijun-backtest-results
+          path: |
+            tenkan_kijun_backtest.csv
+          if-no-files-found: ignore
