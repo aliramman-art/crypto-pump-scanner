@@ -1,0 +1,61 @@
+name: Reverse-Tenkan 6 Coins 90D Backtest
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backtest:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ======================================================
+      # SETUP PYTHON
+      # ======================================================
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ======================================================
+      # INSTALL DEPENDENCIES
+      # ======================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests
+
+      # ======================================================
+      # RUN 90 DAY BACKTEST
+      # ======================================================
+
+      - name: Run Reverse-Tenkan 6 Coins 90D Backtest
+        run: |
+          python reverse_tenkan_6coins_backtest_90d.py
+
+      # ======================================================
+      # UPLOAD RESULTS
+      # ======================================================
+
+      - name: Upload backtest results
+        uses: actions/upload-artifact@v4
+        with:
+          name: reverse-tenkan-6coins-90d-results
+          path: |
+            reverse_tenkan_6coins_90d_summary.csv
+            reverse_tenkan_6coins_90d_trades.csv
+            reverse_tenkan_6coins_90d_aggregate.csv
+          if-no-files-found: error
