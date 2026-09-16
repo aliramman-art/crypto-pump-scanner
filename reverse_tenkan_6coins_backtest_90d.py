@@ -8,8 +8,10 @@
 #
 # STRATEGY LOGIC: SAME AS 90-DAY VERSION
 #
-# ONLY DATA FETCHING CHANGED:
-# 180 DAYS ARE DOWNLOADED IN SMALLER API CHUNKS
+# DATA:
+# 180 DAYS
+# 5M  -> 14 DAY CHUNKS
+# 15M -> 30 DAY CHUNKS
 #
 # ============================================================
 
@@ -63,22 +65,25 @@ SL_FIRST = True
 
 
 # ============================================================
-# API CHUNK SETTINGS
+# API SETTINGS
 # ============================================================
 
-# Kraken rejects very large candle requests.
-#
-# 5M  -> 14 day chunks
-# 15M -> 30 day chunks
+# Kraken Futures officially supports:
+# 1m, 5m, 15m, 30m, 1h, 4h, 12h, 1d, 1w
 
 CHUNK_DAYS = {
-    "5": 14,
-    "15": 30,
+    "5m": 14,
+    "15m": 30,
 }
 
 API_RETRIES = 3
+REQUEST_SLEEP = 0.25
 
-REQUEST_SLEEP = 0.20
+
+BASE_URL = (
+    "https://futures.kraken.com/"
+    "api/charts/v1/trade"
+)
 
 
 # ============================================================
@@ -93,13 +98,6 @@ EXIT_MODELS = {
     "2.5R": 2.5,
     "3R": 3.0,
 }
-
-
-# ============================================================
-# KRAKEN API
-# ============================================================
-
-BASE_URL = "https://futures.kraken.com/api/charts/v1/trade"
 
 
 # ============================================================
@@ -126,34 +124,41 @@ def fetch_kraken_chunk(
 
     last_error = None
 
-    for attempt in range(1, API_RETRIES + 1):
+    for attempt in range(
+        1,
+        API_RETRIES + 1
+    ):
 
         try:
 
-            r = requests.get(
+            response = requests.get(
                 url,
                 params=params,
+                headers={
+                    "Accept":
+                    "application/json"
+                },
                 timeout=30
             )
 
-            r.raise_for_status()
+            response.raise_for_status()
 
-            data = r.json()
+            payload = response.json()
 
-            if isinstance(data, dict):
+            if not isinstance(
+                payload,
+                dict
+            ):
 
-                if "candles" in data:
-                    candles = data["candles"]
+                raise RuntimeError(
+                    "Kraken response "
+                    "is not a JSON object"
+                )
 
-                elif "data" in data:
-                    candles = data["data"]
-
-                else:
-                    candles = []
-
-            else:
-
-                candles = data
+            candles = payload.get(
+                "candles",
+                []
+            )
 
             if not candles:
 
@@ -161,55 +166,62 @@ def fetch_kraken_chunk(
 
             rows = []
 
-            for c in candles:
+            for candle in candles:
 
-                if isinstance(c, dict):
+                if not isinstance(
+                    candle,
+                    dict
+                ):
+                    continue
 
-                    rows.append({
-                        "timestamp": c.get("time"),
-                        "open": c.get("open"),
-                        "high": c.get("high"),
-                        "low": c.get("low"),
-                        "close": c.get("close"),
-                        "volume": c.get("volume"),
-                    })
+                rows.append({
+                    "timestamp":
+                        candle.get("time"),
 
-                else:
+                    "open":
+                        candle.get("open"),
 
-                    if len(c) >= 6:
+                    "high":
+                        candle.get("high"),
 
-                        rows.append({
-                            "timestamp": c[0],
-                            "open": c[1],
-                            "high": c[2],
-                            "low": c[3],
-                            "close": c[4],
-                            "volume": c[5],
-                        })
+                    "low":
+                        candle.get("low"),
 
-            df = pd.DataFrame(rows)
+                    "close":
+                        candle.get("close"),
+
+                    "volume":
+                        candle.get("volume"),
+                })
+
+            df = pd.DataFrame(
+                rows
+            )
 
             if df.empty:
                 return df
 
-            # Kraken candle time is milliseconds.
-            df["timestamp"] = pd.to_datetime(
-                df["timestamp"],
-                unit="ms",
-                utc=True,
-                errors="coerce"
+            # Kraken returns candle time
+            # in epoch milliseconds.
+            df["timestamp"] = (
+                pd.to_datetime(
+                    df["timestamp"],
+                    unit="ms",
+                    utc=True,
+                    errors="coerce"
+                )
             )
 
-            for col in [
+            for column in [
                 "open",
                 "high",
                 "low",
                 "close",
-                "volume"
+                "volume",
             ]:
 
-                df[col] = pd.to_numeric(
-                    df[col],
+                df[column] = pd.to_numeric(
+                    df[column],
                     errors="coerce"
                 )
 
@@ -217,21 +229,29 @@ def fetch_kraken_chunk(
 
             df = (
                 df
-                .sort_values("timestamp")
-                .drop_duplicates("timestamp")
-                .reset_index(drop=True)
+                .sort_values(
+                    "timestamp"
+                )
+                .drop_duplicates(
+                    "timestamp"
+                )
+                .reset_index(
+                    drop=True
+                )
             )
 
             return df
 
-        except Exception as e:
+        except Exception as error:
 
-            last_error = e
+            last_error = error
 
             print(
                 f"  API retry "
                 f"{attempt}/{API_RETRIES} "
-                f"{symbol} {resolution}: {e}"
+                f"{symbol} "
+                f"{resolution}: "
+                f"{error}"
             )
 
             if attempt < API_RETRIES:
@@ -243,7 +263,8 @@ def fetch_kraken_chunk(
     raise RuntimeError(
         f"API failed after "
         f"{API_RETRIES} attempts: "
-        f"{symbol} {resolution} | "
+        f"{symbol} "
+        f"{resolution} | "
         f"{last_error}"
     )
 
@@ -270,20 +291,23 @@ def fetch_kraken(
         60
     )
 
+    total_seconds = (
+        end_ts -
+        start_ts
+    )
+
+    total_chunks = int(
+        np.ceil(
+            total_seconds /
+            chunk_seconds
+        )
+    )
+
     frames = []
 
     current_start = start_ts
 
-    total_span = end_ts - start_ts
-
     chunk_number = 0
-
-    total_chunks = int(
-        np.ceil(
-            total_span /
-            chunk_seconds
-        )
-    )
 
     while current_start < end_ts:
 
@@ -296,16 +320,19 @@ def fetch_kraken(
         chunk_number += 1
 
         print(
-            f"  {resolution}M "
+            f"  {resolution} "
             f"chunk "
-            f"{chunk_number}/{total_chunks}"
+            f"{chunk_number}/"
+            f"{total_chunks}"
         )
 
-        df_chunk = fetch_kraken_chunk(
-            symbol,
-            resolution,
-            current_start,
-            current_end
+        df_chunk = (
+            fetch_kraken_chunk(
+                symbol,
+                resolution,
+                current_start,
+                current_end
+            )
         )
 
         if not df_chunk.empty:
@@ -314,7 +341,9 @@ def fetch_kraken(
                 df_chunk
             )
 
-        current_start = current_end
+        current_start = (
+            current_end
+        )
 
         time.sleep(
             REQUEST_SLEEP
@@ -331,16 +360,22 @@ def fetch_kraken(
 
     df = (
         df
-        .sort_values("timestamp")
-        .drop_duplicates("timestamp")
-        .reset_index(drop=True)
+        .sort_values(
+            "timestamp"
+        )
+        .drop_duplicates(
+            "timestamp"
+        )
+        .reset_index(
+            drop=True
+        )
     )
 
     return df
 
 
 # ============================================================
-# INDICATORS
+# RSI
 # ============================================================
 
 def calculate_rsi(
@@ -358,13 +393,17 @@ def calculate_rsi(
         upper=0
     )
 
-    avg_gain = gain.rolling(
-        period
-    ).mean()
+    avg_gain = (
+        gain
+        .rolling(period)
+        .mean()
+    )
 
-    avg_loss = loss.rolling(
-        period
-    ).mean()
+    avg_loss = (
+        loss
+        .rolling(period)
+        .mean()
+    )
 
     rs = (
         avg_gain /
@@ -374,7 +413,7 @@ def calculate_rsi(
         )
     )
 
-    rsi = (
+    return (
         100 -
         (
             100 /
@@ -382,26 +421,28 @@ def calculate_rsi(
         )
     )
 
-    return rsi
 
+# ============================================================
+# PREPARE 5M
+# ============================================================
 
 def prepare_5m(df):
 
     df = df.copy()
 
-    # --------------------------------------------------------
-    # TENKAN
-    # --------------------------------------------------------
-
     highest = (
         df["high"]
-        .rolling(TENKAN_PERIOD)
+        .rolling(
+            TENKAN_PERIOD
+        )
         .max()
     )
 
     lowest = (
         df["low"]
-        .rolling(TENKAN_PERIOD)
+        .rolling(
+            TENKAN_PERIOD
+        )
         .min()
     )
 
@@ -410,22 +451,16 @@ def prepare_5m(df):
         lowest
     ) / 2
 
-    # --------------------------------------------------------
-    # RSI
-    # --------------------------------------------------------
-
     df["rsi"] = calculate_rsi(
         df["close"],
         RSI_PERIOD
     )
 
-    # --------------------------------------------------------
-    # VOLUME
-    # --------------------------------------------------------
-
     df["avg_volume"] = (
         df["volume"]
-        .rolling(RVOL_PERIOD)
+        .rolling(
+            RVOL_PERIOD
+        )
         .mean()
     )
 
@@ -433,10 +468,6 @@ def prepare_5m(df):
         df["volume"] /
         df["avg_volume"]
     )
-
-    # --------------------------------------------------------
-    # CANDLE STRUCTURE
-    # --------------------------------------------------------
 
     df["body"] = (
         df["close"] -
@@ -450,13 +481,17 @@ def prepare_5m(df):
 
     df["avg_body"] = (
         df["body"]
-        .rolling(AVG_BODY_PERIOD)
+        .rolling(
+            AVG_BODY_PERIOD
+        )
         .mean()
     )
 
     df["avg_range"] = (
         df["range"]
-        .rolling(AVG_RANGE_PERIOD)
+        .rolling(
+            AVG_RANGE_PERIOD
+        )
         .mean()
     )
 
@@ -469,10 +504,6 @@ def prepare_5m(df):
         df["range"],
         0.5
     )
-
-    # --------------------------------------------------------
-    # TENKAN DISTANCE
-    # --------------------------------------------------------
 
     df["distance_pct"] = (
         (
@@ -490,10 +521,6 @@ def prepare_5m(df):
         .shift(1)
     )
 
-    # --------------------------------------------------------
-    # TENKAN SLOPE
-    # --------------------------------------------------------
-
     df["tenkan_slope"] = (
         df["tenkan"] -
         df["tenkan"].shift(1)
@@ -506,6 +533,10 @@ def prepare_5m(df):
 
     return df
 
+
+# ============================================================
+# PREPARE 15M
+# ============================================================
 
 def prepare_15m(df):
 
@@ -534,27 +565,29 @@ def generate_signals(
 
     df = df5.copy()
 
-    df15_context = df15[
+    context = df15[
         [
             "timestamp",
             "close",
-            "ema20"
+            "ema20",
         ]
     ].copy()
 
-    df15_context = (
-        df15_context
-        .rename(
-            columns={
-                "close": "close_15m",
-                "ema20": "ema20_15m"
-            }
-        )
+    context = context.rename(
+        columns={
+            "close":
+                "close_15m",
+
+            "ema20":
+                "ema20_15m",
+        }
     )
 
     df = pd.merge_asof(
-        df.sort_values("timestamp"),
-        df15_context.sort_values(
+        df.sort_values(
+            "timestamp"
+        ),
+        context.sort_values(
             "timestamp"
         ),
         on="timestamp",
@@ -572,23 +605,16 @@ def generate_signals(
 
         prev = df.iloc[i - 1]
 
-        if pd.isna(
-            row["tenkan"]
-        ):
-            continue
+        required = [
+            "tenkan",
+            "rsi",
+            "rvol",
+            "ema20_15m",
+        ]
 
-        if pd.isna(
-            row["rsi"]
-        ):
-            continue
-
-        if pd.isna(
-            row["rvol"]
-        ):
-            continue
-
-        if pd.isna(
-            row["ema20_15m"]
+        if any(
+            pd.isna(row[x])
+            for x in required
         ):
             continue
 
@@ -596,13 +622,13 @@ def generate_signals(
 
         tenkan = row["tenkan"]
 
-        distance = row[
-            "distance_pct"
-        ]
+        distance = (
+            row["distance_pct"]
+        )
 
-        # ----------------------------------------------------
+        # ====================================================
         # DISTANCE
-        # ----------------------------------------------------
+        # ====================================================
 
         long_distance = (
             distance <=
@@ -614,9 +640,9 @@ def generate_signals(
             MIN_DISTANCE_PCT
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # DISTANCE CONTRACTING
-        # ----------------------------------------------------
+        # ====================================================
 
         long_contracting = (
             distance >
@@ -628,9 +654,9 @@ def generate_signals(
             row["prev_distance_pct"]
         )
 
-        # ----------------------------------------------------
-        # TENKAN SLOPE REVERSAL
-        # ----------------------------------------------------
+        # ====================================================
+        # TENKAN SLOPE
+        # ====================================================
 
         long_slope = (
             row["tenkan_slope"] > 0
@@ -644,9 +670,9 @@ def generate_signals(
             row["prev_tenkan_slope"] >= 0
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # REVERSAL CANDLE
-        # ----------------------------------------------------
+        # ====================================================
 
         long_candle = (
             row["close"] >
@@ -676,9 +702,9 @@ def generate_signals(
             0.45
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # RSI REVERSAL
-        # ----------------------------------------------------
+        # ====================================================
 
         long_rsi = (
             distance < 0
@@ -698,9 +724,9 @@ def generate_signals(
             prev["rsi"]
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # RVOL
-        # ----------------------------------------------------
+        # ====================================================
 
         rvol_ok = (
             row["rvol"] >= 1.20
@@ -708,9 +734,9 @@ def generate_signals(
             row["rvol"] <= 3.00
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # NO EXPLOSION
-        # ----------------------------------------------------
+        # ====================================================
 
         no_explosion = (
             row["body"]
@@ -724,9 +750,9 @@ def generate_signals(
             MAX_RANGE_MULTIPLIER
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # 15M CONTEXT
-        # ----------------------------------------------------
+        # ====================================================
 
         long_context = (
             row["close_15m"]
@@ -801,7 +827,7 @@ def generate_signals(
             short_score += 2
 
         # ====================================================
-        # LONG SIGNAL
+        # LONG
         # ====================================================
 
         if (
@@ -826,20 +852,21 @@ def generate_signals(
 
                 signals.append({
                     "index": i,
-                    "timestamp": row[
-                        "timestamp"
-                    ],
+                    "timestamp":
+                        row["timestamp"],
                     "symbol": None,
                     "side": "LONG",
                     "entry": entry,
                     "sl": sl,
                     "tenkan": tenkan,
-                    "score": long_score,
-                    "distance_pct": distance,
+                    "score":
+                        long_score,
+                    "distance_pct":
+                        distance,
                 })
 
         # ====================================================
-        # SHORT SIGNAL
+        # SHORT
         # ====================================================
 
         if (
@@ -864,16 +891,17 @@ def generate_signals(
 
                 signals.append({
                     "index": i,
-                    "timestamp": row[
-                        "timestamp"
-                    ],
+                    "timestamp":
+                        row["timestamp"],
                     "symbol": None,
                     "side": "SHORT",
                     "entry": entry,
                     "sl": sl,
                     "tenkan": tenkan,
-                    "score": short_score,
-                    "distance_pct": distance,
+                    "score":
+                        short_score,
+                    "distance_pct":
+                        distance,
                 })
 
     return signals, df
@@ -995,14 +1023,14 @@ def simulate_trade(
                 exit_index = j
                 break
 
-            elif sl_hit:
+            if sl_hit:
 
                 exit_price = sl
                 exit_reason = "SL"
                 exit_index = j
                 break
 
-            elif tp_hit:
+            if tp_hit:
 
                 exit_price = tp
                 exit_reason = "TP"
@@ -1034,23 +1062,19 @@ def simulate_trade(
                 exit_index = j
                 break
 
-            elif sl_hit:
+            if sl_hit:
 
                 exit_price = sl
                 exit_reason = "SL"
                 exit_index = j
                 break
 
-            elif tp_hit:
+            if tp_hit:
 
                 exit_price = tp
                 exit_reason = "TP"
                 exit_index = j
                 break
-
-    # --------------------------------------------------------
-    # TIMEOUT
-    # --------------------------------------------------------
 
     if exit_price is None:
 
@@ -1062,10 +1086,6 @@ def simulate_trade(
 
         exit_reason = "TIMEOUT"
 
-    # --------------------------------------------------------
-    # PNL
-    # --------------------------------------------------------
-
     if side == "LONG":
 
         gross_pnl_pct = (
@@ -1074,8 +1094,7 @@ def simulate_trade(
                 entry
             )
             /
-            entry
-            *
+            entry *
             100
         )
 
@@ -1087,8 +1106,7 @@ def simulate_trade(
                 exit_price
             )
             /
-            entry
-            *
+            entry *
             100
         )
 
@@ -1097,27 +1115,32 @@ def simulate_trade(
         ROUND_TRIP_FEE_PCT
     )
 
-    win = (
-        net_pnl_pct > 0
-    )
-
     return {
-        "entry_time": signal[
-            "timestamp"
-        ],
-        "exit_time": df.iloc[
-            exit_index
-        ]["timestamp"],
+        "entry_time":
+            signal["timestamp"],
 
-        "side": side,
+        "exit_time":
+            df.iloc[
+                exit_index
+            ]["timestamp"],
 
-        "entry": entry,
-        "sl": sl,
-        "tp": tp,
+        "side":
+            side,
 
-        "exit": exit_price,
+        "entry":
+            entry,
 
-        "reason": exit_reason,
+        "sl":
+            sl,
+
+        "tp":
+            tp,
+
+        "exit":
+            exit_price,
+
+        "reason":
+            exit_reason,
 
         "gross_pnl_pct":
             gross_pnl_pct,
@@ -1125,7 +1148,8 @@ def simulate_trade(
         "net_pnl_pct":
             net_pnl_pct,
 
-        "win": win,
+        "win":
+            net_pnl_pct > 0,
 
         "score":
             signal["score"],
@@ -1175,14 +1199,12 @@ def calculate_performance(
         "TIMEOUT"
     ]
 
-    gross_profit = wins[
-        "net_pnl_pct"
-    ].sum()
+    gross_profit = (
+        wins["net_pnl_pct"].sum()
+    )
 
     gross_loss = abs(
-        losses[
-            "net_pnl_pct"
-        ].sum()
+        losses["net_pnl_pct"].sum()
     )
 
     if gross_loss > 0:
@@ -1202,13 +1224,14 @@ def calculate_performance(
         100
     )
 
-    net = df[
-        "net_pnl_pct"
-    ].sum()
+    net = (
+        df["net_pnl_pct"].sum()
+    )
 
-    equity = df[
-        "net_pnl_pct"
-    ].cumsum()
+    equity = (
+        df["net_pnl_pct"]
+        .cumsum()
+    )
 
     running_max = (
         equity.cummax()
@@ -1240,12 +1263,10 @@ def calculate_performance(
 def main():
 
     print("=" * 90)
-
     print(
         "REVERSE-TENKAN 6 COINS - "
         "180 DAY BACKTEST"
     )
-
     print("=" * 90)
 
     end_dt = datetime.now(
@@ -1267,6 +1288,16 @@ def main():
         end_dt.timestamp()
     )
 
+    print(
+        f"Start UTC : "
+        f"{start_dt.isoformat()}"
+    )
+
+    print(
+        f"End UTC   : "
+        f"{end_dt.isoformat()}"
+    )
+
     all_summary = []
 
     all_trades = []
@@ -1281,7 +1312,7 @@ def main():
     failed_symbols = []
 
     # ========================================================
-    # SYMBOL LOOP
+    # SYMBOLS
     # ========================================================
 
     for symbol in SYMBOLS:
@@ -1294,31 +1325,33 @@ def main():
         try:
 
             # ------------------------------------------------
-            # FETCH 5M
+            # 5M
             # ------------------------------------------------
 
             print(
-                f"Fetching {symbol} 5M..."
+                f"Fetching "
+                f"{symbol} 5M..."
             )
 
             df5 = fetch_kraken(
                 symbol,
-                "5",
+                "5m",
                 start_ts,
                 end_ts
             )
 
             # ------------------------------------------------
-            # FETCH 15M
+            # 15M
             # ------------------------------------------------
 
             print(
-                f"Fetching {symbol} 15M..."
+                f"Fetching "
+                f"{symbol} 15M..."
             )
 
             df15 = fetch_kraken(
                 symbol,
-                "15",
+                "15m",
                 start_ts,
                 end_ts
             )
@@ -1326,15 +1359,17 @@ def main():
             if df5.empty:
 
                 raise RuntimeError(
-                    f"No 5M data returned "
-                    f"for {symbol}"
+                    f"No 5M data "
+                    f"returned for "
+                    f"{symbol}"
                 )
 
             if df15.empty:
 
                 raise RuntimeError(
-                    f"No 15M data returned "
-                    f"for {symbol}"
+                    f"No 15M data "
+                    f"returned for "
+                    f"{symbol}"
                 )
 
             # ------------------------------------------------
@@ -1402,13 +1437,13 @@ def main():
                         )
                     )
 
-                    trade[
-                        "symbol"
-                    ] = symbol
+                    trade["symbol"] = (
+                        symbol
+                    )
 
-                    trade[
-                        "model"
-                    ] = model_name
+                    trade["model"] = (
+                        model_name
+                    )
 
                     model_trades.append(
                         trade
@@ -1441,8 +1476,12 @@ def main():
                 )
 
                 all_summary.append({
-                    "Symbol": symbol,
-                    "Model": model_name,
+                    "Symbol":
+                        symbol,
+
+                    "Model":
+                        model_name,
+
                     **perf
                 })
 
@@ -1450,7 +1489,7 @@ def main():
                     model_trades
                 )
 
-        except Exception as e:
+        except Exception as error:
 
             print()
             print(
@@ -1458,7 +1497,7 @@ def main():
             )
 
             print(
-                f"Reason: {e}"
+                f"Reason: {error}"
             )
 
             failed_symbols.append(
@@ -1466,7 +1505,7 @@ def main():
             )
 
     # ========================================================
-    # DO NOT ACCEPT PARTIAL BACKTEST
+    # FAIL IF ANY SYMBOL FAILED
     # ========================================================
 
     if failed_symbols:
@@ -1479,8 +1518,7 @@ def main():
         print("=" * 90)
 
         print(
-            "The following symbols "
-            "could not be downloaded:"
+            "Failed symbols:"
         )
 
         for symbol in failed_symbols:
@@ -1491,7 +1529,7 @@ def main():
 
         print()
         print(
-            "No performance result "
+            "No partial result "
             "will be accepted."
         )
 
@@ -1537,7 +1575,9 @@ def main():
         )
 
         all_aggregate.append({
-            "Model": model_name,
+            "Model":
+                model_name,
+
             **perf
         })
 
