@@ -1,18 +1,7 @@
 # ============================================================
-# KRAKEN FUTURES PATTERN BACKTEST 1Y
-# VERSION 4.4 - RR COMPARISON
+# KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
+# VERSION 5.0 - RR 1.0 + TELEGRAM + PAPER TRADING
 # ============================================================
-#
-# DATA:
-#   Kraken Futures
-#
-# UNIVERSE:
-#   20 FIXED ASSETS
-#   Dynamic exact perpetual-contract discovery
-#
-# TIMEFRAMES:
-#   1H = Pattern + Breakout
-#   5M = FIRST Retest + Confirmation + Trade
 #
 # STRATEGY:
 #
@@ -26,32 +15,34 @@
 #       ↓
 #   ENTRY
 #
-# RR TESTS:
+# LIVE MODE:
 #
-#   RR 1.0 = TP 1.00% / SL 1.00%
-#   RR 1.5 = TP 1.50% / SL 1.00%
-#   RR 2.0 = TP 2.00% / SL 1.00%
+#   RR = 1.0
+#   TP = 1.00%
+#   SL = 1.00%
 #
 # IMPORTANT:
-# - ENTRY LOGIC IS IDENTICAL FOR ALL RR TESTS
-# - SAME ENTRY IS TESTED AGAINST ALL 3 RR VALUES
 # - CLOSED CANDLES ONLY
 # - NO LOOKAHEAD
-# - ONE TRADE PER PATTERN INSTANCE
 # - FIRST RETEST ONLY
 # - CONFIRMATION MUST COME AFTER RETEST
 # - ENTRY CANDLE IS NOT USED FOR TP/SL
 # - SAME CANDLE TP + SL = SL FIRST
-# - UNRESOLVED TRADE = EXCLUDED
+# - PAPER TRADING ONLY
+# - REAL TRADING DISABLED
+# - TELEGRAM REPORTING
+# - SQLITE PERSISTENCE
 #
 # ============================================================
 
+import os
 import time
+import sqlite3
 import requests
 import numpy as np
 import pandas as pd
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 
 # ============================================================
@@ -60,36 +51,79 @@ from datetime import datetime, timedelta, timezone
 
 BASE_URL = "https://futures.kraken.com"
 
-DAYS = 365
+# ------------------------------------------------------------
+# LIVE SETTINGS
+# ------------------------------------------------------------
 
 MAIN_INTERVAL = "1h"
 ENTRY_INTERVAL = "5m"
 
-# ------------------------------------------------------------
-# STOP LOSS IS FIXED
-# ------------------------------------------------------------
-
+# RR 1.0
 SL_PCT = 0.01
+TP_PCT = 0.01
+RR = 1.0
 
 # ------------------------------------------------------------
-# RR TESTS
-#
-# TP changes.
-# SL remains fixed at 1%.
+# PAPER TRADING ONLY
 # ------------------------------------------------------------
 
-RR_TESTS = {
-    "RR_1.0": 0.01,
-    "RR_1.5": 0.015,
-    "RR_2.0": 0.02,
-}
+REAL_TRADING = False
+
+# ------------------------------------------------------------
+# MAXIMUM TRADE AGE
+# ------------------------------------------------------------
 
 MAX_HOLD_HOURS = 48
+
+# ------------------------------------------------------------
+# LIVE HISTORY
+#
+# Enough history for:
+# - pivots
+# - patterns
+# - flags
+# - breakout
+# - retest
+#
+# ------------------------------------------------------------
+
+MAIN_LOOKBACK = 500
+ENTRY_LOOKBACK = 1500
+
+# ------------------------------------------------------------
+# API
+# ------------------------------------------------------------
 
 REQUEST_TIMEOUT = 30
 REQUEST_SLEEP = 0.10
 
 CANDLE_CHUNK = 1900
+
+# ------------------------------------------------------------
+# DATABASE
+# ------------------------------------------------------------
+
+DB_FILE = "kraken_pattern_live.db"
+
+# ------------------------------------------------------------
+# TELEGRAM
+#
+# GitHub Actions:
+#
+# TELEGRAM_BOT_TOKEN
+# TELEGRAM_CHAT_ID
+#
+# ------------------------------------------------------------
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+)
 
 
 # ============================================================
@@ -168,7 +202,7 @@ SESSION.headers.update(
     {
         "User-Agent":
             "Mozilla/5.0 "
-            "KrakenPatternBacktest/4.4"
+            "KrakenPatternLive/5.0"
     }
 )
 
@@ -176,6 +210,38 @@ SESSION.headers.update(
 # ============================================================
 # GENERAL HELPERS
 # ============================================================
+
+def utc_now():
+
+    return datetime.now(
+        timezone.utc
+    )
+
+
+def format_time(ts):
+
+    return datetime.fromtimestamp(
+        int(ts),
+        tz=timezone.utc,
+    ).strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+
+
+def pct_change(
+    current,
+    reference,
+):
+
+    if reference == 0:
+        return 0.0
+
+    return (
+        current
+        / reference
+        - 1.0
+    ) * 100.0
+
 
 def pct(a, b):
 
@@ -185,11 +251,31 @@ def pct(a, b):
     return abs(a - b) / abs(b)
 
 
+def fmt_price(price):
+
+    if price >= 1000:
+        return f"{price:.2f}"
+
+    if price >= 100:
+        return f"{price:.3f}"
+
+    if price >= 1:
+        return f"{price:.4f}"
+
+    if price >= 0.01:
+        return f"{price:.6f}"
+
+    return f"{price:.8f}"
+
+
 # ============================================================
 # API
 # ============================================================
 
-def api_get(path, params=None):
+def api_get(
+    path,
+    params=None,
+):
 
     url = BASE_URL + path
 
@@ -211,7 +297,9 @@ def api_get(path, params=None):
 
             if isinstance(data, dict):
 
-                if data.get("result") == "error":
+                if data.get(
+                    "result"
+                ) == "error":
 
                     raise RuntimeError(
                         str(data)
@@ -220,7 +308,9 @@ def api_get(path, params=None):
                 if data.get("error"):
 
                     raise RuntimeError(
-                        str(data["error"])
+                        str(
+                            data["error"]
+                        )
                     )
 
             time.sleep(
@@ -236,7 +326,8 @@ def api_get(path, params=None):
             if attempt < 2:
 
                 time.sleep(
-                    1.0 * (attempt + 1)
+                    1.0
+                    * (attempt + 1)
                 )
 
     raise RuntimeError(
@@ -246,7 +337,7 @@ def api_get(path, params=None):
 
 
 # ============================================================
-# KRAKEN INSTRUMENT DISCOVERY
+# INSTRUMENT DISCOVERY
 # ============================================================
 
 def discover_instruments():
@@ -260,38 +351,28 @@ def discover_instruments():
         []
     )
 
-    if not isinstance(raw, list):
+    if not isinstance(
+        raw,
+        list,
+    ):
 
         raise RuntimeError(
             "Invalid instruments response"
         )
 
-    instruments = []
-
-    for item in raw:
-
-        if not isinstance(item, dict):
-            continue
-
-        symbol = str(
-            item.get("symbol")
-            or item.get("instrument")
-            or ""
-        ).upper().strip()
-
-        if not symbol:
-            continue
-
-        instruments.append(item)
-
-    return instruments
+    return [
+        item
+        for item in raw
+        if isinstance(
+            item,
+            dict,
+        )
+    ]
 
 
-# ============================================================
-# PERPETUAL CHECK
-# ============================================================
-
-def is_perpetual_instrument(item):
+def is_perpetual_instrument(
+    item
+):
 
     symbol = str(
         item.get("symbol")
@@ -319,10 +400,6 @@ def is_perpetual_instrument(item):
 
     return False
 
-
-# ============================================================
-# EXACT CONTRACT MATCH
-# ============================================================
 
 def choose_contract_for_asset(
     asset,
@@ -366,10 +443,6 @@ def choose_contract_for_asset(
     return candidates[0]
 
 
-# ============================================================
-# BUILD UNIVERSE
-# ============================================================
-
 def build_dynamic_universe():
 
     instruments = discover_instruments()
@@ -383,11 +456,6 @@ def build_dynamic_universe():
     )
     print("=" * 70)
 
-    print(
-        f"Configured assets: "
-        f"{EXPECTED_UNIVERSE_SIZE}"
-    )
-
     for asset in FIXED_ASSETS:
 
         contract = choose_contract_for_asset(
@@ -397,18 +465,10 @@ def build_dynamic_universe():
 
         mapping[asset] = contract
 
-        if contract:
-
-            print(
-                f"{asset:<8} -> {contract}"
-            )
-
-        else:
-
-            print(
-                f"{asset:<8} -> "
-                f"NO EXACT PERPETUAL CONTRACT"
-            )
+        print(
+            f"{asset:<8} -> "
+            f"{contract or 'NO EXACT CONTRACT'}"
+        )
 
     print("=" * 70)
 
@@ -416,7 +476,7 @@ def build_dynamic_universe():
 
 
 # ============================================================
-# CANDLE RESPONSE PARSER
+# CANDLE PARSER
 # ============================================================
 
 def parse_candle_response(data):
@@ -434,12 +494,18 @@ def parse_candle_response(data):
 
             value = data.get(key)
 
-            if isinstance(value, list):
+            if isinstance(
+                value,
+                list,
+            ):
 
                 rows = value
                 break
 
-    elif isinstance(data, list):
+    elif isinstance(
+        data,
+        list,
+    ):
 
         rows = data
 
@@ -450,7 +516,10 @@ def parse_candle_response(data):
 
     for row in rows:
 
-        if isinstance(row, dict):
+        if isinstance(
+            row,
+            dict,
+        ):
 
             ts = (
                 row.get("time")
@@ -470,7 +539,10 @@ def parse_candle_response(data):
             )
 
         elif (
-            isinstance(row, (list, tuple))
+            isinstance(
+                row,
+                (list, tuple),
+            )
             and len(row) >= 5
         ):
 
@@ -516,20 +588,14 @@ def parse_candle_response(data):
 
 
 # ============================================================
-# FETCH CANDLES
+# FETCH RECENT CANDLES
 # ============================================================
 
-def fetch_candles(
+def fetch_recent_candles(
     symbol,
     interval,
-    start_ts,
-    end_ts,
+    lookback,
 ):
-
-    all_rows = []
-
-    cursor = int(start_ts)
-    end_ts = int(end_ts)
 
     interval_seconds_map = {
         "1m": 60,
@@ -542,11 +608,31 @@ def fetch_candles(
     }
 
     interval_seconds = (
-        interval_seconds_map.get(
-            interval,
-            3600,
-        )
+        interval_seconds_map[
+            interval
+        ]
     )
+
+    now_ts = int(
+        utc_now().timestamp()
+    )
+
+    # Small buffer so the currently forming
+    # candle can be removed safely.
+    start_ts = (
+        now_ts
+        - (
+            lookback
+            + 20
+        )
+        * interval_seconds
+    )
+
+    end_ts = now_ts
+
+    all_rows = []
+
+    cursor = start_ts
 
     while cursor < end_ts:
 
@@ -562,16 +648,14 @@ def fetch_candles(
             f"{symbol}/{interval}"
         )
 
-        params = {
-            "from": cursor,
-            "to": chunk_end,
-        }
-
         try:
 
             data = api_get(
                 path,
-                params=params,
+                params={
+                    "from": cursor,
+                    "to": chunk_end,
+                },
             )
 
             rows = parse_candle_response(
@@ -580,16 +664,6 @@ def fetch_candles(
 
             if rows:
                 all_rows.extend(rows)
-
-            next_cursor = (
-                chunk_end
-                + interval_seconds
-            )
-
-            if next_cursor <= cursor:
-                break
-
-            cursor = next_cursor
 
         except Exception as exc:
 
@@ -600,6 +674,16 @@ def fetch_candles(
             )
 
             break
+
+        next_cursor = (
+            chunk_end
+            + interval_seconds
+        )
+
+        if next_cursor <= cursor:
+            break
+
+        cursor = next_cursor
 
     if not all_rows:
 
@@ -628,15 +712,33 @@ def fetch_candles(
         drop=True
     )
 
+    # --------------------------------------------------------
+    # CLOSED CANDLES ONLY
+    # --------------------------------------------------------
+
     now_ts = int(
-        datetime.now(
-            timezone.utc
-        ).timestamp()
+        utc_now().timestamp()
     )
 
     df = df[
-        df["timestamp"] <= now_ts
+        df["timestamp"]
+        <= now_ts
     ].copy()
+
+    # Remove currently forming candle.
+    df = df[
+        (
+            df["timestamp"]
+            + interval_seconds
+        )
+        <= now_ts
+    ].copy()
+
+    if len(df) > lookback:
+
+        df = df.tail(
+            lookback
+        )
 
     return df.reset_index(
         drop=True
@@ -644,98 +746,333 @@ def fetch_candles(
 
 
 # ============================================================
-# EXPECTED CANDLE COUNT
+# CURRENT MARKET PRICE
 # ============================================================
 
-def expected_candles(interval):
-
-    interval_minutes = {
-        "1h": 60,
-        "5m": 5,
-    }
-
-    if interval not in interval_minutes:
-
-        raise ValueError(
-            f"Unsupported interval: "
-            f"{interval}"
-        )
-
-    total_minutes = (
-        DAYS * 24 * 60
-    )
-
-    return int(
-        total_minutes
-        / interval_minutes[interval]
-    )
-
-
-# ============================================================
-# HISTORY STATUS
-# ============================================================
-
-def history_status(
-    df_1h,
-    df_5m,
+def fetch_current_price(
+    contract,
 ):
 
-    expected_1h = expected_candles(
-        "1h"
-    )
+    try:
 
-    expected_5m = expected_candles(
-        "5m"
-    )
-
-    actual_1h = len(df_1h)
-    actual_5m = len(df_5m)
-
-    minimum_1h = int(
-        expected_1h * 0.90
-    )
-
-    minimum_5m = int(
-        expected_5m * 0.90
-    )
-
-    if actual_1h < minimum_1h:
-
-        return (
-            "INSUFFICIENT_1H",
-            expected_1h,
-            expected_5m,
+        data = api_get(
+            "/derivatives/api/v3/tickers"
         )
 
-    if actual_5m < minimum_5m:
-
-        return (
-            "INSUFFICIENT_5M",
-            expected_1h,
-            expected_5m,
+        tickers = data.get(
+            "tickers",
+            []
         )
 
-    if (
-        actual_1h >= int(
-            expected_1h * 0.98
-        )
-        and
-        actual_5m >= int(
-            expected_5m * 0.98
-        )
-    ):
+        for item in tickers:
 
-        return (
-            "OK",
-            expected_1h,
-            expected_5m,
+            if not isinstance(
+                item,
+                dict,
+            ):
+                continue
+
+            symbol = str(
+                item.get("symbol")
+                or item.get("instrument")
+                or ""
+            ).upper()
+
+            if symbol != contract.upper():
+                continue
+
+            for key in (
+                "last",
+                "lastPrice",
+                "price",
+            ):
+
+                value = item.get(
+                    key
+                )
+
+                if value is not None:
+
+                    return float(
+                        value
+                    )
+
+    except Exception as exc:
+
+        print(
+            f"Current price error "
+            f"{contract}: {exc}"
         )
 
-    return (
-        "PARTIAL_HISTORY",
-        expected_1h,
-        expected_5m,
+    return None
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+def db_connect():
+
+    conn = sqlite3.connect(
+        DB_FILE
     )
+
+    conn.row_factory = (
+        sqlite3.Row
+    )
+
+    return conn
+
+
+def init_db():
+
+    conn = db_connect()
+
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            signal_key TEXT UNIQUE,
+
+            asset TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            pattern TEXT NOT NULL,
+            direction TEXT NOT NULL,
+
+            pattern_start INTEGER,
+            pattern_end INTEGER,
+            breakout_time INTEGER,
+            retest_time INTEGER,
+            entry_time INTEGER,
+
+            entry_price REAL NOT NULL,
+
+            tp_price REAL NOT NULL,
+            sl_price REAL NOT NULL,
+
+            current_price REAL,
+
+            status TEXT NOT NULL,
+            result TEXT,
+
+            exit_time INTEGER,
+            exit_price REAL,
+
+            r_multiple REAL,
+
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def trade_exists(
+    signal_key,
+):
+
+    conn = db_connect()
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM trades
+        WHERE signal_key = ?
+        LIMIT 1
+        """,
+        (
+            signal_key,
+        ),
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
+def insert_trade(
+    trade,
+):
+
+    conn = db_connect()
+
+    now_ts = int(
+        utc_now().timestamp()
+    )
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO trades (
+            signal_key,
+            asset,
+            symbol,
+            pattern,
+            direction,
+            pattern_start,
+            pattern_end,
+            breakout_time,
+            retest_time,
+            entry_time,
+            entry_price,
+            tp_price,
+            sl_price,
+            current_price,
+            status,
+            result,
+            exit_time,
+            exit_price,
+            r_multiple,
+            created_at,
+            updated_at
+        )
+        VALUES (
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+        )
+        """,
+        (
+            trade["signal_key"],
+            trade["asset"],
+            trade["symbol"],
+            trade["pattern"],
+            trade["direction"],
+            trade["pattern_start"],
+            trade["pattern_end"],
+            trade["breakout_time"],
+            trade["retest_time"],
+            trade["entry_time"],
+            trade["entry_price"],
+            trade["tp_price"],
+            trade["sl_price"],
+            trade.get(
+                "current_price"
+            ),
+            "OPEN",
+            None,
+            None,
+            None,
+            None,
+            now_ts,
+            now_ts,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def get_open_trades():
+
+    conn = db_connect()
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM trades
+        WHERE status = 'OPEN'
+        ORDER BY entry_time ASC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
+
+
+def get_all_closed_trades():
+
+    conn = db_connect()
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM trades
+        WHERE status = 'CLOSED'
+        ORDER BY exit_time ASC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
+
+
+def update_trade_open_price(
+    trade_id,
+    current_price,
+):
+
+    conn = db_connect()
+
+    conn.execute(
+        """
+        UPDATE trades
+        SET
+            current_price = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            current_price,
+            int(
+                utc_now().timestamp()
+            ),
+            trade_id,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def close_trade(
+    trade_id,
+    result,
+    exit_time,
+    exit_price,
+    r_multiple,
+):
+
+    conn = db_connect()
+
+    conn.execute(
+        """
+        UPDATE trades
+        SET
+            status = 'CLOSED',
+            result = ?,
+            exit_time = ?,
+            exit_price = ?,
+            r_multiple = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            result,
+            exit_time,
+            exit_price,
+            r_multiple,
+            int(
+                utc_now().timestamp()
+            ),
+            trade_id,
+        ),
+    )
+
+    conn.commit()
+    conn.close()
 
 
 # ============================================================
@@ -827,7 +1164,9 @@ def make_pattern(
             else None
         ),
         "anchors": anchors or [],
-        "quality": float(quality),
+        "quality": float(
+            quality
+        ),
         "state": "DETECTED",
     }
 
@@ -836,7 +1175,10 @@ def make_pattern(
 # STRUCTURE OVERLAP
 # ============================================================
 
-def structures_overlap(a, b):
+def structures_overlap(
+    a,
+    b,
+):
 
     a0 = a["start"]
     a1 = a["end"]
@@ -905,7 +1247,9 @@ def detect_double_top(
 
         p2 = pivots_high[j]
 
-        separation = p2 - p1
+        separation = (
+            p2 - p1
+        )
 
         if not (
             DOUBLE_MIN_SEPARATION
@@ -917,7 +1261,10 @@ def detect_double_top(
         h1 = df.iloc[p1]["high"]
         h2 = df.iloc[p2]["high"]
 
-        if pct(h1, h2) > DOUBLE_TOLERANCE:
+        if pct(
+            h1,
+            h2,
+        ) > DOUBLE_TOLERANCE:
             continue
 
         between = df.iloc[
@@ -952,7 +1299,10 @@ def detect_double_top(
                 ],
                 quality=(
                     1.0
-                    - pct(h1, h2)
+                    - pct(
+                        h1,
+                        h2,
+                    )
                 ),
             )
         )
@@ -982,7 +1332,9 @@ def detect_double_bottom(
 
         p2 = pivots_low[j]
 
-        separation = p2 - p1
+        separation = (
+            p2 - p1
+        )
 
         if not (
             DOUBLE_MIN_SEPARATION
@@ -994,7 +1346,10 @@ def detect_double_bottom(
         l1 = df.iloc[p1]["low"]
         l2 = df.iloc[p2]["low"]
 
-        if pct(l1, l2) > DOUBLE_TOLERANCE:
+        if pct(
+            l1,
+            l2,
+        ) > DOUBLE_TOLERANCE:
             continue
 
         between = df.iloc[
@@ -1029,7 +1384,10 @@ def detect_double_bottom(
                 ],
                 quality=(
                     1.0
-                    - pct(l1, l2)
+                    - pct(
+                        l1,
+                        l2,
+                    )
                 ),
             )
         )
@@ -1315,7 +1673,10 @@ def linear_level(
 
     return (
         p1
-        + slope * (x - i1)
+        + slope
+        * (
+            x - i1
+        )
     )
 
 
@@ -1543,7 +1904,10 @@ def detect_flags(
         - consolidation
     )
 
-    if impulse_end <= impulse_start:
+    if (
+        impulse_end
+        <= impulse_start
+    ):
         return patterns
 
     start_price = float(
@@ -1567,7 +1931,10 @@ def detect_flags(
         impulse_return
     )
 
-    if impulse_abs < FLAG_MIN_IMPULSE:
+    if (
+        impulse_abs
+        < FLAG_MIN_IMPULSE
+    ):
         return patterns
 
     impulse_high = float(
@@ -1598,11 +1965,15 @@ def detect_flags(
     ]
 
     c_high = float(
-        consolidation_df["high"].max()
+        consolidation_df[
+            "high"
+        ].max()
     )
 
     c_low = float(
-        consolidation_df["low"].min()
+        consolidation_df[
+            "low"
+        ].min()
     )
 
     c_range = (
@@ -1647,7 +2018,6 @@ def detect_flags(
     ):
         return patterns
 
-    # Bull flag
     if impulse_return > 0:
 
         retrace = (
@@ -1678,7 +2048,6 @@ def detect_flags(
                 )
             )
 
-    # Bear flag
     elif impulse_return < 0:
 
         retrace = (
@@ -1879,7 +2248,10 @@ def find_entry(
 
     retest_pos = None
 
-    for pos, (_, row) in enumerate(
+    for pos, (
+        _,
+        row,
+    ) in enumerate(
         future.iterrows()
     ):
 
@@ -1919,12 +2291,14 @@ def find_entry(
     if retest_pos is None:
         return None
 
-    confirmation_slice = future.iloc[
-        retest_pos + 1:
-        retest_pos
-        + 1
-        + CONFIRM_MAX_BARS
-    ]
+    confirmation_slice = (
+        future.iloc[
+            retest_pos + 1:
+            retest_pos
+            + 1
+            + CONFIRM_MAX_BARS
+        ]
+    )
 
     if confirmation_slice.empty:
         return None
@@ -1957,174 +2331,6 @@ def find_entry(
                 ]["close"]
             ),
         }
-
-    return None
-
-
-# ============================================================
-# TRADE SIMULATION
-# ============================================================
-#
-# IMPORTANT:
-# This function now receives TP_PCT explicitly.
-#
-# Therefore the EXACT SAME ENTRY can be simulated with:
-#
-# RR 1.0
-# RR 1.5
-# RR 2.0
-#
-# No new entry signal is generated for each RR.
-#
-# ============================================================
-
-def simulate_trade(
-    df_5m,
-    entry_time,
-    entry_price,
-    direction,
-    tp_pct,
-    rr_name,
-):
-
-    if direction == "LONG":
-
-        tp_price = (
-            entry_price
-            * (
-                1.0
-                + tp_pct
-            )
-        )
-
-        sl_price = (
-            entry_price
-            * (
-                1.0
-                - SL_PCT
-            )
-        )
-
-    else:
-
-        tp_price = (
-            entry_price
-            * (
-                1.0
-                - tp_pct
-            )
-        )
-
-        sl_price = (
-            entry_price
-            * (
-                1.0
-                + SL_PCT
-            )
-        )
-
-    max_hold_seconds = (
-        MAX_HOLD_HOURS
-        * 3600
-    )
-
-    future = df_5m[
-        (
-            df_5m["timestamp"]
-            > entry_time
-        )
-        &
-        (
-            df_5m["timestamp"]
-            <=
-            entry_time
-            + max_hold_seconds
-        )
-    ].copy()
-
-    for _, row in (
-        future.iterrows()
-    ):
-
-        high = float(
-            row["high"]
-        )
-
-        low = float(
-            row["low"]
-        )
-
-        if direction == "LONG":
-
-            hit_tp = (
-                high >= tp_price
-            )
-
-            hit_sl = (
-                low <= sl_price
-            )
-
-        else:
-
-            hit_tp = (
-                low <= tp_price
-            )
-
-            hit_sl = (
-                high >= sl_price
-            )
-
-        # ----------------------------------------------------
-        # SAME CANDLE:
-        # SL FIRST
-        # ----------------------------------------------------
-
-        if hit_tp and hit_sl:
-
-            return {
-                "rr": rr_name,
-                "tp_pct": tp_pct,
-                "result": "FAILURE",
-                "exit_time": int(
-                    row["timestamp"]
-                ),
-                "exit_price": sl_price,
-                "tp_price": tp_price,
-                "sl_price": sl_price,
-                "r_multiple": -1.0,
-            }
-
-        if hit_sl:
-
-            return {
-                "rr": rr_name,
-                "tp_pct": tp_pct,
-                "result": "FAILURE",
-                "exit_time": int(
-                    row["timestamp"]
-                ),
-                "exit_price": sl_price,
-                "tp_price": tp_price,
-                "sl_price": sl_price,
-                "r_multiple": -1.0,
-            }
-
-        if hit_tp:
-
-            return {
-                "rr": rr_name,
-                "tp_pct": tp_pct,
-                "result": "SUCCESS",
-                "exit_time": int(
-                    row["timestamp"]
-                ),
-                "exit_price": tp_price,
-                "tp_price": tp_price,
-                "sl_price": sl_price,
-                "r_multiple": (
-                    tp_pct / SL_PCT
-                ),
-            }
 
     return None
 
@@ -2196,10 +2402,6 @@ def detect_patterns(df):
             )
         )
 
-    # --------------------------------------------------------
-    # Exact duplicate removal
-    # --------------------------------------------------------
-
     unique = {}
 
     for p in patterns:
@@ -2229,10 +2431,6 @@ def detect_patterns(df):
             x["start"],
         )
     )
-
-    # --------------------------------------------------------
-    # Same-type + same-direction overlap
-    # --------------------------------------------------------
 
     accepted = []
 
@@ -2285,150 +2483,59 @@ def detect_patterns(df):
 
 
 # ============================================================
-# PROCESS ONE ASSET
+# SIGNAL GENERATION
 # ============================================================
 
-def process_asset(
+def generate_live_entries(
     asset,
     contract,
-    start_ts,
-    end_ts,
+    df_1h,
+    df_5m,
 ):
-
-    print()
-    print("=" * 70)
-    print(
-        f"{asset} | CONTRACT={contract}"
-    )
-    print("=" * 70)
-
-    if not contract:
-
-        print(
-            f"{asset}: "
-            f"NO EXACT PERPETUAL CONTRACT"
-        )
-
-        return {
-            "asset": asset,
-            "contract": None,
-            "status": "NO_CONTRACT",
-            "entries": [],
-            "history_1h": 0,
-            "history_5m": 0,
-            "expected_1h": expected_candles(
-                "1h"
-            ),
-            "expected_5m": expected_candles(
-                "5m"
-            ),
-            "lifecycle": {},
-        }
-
-    df_1h = fetch_candles(
-        contract,
-        MAIN_INTERVAL,
-        start_ts,
-        end_ts,
-    )
-
-    df_5m = fetch_candles(
-        contract,
-        ENTRY_INTERVAL,
-        start_ts,
-        end_ts,
-    )
-
-    print(
-        f"{asset} {contract} "
-        f"1H={len(df_1h)} "
-        f"5M={len(df_5m)}"
-    )
-
-    status, expected_1h, expected_5m = (
-        history_status(
-            df_1h,
-            df_5m,
-        )
-    )
-
-    print(
-        f"{asset}: {status}"
-    )
-
-    print(
-        f"{asset}: expected "
-        f"1H={expected_1h} "
-        f"5M={expected_5m}"
-    )
-
-    if status in (
-        "INSUFFICIENT_1H",
-        "INSUFFICIENT_5M",
-    ):
-
-        return {
-            "asset": asset,
-            "contract": contract,
-            "status": status,
-            "entries": [],
-            "history_1h": len(df_1h),
-            "history_5m": len(df_5m),
-            "expected_1h": expected_1h,
-            "expected_5m": expected_5m,
-            "lifecycle": {},
-        }
-
-    # --------------------------------------------------------
-    # PATTERN DETECTION
-    # --------------------------------------------------------
 
     patterns = detect_patterns(
         df_1h
     )
 
-    print(
-        f"{asset}: detected patterns="
-        f"{len(patterns)}"
-    )
+    if not patterns:
+        return []
 
     entries = []
 
     consumed_events = set()
 
-    lifecycle = {}
+    # --------------------------------------------------------
+    # We only need recent 1H pattern events.
+    #
+    # But we preserve enough candles to allow:
+    # Pattern -> Breakout -> Retest -> Confirmation
+    #
+    # --------------------------------------------------------
 
-    # --------------------------------------------------------
-    # PATTERN LIFECYCLE
-    # --------------------------------------------------------
+    recent_start_ts = int(
+        df_1h.iloc[
+            max(
+                0,
+                len(df_1h) - 180
+            )
+        ]["timestamp"]
+    )
 
     for p in patterns:
 
-        pattern_name = p[
-            "pattern"
-        ]
+        # Ignore very old pattern structures
+        # that cannot produce a fresh signal.
+        pattern_end_ts = int(
+            df_1h.iloc[
+                p["end"]
+            ]["timestamp"]
+        )
 
         if (
-            pattern_name
-            not in lifecycle
+            pattern_end_ts
+            < recent_start_ts
         ):
-
-            lifecycle[
-                pattern_name
-            ] = {
-                "Candidates": 0,
-                "Breakouts": 0,
-                "Retests": 0,
-                "Confirmations": 0,
-            }
-
-        lifecycle[
-            pattern_name
-        ]["Candidates"] += 1
-
-        # ----------------------------------------------------
-        # FIRST VALID 1H BREAKOUT
-        # ----------------------------------------------------
+            continue
 
         breakout_i = None
 
@@ -2449,6 +2556,38 @@ def process_asset(
             ):
                 continue
 
+            breakout_time = int(
+                df_1h.iloc[
+                    i
+                ]["timestamp"]
+            )
+
+            # We only care about breakout
+            # events that are recent enough
+            # to still have a 5M retest window.
+            latest_5m_ts = int(
+                df_5m.iloc[-1][
+                    "timestamp"
+                ]
+            )
+
+            max_retest_seconds = (
+                (
+                    RETEST_MAX_BARS
+                    + CONFIRM_MAX_BARS
+                    + 5
+                )
+                * 300
+            )
+
+            if (
+                breakout_time
+                <
+                latest_5m_ts
+                - max_retest_seconds
+            ):
+                continue
+
             event_key = (
                 asset,
                 i,
@@ -2460,30 +2599,22 @@ def process_asset(
             ):
                 continue
 
-            breakout_i = i
-
             consumed_events.add(
                 event_key
             )
+
+            breakout_i = i
 
             break
 
         if breakout_i is None:
             continue
 
-        lifecycle[
-            pattern_name
-        ]["Breakouts"] += 1
-
         breakout_time = int(
             df_1h.iloc[
                 breakout_i
             ]["timestamp"]
         )
-
-        # ----------------------------------------------------
-        # FREEZE PATTERN BOUNDARY
-        # ----------------------------------------------------
 
         if (
             p["direction"]
@@ -2510,10 +2641,6 @@ def process_asset(
                 ]
             )
 
-        # ----------------------------------------------------
-        # FIRST RETEST + CONFIRMATION
-        # ----------------------------------------------------
-
         entry = find_entry(
             df_5m,
             breakout_time,
@@ -2524,27 +2651,17 @@ def process_asset(
         if entry is None:
             continue
 
-        lifecycle[
-            pattern_name
-        ]["Retests"] += 1
-
-        lifecycle[
-            pattern_name
-        ]["Confirmations"] += 1
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # Store ENTRY ONLY.
-        #
-        # We DO NOT simulate RR here.
-        #
-        # This guarantees the exact same entry is used
-        # for RR 1.0, RR 1.5 and RR 2.0.
-        # ----------------------------------------------------
+        signal_key = (
+            f"{asset}|"
+            f"{p['pattern']}|"
+            f"{p['direction']}|"
+            f"{breakout_time}|"
+            f"{entry['entry_time']}"
+        )
 
         entries.append(
             {
+                "signal_key": signal_key,
                 "asset": asset,
                 "symbol": contract,
                 "pattern": p[
@@ -2565,910 +2682,1068 @@ def process_asset(
                 ),
                 "breakout_time":
                     breakout_time,
-                "retest_time": entry[
-                    "retest_time"
-                ],
-                "entry_time": entry[
-                    "entry_time"
-                ],
-                "entry_price": entry[
-                    "entry_price"
-                ],
-            }
-        )
-
-    print(
-        f"{asset}: completed entries="
-        f"{len(entries)}"
-    )
-
-    return {
-        "asset": asset,
-        "contract": contract,
-        "status": status,
-        "entries": entries,
-        "history_1h": len(df_1h),
-        "history_5m": len(df_5m),
-        "expected_1h": expected_1h,
-        "expected_5m": expected_5m,
-        "lifecycle": lifecycle,
-
-        # Keep dataframes available for RR simulation.
-        "df_5m": df_5m,
-    }
-
-
-# ============================================================
-# SIMULATE ALL RR VALUES
-# ============================================================
-#
-# Each ENTRY is tested independently against:
-#
-# RR 1.0
-# RR 1.5
-# RR 2.0
-#
-# ============================================================
-
-def simulate_all_rr(
-    results,
-):
-
-    all_trades = []
-
-    for result in results:
-
-        entries = result.get(
-            "entries",
-            []
-        )
-
-        df_5m = result.get(
-            "df_5m"
-        )
-
-        if df_5m is None:
-            continue
-
-        for entry in entries:
-
-            for rr_name, tp_pct in (
-                RR_TESTS.items()
-            ):
-
-                simulation = simulate_trade(
-                    df_5m,
+                "retest_time":
+                    entry[
+                        "retest_time"
+                    ],
+                "entry_time":
                     entry[
                         "entry_time"
                     ],
+                "entry_price":
                     entry[
                         "entry_price"
                     ],
+                "tp_price": (
                     entry[
+                        "entry_price"
+                    ]
+                    * (
+                        1.0
+                        + TP_PCT
+                    )
+                    if p[
                         "direction"
-                    ],
-                    tp_pct,
-                    rr_name,
-                )
+                    ] == "LONG"
+                    else
+                    entry[
+                        "entry_price"
+                    ]
+                    * (
+                        1.0
+                        - TP_PCT
+                    )
+                ),
+                "sl_price": (
+                    entry[
+                        "entry_price"
+                    ]
+                    * (
+                        1.0
+                        - SL_PCT
+                    )
+                    if p[
+                        "direction"
+                    ] == "LONG"
+                    else
+                    entry[
+                        "entry_price"
+                    ]
+                    * (
+                        1.0
+                        + SL_PCT
+                    )
+                ),
+            }
+        )
 
-                if simulation is None:
-                    continue
-
-                trade = dict(entry)
-
-                trade.update(
-                    {
-                        "rr": rr_name,
-                        "tp_pct": tp_pct,
-                        "tp_price":
-                            simulation[
-                                "tp_price"
-                            ],
-                        "sl_price":
-                            simulation[
-                                "sl_price"
-                            ],
-                        "exit_time":
-                            simulation[
-                                "exit_time"
-                            ],
-                        "exit_price":
-                            simulation[
-                                "exit_price"
-                            ],
-                        "result":
-                            simulation[
-                                "result"
-                            ],
-                        "r_multiple":
-                            simulation[
-                                "r_multiple"
-                            ],
-                    }
-                )
-
-                all_trades.append(
-                    trade
-                )
-
-    return all_trades
+    return entries
 
 
 # ============================================================
-# RR SUMMARY
+# PROCESS OPEN TRADES
 # ============================================================
 
-def calculate_rr_stats(
-    trades,
-    rr_name,
-):
+def process_open_trades():
 
-    subset = [
-        x
-        for x in trades
-        if x["rr"] == rr_name
-    ]
+    open_trades = get_open_trades()
 
-    wins = sum(
-        1
-        for x in subset
-        if x["result"]
-        == "SUCCESS"
-    )
+    if not open_trades:
+        return []
 
-    losses = sum(
-        1
-        for x in subset
-        if x["result"]
-        == "FAILURE"
-    )
+    closed_now = []
 
-    total = (
-        wins
-        + losses
-    )
+    for trade in open_trades:
 
-    if total:
-
-        win_rate = (
-            wins
-            / total
-            * 100
-        )
-
-    else:
-
-        win_rate = 0.0
-
-    tp_pct = RR_TESTS[
-        rr_name
-    ]
-
-    breakeven = (
-        SL_PCT
-        / (
-            tp_pct
-            + SL_PCT
-        )
-        * 100
-    )
-
-    net_r = sum(
-        x["r_multiple"]
-        for x in subset
-    )
-
-    gross_profit_r = sum(
-        x["r_multiple"]
-        for x in subset
-        if x["r_multiple"] > 0
-    )
-
-    gross_loss_r = abs(
-        sum(
-            x["r_multiple"]
-            for x in subset
-            if x["r_multiple"] < 0
-        )
-    )
-
-    if gross_loss_r > 0:
-
-        profit_factor = (
-            gross_profit_r
-            / gross_loss_r
-        )
-
-    else:
-
-        profit_factor = (
-            float("inf")
-            if gross_profit_r > 0
-            else 0.0
-        )
-
-    edge = (
-        win_rate
-        - breakeven
-    )
-
-    return {
-        "rr": rr_name,
-        "tp_pct": tp_pct,
-        "sl_pct": SL_PCT,
-        "total": total,
-        "wins": wins,
-        "losses": losses,
-        "win_rate": win_rate,
-        "breakeven": breakeven,
-        "edge": edge,
-        "net_r": net_r,
-        "gross_profit_r":
-            gross_profit_r,
-        "gross_loss_r":
-            gross_loss_r,
-        "profit_factor":
-            profit_factor,
-    }
-
-
-# ============================================================
-# FINAL SUMMARY
-# ============================================================
-
-def print_summary(
-    results,
-    all_trades,
-):
-
-    print()
-    print("=" * 70)
-    print("FINAL BACKTEST RESULT")
-    print("=" * 70)
-
-    print(
-        f"Universe configured: "
-        f"{EXPECTED_UNIVERSE_SIZE}"
-    )
-
-    usable = [
-        r
-        for r in results
-        if r["status"]
-        in (
-            "OK",
-            "PARTIAL_HISTORY",
-        )
-    ]
-
-    full_history = [
-        r
-        for r in results
-        if r["status"] == "OK"
-    ]
-
-    print(
-        f"Assets with usable data: "
-        f"{len(usable)}"
-    )
-
-    print(
-        f"Full-history assets: "
-        f"{len(full_history)}"
-    )
-
-    # --------------------------------------------------------
-    # ENTRY COUNT
-    # --------------------------------------------------------
-
-    total_entries = sum(
-        len(
-            r.get(
-                "entries",
-                []
+        current_price = (
+            fetch_current_price(
+                trade["symbol"]
             )
         )
-        for r in results
-    )
 
-    print()
-    print(
-        f"UNIQUE ENTRIES: "
-        f"{total_entries}"
-    )
+        if current_price is None:
+            continue
 
-    print(
-        "Each entry tested on all RR values."
-    )
-
-    # ========================================================
-    # RR COMPARISON
-    # ========================================================
-
-    print()
-    print("=" * 70)
-    print("RR COMPARISON")
-    print("=" * 70)
-
-    print(
-        f"{'RR':<10}"
-        f"{'TP':>9}"
-        f"{'SL':>9}"
-        f"{'Trades':>10}"
-        f"{'Wins':>9}"
-        f"{'Losses':>9}"
-        f"{'WR':>9}"
-        f"{'BE':>9}"
-        f"{'Edge':>10}"
-        f"{'Net R':>12}"
-        f"{'PF':>10}"
-    )
-
-    print("-" * 110)
-
-    for rr_name in RR_TESTS:
-
-        stats = calculate_rr_stats(
-            all_trades,
-            rr_name,
+        update_trade_open_price(
+            trade["id"],
+            current_price,
         )
 
-        pf = stats[
-            "profit_factor"
+        direction = trade[
+            "direction"
         ]
 
-        pf_text = (
-            f"{pf:.3f}"
-            if np.isfinite(pf)
-            else "INF"
+        tp_price = float(
+            trade["tp_price"]
         )
 
-        print(
-            f"{rr_name:<10}"
-            f"{stats['tp_pct'] * 100:>8.2f}%"
-            f"{SL_PCT * 100:>8.2f}%"
-            f"{stats['total']:>10}"
-            f"{stats['wins']:>9}"
-            f"{stats['losses']:>9}"
-            f"{stats['win_rate']:>8.2f}%"
-            f"{stats['breakeven']:>8.2f}%"
-            f"{stats['edge']:>+9.2f}pp"
-            f"{stats['net_r']:>12.2f}"
-            f"{pf_text:>10}"
+        sl_price = float(
+            trade["sl_price"]
         )
 
-    # ========================================================
-    # RR DETAILED REPORT
-    # ========================================================
-
-    for rr_name in RR_TESTS:
-
-        stats = calculate_rr_stats(
-            all_trades,
-            rr_name,
+        entry_time = int(
+            trade["entry_time"]
         )
 
-        print()
-        print("=" * 70)
-        print(
-            f"{rr_name} DETAILED RESULT"
+        # ----------------------------------------------------
+        # PRIMARY LIVE PRICE CHECK
+        #
+        # This catches a currently visible
+        # TP/SL level.
+        #
+        # Historical 5M candles are also checked
+        # in the main scan.
+        # ----------------------------------------------------
+
+        hit_tp = False
+        hit_sl = False
+
+        if direction == "LONG":
+
+            if current_price >= tp_price:
+                hit_tp = True
+
+            if current_price <= sl_price:
+                hit_sl = True
+
+        else:
+
+            if current_price <= tp_price:
+                hit_tp = True
+
+            if current_price >= sl_price:
+                hit_sl = True
+
+        # ----------------------------------------------------
+        # SAME PRICE:
+        # SL FIRST
+        # ----------------------------------------------------
+
+        if hit_tp and hit_sl:
+
+            close_trade(
+                trade["id"],
+                "FAILURE",
+                int(
+                    utc_now().timestamp()
+                ),
+                sl_price,
+                -1.0,
+            )
+
+            closed_now.append(
+                (
+                    trade,
+                    "FAILURE",
+                    sl_price,
+                    -1.0,
+                )
+            )
+
+            continue
+
+        if hit_sl:
+
+            close_trade(
+                trade["id"],
+                "FAILURE",
+                int(
+                    utc_now().timestamp()
+                ),
+                sl_price,
+                -1.0,
+            )
+
+            closed_now.append(
+                (
+                    trade,
+                    "FAILURE",
+                    sl_price,
+                    -1.0,
+                )
+            )
+
+            continue
+
+        if hit_tp:
+
+            close_trade(
+                trade["id"],
+                "SUCCESS",
+                int(
+                    utc_now().timestamp()
+                ),
+                tp_price,
+                RR,
+            )
+
+            closed_now.append(
+                (
+                    trade,
+                    "SUCCESS",
+                    tp_price,
+                    RR,
+                )
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # TIME EXIT
+        #
+        # Unlike backtest unresolved trades,
+        # live trades must be closed from DB.
+        # ----------------------------------------------------
+
+        age_seconds = (
+            int(
+                utc_now().timestamp()
+            )
+            - entry_time
         )
-        print("=" * 70)
 
-        print(
-            f"TP: "
-            f"{stats['tp_pct'] * 100:.2f}%"
+        if (
+            age_seconds
+            >= MAX_HOLD_HOURS * 3600
+        ):
+
+            close_trade(
+                trade["id"],
+                "TIME_EXIT",
+                int(
+                    utc_now().timestamp()
+                ),
+                current_price,
+                0.0,
+            )
+
+            closed_now.append(
+                (
+                    trade,
+                    "TIME_EXIT",
+                    current_price,
+                    0.0,
+                )
+            )
+
+    return closed_now
+
+
+# ============================================================
+# HISTORICAL CLOSED 5M CHECK FOR OPEN TRADES
+# ============================================================
+
+def resolve_open_trade_from_candles(
+    trade,
+    df_5m,
+):
+
+    entry_time = int(
+        trade["entry_time"]
+    )
+
+    future = df_5m[
+        df_5m["timestamp"]
+        > entry_time
+    ].copy()
+
+    if future.empty:
+        return None
+
+    max_hold_seconds = (
+        MAX_HOLD_HOURS
+        * 3600
+    )
+
+    future = future[
+        future["timestamp"]
+        <=
+        entry_time
+        + max_hold_seconds
+    ]
+
+    if future.empty:
+        return None
+
+    tp_price = float(
+        trade["tp_price"]
+    )
+
+    sl_price = float(
+        trade["sl_price"]
+    )
+
+    direction = trade[
+        "direction"
+    ]
+
+    for _, row in (
+        future.iterrows()
+    ):
+
+        high = float(
+            row["high"]
         )
 
-        print(
-            f"SL: "
-            f"{SL_PCT * 100:.2f}%"
+        low = float(
+            row["low"]
         )
 
-        print(
-            f"Trades: "
-            f"{stats['total']}"
-        )
+        if direction == "LONG":
 
-        print(
-            f"Wins: "
-            f"{stats['wins']}"
-        )
+            hit_tp = (
+                high >= tp_price
+            )
 
-        print(
-            f"Losses: "
-            f"{stats['losses']}"
-        )
-
-        print(
-            f"Win Rate: "
-            f"{stats['win_rate']:.2f}%"
-        )
-
-        print(
-            f"Break-Even: "
-            f"{stats['breakeven']:.2f}%"
-        )
-
-        print(
-            f"Edge vs Break-Even: "
-            f"{stats['edge']:+.2f} pp"
-        )
-
-        print(
-            f"Gross Profit: "
-            f"{stats['gross_profit_r']:.2f}R"
-        )
-
-        print(
-            f"Gross Loss: "
-            f"{stats['gross_loss_r']:.2f}R"
-        )
-
-        print(
-            f"Net R: "
-            f"{stats['net_r']:.2f}R"
-        )
-
-        pf = stats[
-            "profit_factor"
-        ]
-
-        if np.isfinite(pf):
-
-            print(
-                f"Profit Factor: "
-                f"{pf:.3f}"
+            hit_sl = (
+                low <= sl_price
             )
 
         else:
 
-            print(
-                "Profit Factor: INF"
+            hit_tp = (
+                low <= tp_price
             )
 
-    # ========================================================
-    # UNIVERSE STATUS
-    # ========================================================
-
-    print()
-    print(
-        "20-ASSET UNIVERSE STATUS"
-    )
-
-    print("-" * 70)
-
-    for r in results:
-
-        contract = (
-            r["contract"]
-            or "NONE"
-        )
-
-        print(
-            f"{r['asset']:<8} "
-            f"{contract:<16} "
-            f"{r['status']:<20} "
-            f"1H={r['history_1h']:<6} "
-            f"5M={r['history_5m']:<7} "
-            f"Entries="
-            f"{len(r.get('entries', []))}"
-        )
-
-    # ========================================================
-    # PATTERN BREAKDOWN BY RR
-    # ========================================================
-
-    for rr_name in RR_TESTS:
-
-        print()
-        print(
-            f"PATTERN BREAKDOWN - "
-            f"{rr_name}"
-        )
-
-        print("-" * 70)
-
-        pattern_stats = {}
-
-        for trade in all_trades:
-
-            if trade["rr"] != rr_name:
-                continue
-
-            p = trade[
-                "pattern"
-            ]
-
-            if p not in pattern_stats:
-
-                pattern_stats[p] = {
-                    "total": 0,
-                    "success": 0,
-                    "failure": 0,
-                    "net_r": 0.0,
-                }
-
-            pattern_stats[
-                p
-            ]["total"] += 1
-
-            pattern_stats[
-                p
-            ]["net_r"] += trade[
-                "r_multiple"
-            ]
-
-            if (
-                trade["result"]
-                == "SUCCESS"
-            ):
-
-                pattern_stats[
-                    p
-                ]["success"] += 1
-
-            else:
-
-                pattern_stats[
-                    p
-                ]["failure"] += 1
-
-        for p, s in sorted(
-            pattern_stats.items(),
-            key=lambda x:
-            -x[1]["total"],
-        ):
-
-            wr = (
-                s["success"]
-                / s["total"]
-                * 100
-                if s["total"]
-                else 0.0
+            hit_sl = (
+                high >= sl_price
             )
 
-            print(
-                f"{p:<24}"
-                f"{s['total']:>8}"
-                f"{s['success']:>8}"
-                f"{s['failure']:>8}"
-                f"{wr:>9.2f}%"
-                f"{s['net_r']:>12.2f}R"
-            )
+        # SL FIRST
+        if hit_tp and hit_sl:
 
-    # ========================================================
-    # ASSET BREAKDOWN BY RR
-    # ========================================================
-
-    for rr_name in RR_TESTS:
-
-        print()
-        print(
-            f"ASSET BREAKDOWN - "
-            f"{rr_name}"
-        )
-
-        print("-" * 70)
-
-        asset_stats = {}
-
-        for asset in FIXED_ASSETS:
-
-            asset_stats[
-                asset
-            ] = {
-                "total": 0,
-                "success": 0,
-                "failure": 0,
-                "net_r": 0.0,
+            return {
+                "result": "FAILURE",
+                "exit_time": int(
+                    row["timestamp"]
+                ),
+                "exit_price":
+                    sl_price,
+                "r_multiple": -1.0,
             }
 
-        for trade in all_trades:
+        if hit_sl:
 
-            if trade["rr"] != rr_name:
-                continue
+            return {
+                "result": "FAILURE",
+                "exit_time": int(
+                    row["timestamp"]
+                ),
+                "exit_price":
+                    sl_price,
+                "r_multiple": -1.0,
+            }
 
-            asset = trade[
-                "asset"
-            ]
+        if hit_tp:
 
-            asset_stats[
-                asset
-            ]["total"] += 1
+            return {
+                "result": "SUCCESS",
+                "exit_time": int(
+                    row["timestamp"]
+                ),
+                "exit_price":
+                    tp_price,
+                "r_multiple": RR,
+            }
 
-            asset_stats[
-                asset
-            ]["net_r"] += trade[
-                "r_multiple"
-            ]
-
-            if (
-                trade["result"]
-                == "SUCCESS"
-            ):
-
-                asset_stats[
-                    asset
-                ]["success"] += 1
-
-            else:
-
-                asset_stats[
-                    asset
-                ]["failure"] += 1
-
-        for asset in FIXED_ASSETS:
-
-            s = asset_stats[
-                asset
-            ]
-
-            wr = (
-                s["success"]
-                / s["total"]
-                * 100
-                if s["total"]
-                else 0.0
-            )
-
-            print(
-                f"{asset:<8}"
-                f"{s['total']:>8}"
-                f"{s['success']:>8}"
-                f"{s['failure']:>8}"
-                f"{wr:>9.2f}%"
-                f"{s['net_r']:>12.2f}R"
-            )
-
-    # ========================================================
-    # LIFECYCLE DIAGNOSTICS
-    # ========================================================
-
-    print()
-    print(
-        "LIFECYCLE DIAGNOSTICS"
-    )
-
-    print("-" * 70)
-
-    lifecycle_total = {}
-
-    for r in results:
-
-        for pattern, stats in (
-            r.get(
-                "lifecycle",
-                {}
-            ).items()
-        ):
-
-            if (
-                pattern
-                not in lifecycle_total
-            ):
-
-                lifecycle_total[
-                    pattern
-                ] = {
-                    "Candidates": 0,
-                    "Breakouts": 0,
-                    "Retests": 0,
-                    "Confirmations": 0,
-                }
-
-            for key in (
-                lifecycle_total[
-                    pattern
-                ]
-            ):
-
-                lifecycle_total[
-                    pattern
-                ][key] += stats.get(
-                    key,
-                    0,
-                )
-
-    for pattern, stats in sorted(
-        lifecycle_total.items()
-    ):
-
-        print(
-            f"{pattern:<20}"
-            f"Candidates="
-            f"{stats['Candidates']:<7}"
-            f"Breakouts="
-            f"{stats['Breakouts']:<7}"
-            f"Retests="
-            f"{stats['Retests']:<7}"
-            f"Confirmations="
-            f"{stats['Confirmations']:<7}"
-        )
+    return None
 
 
 # ============================================================
-# SAVE TRADES
+# UPDATE ALL OPEN TRADES USING 5M CANDLES
 # ============================================================
 
-def save_results(
-    all_trades,
+def update_open_trades_from_history(
+    contracts,
 ):
 
-    filename = (
-        "kraken_pattern_backtest_1y_rr_comparison.csv"
+    open_trades = get_open_trades()
+
+    if not open_trades:
+        return []
+
+    closed_now = []
+
+    grouped = {}
+
+    for trade in open_trades:
+
+        grouped.setdefault(
+            trade["symbol"],
+            []
+        ).append(trade)
+
+    for symbol, trades in (
+        grouped.items()
+    ):
+
+        df_5m = fetch_recent_candles(
+            symbol,
+            ENTRY_INTERVAL,
+            ENTRY_LOOKBACK,
+        )
+
+        if df_5m.empty:
+            continue
+
+        for trade in trades:
+
+            result = (
+                resolve_open_trade_from_candles(
+                    trade,
+                    df_5m,
+                )
+            )
+
+            if result is None:
+                continue
+
+            close_trade(
+                trade["id"],
+                result["result"],
+                result["exit_time"],
+                result["exit_price"],
+                result["r_multiple"],
+            )
+
+            closed_now.append(
+                (
+                    trade,
+                    result["result"],
+                    result["exit_price"],
+                    result["r_multiple"],
+                )
+            )
+
+    return closed_now
+
+
+# ============================================================
+# AGGREGATE STATISTICS
+# ============================================================
+
+def aggregate_stats():
+
+    conn = db_connect()
+
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS total,
+            SUM(
+                CASE
+                    WHEN result = 'SUCCESS'
+                    THEN 1 ELSE 0
+                END
+            ) AS wins,
+            SUM(
+                CASE
+                    WHEN result = 'FAILURE'
+                    THEN 1 ELSE 0
+                END
+            ) AS losses,
+            COALESCE(
+                SUM(r_multiple),
+                0
+            ) AS net_r
+        FROM trades
+        WHERE status = 'CLOSED'
+        """
+    ).fetchone()
+
+    conn.close()
+
+    total = int(
+        row["total"] or 0
     )
 
-    columns = [
-        "rr",
-        "tp_pct",
-        "sl_pct",
-        "asset",
-        "symbol",
-        "pattern",
-        "direction",
-        "pattern_start",
-        "pattern_end",
-        "breakout_time",
-        "retest_time",
-        "entry_time",
-        "entry_price",
-        "tp_price",
-        "sl_price",
-        "exit_time",
-        "exit_price",
-        "result",
-        "r_multiple",
+    wins = int(
+        row["wins"] or 0
+    )
+
+    losses = int(
+        row["losses"] or 0
+    )
+
+    net_r = float(
+        row["net_r"] or 0.0
+    )
+
+    wr = (
+        wins / total * 100
+        if total
+        else 0.0
+    )
+
+    return {
+        "total": total,
+        "wins": wins,
+        "losses": losses,
+        "wr": wr,
+        "net_r": net_r,
+    }
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def telegram_send(
+    text,
+):
+
+    if not TELEGRAM_BOT_TOKEN:
+        print(
+            "Telegram token not configured."
+        )
+        return False
+
+    if not TELEGRAM_CHAT_ID:
+        print(
+            "Telegram chat ID not configured."
+        )
+        return False
+
+    url = (
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/"
+        "sendMessage"
+    )
+
+    payload = {
+        "chat_id":
+            TELEGRAM_CHAT_ID,
+        "text": text,
+        "disable_web_page_preview":
+            True,
+    }
+
+    try:
+
+        response = SESSION.post(
+            url,
+            json=payload,
+            timeout=REQUEST_TIMEOUT,
+        )
+
+        response.raise_for_status()
+
+        return True
+
+    except Exception as exc:
+
+        print(
+            f"Telegram error: {exc}"
+        )
+
+        return False
+
+
+# ============================================================
+# FORMAT NEW SIGNAL
+# ============================================================
+
+def format_signal(
+    trade,
+    current_price,
+):
+
+    direction = trade[
+        "direction"
     ]
 
-    if all_trades:
+    emoji = (
+        "🟢"
+        if direction == "LONG"
+        else "🔴"
+    )
 
-        df = pd.DataFrame(
-            all_trades
+    entry = float(
+        trade["entry_price"]
+    )
+
+    tp = float(
+        trade["tp_price"]
+    )
+
+    sl = float(
+        trade["sl_price"]
+    )
+
+    current = (
+        current_price
+        if current_price is not None
+        else entry
+    )
+
+    current_pct = pct_change(
+        current,
+        entry,
+    )
+
+    tp_pct_from_entry = (
+        abs(
+            tp - entry
+        )
+        / entry
+        * 100.0
+    )
+
+    sl_pct_from_entry = (
+        abs(
+            sl - entry
+        )
+        / entry
+        * 100.0
+    )
+
+    current_to_tp = (
+        abs(
+            tp - current
+        )
+        / current
+        * 100.0
+        if current
+        else 0.0
+    )
+
+    current_to_sl = (
+        abs(
+            sl - current
+        )
+        / current
+        * 100.0
+        if current
+        else 0.0
+    )
+
+    return (
+        f"{emoji} <b>{direction}</b>\n"
+        f"<b>{trade['asset']}/USDT</b>\n"
+        f"Pattern: {trade['pattern']}\n\n"
+
+        f"Entry: "
+        f"<code>{fmt_price(entry)}</code>\n"
+
+        f"Current: "
+        f"<code>{fmt_price(current)}</code> "
+        f"({current_pct:+.2f}%)\n\n"
+
+        f"TP: "
+        f"<code>{fmt_price(tp)}</code> "
+        f"(+{tp_pct_from_entry:.2f}%)\n"
+
+        f"SL: "
+        f"<code>{fmt_price(sl)}</code> "
+        f"(-{sl_pct_from_entry:.2f}%)\n\n"
+
+        f"Current → TP: "
+        f"{current_to_tp:.2f}%\n"
+
+        f"Current → SL: "
+        f"{current_to_sl:.2f}%\n\n"
+
+        f"RR: 1.00\n"
+        f"Entry time: "
+        f"{format_time(trade['entry_time'])}\n"
+        f"Real trading: DISABLED"
+    )
+
+
+# ============================================================
+# FORMAT OPEN TRADES
+# ============================================================
+
+def format_open_trades(
+    trades,
+    prices,
+):
+
+    if not trades:
+
+        return (
+            "<b>OPEN TRADES</b>\n"
+            "None"
+        )
+
+    lines = [
+        "<b>OPEN TRADES</b>"
+    ]
+
+    for trade in trades:
+
+        direction = trade[
+            "direction"
+        ]
+
+        emoji = (
+            "🟢"
+            if direction == "LONG"
+            else "🔴"
+        )
+
+        entry = float(
+            trade["entry_price"]
+        )
+
+        tp = float(
+            trade["tp_price"]
+        )
+
+        sl = float(
+            trade["sl_price"]
+        )
+
+        current = prices.get(
+            trade["symbol"]
+        )
+
+        if current is None:
+            current = entry
+
+        move_pct = pct_change(
+            current,
+            entry,
+        )
+
+        lines.append(
+            ""
+        )
+
+        lines.append(
+            f"{emoji} "
+            f"<b>{trade['asset']} "
+            f"{direction}</b>"
+        )
+
+        lines.append(
+            f"Entry: "
+            f"<code>{fmt_price(entry)}</code>"
+        )
+
+        lines.append(
+            f"Current: "
+            f"<code>{fmt_price(current)}</code> "
+            f"({move_pct:+.2f}%)"
+        )
+
+        lines.append(
+            f"TP: "
+            f"<code>{fmt_price(tp)}</code> "
+            f"(+1.00%)"
+        )
+
+        lines.append(
+            f"SL: "
+            f"<code>{fmt_price(sl)}</code> "
+            f"(-1.00%)"
+        )
+
+        lines.append(
+            f"Pattern: "
+            f"{trade['pattern']}"
+        )
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
+# FORMAT CLOSED RESULTS
+# ============================================================
+
+def format_closed_results(
+    closed_now,
+):
+
+    if not closed_now:
+        return ""
+
+    lines = [
+        "<b>CLOSED THIS RUN</b>"
+    ]
+
+    for trade, result, exit_price, r in (
+        closed_now
+    ):
+
+        if result == "SUCCESS":
+
+            emoji = "✅"
+
+        elif result == "FAILURE":
+
+            emoji = "❌"
+
+        else:
+
+            emoji = "⏱"
+
+        lines.append(
+            f"{emoji} "
+            f"{trade['asset']} "
+            f"{trade['direction']} "
+            f"{result} "
+            f"({r:+.2f}R)"
+        )
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
+# FORMAT AGGREGATE
+# ============================================================
+
+def format_stats(
+    stats,
+):
+
+    return (
+        "<b>AGGREGATE PERFORMANCE</b>\n"
+        f"Trades: {stats['total']}\n"
+        f"Wins: {stats['wins']}\n"
+        f"Losses: {stats['losses']}\n"
+        f"Win Rate: {stats['wr']:.2f}%\n"
+        f"Net R: {stats['net_r']:+.2f}R\n"
+        f"RR: 1.00\n"
+        f"SL: 1.00%\n"
+        f"TP: 1.00%\n"
+        f"Real trading: DISABLED"
+    )
+
+
+# ============================================================
+# SEND FULL TELEGRAM REPORT
+# ============================================================
+
+def send_report(
+    new_trades,
+    open_trades,
+    prices,
+    closed_now,
+):
+
+    parts = []
+
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
+
+    parts.append(
+        "<b>📊 KRAKEN PATTERN SCANNER</b>"
+    )
+
+    parts.append(
+        f"UTC: "
+        f"{utc_now().strftime('%Y-%m-%d %H:%M')}"
+    )
+
+    parts.append(
+        "RR: 1.00 | TP: 1.00% | SL: 1.00%"
+    )
+
+    parts.append(
+        "Real trading: DISABLED"
+    )
+
+    # --------------------------------------------------------
+    # NEW SIGNALS
+    # --------------------------------------------------------
+
+    if new_trades:
+
+        parts.append(
+            "<b>🚨 NEW SIGNALS</b>"
+        )
+
+        for trade in new_trades:
+
+            current = prices.get(
+                trade["symbol"]
+            )
+
+            parts.append(
+                format_signal(
+                    trade,
+                    current,
+                )
+            )
+
+    else:
+
+        parts.append(
+            "<b>NEW SIGNALS</b>\nNone"
+        )
+
+    # --------------------------------------------------------
+    # OPEN
+    # --------------------------------------------------------
+
+    parts.append(
+        format_open_trades(
+            open_trades,
+            prices,
+        )
+    )
+
+    # --------------------------------------------------------
+    # CLOSED THIS RUN
+    # --------------------------------------------------------
+
+    closed_text = (
+        format_closed_results(
+            closed_now
+        )
+    )
+
+    if closed_text:
+        parts.append(
+            closed_text
+        )
+
+    # --------------------------------------------------------
+    # STATS
+    # --------------------------------------------------------
+
+    stats = aggregate_stats()
+
+    parts.append(
+        format_stats(
+            stats
+        )
+    )
+
+    text = "\n\n".join(
+        parts
+    )
+
+    # Telegram max message length
+    # is 4096 chars.
+    #
+    # Keep a safe margin.
+    # --------------------------------------------------------
+
+    if len(text) <= 3900:
+
+        telegram_send(
+            text
         )
 
     else:
 
-        df = pd.DataFrame(
-            columns=columns
-        )
+        chunks = []
 
-    # Force desired column order.
-    existing_columns = [
-        c
-        for c in columns
-        if c in df.columns
-    ]
+        current_chunk = ""
 
-    df = df[
-        existing_columns
-    ]
+        for line in text.split(
+            "\n"
+        ):
 
-    df.to_csv(
-        filename,
-        index=False,
-    )
+            if (
+                len(
+                    current_chunk
+                )
+                + len(line)
+                + 1
+                > 3800
+            ):
 
-    print()
-    print(
-        f"Trade file saved: "
-        f"{filename}"
-    )
+                chunks.append(
+                    current_chunk
+                )
+
+                current_chunk = line
+
+            else:
+
+                if current_chunk:
+                    current_chunk += "\n"
+
+                current_chunk += line
+
+        if current_chunk:
+            chunks.append(
+                current_chunk
+            )
+
+        for chunk in chunks:
+
+            telegram_send(
+                chunk
+            )
 
 
 # ============================================================
-# MAIN
+# MAIN LIVE SCAN
 # ============================================================
 
 def main():
 
     print("=" * 70)
     print(
-        "KRAKEN FUTURES PATTERN BACKTEST 1Y"
+        "KRAKEN FUTURES PATTERN LIVE SCANNER"
     )
     print(
-        "VERSION 4.4 - RR COMPARISON"
+        "VERSION 5.0 - RR 1.0"
     )
     print("=" * 70)
 
     print(
-        f"Assets configured: "
-        f"{EXPECTED_UNIVERSE_SIZE}"
+        "Real trading: DISABLED"
     )
 
     print(
-        f"Main timeframe: "
-        f"{MAIN_INTERVAL}"
+        "TP: 1.00%"
     )
 
     print(
-        f"Entry timeframe: "
-        f"{ENTRY_INTERVAL}"
-    )
-
-    print()
-    print(
-        "RR TESTS:"
-    )
-
-    for rr_name, tp_pct in (
-        RR_TESTS.items()
-    ):
-
-        rr_value = (
-            tp_pct / SL_PCT
-        )
-
-        print(
-            f"  {rr_name}: "
-            f"TP={tp_pct * 100:.2f}% "
-            f"SL={SL_PCT * 100:.2f}% "
-            f"RR={rr_value:.2f}"
-        )
-
-    print()
-
-    print(
-        f"Max hold: "
-        f"{MAX_HOLD_HOURS}h"
+        "SL: 1.00%"
     )
 
     print(
-        f"Expected 1H candles: "
-        f"{expected_candles('1h')}"
+        "RR: 1.00"
     )
 
-    print(
-        f"Expected 5M candles: "
-        f"{expected_candles('5m')}"
-    )
+    print("=" * 70)
 
-    # ========================================================
-    # UTC WINDOW
-    # ========================================================
+    # --------------------------------------------------------
+    # DATABASE
+    # --------------------------------------------------------
 
-    end_dt = datetime.now(
-        timezone.utc
-    )
+    init_db()
 
-    start_dt = (
-        end_dt
-        - timedelta(
-            days=DAYS
-        )
-    )
-
-    start_ts = int(
-        start_dt.timestamp()
-    )
-
-    end_ts = int(
-        end_dt.timestamp()
-    )
-
-    print(
-        f"Start UTC: "
-        f"{start_dt.isoformat()}"
-    )
-
-    print(
-        f"End UTC: "
-        f"{end_dt.isoformat()}"
-    )
-
-    # ========================================================
+    # --------------------------------------------------------
     # CONTRACT DISCOVERY
-    # ========================================================
+    # --------------------------------------------------------
 
     universe = (
         build_dynamic_universe()
     )
 
-    # ========================================================
-    # PROCESS ALL ASSETS
-    # ========================================================
+    # --------------------------------------------------------
+    # FIRST:
+    # Resolve existing open trades.
+    # --------------------------------------------------------
 
-    results = []
+    print()
+    print(
+        "CHECKING OPEN TRADES"
+    )
+
+    closed_from_history = (
+        update_open_trades_from_history(
+            universe
+        )
+    )
+
+    # --------------------------------------------------------
+    # CURRENT PRICES
+    # --------------------------------------------------------
+
+    prices = {}
 
     for asset in FIXED_ASSETS:
 
@@ -3476,14 +3751,129 @@ def main():
             asset
         )
 
+        if not contract:
+            continue
+
+        price = (
+            fetch_current_price(
+                contract
+            )
+        )
+
+        if price is not None:
+
+            prices[
+                contract
+            ] = price
+
+    # --------------------------------------------------------
+    # LIVE SIGNAL SCAN
+    # --------------------------------------------------------
+
+    new_trades = []
+
+    print()
+    print(
+        "SCANNING FOR NEW SIGNALS"
+    )
+
+    for asset in FIXED_ASSETS:
+
+        contract = universe.get(
+            asset
+        )
+
+        if not contract:
+
+            continue
+
         try:
 
-            result = process_asset(
-                asset,
-                contract,
-                start_ts,
-                end_ts,
+            print()
+            print(
+                f"{asset} "
+                f"({contract})"
             )
+
+            df_1h = (
+                fetch_recent_candles(
+                    contract,
+                    MAIN_INTERVAL,
+                    MAIN_LOOKBACK,
+                )
+            )
+
+            df_5m = (
+                fetch_recent_candles(
+                    contract,
+                    ENTRY_INTERVAL,
+                    ENTRY_LOOKBACK,
+                )
+            )
+
+            if df_1h.empty:
+
+                print(
+                    f"{asset}: "
+                    f"NO 1H DATA"
+                )
+
+                continue
+
+            if df_5m.empty:
+
+                print(
+                    f"{asset}: "
+                    f"NO 5M DATA"
+                )
+
+                continue
+
+            print(
+                f"{asset}: "
+                f"1H={len(df_1h)} "
+                f"5M={len(df_5m)}"
+            )
+
+            entries = (
+                generate_live_entries(
+                    asset,
+                    contract,
+                    df_1h,
+                    df_5m,
+                )
+            )
+
+            print(
+                f"{asset}: "
+                f"candidate entries="
+                f"{len(entries)}"
+            )
+
+            for trade in entries:
+
+                if trade_exists(
+                    trade["signal_key"]
+                ):
+
+                    continue
+
+                insert_trade(
+                    trade
+                )
+
+                new_trades.append(
+                    trade
+                )
+
+                print(
+                    f"NEW SIGNAL: "
+                    f"{asset} "
+                    f"{trade['direction']} "
+                    f"{trade['pattern']} "
+                    f"Entry="
+                    f"{trade['entry_price']}"
+                )
 
         except Exception as exc:
 
@@ -3492,77 +3882,127 @@ def main():
                 f"{exc}"
             )
 
-            result = {
-                "asset": asset,
-                "contract": contract,
-                "status": "ERROR",
-                "entries": [],
-                "history_1h": 0,
-                "history_5m": 0,
-                "expected_1h":
-                    expected_candles(
-                        "1h"
-                    ),
-                "expected_5m":
-                    expected_candles(
-                        "5m"
-                    ),
-                "lifecycle": {},
-            }
+    # --------------------------------------------------------
+    # CHECK NEWLY CREATED OPEN TRADES
+    # --------------------------------------------------------
 
-        results.append(
-            result
-        )
+    open_trades = (
+        get_open_trades()
+    )
 
-    # ========================================================
-    # SAFETY CHECK
-    # ========================================================
+    # --------------------------------------------------------
+    # REFRESH CURRENT PRICES FOR OPEN
+    # --------------------------------------------------------
 
-    if (
-        len(results)
-        != EXPECTED_UNIVERSE_SIZE
-    ):
+    for trade in open_trades:
 
-        raise RuntimeError(
-            "Universe processing error: "
-            f"expected "
-            f"{EXPECTED_UNIVERSE_SIZE}, "
-            f"got {len(results)}"
-        )
+        if (
+            trade["symbol"]
+            not in prices
+        ):
 
-    # ========================================================
-    # SIMULATE SAME ENTRIES
-    # AGAINST ALL RR VALUES
-    # ========================================================
+            price = (
+                fetch_current_price(
+                    trade["symbol"]
+                )
+            )
+
+            if price is not None:
+
+                prices[
+                    trade["symbol"]
+                ] = price
+
+    # --------------------------------------------------------
+    # PROCESS CURRENT PRICE
+    # --------------------------------------------------------
+
+    closed_from_price = (
+        process_open_trades()
+    )
+
+    closed_now = (
+        closed_from_history
+        + closed_from_price
+    )
+
+    # --------------------------------------------------------
+    # FINAL OPEN TRADES
+    # --------------------------------------------------------
+
+    open_trades = (
+        get_open_trades()
+    )
+
+    # --------------------------------------------------------
+    # TELEGRAM
+    # --------------------------------------------------------
+
+    send_report(
+        new_trades,
+        open_trades,
+        prices,
+        closed_now,
+    )
+
+    # --------------------------------------------------------
+    # CONSOLE SUMMARY
+    # --------------------------------------------------------
+
+    stats = aggregate_stats()
 
     print()
     print("=" * 70)
     print(
-        "SIMULATING SAME ENTRIES "
-        "AGAINST ALL RR VALUES"
+        "LIVE SCAN COMPLETE"
     )
     print("=" * 70)
 
-    all_trades = simulate_all_rr(
-        results
+    print(
+        f"New Signals: "
+        f"{len(new_trades)}"
     )
 
-    # ========================================================
-    # FINAL REPORT
-    # ========================================================
-
-    print_summary(
-        results,
-        all_trades,
+    print(
+        f"Open Trades: "
+        f"{len(open_trades)}"
     )
 
-    # ========================================================
-    # SAVE
-    # ========================================================
-
-    save_results(
-        all_trades
+    print(
+        f"Closed This Run: "
+        f"{len(closed_now)}"
     )
+
+    print(
+        f"Total Trades: "
+        f"{stats['total']}"
+    )
+
+    print(
+        f"Wins: "
+        f"{stats['wins']}"
+    )
+
+    print(
+        f"Losses: "
+        f"{stats['losses']}"
+    )
+
+    print(
+        f"Win Rate: "
+        f"{stats['wr']:.2f}%"
+    )
+
+    print(
+        f"Net R: "
+        f"{stats['net_r']:+.2f}R"
+    )
+
+    print(
+        "Real trading: DISABLED"
+    )
+
+    print("=" * 70)
 
 
 # ============================================================
