@@ -1,0 +1,1505 @@
+# ============================================================
+# BINANCE FUTURES PATTERN BACKTEST - 1 YEAR
+# ============================================================
+#
+# DATA:
+#   Binance USDT-M Futures
+#
+# TIMEFRAME:
+#   1H
+#
+# PERIOD:
+#   Last 365 days
+#
+# OUTPUT:
+#   Total Trades
+#   Successful
+#   Failed
+#   Success Rate
+#   Failure Rate
+#
+# PATTERNS:
+#   Double Bottom
+#   Double Top
+#   Head & Shoulders
+#   Inverse Head & Shoulders
+#   Triangle
+#   Wedge
+#   Flag
+#
+# SUCCESS:
+#   TP reached before SL
+#
+# FAILURE:
+#   SL reached before TP
+#
+# ============================================================
+
+import time
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+import requests
+
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
+BASE_URL = "https://fapi.binance.com"
+
+DAYS = 365
+INTERVAL = "1h"
+
+TOP_SYMBOLS = 30
+
+MIN_QUOTE_VOLUME = 50_000_000
+
+LOOKBACK = 120
+
+MAX_HOLD_CANDLES = 48
+
+TP_PCT = 0.020
+SL_PCT = 0.010
+
+PATTERN_TOLERANCE = 0.015
+
+MIN_PATTERN_DISTANCE = 5
+MAX_PATTERN_DISTANCE = 60
+
+SIGNAL_COOLDOWN = 10
+
+
+# ============================================================
+# SESSION
+# ============================================================
+
+session = requests.Session()
+
+session.headers.update({
+    "User-Agent": "Mozilla/5.0"
+})
+
+
+# ============================================================
+# BINANCE REQUEST
+# ============================================================
+
+def binance_get(endpoint, params=None):
+
+    url = BASE_URL + endpoint
+
+    for attempt in range(5):
+
+        try:
+
+            response = session.get(
+                url,
+                params=params,
+                timeout=30
+            )
+
+            if response.status_code == 200:
+                return response.json()
+
+            if response.status_code == 429:
+                time.sleep(3)
+                continue
+
+            print(
+                f"HTTP {response.status_code}"
+            )
+
+            time.sleep(2)
+
+        except Exception as e:
+
+            print(
+                f"Request error: {e}"
+            )
+
+            time.sleep(2)
+
+    return None
+
+
+# ============================================================
+# FUTURES SYMBOLS
+# ============================================================
+
+def get_futures_symbols():
+
+    data = binance_get(
+        "/fapi/v1/exchangeInfo"
+    )
+
+    if not data:
+        return set()
+
+    symbols = set()
+
+    for item in data.get(
+        "symbols",
+        []
+    ):
+
+        if item.get("status") != "TRADING":
+            continue
+
+        if item.get("quoteAsset") != "USDT":
+            continue
+
+        if item.get("contractType") != "PERPETUAL":
+            continue
+
+        symbols.add(
+            item["symbol"]
+        )
+
+    return symbols
+
+
+# ============================================================
+# TOP VOLUME SYMBOLS
+# ============================================================
+
+def get_top_symbols():
+
+    ticker_data = binance_get(
+        "/fapi/v1/ticker/24hr"
+    )
+
+    if not ticker_data:
+        return []
+
+    valid_symbols = get_futures_symbols()
+
+    rows = []
+
+    for item in ticker_data:
+
+        symbol = item.get("symbol")
+
+        if symbol not in valid_symbols:
+            continue
+
+        try:
+            volume = float(
+                item.get(
+                    "quoteVolume",
+                    0
+                )
+            )
+        except Exception:
+            continue
+
+        if volume < MIN_QUOTE_VOLUME:
+            continue
+
+        rows.append(
+            (
+                symbol,
+                volume
+            )
+        )
+
+    rows.sort(
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    return [
+        symbol
+        for symbol, _ in rows[
+            :TOP_SYMBOLS
+        ]
+    ]
+
+
+# ============================================================
+# GET KLINES
+# ============================================================
+
+def get_klines(
+    symbol,
+    start_ms,
+    end_ms
+):
+
+    rows = []
+
+    current_start = start_ms
+
+    while current_start < end_ms:
+
+        params = {
+            "symbol": symbol,
+            "interval": INTERVAL,
+            "startTime": current_start,
+            "endTime": end_ms,
+            "limit": 1500
+        }
+
+        data = binance_get(
+            "/fapi/v1/klines",
+            params
+        )
+
+        if not data:
+            break
+
+        rows.extend(data)
+
+        if len(data) < 1500:
+            break
+
+        current_start = (
+            data[-1][0] + 1
+        )
+
+        time.sleep(0.05)
+
+    if not rows:
+        return pd.DataFrame()
+
+    columns = [
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "quote_volume",
+        "trades",
+        "taker_base",
+        "taker_quote",
+        "ignore"
+    ]
+
+    df = pd.DataFrame(
+        rows,
+        columns=columns
+    )
+
+    numeric_columns = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "quote_volume"
+    ]
+
+    for column in numeric_columns:
+
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce"
+        )
+
+    df["open_time"] = pd.to_datetime(
+        df["open_time"],
+        unit="ms",
+        utc=True
+    )
+
+    df["close_time"] = pd.to_datetime(
+        df["close_time"],
+        unit="ms",
+        utc=True
+    )
+
+    df = df.drop_duplicates(
+        subset=["open_time"]
+    )
+
+    df = df.sort_values(
+        "open_time"
+    )
+
+    df = df.reset_index(
+        drop=True
+    )
+
+    # فقط کندل‌های بسته‌شده
+    now = pd.Timestamp.now(
+        tz="UTC"
+    )
+
+    df = df[
+        df["close_time"] <= now
+    ]
+
+    return df
+
+
+# ============================================================
+# SWING HIGH
+# ============================================================
+
+def find_swing_highs(
+    df,
+    left=2,
+    right=2
+):
+
+    highs = df["high"].values
+
+    result = []
+
+    for i in range(
+        left,
+        len(df) - right
+    ):
+
+        left_max = highs[
+            i-left:i
+        ].max()
+
+        right_max = highs[
+            i+1:i+right+1
+        ].max()
+
+        if (
+            highs[i] > left_max
+            and
+            highs[i] > right_max
+        ):
+            result.append(i)
+
+    return result
+
+
+# ============================================================
+# SWING LOW
+# ============================================================
+
+def find_swing_lows(
+    df,
+    left=2,
+    right=2
+):
+
+    lows = df["low"].values
+
+    result = []
+
+    for i in range(
+        left,
+        len(df) - right
+    ):
+
+        left_min = lows[
+            i-left:i
+        ].min()
+
+        right_min = lows[
+            i+1:i+right+1
+        ].min()
+
+        if (
+            lows[i] < left_min
+            and
+            lows[i] < right_min
+        ):
+            result.append(i)
+
+    return result
+
+
+# ============================================================
+# DOUBLE BOTTOM
+# ============================================================
+
+def detect_double_bottom(
+    df,
+    index
+):
+
+    if index < LOOKBACK:
+        return False
+
+    window = df.iloc[
+        index - LOOKBACK:index
+    ]
+
+    lows = find_swing_lows(
+        window
+    )
+
+    if len(lows) < 2:
+        return False
+
+    l1, l2 = lows[-2:]
+
+    distance = l2 - l1
+
+    if not (
+        MIN_PATTERN_DISTANCE
+        <= distance
+        <= MAX_PATTERN_DISTANCE
+    ):
+        return False
+
+    p1 = float(
+        window.iloc[l1]["low"]
+    )
+
+    p2 = float(
+        window.iloc[l2]["low"]
+    )
+
+    average = (
+        p1 + p2
+    ) / 2
+
+    if average <= 0:
+        return False
+
+    difference = (
+        abs(p1 - p2)
+        / average
+    )
+
+    if difference > PATTERN_TOLERANCE:
+        return False
+
+    neckline = window.iloc[
+        l1:l2 + 1
+    ]["high"].max()
+
+    current_close = float(
+        df.iloc[index]["close"]
+    )
+
+    return current_close > neckline
+
+
+# ============================================================
+# DOUBLE TOP
+# ============================================================
+
+def detect_double_top(
+    df,
+    index
+):
+
+    if index < LOOKBACK:
+        return False
+
+    window = df.iloc[
+        index - LOOKBACK:index
+    ]
+
+    highs = find_swing_highs(
+        window
+    )
+
+    if len(highs) < 2:
+        return False
+
+    h1, h2 = highs[-2:]
+
+    distance = h2 - h1
+
+    if not (
+        MIN_PATTERN_DISTANCE
+        <= distance
+        <= MAX_PATTERN_DISTANCE
+    ):
+        return False
+
+    p1 = float(
+        window.iloc[h1]["high"]
+    )
+
+    p2 = float(
+        window.iloc[h2]["high"]
+    )
+
+    average = (
+        p1 + p2
+    ) / 2
+
+    if average <= 0:
+        return False
+
+    difference = (
+        abs(p1 - p2)
+        / average
+    )
+
+    if difference > PATTERN_TOLERANCE:
+        return False
+
+    neckline = window.iloc[
+        h1:h2 + 1
+    ]["low"].min()
+
+    current_close = float(
+        df.iloc[index]["close"]
+    )
+
+    return current_close < neckline
+
+
+# ============================================================
+# HEAD & SHOULDERS
+# ============================================================
+
+def detect_head_shoulders(
+    df,
+    index
+):
+
+    if index < LOOKBACK:
+        return False
+
+    window = df.iloc[
+        index - LOOKBACK:index
+    ]
+
+    highs = find_swing_highs(
+        window
+    )
+
+    if len(highs) < 3:
+        return False
+
+    h1, h2, h3 = highs[-3:]
+
+    p1 = float(
+        window.iloc[h1]["high"]
+    )
+
+    p2 = float(
+        window.iloc[h2]["high"]
+    )
+
+    p3 = float(
+        window.iloc[h3]["high"]
+    )
+
+    if not (
+        p2 > p1
+        and
+        p2 > p3
+    ):
+        return False
+
+    shoulder_difference = (
+        abs(p1 - p3)
+        /
+        ((p1 + p3) / 2)
+    )
+
+    if shoulder_difference > 0.03:
+        return False
+
+    neckline_1 = window.iloc[
+        h1:h2
+    ]["low"].min()
+
+    neckline_2 = window.iloc[
+        h2:h3
+    ]["low"].min()
+
+    neckline = min(
+        neckline_1,
+        neckline_2
+    )
+
+    current_close = float(
+        df.iloc[index]["close"]
+    )
+
+    return current_close < neckline
+
+
+# ============================================================
+# INVERSE HEAD & SHOULDERS
+# ============================================================
+
+def detect_inverse_head_shoulders(
+    df,
+    index
+):
+
+    if index < LOOKBACK:
+        return False
+
+    window = df.iloc[
+        index - LOOKBACK:index
+    ]
+
+    lows = find_swing_lows(
+        window
+    )
+
+    if len(lows) < 3:
+        return False
+
+    l1, l2, l3 = lows[-3:]
+
+    p1 = float(
+        window.iloc[l1]["low"]
+    )
+
+    p2 = float(
+        window.iloc[l2]["low"]
+    )
+
+    p3 = float(
+        window.iloc[l3]["low"]
+    )
+
+    if not (
+        p2 < p1
+        and
+        p2 < p3
+    ):
+        return False
+
+    shoulder_difference = (
+        abs(p1 - p3)
+        /
+        ((p1 + p3) / 2)
+    )
+
+    if shoulder_difference > 0.03:
+        return False
+
+    neckline_1 = window.iloc[
+        l1:l2
+    ]["high"].max()
+
+    neckline_2 = window.iloc[
+        l2:l3
+    ]["high"].max()
+
+    neckline = max(
+        neckline_1,
+        neckline_2
+    )
+
+    current_close = float(
+        df.iloc[index]["close"]
+    )
+
+    return current_close > neckline
+
+
+# ============================================================
+# TRIANGLE
+# ============================================================
+
+def detect_triangle(
+    df,
+    index
+):
+
+    if index < LOOKBACK:
+        return None
+
+    window = df.iloc[
+        index - LOOKBACK:index
+    ]
+
+    highs = find_swing_highs(
+        window
+    )
+
+    lows = find_swing_lows(
+        window
+    )
+
+    if len(highs) < 2:
+        return None
+
+    if len(lows) < 2:
+        return None
+
+    h1, h2 = highs[-2:]
+    l1, l2 = lows[-2:]
+
+    high1 = float(
+        window.iloc[h1]["high"]
+    )
+
+    high2 = float(
+        window.iloc[h2]["high"]
+    )
+
+    low1 = float(
+        window.iloc[l1]["low"]
+    )
+
+    low2 = float(
+        window.iloc[l2]["low"]
+    )
+
+    if not (
+        high2 < high1
+        and
+        low2 > low1
+    ):
+        return None
+
+    current_close = float(
+        df.iloc[index]["close"]
+    )
+
+    upper = max(
+        high1,
+        high2
+    )
+
+    lower = min(
+        low1,
+        low2
+    )
+
+    if current_close > upper:
+        return "LONG"
+
+    if current_close < lower:
+        return "SHORT"
+
+    return None
+
+
+# ============================================================
+# WEDGE
+# ============================================================
+
+def detect_wedge(
+    df,
+    index
+):
+
+    if index < LOOKBACK:
+        return None
+
+    window = df.iloc[
+        index - LOOKBACK:index
+    ]
+
+    highs = find_swing_highs(
+        window
+    )
+
+    lows = find_swing_lows(
+        window
+    )
+
+    if len(highs) < 2:
+        return None
+
+    if len(lows) < 2:
+        return None
+
+    h1, h2 = highs[-2:]
+    l1, l2 = lows[-2:]
+
+    high1 = float(
+        window.iloc[h1]["high"]
+    )
+
+    high2 = float(
+        window.iloc[h2]["high"]
+    )
+
+    low1 = float(
+        window.iloc[l1]["low"]
+    )
+
+    low2 = float(
+        window.iloc[l2]["low"]
+    )
+
+    high_slope = (
+        high2 - high1
+    )
+
+    low_slope = (
+        low2 - low1
+    )
+
+    current_close = float(
+        df.iloc[index]["close"]
+    )
+
+    upper = max(
+        high1,
+        high2
+    )
+
+    lower = min(
+        low1,
+        low2
+    )
+
+    if (
+        high_slope < 0
+        and
+        low_slope < 0
+        and
+        low_slope > high_slope
+        and
+        current_close > upper
+    ):
+        return "LONG"
+
+    if (
+        high_slope > 0
+        and
+        low_slope > 0
+        and
+        low_slope < high_slope
+        and
+        current_close < lower
+    ):
+        return "SHORT"
+
+    return None
+
+
+# ============================================================
+# FLAG
+# ============================================================
+
+def detect_flag(
+    df,
+    index
+):
+
+    if index < 30:
+        return None
+
+    impulse_start = index - 25
+    impulse_end = index - 10
+
+    start_price = float(
+        df.iloc[
+            impulse_start
+        ]["close"]
+    )
+
+    end_price = float(
+        df.iloc[
+            impulse_end
+        ]["close"]
+    )
+
+    if start_price <= 0:
+        return None
+
+    impulse_move = (
+        end_price - start_price
+    ) / start_price
+
+    if abs(impulse_move) < 0.04:
+        return None
+
+    flag = df.iloc[
+        index - 10:index
+    ]
+
+    flag_high = flag["high"].max()
+    flag_low = flag["low"].min()
+
+    flag_range = (
+        flag_high - flag_low
+    ) / end_price
+
+    if flag_range > 0.035:
+        return None
+
+    current_close = float(
+        df.iloc[index]["close"]
+    )
+
+    if impulse_move > 0:
+
+        if current_close > flag_high:
+            return "LONG"
+
+    else:
+
+        if current_close < flag_low:
+            return "SHORT"
+
+    return None
+
+
+# ============================================================
+# DETECT PATTERNS
+# ============================================================
+
+def detect_patterns(
+    df,
+    index
+):
+
+    patterns = []
+
+    if detect_double_bottom(
+        df,
+        index
+    ):
+        patterns.append(
+            (
+                "Double Bottom",
+                "LONG"
+            )
+        )
+
+    if detect_double_top(
+        df,
+        index
+    ):
+        patterns.append(
+            (
+                "Double Top",
+                "SHORT"
+            )
+        )
+
+    if detect_head_shoulders(
+        df,
+        index
+    ):
+        patterns.append(
+            (
+                "Head & Shoulders",
+                "SHORT"
+            )
+        )
+
+    if detect_inverse_head_shoulders(
+        df,
+        index
+    ):
+        patterns.append(
+            (
+                "Inverse H&S",
+                "LONG"
+            )
+        )
+
+    triangle = detect_triangle(
+        df,
+        index
+    )
+
+    if triangle:
+        patterns.append(
+            (
+                "Triangle",
+                triangle
+            )
+        )
+
+    wedge = detect_wedge(
+        df,
+        index
+    )
+
+    if wedge:
+        patterns.append(
+            (
+                "Wedge",
+                wedge
+            )
+        )
+
+    flag = detect_flag(
+        df,
+        index
+    )
+
+    if flag:
+        patterns.append(
+            (
+                "Flag",
+                flag
+            )
+        )
+
+    return patterns
+
+
+# ============================================================
+# TEST TRADE
+# ============================================================
+
+def test_trade(
+    df,
+    entry_index,
+    direction
+):
+
+    entry = float(
+        df.iloc[
+            entry_index
+        ]["close"]
+    )
+
+    if direction == "LONG":
+
+        tp = entry * (
+            1 + TP_PCT
+        )
+
+        sl = entry * (
+            1 - SL_PCT
+        )
+
+    else:
+
+        tp = entry * (
+            1 - TP_PCT
+        )
+
+        sl = entry * (
+            1 + SL_PCT
+        )
+
+    end_index = min(
+        len(df),
+        entry_index
+        + MAX_HOLD_CANDLES
+        + 1
+    )
+
+    for i in range(
+        entry_index + 1,
+        end_index
+    ):
+
+        high = float(
+            df.iloc[i]["high"]
+        )
+
+        low = float(
+            df.iloc[i]["low"]
+        )
+
+        if direction == "LONG":
+
+            # محافظه‌کارانه:
+            # اگر TP و SL در یک کندل باشند،
+            # SL شکست محسوب می‌شود.
+            if low <= sl:
+                return False
+
+            if high >= tp:
+                return True
+
+        else:
+
+            if high >= sl:
+                return False
+
+            if low <= tp:
+                return True
+
+    return None
+
+
+# ============================================================
+# BACKTEST ONE SYMBOL
+# ============================================================
+
+def backtest_symbol(
+    symbol,
+    df
+):
+
+    results = []
+
+    last_signal_index = -999999
+
+    start_index = LOOKBACK + 5
+
+    end_index = (
+        len(df)
+        - MAX_HOLD_CANDLES
+        - 2
+    )
+
+    for i in range(
+        start_index,
+        end_index
+    ):
+
+        if (
+            i - last_signal_index
+            < SIGNAL_COOLDOWN
+        ):
+            continue
+
+        patterns = detect_patterns(
+            df,
+            i
+        )
+
+        if not patterns:
+            continue
+
+        pattern, direction = patterns[0]
+
+        result = test_trade(
+            df,
+            i,
+            direction
+        )
+
+        if result is None:
+            continue
+
+        results.append({
+            "symbol": symbol,
+            "pattern": pattern,
+            "direction": direction,
+            "success": result
+        })
+
+        last_signal_index = i
+
+    return results
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+
+    print()
+    print("=" * 70)
+    print(
+        "BINANCE FUTURES PATTERN BACKTEST - 1 YEAR"
+    )
+    print("=" * 70)
+    print()
+
+    end_dt = datetime.now(
+        timezone.utc
+    )
+
+    start_dt = (
+        end_dt
+        - timedelta(days=DAYS)
+    )
+
+    start_ms = int(
+        start_dt.timestamp()
+        * 1000
+    )
+
+    end_ms = int(
+        end_dt.timestamp()
+        * 1000
+    )
+
+    print(
+        "Period:",
+        start_dt.strftime(
+            "%Y-%m-%d"
+        ),
+        "->",
+        end_dt.strftime(
+            "%Y-%m-%d"
+        )
+    )
+
+    print(
+        "Timeframe:",
+        INTERVAL
+    )
+
+    print(
+        "TP:",
+        f"{TP_PCT * 100:.2f}%"
+    )
+
+    print(
+        "SL:",
+        f"{SL_PCT * 100:.2f}%"
+    )
+
+    print()
+
+    print(
+        "Selecting Binance Futures symbols..."
+    )
+
+    symbols = get_top_symbols()
+
+    if not symbols:
+
+        print(
+            "ERROR: No symbols found."
+        )
+
+        return
+
+    print(
+        f"Symbols selected: {len(symbols)}"
+    )
+
+    print()
+
+    all_results = []
+
+    for number, symbol in enumerate(
+        symbols,
+        1
+    ):
+
+        print(
+            f"[{number}/{len(symbols)}] "
+            f"{symbol}"
+        )
+
+        df = get_klines(
+            symbol,
+            start_ms,
+            end_ms
+        )
+
+        if df.empty:
+
+            print(
+                "  No data"
+            )
+
+            continue
+
+        print(
+            f"  Candles: {len(df)}"
+        )
+
+        try:
+
+            results = backtest_symbol(
+                symbol,
+                df
+            )
+
+            all_results.extend(
+                results
+            )
+
+            print(
+                f"  Trades: {len(results)}"
+            )
+
+        except Exception as e:
+
+            print(
+                f"  ERROR: {e}"
+            )
+
+    # ========================================================
+    # FINAL RESULTS
+    # ========================================================
+
+    total = len(
+        all_results
+    )
+
+    successful = sum(
+        1
+        for result in all_results
+        if result["success"]
+    )
+
+    failed = (
+        total
+        - successful
+    )
+
+    if total:
+
+        success_rate = (
+            successful
+            / total
+            * 100
+        )
+
+        failure_rate = (
+            failed
+            / total
+            * 100
+        )
+
+    else:
+
+        success_rate = 0
+        failure_rate = 0
+
+    print()
+    print("=" * 70)
+    print("FINAL RESULTS")
+    print("=" * 70)
+    print()
+
+    print(
+        f"Total Trades:   {total}"
+    )
+
+    print(
+        f"Successful:     {successful}"
+    )
+
+    print(
+        f"Failed:         {failed}"
+    )
+
+    print(
+        f"Success Rate:   {success_rate:.2f}%"
+    )
+
+    print(
+        f"Failure Rate:   {failure_rate:.2f}%"
+    )
+
+    # ========================================================
+    # PATTERN RESULTS
+    # ========================================================
+
+    if all_results:
+
+        result_df = pd.DataFrame(
+            all_results
+        )
+
+        print()
+        print("=" * 70)
+        print("PATTERN RESULTS")
+        print("=" * 70)
+
+        for pattern, group in (
+            result_df
+            .groupby("pattern")
+        ):
+
+            trades = len(group)
+
+            wins = int(
+                group["success"].sum()
+            )
+
+            losses = (
+                trades
+                - wins
+            )
+
+            win_rate = (
+                wins
+                / trades
+                * 100
+            )
+
+            loss_rate = (
+                losses
+                / trades
+                * 100
+            )
+
+            print()
+            print(pattern)
+
+            print(
+                f"Trades:         {trades}"
+            )
+
+            print(
+                f"Successful:     {wins}"
+            )
+
+            print(
+                f"Failed:         {losses}"
+            )
+
+            print(
+                f"Success Rate:   {win_rate:.2f}%"
+            )
+
+            print(
+                f"Failure Rate:   {loss_rate:.2f}%"
+            )
+
+        # ====================================================
+        # LONG / SHORT
+        # ====================================================
+
+        print()
+        print("=" * 70)
+        print("LONG / SHORT")
+        print("=" * 70)
+
+        for direction in [
+            "LONG",
+            "SHORT"
+        ]:
+
+            group = result_df[
+                result_df["direction"]
+                == direction
+            ]
+
+            trades = len(group)
+
+            if trades == 0:
+                continue
+
+            wins = int(
+                group["success"].sum()
+            )
+
+            losses = (
+                trades
+                - wins
+            )
+
+            win_rate = (
+                wins
+                / trades
+                * 100
+            )
+
+            print()
+            print(direction)
+
+            print(
+                f"Trades:         {trades}"
+            )
+
+            print(
+                f"Successful:     {wins}"
+            )
+
+            print(
+                f"Failed:         {losses}"
+            )
+
+            print(
+                f"Success Rate:   {win_rate:.2f}%"
+            )
+
+    print()
+    print("=" * 70)
+    print("BACKTEST COMPLETE")
+    print("=" * 70)
+
+
+# ============================================================
+# RUN
+# ============================================================
+
+if __name__ == "__main__":
+    main()
