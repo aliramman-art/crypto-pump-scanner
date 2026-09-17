@@ -1,18 +1,13 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.2
+# VERSION 5.3
 # ============================================================
 #
-# CHANGES FROM v5.1:
+# CHANGES FROM v5.2:
 #
-# - 10 fixed assets
-# - NO MAX OPEN TRADE LIMIT
-# - DUPLICATE EFFECTIVE SIGNALS REMOVED
-# - NEW DATABASE -> START AGGREGATE STATS FROM ZERO
-# - AGGREGATE STATS REMAIN PERSISTENT AFTER START
-# - CLEAN TELEGRAM REPORT
-# - DIRECTIONAL PERCENTAGES FIXED
-# - SAME-RUN CLOSED SIGNALS REMOVED FROM NEW SIGNALS
+# - FIXED REPEATED NEW SIGNAL REPORTING
+# - A TRADE IS NEW ONLY IF ACTUALLY INSERTED INTO DB
+# - EXISTING OPEN TRADES ARE NOT REPORTED AS NEW AGAIN
 #
 # STRATEGY UNCHANGED:
 #
@@ -63,10 +58,6 @@ from datetime import datetime, timezone
 
 BASE_URL = "https://futures.kraken.com"
 
-# ------------------------------------------------------------
-# LIVE SETTINGS
-# ------------------------------------------------------------
-
 MAIN_INTERVAL = "1h"
 ENTRY_INTERVAL = "5m"
 
@@ -74,46 +65,19 @@ SL_PCT = 0.01
 TP_PCT = 0.01
 RR = 1.0
 
-# ------------------------------------------------------------
-# PAPER TRADING ONLY
-# ------------------------------------------------------------
-
 REAL_TRADING = False
-
-# ------------------------------------------------------------
-# MAXIMUM TRADE AGE
-# ------------------------------------------------------------
 
 MAX_HOLD_HOURS = 48
 
-# ------------------------------------------------------------
-# HISTORY
-# ------------------------------------------------------------
-
 MAIN_LOOKBACK = 500
 ENTRY_LOOKBACK = 1500
-
-# ------------------------------------------------------------
-# API
-# ------------------------------------------------------------
 
 REQUEST_TIMEOUT = 30
 REQUEST_SLEEP = 0.10
 
 CANDLE_CHUNK = 1900
 
-# ------------------------------------------------------------
-# DATABASE
-#
-# New database intentionally starts aggregate statistics
-# from zero. It remains persistent across future runs.
-# ------------------------------------------------------------
-
 DB_FILE = "kraken_pattern_live_v52.db"
-
-# ------------------------------------------------------------
-# TELEGRAM
-# ------------------------------------------------------------
 
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
@@ -192,7 +156,7 @@ SESSION.headers.update(
     {
         "User-Agent":
             "Mozilla/5.0 "
-            "KrakenPatternLive/5.2"
+            "KrakenPatternLive/5.3"
     }
 )
 
@@ -267,10 +231,6 @@ def directional_move_pct(
     entry,
     direction,
 ):
-    """
-    Positive = favorable move
-    Negative = unfavorable move
-    """
 
     raw = pct_change(
         current,
@@ -289,15 +249,6 @@ def tp_sl_pct_from_entry(
     sl,
     direction,
 ):
-    """
-    LONG:
-        TP +1%
-        SL -1%
-
-    SHORT:
-        TP -1%
-        SL +1%
-    """
 
     if entry == 0:
         return 0.0, 0.0
@@ -321,9 +272,6 @@ def distance_pct(
     price_a,
     price_b,
 ):
-    """
-    Absolute percentage distance.
-    """
 
     if price_b == 0:
         return 0.0
@@ -961,24 +909,6 @@ def trade_exists(
 # ============================================================
 # EFFECTIVE DUPLICATE CHECK
 # ============================================================
-#
-# A duplicate means:
-#
-#   SAME ASSET
-#   SAME DIRECTION
-#   SAME ENTRY TIME
-#
-# Pattern name is intentionally ignored.
-#
-# This prevents:
-#
-#   DOGE LONG Double Bottom
-#   DOGE LONG Flag
-#
-# from becoming two separate trades if they actually
-# produce the same entry candle.
-#
-# ============================================================
 
 def effective_trade_exists(
     asset,
@@ -1010,6 +940,19 @@ def effective_trade_exists(
     return row is not None
 
 
+# ============================================================
+# INSERT TRADE
+#
+# IMPORTANT:
+#
+# Returns:
+#     True  = genuinely inserted as a NEW trade
+#     False = already existed / ignored
+#
+# This return value is what prevents an old open trade
+# from being reported again as NEW SIGNAL.
+# ============================================================
+
 def insert_trade(
     trade,
 ):
@@ -1020,7 +963,7 @@ def insert_trade(
         utc_now().timestamp()
     )
 
-    conn.execute(
+    cursor = conn.execute(
         """
         INSERT OR IGNORE INTO trades (
             signal_key,
@@ -1077,8 +1020,14 @@ def insert_trade(
         ),
     )
 
+    inserted = (
+        cursor.rowcount == 1
+    )
+
     conn.commit()
     conn.close()
+
+    return inserted
 
 
 def get_open_trades():
@@ -2905,11 +2854,6 @@ def process_open_trades():
             if current_price >= sl_price:
                 hit_sl = True
 
-        # ----------------------------------------------------
-        # SAME PRICE:
-        # SL FIRST
-        # ----------------------------------------------------
-
         if hit_tp and hit_sl:
 
             close_trade(
@@ -3779,10 +3723,6 @@ def send_report(
 
         return
 
-    # --------------------------------------------------------
-    # SAFE SPLIT
-    # --------------------------------------------------------
-
     chunks = []
 
     current_chunk = ""
@@ -3845,7 +3785,7 @@ def main():
         "KRAKEN FUTURES PATTERN LIVE SCANNER"
     )
     print(
-        "VERSION 5.2"
+        "VERSION 5.3"
     )
     print("=" * 70)
 
@@ -3877,6 +3817,11 @@ def main():
     print(
         "Duplicate filter: "
         "ASSET + DIRECTION + ENTRY TIME"
+    )
+
+    print(
+        "NEW SIGNAL filter: "
+        "DATABASE INSERT ONLY"
     )
 
     print(
@@ -3947,11 +3892,6 @@ def main():
     # --------------------------------------------------------
 
     new_trades = []
-
-    # --------------------------------------------------------
-    # Prevent duplicate signals during
-    # the current scan.
-    # --------------------------------------------------------
 
     scan_entries = []
 
@@ -4056,8 +3996,6 @@ def main():
                 #
                 # Same asset + same direction +
                 # same entry candle.
-                #
-                # Pattern name is ignored.
                 # ------------------------------------------------
 
                 if effective_trade_exists(
@@ -4111,11 +4049,31 @@ def main():
 
                 # ------------------------------------------------
                 # INSERT
+                #
+                # IMPORTANT:
+                # insert_trade() returns True ONLY when
+                # a brand-new DB record was created.
                 # ------------------------------------------------
 
-                insert_trade(
+                inserted = insert_trade(
                     trade
                 )
+
+                if not inserted:
+
+                    print(
+                        f"DUPLICATE SKIPPED: "
+                        f"{asset} "
+                        f"{trade['direction']} "
+                        f"already exists in database"
+                    )
+
+                    continue
+
+                # ------------------------------------------------
+                # ONLY REAL NEW DATABASE INSERTS
+                # ARE NEW SIGNALS
+                # ------------------------------------------------
 
                 new_trades.append(
                     trade
@@ -4143,8 +4101,6 @@ def main():
 
     # --------------------------------------------------------
     # GET ALL CURRENT OPEN TRADES
-    #
-    # NO LIMIT APPLIED.
     # --------------------------------------------------------
 
     open_trades = (
@@ -4193,8 +4149,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # IMPORTANT:
-    # Get only trades that are STILL OPEN.
+    # GET ONLY CURRENTLY OPEN TRADES
     # --------------------------------------------------------
 
     open_trades = (
@@ -4202,8 +4157,7 @@ def main():
     )
 
     # --------------------------------------------------------
-    # REFRESH CURRENT PRICES FOR TRADES
-    # THAT REMAIN OPEN.
+    # REFRESH CURRENT PRICES
     # --------------------------------------------------------
 
     for trade in open_trades:
@@ -4222,7 +4176,6 @@ def main():
 
     # --------------------------------------------------------
     # REMOVE SAME-RUN CLOSED SIGNALS
-    # FROM NEW SIGNALS
     # --------------------------------------------------------
 
     new_trades = (
