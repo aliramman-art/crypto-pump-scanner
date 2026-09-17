@@ -84,12 +84,8 @@ REQUEST_SLEEP = 0.10
 
 CANDLE_CHUNK = 1900
 
-# Periodic Telegram report interval
 PERIODIC_REPORT_SECONDS = 30 * 60
 
-# IMPORTANT:
-# Keep the existing DB filename so historical statistics
-# and open trades are NOT reset.
 DB_FILE = "kraken_pattern_live_v52.db"
 
 TELEGRAM_BOT_TOKEN = os.getenv(
@@ -891,14 +887,6 @@ def init_db():
         )
         """
     )
-
-    # --------------------------------------------------------
-    # Persistent scanner metadata.
-    #
-    # This does NOT modify or reset the trades table.
-    # It is used only to remember the last periodic
-    # Telegram report across GitHub Actions runs.
-    # --------------------------------------------------------
 
     cur.execute(
         """
@@ -3036,7 +3024,6 @@ def process_open_trades():
                 result_item
             )
 
-            # Immediate CLOSE alert
             send_close_alert(
                 trade,
                 "FAILURE",
@@ -3072,7 +3059,6 @@ def process_open_trades():
                 result_item
             )
 
-            # Immediate CLOSE alert
             send_close_alert(
                 trade,
                 "FAILURE",
@@ -3108,7 +3094,6 @@ def process_open_trades():
                 result_item
             )
 
-            # Immediate CLOSE alert
             send_close_alert(
                 trade,
                 "SUCCESS",
@@ -3154,7 +3139,6 @@ def process_open_trades():
                 result_item
             )
 
-            # Immediate CLOSE alert
             send_close_alert(
                 trade,
                 "TIME_EXIT",
@@ -3353,7 +3337,6 @@ def update_open_trades_from_history(
                 result_item
             )
 
-            # Immediate CLOSE alert
             send_close_alert(
                 trade,
                 result["result"],
@@ -3687,10 +3670,7 @@ def send_new_signal_alert(
     text = (
         "<b>🚨 NEW SIGNAL</b>\n"
         f"🕐 {utc_now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-        f"{format_signal("
-        f"trade, "
-        f"current_price"
-        f")}"
+        f"{format_signal(trade, current_price)}"
     )
 
     print(
@@ -3912,17 +3892,6 @@ def format_stats(
 
 # ============================================================
 # SEND PERIODIC REPORT
-#
-# IMPORTANT:
-# This report is intentionally NOT an event report.
-#
-# It contains:
-#   - current open trades
-#   - aggregate performance
-#
-# It does NOT replay:
-#   - old NEW SIGNALS
-#   - old CLOSE SIGNALS
 # ============================================================
 
 def send_periodic_report(
@@ -4055,27 +4024,11 @@ def main():
 
     print("=" * 70)
 
-    # --------------------------------------------------------
-    # DATABASE
-    # --------------------------------------------------------
-
     init_db()
-
-    # --------------------------------------------------------
-    # CONTRACT DISCOVERY
-    # --------------------------------------------------------
 
     universe = (
         build_dynamic_universe()
     )
-
-    # --------------------------------------------------------
-    # FIRST:
-    # Resolve existing open trades.
-    #
-    # CLOSE alerts are sent immediately from
-    # update_open_trades_from_history().
-    # --------------------------------------------------------
 
     print()
     print(
@@ -4087,10 +4040,6 @@ def main():
             universe
         )
     )
-
-    # --------------------------------------------------------
-    # CURRENT PRICES
-    # --------------------------------------------------------
 
     prices = {}
 
@@ -4114,10 +4063,6 @@ def main():
             prices[
                 contract
             ] = price
-
-    # --------------------------------------------------------
-    # LIVE SIGNAL SCAN
-    # --------------------------------------------------------
 
     new_trades = []
 
@@ -4202,10 +4147,6 @@ def main():
 
             for trade in entries:
 
-                # ------------------------------------------------
-                # EXACT SIGNAL KEY DUPLICATE
-                # ------------------------------------------------
-
                 if trade_exists(
                     trade["signal_key"]
                 ):
@@ -4218,10 +4159,6 @@ def main():
                     )
 
                     continue
-
-                # ------------------------------------------------
-                # EFFECTIVE DUPLICATE
-                # ------------------------------------------------
 
                 if effective_trade_exists(
                     trade["asset"],
@@ -4239,10 +4176,6 @@ def main():
 
                     continue
 
-                # ------------------------------------------------
-                # ONE OPEN TRADE PER ASSET + DIRECTION
-                # ------------------------------------------------
-
                 if open_same_direction_exists(
                     trade["asset"],
                     trade["direction"],
@@ -4256,10 +4189,6 @@ def main():
                     )
 
                     continue
-
-                # ------------------------------------------------
-                # DUPLICATE DURING CURRENT SCAN
-                # ------------------------------------------------
 
                 current_scan_duplicate = False
 
@@ -4290,10 +4219,6 @@ def main():
 
                     continue
 
-                # ------------------------------------------------
-                # INSERT
-                # ------------------------------------------------
-
                 inserted = insert_trade(
                     trade
                 )
@@ -4308,11 +4233,6 @@ def main():
                     )
 
                     continue
-
-                # ------------------------------------------------
-                # ONLY REAL NEW DATABASE INSERTS
-                # ARE NEW SIGNALS
-                # ------------------------------------------------
 
                 new_trades.append(
                     trade
@@ -4330,14 +4250,6 @@ def main():
                     f"Entry="
                     f"{trade['entry_price']}"
                 )
-
-                # ------------------------------------------------
-                # IMMEDIATE NEW SIGNAL TELEGRAM
-                #
-                # This happens ONLY after successful DB insert.
-                # Therefore an existing trade can never generate
-                # another NEW SIGNAL alert.
-                # ------------------------------------------------
 
                 current_price = prices.get(
                     trade["symbol"]
@@ -4369,10 +4281,6 @@ def main():
                 f"{exc}"
             )
 
-    # --------------------------------------------------------
-    # GET ALL CURRENT OPEN TRADES
-    # --------------------------------------------------------
-
     open_trades = (
         get_open_trades()
     )
@@ -4383,10 +4291,6 @@ def main():
         f"{len(open_trades)}"
     )
 
-    # --------------------------------------------------------
-    # REFRESH CURRENT PRICES FOR OPEN
-    # --------------------------------------------------------
-
     for trade in open_trades:
 
         price = (
@@ -4401,37 +4305,18 @@ def main():
                 trade["symbol"]
             ] = price
 
-    # --------------------------------------------------------
-    # PROCESS CURRENT PRICE
-    #
-    # CLOSE alerts are sent immediately inside
-    # process_open_trades().
-    # --------------------------------------------------------
-
     closed_from_price = (
         process_open_trades()
     )
-
-    # --------------------------------------------------------
-    # COMBINE CLOSED TRADES
-    # --------------------------------------------------------
 
     closed_now = (
         closed_from_history
         + closed_from_price
     )
 
-    # --------------------------------------------------------
-    # GET ONLY CURRENTLY OPEN TRADES
-    # --------------------------------------------------------
-
     open_trades = (
         get_open_trades()
     )
-
-    # --------------------------------------------------------
-    # REFRESH CURRENT PRICES
-    # --------------------------------------------------------
 
     for trade in open_trades:
 
@@ -4446,16 +4331,6 @@ def main():
             prices[
                 trade["symbol"]
             ] = price
-
-    # --------------------------------------------------------
-    # PERIODIC REPORT
-    #
-    # IMPORTANT:
-    # Do NOT send new_trades / closed_now here.
-    #
-    # Those were already sent immediately when the event
-    # occurred.
-    # --------------------------------------------------------
 
     if periodic_report_due():
 
@@ -4475,10 +4350,6 @@ def main():
         print(
             "Periodic Telegram report: NOT DUE"
         )
-
-    # --------------------------------------------------------
-    # CONSOLE SUMMARY
-    # --------------------------------------------------------
 
     stats = aggregate_stats()
 
