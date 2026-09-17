@@ -19,18 +19,35 @@ jobs:
     timeout-minutes: 15
 
     steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ======================================================
+      # DEPENDENCIES
+      # ======================================================
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install pandas requests numpy
+
+      # ======================================================
+      # RUN LIVE SCANNER
+      # ======================================================
 
       - name: Run Kraken Pattern Live Scanner
         env:
@@ -38,6 +55,10 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python kraken_pattern_live.py
+
+      # ======================================================
+      # SAVE DATABASE STATE
+      # ======================================================
 
       - name: Save scanner state
         run: |
