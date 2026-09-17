@@ -12,7 +12,7 @@
 # - NO REPEATED CLOSE ALERTS
 # - PERIODIC REPORT EVERY 30 MINUTES
 # - PERIODIC REPORT DOES NOT REPLAY OLD EVENTS
-# - PERIODIC REPORT SHOWS OPEN TRADES + PERFORMANCE
+# - PERIODIC REPORT SHOWS NEW SIGNALS + OPEN TRADES + PERFORMANCE
 # - PERIODIC REPORT TIMESTAMP IS STORED IN SQLITE
 #
 # STRATEGY UNCHANGED:
@@ -3758,6 +3758,90 @@ def send_close_alert(
 
 
 # ============================================================
+# FORMAT NEW SIGNALS FOR PERIODIC REPORT
+# ============================================================
+
+def format_new_signals(
+    trades,
+):
+
+    lines = [
+        "<b>🆕 NEW SIGNALS</b>"
+    ]
+
+    if not trades:
+
+        lines.append(
+            "None"
+        )
+
+        return "\n".join(
+            lines
+        )
+
+    for trade in trades:
+
+        direction = trade[
+            "direction"
+        ]
+
+        emoji = (
+            "🟢"
+            if direction == "LONG"
+            else "🔴"
+        )
+
+        entry = float(
+            trade["entry_price"]
+        )
+
+        tp = float(
+            trade["tp_price"]
+        )
+
+        sl = float(
+            trade["sl_price"]
+        )
+
+        lines.append("")
+
+        lines.append(
+            f"{emoji} <b>"
+            f"{trade['asset']} "
+            f"{direction}</b>"
+        )
+
+        lines.append(
+            f"Pattern: "
+            f"{trade['pattern']}"
+        )
+
+        lines.append(
+            f"Entry: <code>"
+            f"{fmt_price(entry)}"
+            f"</code>"
+        )
+
+        lines.append(
+            f"TP: <code>"
+            f"{fmt_price(tp)}"
+            f"</code>  |  "
+            f"SL: <code>"
+            f"{fmt_price(sl)}"
+            f"</code>"
+        )
+
+        lines.append(
+            f"Entry time: "
+            f"{format_time(trade['entry_time'])}"
+        )
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
 # FORMAT OPEN TRADES
 # ============================================================
 
@@ -3776,6 +3860,10 @@ def format_open_trades(
     lines = [
         "<b>📂 OPEN TRADES</b>"
     ]
+
+    now_ts = int(
+        utc_now().timestamp()
+    )
 
     for trade in trades:
 
@@ -3833,6 +3921,27 @@ def format_open_trades(
             current,
         )
 
+        entry_time = int(
+            trade["entry_time"]
+        )
+
+        duration_seconds = max(
+            0,
+            now_ts - entry_time
+        )
+
+        duration_hours = (
+            duration_seconds // 3600
+        )
+
+        duration_minutes = (
+            (
+                duration_seconds
+                % 3600
+            )
+            // 60
+        )
+
         lines.append("")
         lines.append(
             f"{emoji} <b>"
@@ -3860,6 +3969,12 @@ def format_open_trades(
         lines.append(
             f"To TP {to_tp:.2f}%  |  "
             f"To SL {to_sl:.2f}%"
+        )
+
+        lines.append(
+            f"⏱ Duration: "
+            f"{duration_hours}h "
+            f"{duration_minutes}m"
         )
 
         lines.append(
@@ -3897,6 +4012,7 @@ def format_stats(
 def send_periodic_report(
     open_trades,
     prices,
+    new_trades,
 ):
 
     parts = []
@@ -3910,6 +4026,12 @@ def send_periodic_report(
         f"RR {RR:.2f}\n"
         f"🧪 Real trading: DISABLED\n"
         f"🪙 Universe: {EXPECTED_UNIVERSE_SIZE} assets"
+    )
+
+    parts.append(
+        format_new_signals(
+            new_trades
+        )
     )
 
     parts.append(
@@ -4342,6 +4464,7 @@ def main():
         send_periodic_report(
             open_trades,
             prices,
+            new_trades,
         )
 
     else:
