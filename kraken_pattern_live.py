@@ -3,13 +3,17 @@
 # VERSION 5.4
 # ============================================================
 #
-# CHANGES FROM v5.3:
+# NOTIFICATION UPDATE:
 #
-# - FIXED REPEATED NEW SIGNAL REPORTING
-# - A TRADE IS NEW ONLY IF ACTUALLY INSERTED INTO DB
-# - EXISTING OPEN TRADES ARE NOT REPORTED AS NEW AGAIN
-# - ONE OPEN TRADE PER ASSET + DIRECTION
-# - OPPOSITE DIRECTIONS ON THE SAME ASSET ARE ALLOWED
+# - SCANNER CAN RUN EVERY 1 MINUTE
+# - NEW SIGNAL TELEGRAM IS SENT IMMEDIATELY
+# - CLOSE TELEGRAM IS SENT IMMEDIATELY
+# - NO REPEATED NEW SIGNAL ALERTS
+# - NO REPEATED CLOSE ALERTS
+# - PERIODIC REPORT EVERY 30 MINUTES
+# - PERIODIC REPORT DOES NOT REPLAY OLD EVENTS
+# - PERIODIC REPORT SHOWS OPEN TRADES + PERFORMANCE
+# - PERIODIC REPORT TIMESTAMP IS STORED IN SQLITE
 #
 # STRATEGY UNCHANGED:
 #
@@ -79,6 +83,9 @@ REQUEST_TIMEOUT = 30
 REQUEST_SLEEP = 0.10
 
 CANDLE_CHUNK = 1900
+
+# Periodic Telegram report interval
+PERIODIC_REPORT_SECONDS = 30 * 60
 
 # IMPORTANT:
 # Keep the existing DB filename so historical statistics
@@ -885,9 +892,130 @@ def init_db():
         """
     )
 
+    # --------------------------------------------------------
+    # Persistent scanner metadata.
+    #
+    # This does NOT modify or reset the trades table.
+    # It is used only to remember the last periodic
+    # Telegram report across GitHub Actions runs.
+    # --------------------------------------------------------
+
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scanner_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+        """
+    )
+
     conn.commit()
     conn.close()
 
+
+# ============================================================
+# SCANNER META
+# ============================================================
+
+def get_meta(
+    key,
+    default=None,
+):
+
+    conn = db_connect()
+
+    row = conn.execute(
+        """
+        SELECT value
+        FROM scanner_meta
+        WHERE key = ?
+        LIMIT 1
+        """,
+        (
+            key,
+        ),
+    ).fetchone()
+
+    conn.close()
+
+    if row is None:
+        return default
+
+    return row["value"]
+
+
+def set_meta(
+    key,
+    value,
+):
+
+    conn = db_connect()
+
+    conn.execute(
+        """
+        INSERT INTO scanner_meta (
+            key,
+            value
+        )
+        VALUES (?, ?)
+
+        ON CONFLICT(key)
+        DO UPDATE SET
+            value = excluded.value
+        """,
+        (
+            key,
+            str(value),
+        ),
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def periodic_report_due():
+
+    raw = get_meta(
+        "last_periodic_report",
+        None,
+    )
+
+    if raw is None:
+        return True
+
+    try:
+
+        last_ts = int(
+            float(raw)
+        )
+
+    except Exception:
+
+        return True
+
+    now_ts = int(
+        utc_now().timestamp()
+    )
+
+    return (
+        now_ts - last_ts
+        >= PERIODIC_REPORT_SECONDS
+    )
+
+
+def mark_periodic_report_sent():
+
+    set_meta(
+        "last_periodic_report",
+        int(
+            utc_now().timestamp()
+        ),
+    )
+
+
+# ============================================================
+# TRADE DUPLICATE CHECK
+# ============================================================
 
 def trade_exists(
     signal_key,
@@ -948,20 +1076,6 @@ def effective_trade_exists(
 
 # ============================================================
 # ONE OPEN TRADE PER ASSET + DIRECTION
-#
-# IMPORTANT:
-#
-# SAME ASSET + OPPOSITE DIRECTION = ALLOWED
-#
-# Examples:
-#
-#   SOL LONG  + SOL SHORT = ALLOWED
-#   SOL SHORT + SOL SHORT = BLOCKED
-#   SOL LONG  + SOL LONG  = BLOCKED
-#
-# This applies ONLY to currently OPEN trades.
-# Once a trade is CLOSED, a new trade in that
-# asset + direction is allowed again.
 # ============================================================
 
 def open_same_direction_exists(
@@ -994,15 +1108,6 @@ def open_same_direction_exists(
 
 # ============================================================
 # INSERT TRADE
-#
-# IMPORTANT:
-#
-# Returns:
-#     True  = genuinely inserted as a NEW trade
-#     False = already existed / ignored
-#
-# This return value is what prevents an old open trade
-# from being reported again as NEW SIGNAL.
 # ============================================================
 
 def insert_trade(
@@ -1236,7 +1341,7 @@ def find_pivots(df):
 
         if (
             l[i] < left_l.min()
-            and l[i] <= right_l.max()
+            and l[i] <= right_l.min()
         ):
 
             lows.append(i)
@@ -2908,69 +3013,108 @@ def process_open_trades():
 
         if hit_tp and hit_sl:
 
+            exit_time = int(
+                utc_now().timestamp()
+            )
+
             close_trade(
                 trade["id"],
                 "FAILURE",
-                int(
-                    utc_now().timestamp()
-                ),
+                exit_time,
+                sl_price,
+                -1.0,
+            )
+
+            result_item = (
+                trade,
+                "FAILURE",
                 sl_price,
                 -1.0,
             )
 
             closed_now.append(
-                (
-                    trade,
-                    "FAILURE",
-                    sl_price,
-                    -1.0,
-                )
+                result_item
+            )
+
+            # Immediate CLOSE alert
+            send_close_alert(
+                trade,
+                "FAILURE",
+                sl_price,
+                -1.0,
+                exit_time,
             )
 
             continue
 
         if hit_sl:
 
+            exit_time = int(
+                utc_now().timestamp()
+            )
+
             close_trade(
                 trade["id"],
                 "FAILURE",
-                int(
-                    utc_now().timestamp()
-                ),
+                exit_time,
+                sl_price,
+                -1.0,
+            )
+
+            result_item = (
+                trade,
+                "FAILURE",
                 sl_price,
                 -1.0,
             )
 
             closed_now.append(
-                (
-                    trade,
-                    "FAILURE",
-                    sl_price,
-                    -1.0,
-                )
+                result_item
+            )
+
+            # Immediate CLOSE alert
+            send_close_alert(
+                trade,
+                "FAILURE",
+                sl_price,
+                -1.0,
+                exit_time,
             )
 
             continue
 
         if hit_tp:
 
+            exit_time = int(
+                utc_now().timestamp()
+            )
+
             close_trade(
                 trade["id"],
                 "SUCCESS",
-                int(
-                    utc_now().timestamp()
-                ),
+                exit_time,
+                tp_price,
+                RR,
+            )
+
+            result_item = (
+                trade,
+                "SUCCESS",
                 tp_price,
                 RR,
             )
 
             closed_now.append(
-                (
-                    trade,
-                    "SUCCESS",
-                    tp_price,
-                    RR,
-                )
+                result_item
+            )
+
+            # Immediate CLOSE alert
+            send_close_alert(
+                trade,
+                "SUCCESS",
+                tp_price,
+                RR,
+                exit_time,
             )
 
             continue
@@ -2987,23 +3131,36 @@ def process_open_trades():
             >= MAX_HOLD_HOURS * 3600
         ):
 
+            exit_time = int(
+                utc_now().timestamp()
+            )
+
             close_trade(
                 trade["id"],
                 "TIME_EXIT",
-                int(
-                    utc_now().timestamp()
-                ),
+                exit_time,
+                current_price,
+                0.0,
+            )
+
+            result_item = (
+                trade,
+                "TIME_EXIT",
                 current_price,
                 0.0,
             )
 
             closed_now.append(
-                (
-                    trade,
-                    "TIME_EXIT",
-                    current_price,
-                    0.0,
-                )
+                result_item
+            )
+
+            # Immediate CLOSE alert
+            send_close_alert(
+                trade,
+                "TIME_EXIT",
+                current_price,
+                0.0,
+                exit_time,
             )
 
     return closed_now
@@ -3185,13 +3342,24 @@ def update_open_trades_from_history(
                 result["r_multiple"],
             )
 
+            result_item = (
+                trade,
+                result["result"],
+                result["exit_price"],
+                result["r_multiple"],
+            )
+
             closed_now.append(
-                (
-                    trade,
-                    result["result"],
-                    result["exit_price"],
-                    result["r_multiple"],
-                )
+                result_item
+            )
+
+            # Immediate CLOSE alert
+            send_close_alert(
+                trade,
+                result["result"],
+                result["exit_price"],
+                result["r_multiple"],
+                result["exit_time"],
             )
 
     return closed_now
@@ -3357,6 +3525,77 @@ def telegram_send(
 
 
 # ============================================================
+# TELEGRAM CHUNK SENDER
+# ============================================================
+
+def telegram_send_chunks(
+    text,
+):
+
+    if len(text) <= 3900:
+
+        return telegram_send(
+            text
+        )
+
+    chunks = []
+
+    current_chunk = ""
+
+    for block in text.split(
+        "\n\n"
+    ):
+
+        if (
+            len(
+                current_chunk
+            )
+            + len(block)
+            + 2
+            > 3800
+        ):
+
+            if current_chunk:
+
+                chunks.append(
+                    current_chunk
+                )
+
+            current_chunk = block
+
+        else:
+
+            if current_chunk:
+
+                current_chunk += (
+                    "\n\n"
+                    + block
+                )
+
+            else:
+
+                current_chunk = block
+
+    if current_chunk:
+
+        chunks.append(
+            current_chunk
+        )
+
+    success = True
+
+    for chunk in chunks:
+
+        if not telegram_send(
+            chunk
+        ):
+
+            success = False
+
+    return success
+
+
+# ============================================================
 # FORMAT NEW SIGNAL
 # ============================================================
 
@@ -3437,6 +3676,108 @@ def format_signal(
 
 
 # ============================================================
+# IMMEDIATE NEW SIGNAL ALERT
+# ============================================================
+
+def send_new_signal_alert(
+    trade,
+    current_price,
+):
+
+    text = (
+        "<b>🚨 NEW SIGNAL</b>\n"
+        f"🕐 {utc_now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        f"{format_signal("
+        f"trade, "
+        f"current_price"
+        f")}"
+    )
+
+    print(
+        f"TELEGRAM NEW SIGNAL: "
+        f"{trade['asset']} "
+        f"{trade['direction']}"
+    )
+
+    return telegram_send_chunks(
+        text
+    )
+
+
+# ============================================================
+# IMMEDIATE CLOSE ALERT
+# ============================================================
+
+def send_close_alert(
+    trade,
+    result,
+    exit_price,
+    r_multiple,
+    exit_time,
+):
+
+    direction = trade[
+        "direction"
+    ]
+
+    if result == "SUCCESS":
+
+        emoji = "✅"
+        label = "TP"
+
+    elif result == "FAILURE":
+
+        emoji = "❌"
+        label = "SL"
+
+    else:
+
+        emoji = "⏱"
+        label = "TIME"
+
+    entry_price = float(
+        trade["entry_price"]
+    )
+
+    move_pct = directional_move_pct(
+        float(exit_price),
+        entry_price,
+        direction,
+    )
+
+    text = (
+        f"{emoji} <b>CLOSE SIGNAL</b>\n"
+        f"<b>{trade['asset']} "
+        f"{direction}</b>\n"
+        f"Pattern: {trade['pattern']}\n"
+        f"Result: <b>{label}</b>\n"
+        f"Entry: <code>"
+        f"{fmt_price(entry_price)}"
+        f"</code>\n"
+        f"Exit: <code>"
+        f"{fmt_price(float(exit_price))}"
+        f"</code> "
+        f"({move_pct:+.2f}%)\n"
+        f"R: <b>{r_multiple:+.2f}R</b>\n"
+        f"Entry time: "
+        f"{format_time(trade['entry_time'])}\n"
+        f"Exit time: "
+        f"{format_time(exit_time)}"
+    )
+
+    print(
+        f"TELEGRAM CLOSE: "
+        f"{trade['asset']} "
+        f"{trade['direction']} "
+        f"{label}"
+    )
+
+    return telegram_send_chunks(
+        text
+    )
+
+
+# ============================================================
 # FORMAT OPEN TRADES
 # ============================================================
 
@@ -3512,41 +3853,6 @@ def format_open_trades(
             current,
         )
 
-        # ----------------------------------------------------
-        # DURATION
-        # ----------------------------------------------------
-
-        entry_time = int(
-            trade["entry_time"]
-        )
-
-        duration_seconds = (
-            int(
-                utc_now().timestamp()
-            )
-            - entry_time
-        )
-
-        if duration_seconds < 0:
-            duration_seconds = 0
-
-        duration_minutes = (
-            duration_seconds // 60
-        )
-
-        duration_hours = (
-            duration_minutes // 60
-        )
-
-        remaining_minutes = (
-            duration_minutes % 60
-        )
-
-        duration_text = (
-            f"{duration_hours}h "
-            f"{remaining_minutes}m"
-        )
-
         lines.append("")
         lines.append(
             f"{emoji} <b>"
@@ -3580,60 +3886,6 @@ def format_open_trades(
             f"Pattern: {trade['pattern']}"
         )
 
-        lines.append(
-            f"Duration: {duration_text}"
-        )
-
-    return "\n".join(
-        lines
-    )
-
-
-# ============================================================
-# FORMAT CLOSED RESULTS
-# ============================================================
-
-def format_closed_results(
-    closed_now,
-):
-
-    if not closed_now:
-        return ""
-
-    lines = [
-        "<b>🏁 CLOSED THIS RUN</b>"
-    ]
-
-    for (
-        trade,
-        result,
-        exit_price,
-        r,
-    ) in closed_now:
-
-        if result == "SUCCESS":
-
-            emoji = "✅"
-            label = "TP"
-
-        elif result == "FAILURE":
-
-            emoji = "❌"
-            label = "SL"
-
-        else:
-
-            emoji = "⏱"
-            label = "TIME"
-
-        lines.append(
-            f"{emoji} "
-            f"<b>{trade['asset']} "
-            f"{trade['direction']}</b> "
-            f"{label} "
-            f"({r:+.2f}R)"
-        )
-
     return "\n".join(
         lines
     )
@@ -3659,110 +3911,37 @@ def format_stats(
 
 
 # ============================================================
-# FILTER NEW SIGNALS THAT CLOSED THIS RUN
+# SEND PERIODIC REPORT
+#
+# IMPORTANT:
+# This report is intentionally NOT an event report.
+#
+# It contains:
+#   - current open trades
+#   - aggregate performance
+#
+# It does NOT replay:
+#   - old NEW SIGNALS
+#   - old CLOSE SIGNALS
 # ============================================================
 
-def filter_new_trades_after_closure(
-    new_trades,
-    closed_now,
-):
-
-    if not new_trades:
-        return []
-
-    closed_keys = {
-        trade["signal_key"]
-        for (
-            trade,
-            _,
-            _,
-            _,
-        ) in closed_now
-    }
-
-    return [
-        trade
-        for trade in new_trades
-        if trade["signal_key"]
-        not in closed_keys
-    ]
-
-
-# ============================================================
-# SEND FULL TELEGRAM REPORT
-# ============================================================
-
-def send_report(
-    new_trades,
+def send_periodic_report(
     open_trades,
     prices,
-    closed_now,
 ):
 
-    new_trades = (
-        filter_new_trades_after_closure(
-            new_trades,
-            closed_now,
-        )
-    )
-
     parts = []
-
-    # --------------------------------------------------------
-    # HEADER
-    # --------------------------------------------------------
 
     parts.append(
         "<b>📊 KRAKEN PATTERN SCANNER</b>\n"
         f"🕐 {utc_now().strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"🔄 30-MINUTE PERIODIC REPORT\n"
         f"⚙️ TP {TP_PCT * 100:.2f}%  |  "
         f"SL {SL_PCT * 100:.2f}%  |  "
         f"RR {RR:.2f}\n"
         f"🧪 Real trading: DISABLED\n"
-        f"🪙 Universe: {EXPECTED_UNIVERSE_SIZE} assets\n"
-        f"📂 Open trade rule: "
-        f"ONE PER ASSET + DIRECTION"
+        f"🪙 Universe: {EXPECTED_UNIVERSE_SIZE} assets"
     )
-
-    # --------------------------------------------------------
-    # NEW SIGNALS
-    # --------------------------------------------------------
-
-    if new_trades:
-
-        signal_lines = [
-            "<b>🚨 NEW SIGNALS</b>"
-        ]
-
-        for trade in new_trades:
-
-            current = prices.get(
-                trade["symbol"]
-            )
-
-            signal_lines.append(
-                format_signal(
-                    trade,
-                    current,
-                )
-            )
-
-        parts.append(
-            "\n\n".join(
-                signal_lines
-            )
-        )
-
-    else:
-
-        parts.append(
-            "<b>🚨 NEW SIGNALS</b>\n"
-            "None"
-        )
-
-    # --------------------------------------------------------
-    # OPEN TRADES
-    # --------------------------------------------------------
 
     parts.append(
         format_open_trades(
@@ -3770,26 +3949,6 @@ def send_report(
             prices,
         )
     )
-
-    # --------------------------------------------------------
-    # CLOSED THIS RUN
-    # --------------------------------------------------------
-
-    closed_text = (
-        format_closed_results(
-            closed_now
-        )
-    )
-
-    if closed_text:
-
-        parts.append(
-            closed_text
-        )
-
-    # --------------------------------------------------------
-    # PERFORMANCE
-    # --------------------------------------------------------
 
     stats = aggregate_stats()
 
@@ -3803,67 +3962,26 @@ def send_report(
         parts
     )
 
-    # --------------------------------------------------------
-    # TELEGRAM LIMIT
-    # --------------------------------------------------------
+    success = telegram_send_chunks(
+        text
+    )
 
-    if len(text) <= 3900:
+    if success:
 
-        telegram_send(
-            text
+        mark_periodic_report_sent()
+
+        print(
+            "30-MINUTE PERIODIC REPORT: SENT"
         )
 
-        return
+    else:
 
-    chunks = []
-
-    current_chunk = ""
-
-    for block in text.split(
-        "\n\n"
-    ):
-
-        if (
-            len(
-                current_chunk
-            )
-            + len(block)
-            + 2
-            > 3800
-        ):
-
-            if current_chunk:
-
-                chunks.append(
-                    current_chunk
-                )
-
-            current_chunk = block
-
-        else:
-
-            if current_chunk:
-
-                current_chunk += (
-                    "\n\n"
-                    + block
-                )
-
-            else:
-
-                current_chunk = block
-
-    if current_chunk:
-
-        chunks.append(
-            current_chunk
+        print(
+            "30-MINUTE PERIODIC REPORT: "
+            "FAILED - timestamp NOT updated"
         )
 
-    for chunk in chunks:
-
-        telegram_send(
-            chunk
-        )
+    return success
 
 
 # ============================================================
@@ -3922,6 +4040,16 @@ def main():
     )
 
     print(
+        "Telegram events: "
+        "IMMEDIATE NEW + IMMEDIATE CLOSE"
+    )
+
+    print(
+        "Periodic Telegram: "
+        "EVERY 30 MINUTES"
+    )
+
+    print(
         f"Database: {DB_FILE}"
     )
 
@@ -3944,6 +4072,9 @@ def main():
     # --------------------------------------------------------
     # FIRST:
     # Resolve existing open trades.
+    #
+    # CLOSE alerts are sent immediately from
+    # update_open_trades_from_history().
     # --------------------------------------------------------
 
     print()
@@ -4090,9 +4221,6 @@ def main():
 
                 # ------------------------------------------------
                 # EFFECTIVE DUPLICATE
-                #
-                # Same asset + same direction +
-                # same entry candle.
                 # ------------------------------------------------
 
                 if effective_trade_exists(
@@ -4113,12 +4241,6 @@ def main():
 
                 # ------------------------------------------------
                 # ONE OPEN TRADE PER ASSET + DIRECTION
-                #
-                # Opposite direction remains allowed.
-                #
-                # Example:
-                # SOL LONG  + SOL SHORT = ALLOWED
-                # SOL SHORT + SOL SHORT = BLOCKED
                 # ------------------------------------------------
 
                 if open_same_direction_exists(
@@ -4170,10 +4292,6 @@ def main():
 
                 # ------------------------------------------------
                 # INSERT
-                #
-                # IMPORTANT:
-                # insert_trade() returns True ONLY when
-                # a brand-new DB record was created.
                 # ------------------------------------------------
 
                 inserted = insert_trade(
@@ -4211,6 +4329,37 @@ def main():
                     f"{trade['pattern']} "
                     f"Entry="
                     f"{trade['entry_price']}"
+                )
+
+                # ------------------------------------------------
+                # IMMEDIATE NEW SIGNAL TELEGRAM
+                #
+                # This happens ONLY after successful DB insert.
+                # Therefore an existing trade can never generate
+                # another NEW SIGNAL alert.
+                # ------------------------------------------------
+
+                current_price = prices.get(
+                    trade["symbol"]
+                )
+
+                if current_price is None:
+
+                    current_price = (
+                        fetch_current_price(
+                            trade["symbol"]
+                        )
+                    )
+
+                    if current_price is not None:
+
+                        prices[
+                            trade["symbol"]
+                        ] = current_price
+
+                send_new_signal_alert(
+                    trade,
+                    current_price,
                 )
 
         except Exception as exc:
@@ -4254,6 +4403,9 @@ def main():
 
     # --------------------------------------------------------
     # PROCESS CURRENT PRICE
+    #
+    # CLOSE alerts are sent immediately inside
+    # process_open_trades().
     # --------------------------------------------------------
 
     closed_from_price = (
@@ -4296,26 +4448,33 @@ def main():
             ] = price
 
     # --------------------------------------------------------
-    # REMOVE SAME-RUN CLOSED SIGNALS
+    # PERIODIC REPORT
+    #
+    # IMPORTANT:
+    # Do NOT send new_trades / closed_now here.
+    #
+    # Those were already sent immediately when the event
+    # occurred.
     # --------------------------------------------------------
 
-    new_trades = (
-        filter_new_trades_after_closure(
-            new_trades,
-            closed_now,
+    if periodic_report_due():
+
+        print()
+        print(
+            "30-MINUTE PERIODIC REPORT DUE"
         )
-    )
 
-    # --------------------------------------------------------
-    # TELEGRAM
-    # --------------------------------------------------------
+        send_periodic_report(
+            open_trades,
+            prices,
+        )
 
-    send_report(
-        new_trades,
-        open_trades,
-        prices,
-        closed_now,
-    )
+    else:
+
+        print()
+        print(
+            "Periodic Telegram report: NOT DUE"
+        )
 
     # --------------------------------------------------------
     # CONSOLE SUMMARY
