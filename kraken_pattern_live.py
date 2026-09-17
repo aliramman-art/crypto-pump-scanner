@@ -1236,7 +1236,7 @@ def find_pivots(df):
 
         if (
             l[i] < left_l.min()
-            and l[i] <= right_l.min()
+            and l[i] <= right_l.max()
         ):
 
             lows.append(i)
@@ -3512,6 +3512,41 @@ def format_open_trades(
             current,
         )
 
+        # ----------------------------------------------------
+        # DURATION
+        # ----------------------------------------------------
+
+        entry_time = int(
+            trade["entry_time"]
+        )
+
+        duration_seconds = (
+            int(
+                utc_now().timestamp()
+            )
+            - entry_time
+        )
+
+        if duration_seconds < 0:
+            duration_seconds = 0
+
+        duration_minutes = (
+            duration_seconds // 60
+        )
+
+        duration_hours = (
+            duration_minutes // 60
+        )
+
+        remaining_minutes = (
+            duration_minutes % 60
+        )
+
+        duration_text = (
+            f"{duration_hours}h "
+            f"{remaining_minutes}m"
+        )
+
         lines.append("")
         lines.append(
             f"{emoji} <b>"
@@ -3543,6 +3578,10 @@ def format_open_trades(
 
         lines.append(
             f"Pattern: {trade['pattern']}"
+        )
+
+        lines.append(
+            f"Duration: {duration_text}"
         )
 
     return "\n".join(
