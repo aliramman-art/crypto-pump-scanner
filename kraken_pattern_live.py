@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.0 - RR 1.0 + TELEGRAM + PAPER TRADING
+# VERSION 5.1 - RR 1.0 + CLEAN TELEGRAM REPORT
 # ============================================================
 #
 # STRATEGY:
@@ -58,7 +58,6 @@ BASE_URL = "https://futures.kraken.com"
 MAIN_INTERVAL = "1h"
 ENTRY_INTERVAL = "5m"
 
-# RR 1.0
 SL_PCT = 0.01
 TP_PCT = 0.01
 RR = 1.0
@@ -76,15 +75,7 @@ REAL_TRADING = False
 MAX_HOLD_HOURS = 48
 
 # ------------------------------------------------------------
-# LIVE HISTORY
-#
-# Enough history for:
-# - pivots
-# - patterns
-# - flags
-# - breakout
-# - retest
-#
+# HISTORY
 # ------------------------------------------------------------
 
 MAIN_LOOKBACK = 500
@@ -107,12 +98,6 @@ DB_FILE = "kraken_pattern_live.db"
 
 # ------------------------------------------------------------
 # TELEGRAM
-#
-# GitHub Actions:
-#
-# TELEGRAM_BOT_TOKEN
-# TELEGRAM_CHAT_ID
-#
 # ------------------------------------------------------------
 
 TELEGRAM_BOT_TOKEN = os.getenv(
@@ -202,7 +187,7 @@ SESSION.headers.update(
     {
         "User-Agent":
             "Mozilla/5.0 "
-            "KrakenPatternLive/5.0"
+            "KrakenPatternLive/5.1"
     }
 )
 
@@ -266,6 +251,88 @@ def fmt_price(price):
         return f"{price:.6f}"
 
     return f"{price:.8f}"
+
+
+# ============================================================
+# DIRECTIONAL HELPERS
+# ============================================================
+
+def directional_move_pct(
+    current,
+    entry,
+    direction,
+):
+    """
+    Positive = favorable move
+    Negative = unfavorable move
+    """
+
+    raw = pct_change(
+        current,
+        entry,
+    )
+
+    if direction == "SHORT":
+        return -raw
+
+    return raw
+
+
+def tp_sl_pct_from_entry(
+    entry,
+    tp,
+    sl,
+    direction,
+):
+    """
+    Returns TP/SL percentages relative to entry
+    with market direction preserved.
+
+    LONG:
+        TP +1%
+        SL -1%
+
+    SHORT:
+        TP -1%
+        SL +1%
+    """
+
+    if entry == 0:
+        return 0.0, 0.0
+
+    tp_pct = (
+        (tp - entry)
+        / entry
+        * 100.0
+    )
+
+    sl_pct = (
+        (sl - entry)
+        / entry
+        * 100.0
+    )
+
+    return tp_pct, sl_pct
+
+
+def distance_pct(
+    price_a,
+    price_b,
+):
+    """
+    Absolute percentage distance.
+    """
+
+    if price_b == 0:
+        return 0.0
+
+    return (
+        abs(
+            price_a - price_b
+        )
+        / price_b
+        * 100.0
+    )
 
 
 # ============================================================
@@ -617,8 +684,6 @@ def fetch_recent_candles(
         utc_now().timestamp()
     )
 
-    # Small buffer so the currently forming
-    # candle can be removed safely.
     start_ts = (
         now_ts
         - (
@@ -712,10 +777,6 @@ def fetch_recent_candles(
         drop=True
     )
 
-    # --------------------------------------------------------
-    # CLOSED CANDLES ONLY
-    # --------------------------------------------------------
-
     now_ts = int(
         utc_now().timestamp()
     )
@@ -725,7 +786,6 @@ def fetch_recent_candles(
         <= now_ts
     ].copy()
 
-    # Remove currently forming candle.
     df = df[
         (
             df["timestamp"]
@@ -2504,14 +2564,6 @@ def generate_live_entries(
 
     consumed_events = set()
 
-    # --------------------------------------------------------
-    # We only need recent 1H pattern events.
-    #
-    # But we preserve enough candles to allow:
-    # Pattern -> Breakout -> Retest -> Confirmation
-    #
-    # --------------------------------------------------------
-
     recent_start_ts = int(
         df_1h.iloc[
             max(
@@ -2523,8 +2575,6 @@ def generate_live_entries(
 
     for p in patterns:
 
-        # Ignore very old pattern structures
-        # that cannot produce a fresh signal.
         pattern_end_ts = int(
             df_1h.iloc[
                 p["end"]
@@ -2562,9 +2612,6 @@ def generate_live_entries(
                 ]["timestamp"]
             )
 
-            # We only care about breakout
-            # events that are recent enough
-            # to still have a 5M retest window.
             latest_5m_ts = int(
                 df_5m.iloc[-1][
                     "timestamp"
@@ -2785,16 +2832,6 @@ def process_open_trades():
             trade["entry_time"]
         )
 
-        # ----------------------------------------------------
-        # PRIMARY LIVE PRICE CHECK
-        #
-        # This catches a currently visible
-        # TP/SL level.
-        #
-        # Historical 5M candles are also checked
-        # in the main scan.
-        # ----------------------------------------------------
-
         hit_tp = False
         hit_sl = False
 
@@ -2887,13 +2924,6 @@ def process_open_trades():
             )
 
             continue
-
-        # ----------------------------------------------------
-        # TIME EXIT
-        #
-        # Unlike backtest unresolved trades,
-        # live trades must be closed from DB.
-        # ----------------------------------------------------
 
         age_seconds = (
             int(
@@ -3009,7 +3039,6 @@ def resolve_open_trade_from_candles(
                 high >= sl_price
             )
 
-        # SL FIRST
         if hit_tp and hit_sl:
 
             return {
@@ -3142,6 +3171,12 @@ def aggregate_stats():
                     THEN 1 ELSE 0
                 END
             ) AS losses,
+            SUM(
+                CASE
+                    WHEN result = 'TIME_EXIT'
+                    THEN 1 ELSE 0
+                END
+            ) AS time_exits,
             COALESCE(
                 SUM(r_multiple),
                 0
@@ -3165,13 +3200,23 @@ def aggregate_stats():
         row["losses"] or 0
     )
 
+    time_exits = int(
+        row["time_exits"] or 0
+    )
+
     net_r = float(
         row["net_r"] or 0.0
     )
 
+    # WR is based on decided TP/SL trades.
+    decided = (
+        wins
+        + losses
+    )
+
     wr = (
-        wins / total * 100
-        if total
+        wins / decided * 100
+        if decided
         else 0.0
     )
 
@@ -3179,6 +3224,8 @@ def aggregate_stats():
         "total": total,
         "wins": wins,
         "losses": losses,
+        "time_exits": time_exits,
+        "decided": decided,
         "wr": wr,
         "net_r": net_r,
     }
@@ -3193,15 +3240,19 @@ def telegram_send(
 ):
 
     if not TELEGRAM_BOT_TOKEN:
+
         print(
             "Telegram token not configured."
         )
+
         return False
 
     if not TELEGRAM_CHAT_ID:
+
         print(
             "Telegram chat ID not configured."
         )
+
         return False
 
     url = (
@@ -3213,7 +3264,13 @@ def telegram_send(
     payload = {
         "chat_id":
             TELEGRAM_CHAT_ID,
-        "text": text,
+
+        "text":
+            text,
+
+        "parse_mode":
+            "HTML",
+
         "disable_web_page_preview":
             True,
     }
@@ -3224,6 +3281,11 @@ def telegram_send(
             url,
             json=payload,
             timeout=REQUEST_TIMEOUT,
+        )
+
+        print(
+            "Telegram response:",
+            response.status_code,
         )
 
         response.raise_for_status()
@@ -3276,77 +3338,46 @@ def format_signal(
         else entry
     )
 
-    current_pct = pct_change(
+    move_pct = directional_move_pct(
         current,
         entry,
+        direction,
     )
 
-    tp_pct_from_entry = (
-        abs(
-            tp - entry
+    tp_pct, sl_pct = (
+        tp_sl_pct_from_entry(
+            entry,
+            tp,
+            sl,
+            direction,
         )
-        / entry
-        * 100.0
     )
 
-    sl_pct_from_entry = (
-        abs(
-            sl - entry
-        )
-        / entry
-        * 100.0
+    current_to_tp = distance_pct(
+        tp,
+        current,
     )
 
-    current_to_tp = (
-        abs(
-            tp - current
-        )
-        / current
-        * 100.0
-        if current
-        else 0.0
-    )
-
-    current_to_sl = (
-        abs(
-            sl - current
-        )
-        / current
-        * 100.0
-        if current
-        else 0.0
+    current_to_sl = distance_pct(
+        sl,
+        current,
     )
 
     return (
-        f"{emoji} <b>{direction}</b>\n"
-        f"<b>{trade['asset']}/USDT</b>\n"
-        f"Pattern: {trade['pattern']}\n\n"
-
-        f"Entry: "
-        f"<code>{fmt_price(entry)}</code>\n"
-
-        f"Current: "
-        f"<code>{fmt_price(current)}</code> "
-        f"({current_pct:+.2f}%)\n\n"
-
-        f"TP: "
-        f"<code>{fmt_price(tp)}</code> "
-        f"(+{tp_pct_from_entry:.2f}%)\n"
-
-        f"SL: "
-        f"<code>{fmt_price(sl)}</code> "
-        f"(-{sl_pct_from_entry:.2f}%)\n\n"
-
-        f"Current → TP: "
-        f"{current_to_tp:.2f}%\n"
-
-        f"Current → SL: "
-        f"{current_to_sl:.2f}%\n\n"
-
-        f"RR: 1.00\n"
-        f"Entry time: "
-        f"{format_time(trade['entry_time'])}\n"
-        f"Real trading: DISABLED"
+        f"{emoji} <b>{trade['asset']} "
+        f"{direction}</b>\n"
+        f"Pattern: {trade['pattern']}\n"
+        f"Entry: <code>{fmt_price(entry)}</code>\n"
+        f"Current: <code>{fmt_price(current)}</code> "
+        f"({move_pct:+.2f}%)\n"
+        f"TP: <code>{fmt_price(tp)}</code> "
+        f"({tp_pct:+.2f}%)\n"
+        f"SL: <code>{fmt_price(sl)}</code> "
+        f"({sl_pct:+.2f}%)\n"
+        f"To TP: {current_to_tp:.2f}%  |  "
+        f"To SL: {current_to_sl:.2f}%\n"
+        f"RR: {RR:.2f}  |  "
+        f"Entry: {format_time(trade['entry_time'])}"
     )
 
 
@@ -3362,12 +3393,12 @@ def format_open_trades(
     if not trades:
 
         return (
-            "<b>OPEN TRADES</b>\n"
+            "<b>📂 OPEN TRADES</b>\n"
             "None"
         )
 
     lines = [
-        "<b>OPEN TRADES</b>"
+        "<b>📂 OPEN TRADES</b>"
     ]
 
     for trade in trades:
@@ -3401,47 +3432,62 @@ def format_open_trades(
         if current is None:
             current = entry
 
-        move_pct = pct_change(
+        move_pct = directional_move_pct(
             current,
             entry,
+            direction,
         )
 
-        lines.append(
-            ""
+        tp_pct, sl_pct = (
+            tp_sl_pct_from_entry(
+                entry,
+                tp,
+                sl,
+                direction,
+            )
         )
 
+        to_tp = distance_pct(
+            tp,
+            current,
+        )
+
+        to_sl = distance_pct(
+            sl,
+            current,
+        )
+
+        lines.append("")
         lines.append(
-            f"{emoji} "
-            f"<b>{trade['asset']} "
+            f"{emoji} <b>"
+            f"{trade['asset']} "
             f"{direction}</b>"
         )
 
         lines.append(
-            f"Entry: "
-            f"<code>{fmt_price(entry)}</code>"
-        )
-
-        lines.append(
-            f"Current: "
+            f"Entry "
+            f"<code>{fmt_price(entry)}</code>  "
+            f"Current "
             f"<code>{fmt_price(current)}</code> "
             f"({move_pct:+.2f}%)"
         )
 
         lines.append(
-            f"TP: "
+            f"TP "
             f"<code>{fmt_price(tp)}</code> "
-            f"(+1.00%)"
-        )
-
-        lines.append(
-            f"SL: "
+            f"({tp_pct:+.2f}%)  |  "
+            f"SL "
             f"<code>{fmt_price(sl)}</code> "
-            f"(-1.00%)"
+            f"({sl_pct:+.2f}%)"
         )
 
         lines.append(
-            f"Pattern: "
-            f"{trade['pattern']}"
+            f"To TP {to_tp:.2f}%  |  "
+            f"To SL {to_sl:.2f}%"
+        )
+
+        lines.append(
+            f"Pattern: {trade['pattern']}"
         )
 
     return "\n".join(
@@ -3461,30 +3507,36 @@ def format_closed_results(
         return ""
 
     lines = [
-        "<b>CLOSED THIS RUN</b>"
+        "<b>🏁 CLOSED THIS RUN</b>"
     ]
 
-    for trade, result, exit_price, r in (
-        closed_now
-    ):
+    for (
+        trade,
+        result,
+        exit_price,
+        r,
+    ) in closed_now:
 
         if result == "SUCCESS":
 
             emoji = "✅"
+            label = "TP"
 
         elif result == "FAILURE":
 
             emoji = "❌"
+            label = "SL"
 
         else:
 
             emoji = "⏱"
+            label = "TIME"
 
         lines.append(
             f"{emoji} "
-            f"{trade['asset']} "
-            f"{trade['direction']} "
-            f"{result} "
+            f"<b>{trade['asset']} "
+            f"{trade['direction']}</b> "
+            f"{label} "
             f"({r:+.2f}R)"
         )
 
@@ -3502,17 +3554,44 @@ def format_stats(
 ):
 
     return (
-        "<b>AGGREGATE PERFORMANCE</b>\n"
-        f"Trades: {stats['total']}\n"
-        f"Wins: {stats['wins']}\n"
+        "<b>📈 PERFORMANCE</b>\n"
+        f"Closed: {stats['total']}\n"
+        f"Wins: {stats['wins']}  |  "
         f"Losses: {stats['losses']}\n"
+        f"Time Exit: {stats['time_exits']}\n"
         f"Win Rate: {stats['wr']:.2f}%\n"
-        f"Net R: {stats['net_r']:+.2f}R\n"
-        f"RR: 1.00\n"
-        f"SL: 1.00%\n"
-        f"TP: 1.00%\n"
-        f"Real trading: DISABLED"
+        f"Net R: {stats['net_r']:+.2f}R"
     )
+
+
+# ============================================================
+# FILTER NEW SIGNALS THAT CLOSED THIS RUN
+# ============================================================
+
+def filter_new_trades_after_closure(
+    new_trades,
+    closed_now,
+):
+
+    if not new_trades:
+        return []
+
+    closed_keys = {
+        trade["signal_key"]
+        for (
+            trade,
+            _,
+            _,
+            _,
+        ) in closed_now
+    }
+
+    return [
+        trade
+        for trade in new_trades
+        if trade["signal_key"]
+        not in closed_keys
+    ]
 
 
 # ============================================================
@@ -3526,6 +3605,19 @@ def send_report(
     closed_now,
 ):
 
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # A trade opened and closed during the same run
+    # belongs only in CLOSED THIS RUN.
+    # --------------------------------------------------------
+
+    new_trades = (
+        filter_new_trades_after_closure(
+            new_trades,
+            closed_now,
+        )
+    )
+
     parts = []
 
     # --------------------------------------------------------
@@ -3533,20 +3625,12 @@ def send_report(
     # --------------------------------------------------------
 
     parts.append(
-        "<b>📊 KRAKEN PATTERN SCANNER</b>"
-    )
-
-    parts.append(
-        f"UTC: "
-        f"{utc_now().strftime('%Y-%m-%d %H:%M')}"
-    )
-
-    parts.append(
-        "RR: 1.00 | TP: 1.00% | SL: 1.00%"
-    )
-
-    parts.append(
-        "Real trading: DISABLED"
+        "<b>📊 KRAKEN PATTERN SCANNER</b>\n"
+        f"🕐 {utc_now().strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"⚙️ TP {TP_PCT * 100:.2f}%  |  "
+        f"SL {SL_PCT * 100:.2f}%  |  "
+        f"RR {RR:.2f}\n"
+        f"🧪 PAPER TRADING"
     )
 
     # --------------------------------------------------------
@@ -3555,9 +3639,9 @@ def send_report(
 
     if new_trades:
 
-        parts.append(
+        signal_lines = [
             "<b>🚨 NEW SIGNALS</b>"
-        )
+        ]
 
         for trade in new_trades:
 
@@ -3565,21 +3649,28 @@ def send_report(
                 trade["symbol"]
             )
 
-            parts.append(
+            signal_lines.append(
                 format_signal(
                     trade,
                     current,
                 )
             )
 
+        parts.append(
+            "\n\n".join(
+                signal_lines
+            )
+        )
+
     else:
 
         parts.append(
-            "<b>NEW SIGNALS</b>\nNone"
+            "<b>🚨 NEW SIGNALS</b>\n"
+            "None"
         )
 
     # --------------------------------------------------------
-    # OPEN
+    # OPEN TRADES
     # --------------------------------------------------------
 
     parts.append(
@@ -3600,12 +3691,13 @@ def send_report(
     )
 
     if closed_text:
+
         parts.append(
             closed_text
         )
 
     # --------------------------------------------------------
-    # STATS
+    # PERFORMANCE
     # --------------------------------------------------------
 
     stats = aggregate_stats()
@@ -3620,10 +3712,8 @@ def send_report(
         parts
     )
 
-    # Telegram max message length
-    # is 4096 chars.
-    #
-    # Keep a safe margin.
+    # --------------------------------------------------------
+    # TELEGRAM LIMIT
     # --------------------------------------------------------
 
     if len(text) <= 3900:
@@ -3632,48 +3722,61 @@ def send_report(
             text
         )
 
-    else:
+        return
 
-        chunks = []
+    # --------------------------------------------------------
+    # SAFE SPLIT
+    # --------------------------------------------------------
 
-        current_chunk = ""
+    chunks = []
 
-        for line in text.split(
-            "\n"
+    current_chunk = ""
+
+    for block in text.split(
+        "\n\n"
+    ):
+
+        if (
+            len(
+                current_chunk
+            )
+            + len(block)
+            + 2
+            > 3800
         ):
 
-            if (
-                len(
-                    current_chunk
-                )
-                + len(line)
-                + 1
-                > 3800
-            ):
+            if current_chunk:
 
                 chunks.append(
                     current_chunk
                 )
 
-                current_chunk = line
+            current_chunk = block
+
+        else:
+
+            if current_chunk:
+
+                current_chunk += (
+                    "\n\n"
+                    + block
+                )
 
             else:
 
-                if current_chunk:
-                    current_chunk += "\n"
+                current_chunk = block
 
-                current_chunk += line
+    if current_chunk:
 
-        if current_chunk:
-            chunks.append(
-                current_chunk
-            )
+        chunks.append(
+            current_chunk
+        )
 
-        for chunk in chunks:
+    for chunk in chunks:
 
-            telegram_send(
-                chunk
-            )
+        telegram_send(
+            chunk
+        )
 
 
 # ============================================================
@@ -3687,7 +3790,7 @@ def main():
         "KRAKEN FUTURES PATTERN LIVE SCANNER"
     )
     print(
-        "VERSION 5.0 - RR 1.0"
+        "VERSION 5.1 - RR 1.0"
     )
     print("=" * 70)
 
@@ -3784,7 +3887,6 @@ def main():
         )
 
         if not contract:
-
             continue
 
         try:
@@ -3921,17 +4023,52 @@ def main():
         process_open_trades()
     )
 
+    # --------------------------------------------------------
+    # COMBINE CLOSED TRADES
+    # --------------------------------------------------------
+
     closed_now = (
         closed_from_history
         + closed_from_price
     )
 
     # --------------------------------------------------------
-    # FINAL OPEN TRADES
+    # IMPORTANT:
+    # Refresh prices for trades that remain OPEN.
     # --------------------------------------------------------
 
     open_trades = (
         get_open_trades()
+    )
+
+    for trade in open_trades:
+
+        if (
+            trade["symbol"]
+            not in prices
+        ):
+
+            price = (
+                fetch_current_price(
+                    trade["symbol"]
+                )
+            )
+
+            if price is not None:
+
+                prices[
+                    trade["symbol"]
+                ] = price
+
+    # --------------------------------------------------------
+    # REMOVE SAME-RUN CLOSED SIGNALS FROM NEW SIGNALS
+    # --------------------------------------------------------
+
+    new_trades = (
+        filter_new_trades_after_closure(
+            new_trades,
+            closed_now,
+        )
     )
 
     # --------------------------------------------------------
@@ -3986,6 +4123,11 @@ def main():
     print(
         f"Losses: "
         f"{stats['losses']}"
+    )
+
+    print(
+        f"Time Exits: "
+        f"{stats['time_exits']}"
     )
 
     print(
