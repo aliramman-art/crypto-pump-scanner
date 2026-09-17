@@ -1,52 +1,52 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN BACKTEST 1Y
-# VERSION 4.2 - DYNAMIC FUTURES UNIVERSE
+# VERSION 4.3
 # ============================================================
 #
 # DATA:
 #   Kraken Futures
 #
+# UNIVERSE:
+#   20 FIXED ASSETS
+#   Dynamic exact perpetual-contract discovery
+#
 # TIMEFRAMES:
-#   1H  = Pattern + Breakout
-#   5M  = FIRST Retest + Confirmation + Trade Simulation
+#   1H = Pattern + Breakout
+#   5M = FIRST Retest + Confirmation + Trade
 #
 # STRATEGY:
+#
 #   1H Pattern
-#       ->
+#       ↓
 #   1H CLOSED-CANDLE BREAKOUT
-#       ->
+#       ↓
 #   FIRST 5M RETEST
-#       ->
+#       ↓
 #   5M CONFIRMATION
-#       ->
+#       ↓
 #   ENTRY
 #
 # TP = +2%
 # SL = -1%
+# MAX HOLD = 48 HOURS
 #
-# RULES:
+# IMPORTANT:
 # - CLOSED CANDLES ONLY
 # - NO LOOKAHEAD
 # - ONE TRADE PER PATTERN INSTANCE
 # - FIRST RETEST ONLY
-# - SAME 5M CANDLE TP + SL = SL FIRST
-# - MAX HOLD = 48 HOURS
-#
-# IMPORTANT UNIVERSE FIX:
-# - Universe is defined by ASSET, not hard-coded contract.
-# - Kraken /instruments is queried first.
-# - PI_* and PF_* perpetual contracts are discovered dynamically.
-# - Historical availability is checked independently.
-# - The configured universe remains exactly 20 assets.
-# - An unavailable/partial asset is NEVER silently removed.
+# - CONFIRMATION MUST COME AFTER RETEST
+# - ENTRY CANDLE IS NOT USED FOR TP/SL
+# - SAME CANDLE TP + SL = SL FIRST
+# - UNRESOLVED TRADE = EXCLUDED
 #
 # ============================================================
 
 import time
-import math
 import requests
 import numpy as np
 import pandas as pd
+
 from datetime import datetime, timedelta, timezone
 
 
@@ -69,7 +69,6 @@ MAX_HOLD_HOURS = 48
 REQUEST_TIMEOUT = 30
 REQUEST_SLEEP = 0.10
 
-# Kraken candle endpoint has practical limits.
 CANDLE_CHUNK = 1900
 
 
@@ -78,9 +77,9 @@ CANDLE_CHUNK = 1900
 # ============================================================
 #
 # IMPORTANT:
-# These are ASSETS, not Kraken contract names.
+# These are ASSETS, NOT CONTRACT NAMES.
 #
-# The code discovers PI_* / PF_* automatically.
+# The code discovers the exact Kraken perpetual contract.
 #
 
 FIXED_ASSETS = [
@@ -128,6 +127,7 @@ MAX_STRUCTURE_BARS = 60
 
 FLAG_IMPULSE_LOOKBACK = 35
 FLAG_CONSOLIDATION_BARS = 15
+
 FLAG_MIN_IMPULSE = 0.04
 FLAG_MAX_RETRACE = 0.55
 FLAG_MAX_RANGE_TO_IMPULSE = 0.60
@@ -143,52 +143,38 @@ MIN_CLOSE_POSITION = 0.60
 
 
 # ============================================================
-# SESSION
+# HTTP SESSION
 # ============================================================
 
 SESSION = requests.Session()
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 KrakenPatternBacktest/4.2"
-}
+SESSION.headers.update(
+    {
+        "User-Agent":
+            "Mozilla/5.0 "
+            "KrakenPatternBacktest/4.3"
+    }
+)
 
 
 # ============================================================
-# HELPERS
+# GENERAL HELPERS
 # ============================================================
 
 def pct(a, b):
+
     if b == 0:
         return 0.0
+
     return abs(a - b) / abs(b)
 
 
-def safe_float(value, default=np.nan):
-    try:
-        return float(value)
-    except Exception:
-        return default
-
-
-def normalize_asset(value):
-    if value is None:
-        return ""
-
-    s = str(value).upper().strip()
-
-    replacements = {
-        "XBT": "XBT",
-        "BTC": "XBT",
-    }
-
-    return replacements.get(s, s)
-
-
 # ============================================================
-# KRAKEN API
+# API
 # ============================================================
 
 def api_get(path, params=None):
+
     url = BASE_URL + path
 
     last_error = None
@@ -200,7 +186,6 @@ def api_get(path, params=None):
             response = SESSION.get(
                 url,
                 params=params,
-                headers=HEADERS,
                 timeout=REQUEST_TIMEOUT,
             )
 
@@ -209,11 +194,16 @@ def api_get(path, params=None):
             data = response.json()
 
             if isinstance(data, dict):
+
                 if data.get("result") == "error":
-                    raise RuntimeError(str(data))
+                    raise RuntimeError(
+                        str(data)
+                    )
 
                 if data.get("error"):
-                    raise RuntimeError(str(data["error"]))
+                    raise RuntimeError(
+                        str(data["error"])
+                    )
 
             time.sleep(REQUEST_SLEEP)
 
@@ -224,25 +214,36 @@ def api_get(path, params=None):
             last_error = exc
 
             if attempt < 2:
-                time.sleep(1.0 * (attempt + 1))
+                time.sleep(
+                    1.0 * (attempt + 1)
+                )
 
     raise RuntimeError(
-        f"API request failed: {path} | {last_error}"
+        f"API request failed: "
+        f"{path} | {last_error}"
     )
 
 
 # ============================================================
-# DISCOVER KRAKEN FUTURES INSTRUMENTS
+# KRAKEN INSTRUMENT DISCOVERY
 # ============================================================
 
 def discover_instruments():
 
-    data = api_get("/derivatives/api/v3/instruments")
+    data = api_get(
+        "/derivatives/api/v3/instruments"
+    )
 
-    raw = data.get("instruments", [])
+    raw = data.get(
+        "instruments",
+        []
+    )
 
     if not isinstance(raw, list):
-        raise RuntimeError("Invalid instruments response")
+
+        raise RuntimeError(
+            "Invalid instruments response"
+        )
 
     instruments = []
 
@@ -255,7 +256,7 @@ def discover_instruments():
             item.get("symbol")
             or item.get("instrument")
             or ""
-        ).upper()
+        ).upper().strip()
 
         if not symbol:
             continue
@@ -265,75 +266,9 @@ def discover_instruments():
     return instruments
 
 
-def extract_asset_from_instrument(item):
-
-    symbol = str(
-        item.get("symbol")
-        or item.get("instrument")
-        or ""
-    ).upper()
-
-    # --------------------------------------------------------
-    # First use explicit fields if Kraken supplies them.
-    # --------------------------------------------------------
-
-    candidates = [
-        item.get("underlying"),
-        item.get("base"),
-        item.get("baseAsset"),
-        item.get("underlying_asset"),
-        item.get("pair"),
-    ]
-
-    for value in candidates:
-
-        if not value:
-            continue
-
-        text = str(value).upper()
-
-        for asset in FIXED_ASSETS:
-
-            if asset == "XBT":
-                aliases = ["XBT", "BTC"]
-            else:
-                aliases = [asset]
-
-            for alias in aliases:
-
-                if text == alias:
-                    return asset
-
-                if text.startswith(alias + "/"):
-                    return asset
-
-                if text.startswith(alias + "_"):
-                    return asset
-
-    # --------------------------------------------------------
-    # Then infer from common perpetual symbol names.
-    # --------------------------------------------------------
-
-    for asset in FIXED_ASSETS:
-
-        aliases = ["XBT", "BTC"] if asset == "XBT" else [asset]
-
-        for alias in aliases:
-
-            if symbol in (
-                f"PI_{alias}USD",
-                f"PF_{alias}USD",
-            ):
-                return asset
-
-            if symbol.startswith(f"PI_{alias}"):
-                return asset
-
-            if symbol.startswith(f"PF_{alias}"):
-                return asset
-
-    return None
-
+# ============================================================
+# PERPETUAL CHECK
+# ============================================================
 
 def is_perpetual_instrument(item):
 
@@ -349,64 +284,57 @@ def is_perpetual_instrument(item):
         or ""
     ).upper()
 
-    # Explicit perpetual indicators
     if "PERPETUAL" in instrument_type:
         return True
 
     if "PERPETUAL" in symbol:
         return True
 
-    # Kraken perpetuals commonly use PI_ / PF_
-    if symbol.startswith("PI_") or symbol.startswith("PF_"):
-        return True
-
-    return False
-
-
-def is_usd_contract(item):
-
-    symbol = str(
-        item.get("symbol")
-        or item.get("instrument")
-        or ""
-    ).upper()
-
-    # For this test we want USD perpetual contracts.
-    if symbol.endswith("USD"):
-        return True
-
-    quote_candidates = [
-        item.get("quote"),
-        item.get("quoteAsset"),
-        item.get("quote_currency"),
-    ]
-
-    for value in quote_candidates:
-
-        if str(value).upper() in ("USD", "USDT"):
-            return True
-
-    return False
-
-
-def contract_priority(symbol):
-
-    symbol = symbol.upper()
-
-    # Prefer PF when both PI and PF are available,
-    # but do NOT assume one naming scheme universally.
-    #
-    # The actual historical data check below is decisive.
-    if symbol.startswith("PF_"):
-        return 0
-
+    # Kraken Futures perpetual naming
     if symbol.startswith("PI_"):
-        return 1
+        return True
 
-    return 2
+    if symbol.startswith("PF_"):
+        return True
+
+    return False
 
 
-def choose_contract_for_asset(asset, instruments):
+# ============================================================
+# EXACT CONTRACT MATCH
+# ============================================================
+#
+# THIS IS IMPORTANT.
+#
+# We DO NOT use:
+#
+#     startswith("PF_ETH")
+#
+# because:
+#
+#     PF_ETHUSD
+#     PF_ETHFIUSD
+#
+# would both match.
+#
+# We only accept:
+#
+#     PF_ETHUSD
+#     PI_ETHUSD
+#
+# for ETH.
+#
+# ============================================================
+
+def choose_contract_for_asset(
+    asset,
+    instruments,
+):
+
+    valid_symbols = {
+        f"PF_{asset}USD",
+        f"PI_{asset}USD",
+    }
 
     candidates = []
 
@@ -415,32 +343,35 @@ def choose_contract_for_asset(asset, instruments):
         if not is_perpetual_instrument(item):
             continue
 
-        if not is_usd_contract(item):
-            continue
-
-        discovered_asset = extract_asset_from_instrument(item)
-
-        if discovered_asset != asset:
-            continue
-
         symbol = str(
             item.get("symbol")
             or item.get("instrument")
             or ""
-        ).upper()
+        ).upper().strip()
 
-        if not symbol:
+        if symbol not in valid_symbols:
             continue
 
-        candidates.append((contract_priority(symbol), symbol, item))
+        candidates.append(
+            symbol
+        )
 
     if not candidates:
         return None
 
-    candidates.sort(key=lambda x: (x[0], x[1]))
+    # Prefer PF if both exist.
+    if f"PF_{asset}USD" in candidates:
+        return f"PF_{asset}USD"
 
-    return candidates[0][1]
+    if f"PI_{asset}USD" in candidates:
+        return f"PI_{asset}USD"
 
+    return candidates[0]
+
+
+# ============================================================
+# BUILD UNIVERSE
+# ============================================================
 
 def build_dynamic_universe():
 
@@ -448,12 +379,15 @@ def build_dynamic_universe():
 
     mapping = {}
 
-    print("\n")
+    print()
     print("=" * 70)
-    print("KRAKEN FUTURES DYNAMIC UNIVERSE")
+    print("KRAKEN FUTURES CONTRACT DISCOVERY")
     print("=" * 70)
 
-    print(f"Configured assets: {EXPECTED_UNIVERSE_SIZE}")
+    print(
+        f"Configured assets: "
+        f"{EXPECTED_UNIVERSE_SIZE}"
+    )
 
     for asset in FIXED_ASSETS:
 
@@ -465,12 +399,16 @@ def build_dynamic_universe():
         mapping[asset] = contract
 
         if contract:
+
             print(
                 f"{asset:<8} -> {contract}"
             )
+
         else:
+
             print(
-                f"{asset:<8} -> NO PERPETUAL CONTRACT FOUND"
+                f"{asset:<8} -> "
+                f"NO EXACT PERPETUAL CONTRACT"
             )
 
     print("=" * 70)
@@ -479,7 +417,7 @@ def build_dynamic_universe():
 
 
 # ============================================================
-# CANDLE FETCHING
+# CANDLE RESPONSE PARSER
 # ============================================================
 
 def parse_candle_response(data):
@@ -498,6 +436,7 @@ def parse_candle_response(data):
             value = data.get(key)
 
             if isinstance(value, list):
+
                 rows = value
                 break
 
@@ -524,29 +463,39 @@ def parse_candle_response(data):
             h = row.get("high")
             l = row.get("low")
             c = row.get("close")
+
             v = (
                 row.get("volume")
                 or row.get("vol")
                 or 0
             )
 
-        elif isinstance(row, (list, tuple)) and len(row) >= 5:
+        elif (
+            isinstance(row, (list, tuple))
+            and len(row) >= 5
+        ):
 
             ts = row[0]
             o = row[1]
             h = row[2]
             l = row[3]
             c = row[4]
-            v = row[5] if len(row) > 5 else 0
+
+            v = (
+                row[5]
+                if len(row) > 5
+                else 0
+            )
 
         else:
+
             continue
 
         try:
 
             ts = float(ts)
 
-            # Kraken may return milliseconds.
+            # Milliseconds -> seconds
             if ts > 10_000_000_000:
                 ts /= 1000.0
 
@@ -562,19 +511,29 @@ def parse_candle_response(data):
             )
 
         except Exception:
+
             continue
 
     return output
 
 
-def fetch_candles(symbol, interval, start_ts, end_ts):
+# ============================================================
+# FETCH CANDLES
+# ============================================================
+
+def fetch_candles(
+    symbol,
+    interval,
+    start_ts,
+    end_ts,
+):
 
     all_rows = []
 
     cursor = int(start_ts)
     end_ts = int(end_ts)
 
-    interval_seconds = {
+    interval_seconds_map = {
         "1m": 60,
         "5m": 300,
         "15m": 900,
@@ -582,16 +541,22 @@ def fetch_candles(symbol, interval, start_ts, end_ts):
         "1h": 3600,
         "4h": 14400,
         "1d": 86400,
-    }.get(interval, 3600)
+    }
+
+    interval_seconds = (
+        interval_seconds_map.get(
+            interval,
+            3600,
+        )
+    )
 
     while cursor < end_ts:
 
         chunk_end = min(
             end_ts,
-            cursor + (
-                CANDLE_CHUNK *
-                interval_seconds
-            ),
+            cursor
+            + CANDLE_CHUNK
+            * interval_seconds,
         )
 
         path = (
@@ -611,14 +576,17 @@ def fetch_candles(symbol, interval, start_ts, end_ts):
                 params=params,
             )
 
-            rows = parse_candle_response(data)
+            rows = parse_candle_response(
+                data
+            )
 
             if rows:
                 all_rows.extend(rows)
 
-            # Important:
-            # always advance by time, not by returned row count.
-            next_cursor = chunk_end + interval_seconds
+            next_cursor = (
+                chunk_end
+                + interval_seconds
+            )
 
             if next_cursor <= cursor:
                 break
@@ -629,12 +597,14 @@ def fetch_candles(symbol, interval, start_ts, end_ts):
 
             print(
                 f"  Candle fetch error "
-                f"{symbol} {interval}: {exc}"
+                f"{symbol} {interval}: "
+                f"{exc}"
             )
 
             break
 
     if not all_rows:
+
         return pd.DataFrame(
             columns=[
                 "timestamp",
@@ -646,7 +616,9 @@ def fetch_candles(symbol, interval, start_ts, end_ts):
             ]
         )
 
-    df = pd.DataFrame(all_rows)
+    df = pd.DataFrame(
+        all_rows
+    )
 
     df = df.drop_duplicates(
         subset=["timestamp"]
@@ -654,56 +626,104 @@ def fetch_candles(symbol, interval, start_ts, end_ts):
 
     df = df.sort_values(
         "timestamp"
-    ).reset_index(drop=True)
+    ).reset_index(
+        drop=True
+    )
 
-    # Remove future/incomplete candle.
+    # Never use future candle.
     now_ts = int(
-        datetime.now(timezone.utc).timestamp()
+        datetime.now(
+            timezone.utc
+        ).timestamp()
     )
 
     df = df[
         df["timestamp"] <= now_ts
     ].copy()
 
-    return df.reset_index(drop=True)
+    return df.reset_index(
+        drop=True
+    )
 
 
 # ============================================================
-# HISTORY VALIDATION
+# EXPECTED CANDLE COUNT
+# ============================================================
+#
+# FIXED:
+#
+# Previous bug:
+#
+# DAYS * 24 * 60 / (minutes / 60)
+#
+# produced 525600 for 1H.
+#
+# Correct:
+#
+# total minutes / interval minutes
+#
 # ============================================================
 
 def expected_candles(interval):
 
-    minutes = {
+    interval_minutes = {
         "1h": 60,
         "5m": 5,
-    }[interval]
+    }
+
+    if interval not in interval_minutes:
+
+        raise ValueError(
+            f"Unsupported interval: "
+            f"{interval}"
+        )
+
+    total_minutes = (
+        DAYS * 24 * 60
+    )
 
     return int(
-        DAYS * 24 * 60 / (minutes / 60)
+        total_minutes
+        / interval_minutes[interval]
     )
 
 
-def history_status(df_1h, df_5m):
+# ============================================================
+# HISTORY STATUS
+# ============================================================
 
-    expected_1h = expected_candles("1h")
-    expected_5m = expected_candles("5m")
+def history_status(
+    df_1h,
+    df_5m,
+):
 
-    n1 = len(df_1h)
-    n5 = len(df_5m)
-
-    # Need enough history for actual strategy.
-    minimum_1h = max(
-        500,
-        int(expected_1h * 0.90),
+    expected_1h = expected_candles(
+        "1h"
     )
 
-    minimum_5m = max(
-        5000,
-        int(expected_5m * 0.90),
+    expected_5m = expected_candles(
+        "5m"
     )
 
-    if n1 < minimum_1h:
+    actual_1h = len(df_1h)
+    actual_5m = len(df_5m)
+
+    # --------------------------------------------------------
+    # Minimum amount required for a valid 1Y test.
+    #
+    # 90% is allowed because exchange history can contain
+    # small gaps.
+    # --------------------------------------------------------
+
+    minimum_1h = int(
+        expected_1h * 0.90
+    )
+
+    minimum_5m = int(
+        expected_5m * 0.90
+    )
+
+    if actual_1h < minimum_1h:
 
         return (
             "INSUFFICIENT_1H",
@@ -711,7 +731,7 @@ def history_status(df_1h, df_5m):
             expected_5m,
         )
 
-    if n5 < minimum_5m:
+    if actual_5m < minimum_5m:
 
         return (
             "INSUFFICIENT_5M",
@@ -719,15 +739,31 @@ def history_status(df_1h, df_5m):
             expected_5m,
         )
 
-    # Full-ish one-year history.
-    if n1 >= int(expected_1h * 0.98) and \
-       n5 >= int(expected_5m * 0.98):
+    # --------------------------------------------------------
+    # Full history.
+    #
+    # 98% threshold.
+    # --------------------------------------------------------
+
+    if (
+        actual_1h >= int(
+            expected_1h * 0.98
+        )
+        and
+        actual_5m >= int(
+            expected_5m * 0.98
+        )
+    ):
 
         return (
             "OK",
             expected_1h,
             expected_5m,
         )
+
+    # --------------------------------------------------------
+    # Usable but not completely full.
+    # --------------------------------------------------------
 
     return (
         "PARTIAL_HISTORY",
@@ -760,7 +796,8 @@ def find_pivots(df):
         ]
 
         right_h = h[
-            i + 1:i + 1 + PIVOT_RIGHT
+            i + 1:
+            i + 1 + PIVOT_RIGHT
         ]
 
         left_l = l[
@@ -768,19 +805,22 @@ def find_pivots(df):
         ]
 
         right_l = l[
-            i + 1:i + 1 + PIVOT_RIGHT
+            i + 1:
+            i + 1 + PIVOT_RIGHT
         ]
 
         if (
             h[i] > left_h.max()
             and h[i] >= right_h.max()
         ):
+
             highs.append(i)
 
         if (
             l[i] < left_l.min()
             and l[i] <= right_l.min()
         ):
+
             lows.append(i)
 
     return highs, lows
@@ -838,18 +878,41 @@ def structures_overlap(a, b):
     b0 = b["start"]
     b1 = b["end"]
 
-    overlap_start = max(a0, b0)
-    overlap_end = min(a1, b1)
+    overlap_start = max(
+        a0,
+        b0,
+    )
+
+    overlap_end = min(
+        a1,
+        b1,
+    )
 
     if overlap_end <= overlap_start:
         return False
 
-    overlap = overlap_end - overlap_start
+    overlap = (
+        overlap_end
+        - overlap_start
+    )
 
-    len_a = max(1, a1 - a0)
-    len_b = max(1, b1 - b0)
+    len_a = max(
+        1,
+        a1 - a0,
+    )
 
-    ratio = overlap / min(len_a, len_b)
+    len_b = max(
+        1,
+        b1 - b0,
+    )
+
+    ratio = (
+        overlap
+        / min(
+            len_a,
+            len_b,
+        )
+    )
 
     return ratio >= 0.70
 
@@ -858,13 +921,22 @@ def structures_overlap(a, b):
 # DOUBLE TOP
 # ============================================================
 
-def detect_double_top(df, pivots_high):
+def detect_double_top(
+    df,
+    pivots_high,
+):
 
     patterns = []
 
-    for j in range(1, len(pivots_high)):
+    for j in range(
+        1,
+        len(pivots_high),
+    ):
 
-        p1 = pivots_high[j - 1]
+        p1 = pivots_high[
+            j - 1
+        ]
+
         p2 = pivots_high[j]
 
         separation = p2 - p1
@@ -890,7 +962,10 @@ def detect_double_top(df, pivots_high):
             between["low"].min()
         )
 
-        if neckline >= min(h1, h2):
+        if neckline >= min(
+            h1,
+            h2,
+        ):
             continue
 
         patterns.append(
@@ -900,10 +975,19 @@ def detect_double_top(df, pivots_high):
                 p1,
                 p2,
                 neckline,
-                upper_level=max(h1, h2),
+                upper_level=max(
+                    h1,
+                    h2,
+                ),
                 lower_level=neckline,
-                anchors=[p1, p2],
-                quality=1.0 - pct(h1, h2),
+                anchors=[
+                    p1,
+                    p2,
+                ],
+                quality=(
+                    1.0
+                    - pct(h1, h2)
+                ),
             )
         )
 
@@ -914,13 +998,22 @@ def detect_double_top(df, pivots_high):
 # DOUBLE BOTTOM
 # ============================================================
 
-def detect_double_bottom(df, pivots_low):
+def detect_double_bottom(
+    df,
+    pivots_low,
+):
 
     patterns = []
 
-    for j in range(1, len(pivots_low)):
+    for j in range(
+        1,
+        len(pivots_low),
+    ):
 
-        p1 = pivots_low[j - 1]
+        p1 = pivots_low[
+            j - 1
+        ]
+
         p2 = pivots_low[j]
 
         separation = p2 - p1
@@ -946,7 +1039,10 @@ def detect_double_bottom(df, pivots_low):
             between["high"].max()
         )
 
-        if neckline <= max(l1, l2):
+        if neckline <= max(
+            l1,
+            l2,
+        ):
             continue
 
         patterns.append(
@@ -957,9 +1053,18 @@ def detect_double_bottom(df, pivots_low):
                 p2,
                 neckline,
                 upper_level=neckline,
-                lower_level=min(l1, l2),
-                anchors=[p1, p2],
-                quality=1.0 - pct(l1, l2),
+                lower_level=min(
+                    l1,
+                    l2,
+                ),
+                anchors=[
+                    p1,
+                    p2,
+                ],
+                quality=(
+                    1.0
+                    - pct(l1, l2)
+                ),
             )
         )
 
@@ -983,8 +1088,12 @@ def detect_head_shoulders(
     ):
 
         ls = pivots_high[i]
-        head = pivots_high[i + 1]
-        rs = pivots_high[i + 2]
+        head = pivots_high[
+            i + 1
+        ]
+        rs = pivots_high[
+            i + 2
+        ]
 
         if not (
             HS_MIN_SEPARATION
@@ -1000,43 +1109,64 @@ def detect_head_shoulders(
         ):
             continue
 
-        h_ls = df.iloc[ls]["high"]
-        h_head = df.iloc[head]["high"]
-        h_rs = df.iloc[rs]["high"]
+        h_ls = df.iloc[
+            ls
+        ]["high"]
 
-        if h_head <= h_ls or h_head <= h_rs:
+        h_head = df.iloc[
+            head
+        ]["high"]
+
+        h_rs = df.iloc[
+            rs
+        ]["high"]
+
+        if (
+            h_head <= h_ls
+            or h_head <= h_rs
+        ):
             continue
 
-        if pct(h_ls, h_rs) > 0.05:
+        if pct(
+            h_ls,
+            h_rs,
+        ) > 0.05:
             continue
 
         lows_between_1 = [
-            x for x in pivots_low
+            x
+            for x in pivots_low
             if ls < x < head
         ]
 
         lows_between_2 = [
-            x for x in pivots_low
+            x
+            for x in pivots_low
             if head < x < rs
         ]
 
-        if not lows_between_1 or not lows_between_2:
+        if (
+            not lows_between_1
+            or not lows_between_2
+        ):
             continue
 
         n1 = min(
             lows_between_1,
-            key=lambda x: df.iloc[x]["low"]
+            key=lambda x:
+            df.iloc[x]["low"],
         )
 
         n2 = min(
             lows_between_2,
-            key=lambda x: df.iloc[x]["low"]
+            key=lambda x:
+            df.iloc[x]["low"],
         )
 
         neckline = (
             df.iloc[n1]["low"]
             + df.iloc[n2]["low"]
-        ) / 2
+        ) / 2.0
 
         patterns.append(
             make_pattern(
@@ -1054,9 +1184,12 @@ def detect_head_shoulders(
                     n1,
                     n2,
                 ],
-                quality=h_head / max(
-                    h_ls,
-                    h_rs,
+                quality=(
+                    h_head
+                    / max(
+                        h_ls,
+                        h_rs,
+                    )
                 ),
             )
         )
@@ -1081,8 +1214,12 @@ def detect_inverse_head_shoulders(
     ):
 
         ls = pivots_low[i]
-        head = pivots_low[i + 1]
-        rs = pivots_low[i + 2]
+        head = pivots_low[
+            i + 1
+        ]
+        rs = pivots_low[
+            i + 2
+        ]
 
         if not (
             HS_MIN_SEPARATION
@@ -1098,43 +1235,64 @@ def detect_inverse_head_shoulders(
         ):
             continue
 
-        l_ls = df.iloc[ls]["low"]
-        l_head = df.iloc[head]["low"]
-        l_rs = df.iloc[rs]["low"]
+        l_ls = df.iloc[
+            ls
+        ]["low"]
 
-        if l_head >= l_ls or l_head >= l_rs:
+        l_head = df.iloc[
+            head
+        ]["low"]
+
+        l_rs = df.iloc[
+            rs
+        ]["low"]
+
+        if (
+            l_head >= l_ls
+            or l_head >= l_rs
+        ):
             continue
 
-        if pct(l_ls, l_rs) > 0.05:
+        if pct(
+            l_ls,
+            l_rs,
+        ) > 0.05:
             continue
 
         highs_between_1 = [
-            x for x in pivots_high
+            x
+            for x in pivots_high
             if ls < x < head
         ]
 
         highs_between_2 = [
-            x for x in pivots_high
+            x
+            for x in pivots_high
             if head < x < rs
         ]
 
-        if not highs_between_1 or not highs_between_2:
+        if (
+            not highs_between_1
+            or not highs_between_2
+        ):
             continue
 
         n1 = max(
             highs_between_1,
-            key=lambda x: df.iloc[x]["high"]
+            key=lambda x:
+            df.iloc[x]["high"],
         )
 
         n2 = max(
             highs_between_2,
-            key=lambda x: df.iloc[x]["high"]
+            key=lambda x:
+            df.iloc[x]["high"],
         )
 
         neckline = (
             df.iloc[n1]["high"]
             + df.iloc[n2]["high"]
-        ) / 2
+        ) / 2.0
 
         patterns.append(
             make_pattern(
@@ -1152,12 +1310,15 @@ def detect_inverse_head_shoulders(
                     n1,
                     n2,
                 ],
-                quality=min(
-                    l_ls,
-                    l_rs
-                ) / max(
-                    l_head,
-                    1e-12
+                quality=(
+                    min(
+                        l_ls,
+                        l_rs,
+                    )
+                    / max(
+                        l_head,
+                        1e-12,
+                    )
                 ),
             )
         )
@@ -1166,18 +1327,35 @@ def detect_inverse_head_shoulders(
 
 
 # ============================================================
-# TRIANGLE / WEDGE
+# LINEAR LEVEL
 # ============================================================
 
-def linear_level(i1, p1, i2, p2, x):
+def linear_level(
+    i1,
+    p1,
+    i2,
+    p2,
+    x,
+):
 
     if i2 == i1:
         return p2
 
-    slope = (p2 - p1) / (i2 - i1)
+    slope = (
+        p2 - p1
+    ) / (
+        i2 - i1
+    )
 
-    return p1 + slope * (x - i1)
+    return (
+        p1
+        + slope * (x - i1)
+    )
 
+
+# ============================================================
+# TRIANGLE / WEDGE
+# ============================================================
 
 def detect_triangle_wedge(
     df,
@@ -1199,8 +1377,15 @@ def detect_triangle_wedge(
     lo1 = pivots_low[-2]
     lo2 = pivots_low[-1]
 
-    start = min(hi1, lo1)
-    end = max(hi2, lo2)
+    start = min(
+        hi1,
+        lo1,
+    )
+
+    end = max(
+        hi2,
+        lo2,
+    )
 
     bars = end - start
 
@@ -1211,15 +1396,21 @@ def detect_triangle_wedge(
     ):
         return patterns
 
-    h1 = df.iloc[hi1]["high"]
-    h2 = df.iloc[hi2]["high"]
+    h1 = df.iloc[
+        hi1
+    ]["high"]
 
-    l1 = df.iloc[lo1]["low"]
-    l2 = df.iloc[lo2]["low"]
+    h2 = df.iloc[
+        hi2
+    ]["high"]
 
-    # --------------------------------------------------------
-    # Project actual boundaries to current candle.
-    # --------------------------------------------------------
+    l1 = df.iloc[
+        lo1
+    ]["low"]
+
+    l2 = df.iloc[
+        lo2
+    ]["low"]
 
     upper_now = linear_level(
         hi1,
@@ -1240,11 +1431,16 @@ def detect_triangle_wedge(
     if upper_now <= lower_now:
         return patterns
 
-    upper_slope = h2 - h1
-    lower_slope = l2 - l1
+    upper_slope = (
+        h2 - h1
+    )
+
+    lower_slope = (
+        l2 - l1
+    )
 
     # --------------------------------------------------------
-    # Symmetrical / contracting triangle
+    # Symmetrical contracting triangle
     # --------------------------------------------------------
 
     contracting = (
@@ -1361,37 +1557,56 @@ def detect_triangle_wedge(
 # FLAG
 # ============================================================
 
-def detect_flags(df, current_i):
+def detect_flags(
+    df,
+    current_i,
+):
 
     patterns = []
 
-    consolidation = FLAG_CONSOLIDATION_BARS
-    impulse_lb = FLAG_IMPULSE_LOOKBACK
+    consolidation = (
+        FLAG_CONSOLIDATION_BARS
+    )
 
-    if current_i < impulse_lb + consolidation:
+    impulse_lb = (
+        FLAG_IMPULSE_LOOKBACK
+    )
+
+    if (
+        current_i
+        < impulse_lb
+        + consolidation
+    ):
         return patterns
 
     impulse_start = (
-        current_i - impulse_lb
+        current_i
+        - impulse_lb
     )
 
     impulse_end = (
-        current_i - consolidation
+        current_i
+        - consolidation
     )
 
     if impulse_end <= impulse_start:
         return patterns
 
-    start_price = df.iloc[
-        impulse_start
-    ]["close"]
+    start_price = float(
+        df.iloc[
+            impulse_start
+        ]["close"]
+    )
 
-    impulse_end_price = df.iloc[
-        impulse_end
-    ]["close"]
+    impulse_end_price = float(
+        df.iloc[
+            impulse_end
+        ]["close"]
+    )
 
     impulse_return = (
-        impulse_end_price / start_price
+        impulse_end_price
+        / start_price
     ) - 1.0
 
     impulse_abs = abs(
@@ -1403,25 +1618,29 @@ def detect_flags(df, current_i):
 
     impulse_high = float(
         df.iloc[
-            impulse_start:impulse_end + 1
+            impulse_start:
+            impulse_end + 1
         ]["high"].max()
     )
 
     impulse_low = float(
         df.iloc[
-            impulse_start:impulse_end + 1
+            impulse_start:
+            impulse_end + 1
         ]["low"].min()
     )
 
     impulse_range = (
-        impulse_high - impulse_low
+        impulse_high
+        - impulse_low
     )
 
     if impulse_range <= 0:
         return patterns
 
     consolidation_df = df.iloc[
-        impulse_end:current_i + 1
+        impulse_end:
+        current_i + 1
     ]
 
     c_high = float(
@@ -1432,24 +1651,30 @@ def detect_flags(df, current_i):
         consolidation_df["low"].min()
     )
 
-    c_range = c_high - c_low
+    c_range = (
+        c_high
+        - c_low
+    )
 
-    if c_range / impulse_range > FLAG_MAX_RANGE_TO_IMPULSE:
+    if (
+        c_range
+        / impulse_range
+        > FLAG_MAX_RANGE_TO_IMPULSE
+    ):
         return patterns
 
-    # --------------------------------------------------------
-    # Directional efficiency
-    # --------------------------------------------------------
-
-    closes = consolidation_df[
-        "close"
-    ].values
+    closes = (
+        consolidation_df[
+            "close"
+        ].values
+    )
 
     if len(closes) < 2:
         return patterns
 
     net_move = abs(
-        closes[-1] - closes[0]
+        closes[-1]
+        - closes[0]
     )
 
     path = np.abs(
@@ -1459,10 +1684,13 @@ def detect_flags(df, current_i):
     efficiency = (
         net_move / path
         if path > 0
-        else 0
+        else 0.0
     )
 
-    if efficiency < 0:
+    if (
+        efficiency
+        < FLAG_MIN_DIRECTIONAL_EFFICIENCY
+    ):
         return patterns
 
     # --------------------------------------------------------
@@ -1476,7 +1704,10 @@ def detect_flags(df, current_i):
             - closes[-1]
         ) / impulse_range
 
-        if retrace <= FLAG_MAX_RETRACE:
+        if (
+            retrace
+            <= FLAG_MAX_RETRACE
+        ):
 
             patterns.append(
                 make_pattern(
@@ -1507,7 +1738,10 @@ def detect_flags(df, current_i):
             - impulse_end_price
         ) / impulse_range
 
-        if retrace <= FLAG_MAX_RETRACE:
+        if (
+            retrace
+            <= FLAG_MAX_RETRACE
+        ):
 
             patterns.append(
                 make_pattern(
@@ -1531,78 +1765,121 @@ def detect_flags(df, current_i):
 
 
 # ============================================================
-# BREAKOUT DETECTION
+# BREAKOUT
 # ============================================================
 
-def breakout_signal(df, pattern, candle_i):
+def breakout_signal(
+    df,
+    pattern,
+    candle_i,
+):
 
     if candle_i <= pattern["end"]:
         return False
 
-    row = df.iloc[candle_i]
+    row = df.iloc[
+        candle_i
+    ]
 
-    close = float(row["close"])
+    close = float(
+        row["close"]
+    )
 
-    direction = pattern["direction"]
+    direction = pattern[
+        "direction"
+    ]
 
     # --------------------------------------------------------
-    # Use actual structure boundaries.
+    # LONG = break actual upper boundary
+    # SHORT = break actual lower boundary
     # --------------------------------------------------------
 
     if direction == "LONG":
 
-        level = pattern.get(
-            "upper_level"
+        level = (
+            pattern.get(
+                "upper_level"
+            )
+            or pattern[
+                "breakout_level"
+            ]
         )
 
-        if level is None:
-            level = pattern["breakout_level"]
-
         return (
-            close >
-            level * (
-                1.0 + BREAKOUT_BUFFER
+            close
+            >
+            level
+            * (
+                1.0
+                + BREAKOUT_BUFFER
             )
         )
 
-    else:
-
-        level = pattern.get(
+    level = (
+        pattern.get(
             "lower_level"
         )
+        or pattern[
+            "breakout_level"
+        ]
+    )
 
-        if level is None:
-            level = pattern["breakout_level"]
-
-        return (
-            close <
-            level * (
-                1.0 - BREAKOUT_BUFFER
-            )
+    return (
+        close
+        <
+        level
+        * (
+            1.0
+            - BREAKOUT_BUFFER
         )
+    )
 
 
 # ============================================================
-# RETEST + CONFIRMATION
+# CONFIRMATION
 # ============================================================
 
-def confirmation_ok(row, direction):
+def confirmation_ok(
+    row,
+    direction,
+):
 
-    o = float(row["open"])
-    h = float(row["high"])
-    l = float(row["low"])
-    c = float(row["close"])
+    o = float(
+        row["open"]
+    )
 
-    candle_range = h - l
+    h = float(
+        row["high"]
+    )
+
+    l = float(
+        row["low"]
+    )
+
+    c = float(
+        row["close"]
+    )
+
+    candle_range = (
+        h - l
+    )
 
     if candle_range <= 0:
         return False
 
-    body = abs(c - o)
+    body = abs(
+        c - o
+    )
 
-    body_ratio = body / candle_range
+    body_ratio = (
+        body
+        / candle_range
+    )
 
-    if body_ratio < MIN_BODY_RATIO:
+    if (
+        body_ratio
+        < MIN_BODY_RATIO
+    ):
         return False
 
     if direction == "LONG":
@@ -1611,22 +1888,30 @@ def confirmation_ok(row, direction):
             c - l
         ) / candle_range
 
-        if close_position < MIN_CLOSE_POSITION:
+        if (
+            close_position
+            < MIN_CLOSE_POSITION
+        ):
             return False
 
         return c > o
 
-    else:
+    close_position = (
+        h - c
+    ) / candle_range
 
-        close_position = (
-            h - c
-        ) / candle_range
+    if (
+        close_position
+        < MIN_CLOSE_POSITION
+    ):
+        return False
 
-        if close_position < MIN_CLOSE_POSITION:
-            return False
+    return c < o
 
-        return c < o
 
+# ============================================================
+# FIRST RETEST + CONFIRMATION
+# ============================================================
 
 def find_entry(
     df_5m,
@@ -1659,9 +1944,17 @@ def find_entry(
         future.iterrows()
     ):
 
-        h = float(row["high"])
-        l = float(row["low"])
-        c = float(row["close"])
+        h = float(
+            row["high"]
+        )
+
+        l = float(
+            row["low"]
+        )
+
+        c = float(
+            row["close"]
+        )
 
         touched = (
             l <= level <= h
@@ -1670,16 +1963,19 @@ def find_entry(
         if not touched:
             continue
 
-        # Retest must close on breakout side.
+        # LONG retest must close above level.
         if direction == "LONG":
 
             if c >= level:
+
                 retest_pos = pos
                 break
 
+        # SHORT retest must close below level.
         else:
 
             if c <= level:
+
                 retest_pos = pos
                 break
 
@@ -1687,18 +1983,22 @@ def find_entry(
         return None
 
     # --------------------------------------------------------
-    # Confirmation comes AFTER retest candle.
+    # Confirmation AFTER retest candle
     # --------------------------------------------------------
 
     confirmation_slice = future.iloc[
         retest_pos + 1:
-        retest_pos + 1 + CONFIRM_MAX_BARS
+        retest_pos
+        + 1
+        + CONFIRM_MAX_BARS
     ]
 
     if confirmation_slice.empty:
         return None
 
-    for _, row in confirmation_slice.iterrows():
+    for _, row in (
+        confirmation_slice.iterrows()
+    ):
 
         if not confirmation_ok(
             row,
@@ -1742,29 +2042,42 @@ def simulate_trade(
     if direction == "LONG":
 
         tp_price = (
-            entry_price *
-            (1.0 + TP_PCT)
+            entry_price
+            * (
+                1.0
+                + TP_PCT
+            )
         )
 
         sl_price = (
-            entry_price *
-            (1.0 - SL_PCT)
+            entry_price
+            * (
+                1.0
+                - SL_PCT
+            )
         )
 
     else:
 
         tp_price = (
-            entry_price *
-            (1.0 - TP_PCT)
+            entry_price
+            * (
+                1.0
+                - TP_PCT
+            )
         )
 
         sl_price = (
-            entry_price *
-            (1.0 + SL_PCT)
+            entry_price
+            * (
+                1.0
+                + SL_PCT
+            )
         )
 
     max_hold_seconds = (
-        MAX_HOLD_HOURS * 3600
+        MAX_HOLD_HOURS
+        * 3600
     )
 
     future = df_5m[
@@ -1781,26 +2094,43 @@ def simulate_trade(
         )
     ].copy()
 
-    for _, row in future.iterrows():
+    for _, row in (
+        future.iterrows()
+    ):
 
-        high = float(row["high"])
-        low = float(row["low"])
-
-        hit_tp = (
-            high >= tp_price
-            if direction == "LONG"
-            else low <= tp_price
+        high = float(
+            row["high"]
         )
 
-        hit_sl = (
-            low <= sl_price
-            if direction == "LONG"
-            else high >= sl_price
+        low = float(
+            row["low"]
         )
 
-        # Conservative assumption:
-        # if both are touched on same candle,
-        # SL happens first.
+        if direction == "LONG":
+
+            hit_tp = (
+                high >= tp_price
+            )
+
+            hit_sl = (
+                low <= sl_price
+            )
+
+        else:
+
+            hit_tp = (
+                low <= tp_price
+            )
+
+            hit_sl = (
+                high >= sl_price
+            )
+
+        # ----------------------------------------------------
+        # Conservative same-candle rule:
+        # SL FIRST
+        # ----------------------------------------------------
+
         if hit_tp and hit_sl:
 
             return {
@@ -1838,19 +2168,21 @@ def simulate_trade(
             }
 
     # --------------------------------------------------------
-    # Unresolved trades are excluded.
+    # Unresolved = excluded
     # --------------------------------------------------------
 
     return None
 
 
 # ============================================================
-# PATTERN DETECTION ENGINE
+# PATTERN ENGINE
 # ============================================================
 
 def detect_patterns(df):
 
-    pivots_high, pivots_low = find_pivots(df)
+    pivots_high, pivots_low = (
+        find_pivots(df)
+    )
 
     patterns = []
 
@@ -1892,10 +2224,17 @@ def detect_patterns(df):
         )
     )
 
-    # Flags are generated from completed 1H candles.
-    for i in range(
+    # --------------------------------------------------------
+    # Flags
+    # --------------------------------------------------------
+
+    start_flag = (
         FLAG_IMPULSE_LOOKBACK
-        + FLAG_CONSOLIDATION_BARS,
+        + FLAG_CONSOLIDATION_BARS
+    )
+
+    for i in range(
+        start_flag,
         len(df) - 1,
     ):
 
@@ -1907,7 +2246,7 @@ def detect_patterns(df):
         )
 
     # --------------------------------------------------------
-    # Remove exact duplicates.
+    # Exact duplicate removal
     # --------------------------------------------------------
 
     unique = {}
@@ -1920,7 +2259,9 @@ def detect_patterns(df):
             p["start"],
             p["end"],
             round(
-                p["breakout_level"],
+                p[
+                    "breakout_level"
+                ],
                 10,
             ),
         )
@@ -1932,7 +2273,7 @@ def detect_patterns(df):
     )
 
     # --------------------------------------------------------
-    # Sort chronologically.
+    # Chronological
     # --------------------------------------------------------
 
     patterns.sort(
@@ -1943,7 +2284,7 @@ def detect_patterns(df):
     )
 
     # --------------------------------------------------------
-    # Same-type overlap filter.
+    # Same-type + same-direction overlap
     # --------------------------------------------------------
 
     accepted = []
@@ -1954,10 +2295,16 @@ def detect_patterns(df):
 
         for old in accepted:
 
-            if p["pattern"] != old["pattern"]:
+            if (
+                p["pattern"]
+                != old["pattern"]
+            ):
                 continue
 
-            if p["direction"] != old["direction"]:
+            if (
+                p["direction"]
+                != old["direction"]
+            ):
                 continue
 
             if structures_overlap(
@@ -1965,7 +2312,6 @@ def detect_patterns(df):
                 old,
             ):
 
-                # Keep the newer / higher quality one.
                 if (
                     p["quality"]
                     <= old["quality"]
@@ -1976,7 +2322,9 @@ def detect_patterns(df):
                 else:
 
                     try:
-                        accepted.remove(old)
+                        accepted.remove(
+                            old
+                        )
                     except ValueError:
                         pass
 
@@ -1999,15 +2347,18 @@ def process_asset(
     end_ts,
 ):
 
-    print("\n")
+    print()
     print("=" * 70)
-    print(f"{asset} | CONTRACT={contract}")
+    print(
+        f"{asset} | CONTRACT={contract}"
+    )
     print("=" * 70)
 
     if not contract:
 
         print(
-            f"{asset}: NO PERPETUAL CONTRACT"
+            f"{asset}: "
+            f"NO EXACT PERPETUAL CONTRACT"
         )
 
         return {
@@ -2017,6 +2368,13 @@ def process_asset(
             "trades": [],
             "history_1h": 0,
             "history_5m": 0,
+            "expected_1h": expected_candles(
+                "1h"
+            ),
+            "expected_5m": expected_candles(
+                "5m"
+            ),
+            "lifecycle": {},
         }
 
     df_1h = fetch_candles(
@@ -2050,6 +2408,16 @@ def process_asset(
         f"{asset}: {status}"
     )
 
+    print(
+        f"{asset}: expected "
+        f"1H={expected_1h} "
+        f"5M={expected_5m}"
+    )
+
+    # --------------------------------------------------------
+    # Do not backtest insufficient history.
+    # --------------------------------------------------------
+
     if status in (
         "INSUFFICIENT_1H",
         "INSUFFICIENT_5M",
@@ -2062,6 +2430,9 @@ def process_asset(
             "trades": [],
             "history_1h": len(df_1h),
             "history_5m": len(df_5m),
+            "expected_1h": expected_1h,
+            "expected_5m": expected_5m,
+            "lifecycle": {},
         }
 
     # --------------------------------------------------------
@@ -2073,7 +2444,7 @@ def process_asset(
     )
 
     print(
-        f"{asset}: detected patterns = "
+        f"{asset}: detected patterns="
         f"{len(patterns)}"
     )
 
@@ -2083,25 +2454,36 @@ def process_asset(
 
     lifecycle = {}
 
+    # --------------------------------------------------------
+    # Pattern lifecycle
+    # --------------------------------------------------------
+
     for p in patterns:
 
-        pkey = p["pattern"]
+        pattern_name = p[
+            "pattern"
+        ]
 
-        if pkey not in lifecycle:
+        if (
+            pattern_name
+            not in lifecycle
+        ):
 
-            lifecycle[pkey] = {
+            lifecycle[
+                pattern_name
+            ] = {
                 "Candidates": 0,
                 "Breakouts": 0,
                 "Retests": 0,
                 "Confirmations": 0,
             }
 
-        lifecycle[pkey][
-            "Candidates"
-        ] += 1
+        lifecycle[
+            pattern_name
+        ]["Candidates"] += 1
 
         # ----------------------------------------------------
-        # Search 1H breakout after pattern completion.
+        # Search for first valid 1H breakout.
         # ----------------------------------------------------
 
         breakout_i = None
@@ -2129,10 +2511,13 @@ def process_asset(
                 p["direction"],
             )
 
-            if event_key in consumed_events:
+            if event_key in (
+                consumed_events
+            ):
                 continue
 
             breakout_i = i
+
             consumed_events.add(
                 event_key
             )
@@ -2142,9 +2527,9 @@ def process_asset(
         if breakout_i is None:
             continue
 
-        lifecycle[pkey][
-            "Breakouts"
-        ] += 1
+        lifecycle[
+            pattern_name
+        ]["Breakouts"] += 1
 
         breakout_time = int(
             df_1h.iloc[
@@ -2153,32 +2538,34 @@ def process_asset(
         )
 
         # ----------------------------------------------------
-        # IMPORTANT:
-        # breakout level is frozen from the pattern.
-        # No future adjustment.
+        # Freeze pattern boundary.
+        # No future information.
         # ----------------------------------------------------
 
-        if p["direction"] == "LONG":
+        if (
+            p["direction"]
+            == "LONG"
+        ):
 
-            level = p.get(
-                "upper_level"
-            )
-
-            if level is None:
-                level = p[
+            level = (
+                p.get(
+                    "upper_level"
+                )
+                or p[
                     "breakout_level"
                 ]
+            )
 
         else:
 
-            level = p.get(
-                "lower_level"
-            )
-
-            if level is None:
-                level = p[
+            level = (
+                p.get(
+                    "lower_level"
+                )
+                or p[
                     "breakout_level"
                 ]
+            )
 
         # ----------------------------------------------------
         # FIRST RETEST + CONFIRMATION
@@ -2194,13 +2581,13 @@ def process_asset(
         if entry is None:
             continue
 
-        lifecycle[pkey][
-            "Retests"
-        ] += 1
+        lifecycle[
+            pattern_name
+        ]["Retests"] += 1
 
-        lifecycle[pkey][
-            "Confirmations"
-        ] += 1
+        lifecycle[
+            pattern_name
+        ]["Confirmations"] += 1
 
         # ----------------------------------------------------
         # Trade simulation starts AFTER confirmation candle.
@@ -2208,8 +2595,12 @@ def process_asset(
 
         result = simulate_trade(
             df_5m,
-            entry["entry_time"],
-            entry["entry_price"],
+            entry[
+                "entry_time"
+            ],
+            entry[
+                "entry_price"
+            ],
             p["direction"],
         )
 
@@ -2220,8 +2611,12 @@ def process_asset(
             {
                 "asset": asset,
                 "symbol": contract,
-                "pattern": p["pattern"],
-                "direction": p["direction"],
+                "pattern": p[
+                    "pattern"
+                ],
+                "direction": p[
+                    "direction"
+                ],
                 "pattern_start": int(
                     df_1h.iloc[
                         p["start"]
@@ -2232,7 +2627,8 @@ def process_asset(
                         p["end"]
                     ]["timestamp"]
                 ),
-                "breakout_time": breakout_time,
+                "breakout_time":
+                    breakout_time,
                 "retest_time": entry[
                     "retest_time"
                 ],
@@ -2261,7 +2657,7 @@ def process_asset(
         )
 
     print(
-        f"{asset}: completed trades = "
+        f"{asset}: completed trades="
         f"{len(trades)}"
     )
 
@@ -2279,7 +2675,7 @@ def process_asset(
 
 
 # ============================================================
-# SUMMARY
+# FINAL SUMMARY
 # ============================================================
 
 def print_summary(
@@ -2287,7 +2683,7 @@ def print_summary(
     all_trades,
 ):
 
-    print("\n")
+    print()
     print("=" * 70)
     print("FINAL BACKTEST RESULT")
     print("=" * 70)
@@ -2298,15 +2694,18 @@ def print_summary(
     )
 
     usable = [
-        r for r in results
-        if r["status"] in (
+        r
+        for r in results
+        if r["status"]
+        in (
             "OK",
             "PARTIAL_HISTORY",
         )
     ]
 
     full_history = [
-        r for r in results
+        r
+        for r in results
         if r["status"] == "OK"
     ]
 
@@ -2326,25 +2725,36 @@ def print_summary(
     )
 
     success = sum(
-        1 for x in all_trades
-        if x["result"] == "SUCCESS"
+        1
+        for x in all_trades
+        if x["result"]
+        == "SUCCESS"
     )
 
     failure = sum(
-        1 for x in all_trades
-        if x["result"] == "FAILURE"
+        1
+        for x in all_trades
+        if x["result"]
+        == "FAILURE"
     )
 
-    total = success + failure
+    total = (
+        success
+        + failure
+    )
 
     if total:
 
         success_rate = (
-            success / total * 100
+            success
+            / total
+            * 100
         )
 
         failure_rate = (
-            failure / total * 100
+            failure
+            / total
+            * 100
         )
 
     else:
@@ -2352,15 +2762,18 @@ def print_summary(
         success_rate = 0.0
         failure_rate = 0.0
 
-    breakeven = (
-        SL_PCT /
-        (TP_PCT + SL_PCT)
+    raw_breakeven = (
+        SL_PCT
+        / (
+            TP_PCT
+            + SL_PCT
+        )
         * 100
     )
 
     edge = (
         success_rate
-        - breakeven
+        - raw_breakeven
     )
 
     print(
@@ -2383,7 +2796,7 @@ def print_summary(
 
     print(
         f"RAW BREAK-EVEN: "
-        f"{breakeven:.2f}%"
+        f"{raw_breakeven:.2f}%"
     )
 
     print(
@@ -2391,11 +2804,11 @@ def print_summary(
         f"{edge:+.2f} pp"
     )
 
-    # --------------------------------------------------------
-    # Universe status
-    # --------------------------------------------------------
+    # ========================================================
+    # UNIVERSE STATUS
+    # ========================================================
 
-    print("\n")
+    print()
     print(
         "20-ASSET UNIVERSE STATUS"
     )
@@ -2415,14 +2828,15 @@ def print_summary(
             f"{r['status']:<20} "
             f"1H={r['history_1h']:<6} "
             f"5M={r['history_5m']:<7} "
-            f"Trades={len(r['trades'])}"
+            f"Trades="
+            f"{len(r['trades'])}"
         )
 
-    # --------------------------------------------------------
-    # Pattern breakdown
-    # --------------------------------------------------------
+    # ========================================================
+    # PATTERN BREAKDOWN
+    # ========================================================
 
-    print("\n")
+    print()
     print(
         "PATTERN BREAKDOWN"
     )
@@ -2433,7 +2847,9 @@ def print_summary(
 
     for trade in all_trades:
 
-        p = trade["pattern"]
+        p = trade[
+            "pattern"
+        ]
 
         if p not in pattern_stats:
 
@@ -2443,16 +2859,29 @@ def print_summary(
                 "failure": 0,
             }
 
-        pattern_stats[p]["total"] += 1
+        pattern_stats[
+            p
+        ]["total"] += 1
 
-        if trade["result"] == "SUCCESS":
-            pattern_stats[p]["success"] += 1
+        if (
+            trade["result"]
+            == "SUCCESS"
+        ):
+
+            pattern_stats[
+                p
+            ]["success"] += 1
+
         else:
-            pattern_stats[p]["failure"] += 1
+
+            pattern_stats[
+                p
+            ]["failure"] += 1
 
     for p, s in sorted(
         pattern_stats.items(),
-        key=lambda x: -x[1]["total"],
+        key=lambda x:
+        -x[1]["total"],
     ):
 
         wr = (
@@ -2460,22 +2889,22 @@ def print_summary(
             / s["total"]
             * 100
             if s["total"]
-            else 0
+            else 0.0
         )
 
         print(
             f"{p:<24}"
-            f"{s['total']:>6}"
+            f"{s['total']:>7}"
             f"{s['success']:>8}"
             f"{s['failure']:>8}"
             f"{wr:>9.2f}%"
         )
 
-    # --------------------------------------------------------
-    # Asset breakdown
-    # --------------------------------------------------------
+    # ========================================================
+    # ASSET BREAKDOWN
+    # ========================================================
 
-    print("\n")
+    print()
     print(
         "ASSET BREAKDOWN"
     )
@@ -2486,7 +2915,9 @@ def print_summary(
 
     for asset in FIXED_ASSETS:
 
-        asset_stats[asset] = {
+        asset_stats[
+            asset
+        ] = {
             "total": 0,
             "success": 0,
             "failure": 0,
@@ -2494,25 +2925,41 @@ def print_summary(
 
     for trade in all_trades:
 
-        a = trade["asset"]
+        asset = trade[
+            "asset"
+        ]
 
-        asset_stats[a]["total"] += 1
+        asset_stats[
+            asset
+        ]["total"] += 1
 
-        if trade["result"] == "SUCCESS":
-            asset_stats[a]["success"] += 1
+        if (
+            trade["result"]
+            == "SUCCESS"
+        ):
+
+            asset_stats[
+                asset
+            ]["success"] += 1
+
         else:
-            asset_stats[a]["failure"] += 1
+
+            asset_stats[
+                asset
+            ]["failure"] += 1
 
     for asset in FIXED_ASSETS:
 
-        s = asset_stats[asset]
+        s = asset_stats[
+            asset
+        ]
 
         wr = (
             s["success"]
             / s["total"]
             * 100
             if s["total"]
-            else 0
+            else 0.0
         )
 
         print(
@@ -2523,11 +2970,11 @@ def print_summary(
             f"{wr:>9.2f}%"
         )
 
-    # --------------------------------------------------------
-    # Lifecycle
-    # --------------------------------------------------------
+    # ========================================================
+    # LIFECYCLE DIAGNOSTICS
+    # ========================================================
 
-    print("\n")
+    print()
     print(
         "LIFECYCLE DIAGNOSTICS"
     )
@@ -2545,24 +2992,31 @@ def print_summary(
             ).items()
         ):
 
-            if pattern not in lifecycle_total:
+            if (
+                pattern
+                not in lifecycle_total
+            ):
 
-                lifecycle_total[pattern] = {
+                lifecycle_total[
+                    pattern
+                ] = {
                     "Candidates": 0,
                     "Breakouts": 0,
                     "Retests": 0,
                     "Confirmations": 0,
                 }
 
-            for key in lifecycle_total[
-                pattern
-            ]:
+            for key in (
+                lifecycle_total[
+                    pattern
+                ]
+            ):
 
                 lifecycle_total[
                     pattern
                 ][key] += stats.get(
                     key,
-                    0
+                    0,
                 )
 
     for pattern, stats in sorted(
@@ -2571,49 +3025,57 @@ def print_summary(
 
         print(
             f"{pattern:<20}"
-            f"Candidates={stats['Candidates']:<6} "
-            f"Breakouts={stats['Breakouts']:<6} "
-            f"Retests={stats['Retests']:<6} "
-            f"Confirmations={stats['Confirmations']:<6}"
+            f"Candidates="
+            f"{stats['Candidates']:<7}"
+            f"Breakouts="
+            f"{stats['Breakouts']:<7}"
+            f"Retests="
+            f"{stats['Retests']:<7}"
+            f"Confirmations="
+            f"{stats['Confirmations']:<7}"
         )
 
 
 # ============================================================
-# SAVE RESULTS
+# SAVE TRADES
 # ============================================================
 
-def save_results(all_trades):
+def save_results(
+    all_trades,
+):
 
     filename = (
         "kraken_pattern_backtest_1y_trades.csv"
     )
 
-    if not all_trades:
+    columns = [
+        "asset",
+        "symbol",
+        "pattern",
+        "direction",
+        "pattern_start",
+        "pattern_end",
+        "breakout_time",
+        "retest_time",
+        "entry_time",
+        "entry_price",
+        "tp_price",
+        "sl_price",
+        "exit_time",
+        "exit_price",
+        "result",
+    ]
+
+    if all_trades:
 
         df = pd.DataFrame(
-            columns=[
-                "asset",
-                "symbol",
-                "pattern",
-                "direction",
-                "pattern_start",
-                "pattern_end",
-                "breakout_time",
-                "retest_time",
-                "entry_time",
-                "entry_price",
-                "tp_price",
-                "sl_price",
-                "exit_time",
-                "exit_price",
-                "result",
-            ]
+            all_trades
         )
 
     else:
 
         df = pd.DataFrame(
-            all_trades
+            columns=columns
         )
 
     df.to_csv(
@@ -2621,9 +3083,10 @@ def save_results(all_trades):
         index=False,
     )
 
-    print("\n")
+    print()
     print(
-        f"Trade file saved: {filename}"
+        f"Trade file saved: "
+        f"{filename}"
     )
 
 
@@ -2638,7 +3101,7 @@ def main():
         "KRAKEN FUTURES PATTERN BACKTEST 1Y"
     )
     print(
-        "VERSION 4.2 - DYNAMIC UNIVERSE"
+        "VERSION 4.3"
     )
     print("=" * 70)
 
@@ -2658,11 +3121,13 @@ def main():
     )
 
     print(
-        f"TP: {TP_PCT * 100:.2f}%"
+        f"TP: "
+        f"{TP_PCT * 100:.2f}%"
     )
 
     print(
-        f"SL: {SL_PCT * 100:.2f}%"
+        f"SL: "
+        f"{SL_PCT * 100:.2f}%"
     )
 
     print(
@@ -2670,9 +3135,19 @@ def main():
         f"{MAX_HOLD_HOURS}h"
     )
 
-    # --------------------------------------------------------
-    # Exact UTC window
-    # --------------------------------------------------------
+    print(
+        f"Expected 1H candles: "
+        f"{expected_candles('1h')}"
+    )
+
+    print(
+        f"Expected 5M candles: "
+        f"{expected_candles('5m')}"
+    )
+
+    # ========================================================
+    # UTC WINDOW
+    # ========================================================
 
     end_dt = datetime.now(
         timezone.utc
@@ -2680,7 +3155,9 @@ def main():
 
     start_dt = (
         end_dt
-        - timedelta(days=DAYS)
+        - timedelta(
+            days=DAYS
+        )
     )
 
     start_ts = int(
@@ -2701,31 +3178,17 @@ def main():
         f"{end_dt.isoformat()}"
     )
 
-    # --------------------------------------------------------
-    # Dynamic contract discovery
-    # --------------------------------------------------------
+    # ========================================================
+    # DYNAMIC CONTRACT DISCOVERY
+    # ========================================================
 
-    try:
+    universe = (
+        build_dynamic_universe()
+    )
 
-        universe = (
-            build_dynamic_universe()
-        )
-
-    except Exception as exc:
-
-        print(
-            "FATAL: Could not discover "
-            f"Kraken instruments: {exc}"
-        )
-
-        raise
-
-    # --------------------------------------------------------
-    # Process every configured asset.
-    #
-    # IMPORTANT:
-    # We NEVER shrink the universe.
-    # --------------------------------------------------------
+    # ========================================================
+    # PROCESS ALL 20 ASSETS
+    # ========================================================
 
     results = []
 
@@ -2749,7 +3212,8 @@ def main():
         except Exception as exc:
 
             print(
-                f"{asset}: ERROR -> {exc}"
+                f"{asset}: ERROR -> "
+                f"{exc}"
             )
 
             result = {
@@ -2759,33 +3223,47 @@ def main():
                 "trades": [],
                 "history_1h": 0,
                 "history_5m": 0,
+                "expected_1h":
+                    expected_candles(
+                        "1h"
+                    ),
+                "expected_5m":
+                    expected_candles(
+                        "5m"
+                    ),
                 "lifecycle": {},
             }
 
-        results.append(result)
+        results.append(
+            result
+        )
 
         all_trades.extend(
             result.get(
                 "trades",
-                []
+                [],
             )
         )
 
-    # --------------------------------------------------------
-    # Safety check
-    # --------------------------------------------------------
+    # ========================================================
+    # SAFETY CHECK
+    # ========================================================
 
-    if len(results) != EXPECTED_UNIVERSE_SIZE:
+    if (
+        len(results)
+        != EXPECTED_UNIVERSE_SIZE
+    ):
 
         raise RuntimeError(
             "Universe processing error: "
-            f"expected {EXPECTED_UNIVERSE_SIZE}, "
+            f"expected "
+            f"{EXPECTED_UNIVERSE_SIZE}, "
             f"got {len(results)}"
         )
 
-    # --------------------------------------------------------
-    # Final report
-    # --------------------------------------------------------
+    # ========================================================
+    # FINAL REPORT
+    # ========================================================
 
     print_summary(
         results,
