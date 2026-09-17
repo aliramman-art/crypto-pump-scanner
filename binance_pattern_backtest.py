@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN BACKTEST 1Y
-# VERSION 4.3
+# VERSION 4.4 - RR COMPARISON
 # ============================================================
 #
 # DATA:
@@ -26,11 +26,15 @@
 #       ↓
 #   ENTRY
 #
-# TP = +2%
-# SL = -1%
-# MAX HOLD = 48 HOURS
+# RR TESTS:
+#
+#   RR 1.0 = TP 1.00% / SL 1.00%
+#   RR 1.5 = TP 1.50% / SL 1.00%
+#   RR 2.0 = TP 2.00% / SL 1.00%
 #
 # IMPORTANT:
+# - ENTRY LOGIC IS IDENTICAL FOR ALL RR TESTS
+# - SAME ENTRY IS TESTED AGAINST ALL 3 RR VALUES
 # - CLOSED CANDLES ONLY
 # - NO LOOKAHEAD
 # - ONE TRADE PER PATTERN INSTANCE
@@ -61,8 +65,24 @@ DAYS = 365
 MAIN_INTERVAL = "1h"
 ENTRY_INTERVAL = "5m"
 
-TP_PCT = 0.02
+# ------------------------------------------------------------
+# STOP LOSS IS FIXED
+# ------------------------------------------------------------
+
 SL_PCT = 0.01
+
+# ------------------------------------------------------------
+# RR TESTS
+#
+# TP changes.
+# SL remains fixed at 1%.
+# ------------------------------------------------------------
+
+RR_TESTS = {
+    "RR_1.0": 0.01,
+    "RR_1.5": 0.015,
+    "RR_2.0": 0.02,
+}
 
 MAX_HOLD_HOURS = 48
 
@@ -75,12 +95,6 @@ CANDLE_CHUNK = 1900
 # ============================================================
 # FIXED 20-ASSET UNIVERSE
 # ============================================================
-#
-# IMPORTANT:
-# These are ASSETS, NOT CONTRACT NAMES.
-#
-# The code discovers the exact Kraken perpetual contract.
-#
 
 FIXED_ASSETS = [
     "XBT",
@@ -105,7 +119,9 @@ FIXED_ASSETS = [
     "HBAR",
 ]
 
-EXPECTED_UNIVERSE_SIZE = len(FIXED_ASSETS)
+EXPECTED_UNIVERSE_SIZE = len(
+    FIXED_ASSETS
+)
 
 
 # ============================================================
@@ -152,7 +168,7 @@ SESSION.headers.update(
     {
         "User-Agent":
             "Mozilla/5.0 "
-            "KrakenPatternBacktest/4.3"
+            "KrakenPatternBacktest/4.4"
     }
 )
 
@@ -196,16 +212,20 @@ def api_get(path, params=None):
             if isinstance(data, dict):
 
                 if data.get("result") == "error":
+
                     raise RuntimeError(
                         str(data)
                     )
 
                 if data.get("error"):
+
                     raise RuntimeError(
                         str(data["error"])
                     )
 
-            time.sleep(REQUEST_SLEEP)
+            time.sleep(
+                REQUEST_SLEEP
+            )
 
             return data
 
@@ -214,6 +234,7 @@ def api_get(path, params=None):
             last_error = exc
 
             if attempt < 2:
+
                 time.sleep(
                     1.0 * (attempt + 1)
                 )
@@ -290,7 +311,6 @@ def is_perpetual_instrument(item):
     if "PERPETUAL" in symbol:
         return True
 
-    # Kraken Futures perpetual naming
     if symbol.startswith("PI_"):
         return True
 
@@ -302,28 +322,6 @@ def is_perpetual_instrument(item):
 
 # ============================================================
 # EXACT CONTRACT MATCH
-# ============================================================
-#
-# THIS IS IMPORTANT.
-#
-# We DO NOT use:
-#
-#     startswith("PF_ETH")
-#
-# because:
-#
-#     PF_ETHUSD
-#     PF_ETHFIUSD
-#
-# would both match.
-#
-# We only accept:
-#
-#     PF_ETHUSD
-#     PI_ETHUSD
-#
-# for ETH.
-#
 # ============================================================
 
 def choose_contract_for_asset(
@@ -340,7 +338,9 @@ def choose_contract_for_asset(
 
     for item in instruments:
 
-        if not is_perpetual_instrument(item):
+        if not is_perpetual_instrument(
+            item
+        ):
             continue
 
         symbol = str(
@@ -352,14 +352,11 @@ def choose_contract_for_asset(
         if symbol not in valid_symbols:
             continue
 
-        candidates.append(
-            symbol
-        )
+        candidates.append(symbol)
 
     if not candidates:
         return None
 
-    # Prefer PF if both exist.
     if f"PF_{asset}USD" in candidates:
         return f"PF_{asset}USD"
 
@@ -381,7 +378,9 @@ def build_dynamic_universe():
 
     print()
     print("=" * 70)
-    print("KRAKEN FUTURES CONTRACT DISCOVERY")
+    print(
+        "KRAKEN FUTURES CONTRACT DISCOVERY"
+    )
     print("=" * 70)
 
     print(
@@ -495,7 +494,6 @@ def parse_candle_response(data):
 
             ts = float(ts)
 
-            # Milliseconds -> seconds
             if ts > 10_000_000_000:
                 ts /= 1000.0
 
@@ -630,7 +628,6 @@ def fetch_candles(
         drop=True
     )
 
-    # Never use future candle.
     now_ts = int(
         datetime.now(
             timezone.utc
@@ -648,20 +645,6 @@ def fetch_candles(
 
 # ============================================================
 # EXPECTED CANDLE COUNT
-# ============================================================
-#
-# FIXED:
-#
-# Previous bug:
-#
-# DAYS * 24 * 60 / (minutes / 60)
-#
-# produced 525600 for 1H.
-#
-# Correct:
-#
-# total minutes / interval minutes
-#
 # ============================================================
 
 def expected_candles(interval):
@@ -708,13 +691,6 @@ def history_status(
     actual_1h = len(df_1h)
     actual_5m = len(df_5m)
 
-    # --------------------------------------------------------
-    # Minimum amount required for a valid 1Y test.
-    #
-    # 90% is allowed because exchange history can contain
-    # small gaps.
-    # --------------------------------------------------------
-
     minimum_1h = int(
         expected_1h * 0.90
     )
@@ -739,12 +715,6 @@ def history_status(
             expected_5m,
         )
 
-    # --------------------------------------------------------
-    # Full history.
-    #
-    # 98% threshold.
-    # --------------------------------------------------------
-
     if (
         actual_1h >= int(
             expected_1h * 0.98
@@ -760,10 +730,6 @@ def history_status(
             expected_1h,
             expected_5m,
         )
-
-    # --------------------------------------------------------
-    # Usable but not completely full.
-    # --------------------------------------------------------
 
     return (
         "PARTIAL_HISTORY",
@@ -1439,10 +1405,6 @@ def detect_triangle_wedge(
         l2 - l1
     )
 
-    # --------------------------------------------------------
-    # Symmetrical contracting triangle
-    # --------------------------------------------------------
-
     contracting = (
         upper_slope < 0
         and lower_slope > 0
@@ -1488,10 +1450,6 @@ def detect_triangle_wedge(
             )
         )
 
-    # --------------------------------------------------------
-    # Rising wedge
-    # --------------------------------------------------------
-
     rising_wedge = (
         upper_slope > 0
         and lower_slope > 0
@@ -1518,10 +1476,6 @@ def detect_triangle_wedge(
                 quality=1.0,
             )
         )
-
-    # --------------------------------------------------------
-    # Falling wedge
-    # --------------------------------------------------------
 
     falling_wedge = (
         upper_slope < 0
@@ -1693,10 +1647,7 @@ def detect_flags(
     ):
         return patterns
 
-    # --------------------------------------------------------
     # Bull flag
-    # --------------------------------------------------------
-
     if impulse_return > 0:
 
         retrace = (
@@ -1727,10 +1678,7 @@ def detect_flags(
                 )
             )
 
-    # --------------------------------------------------------
     # Bear flag
-    # --------------------------------------------------------
-
     elif impulse_return < 0:
 
         retrace = (
@@ -1788,11 +1736,6 @@ def breakout_signal(
     direction = pattern[
         "direction"
     ]
-
-    # --------------------------------------------------------
-    # LONG = break actual upper boundary
-    # SHORT = break actual lower boundary
-    # --------------------------------------------------------
 
     if direction == "LONG":
 
@@ -1934,10 +1877,6 @@ def find_entry(
         + 5
     )
 
-    # --------------------------------------------------------
-    # FIRST RETEST ONLY
-    # --------------------------------------------------------
-
     retest_pos = None
 
     for pos, (_, row) in enumerate(
@@ -1963,7 +1902,6 @@ def find_entry(
         if not touched:
             continue
 
-        # LONG retest must close above level.
         if direction == "LONG":
 
             if c >= level:
@@ -1971,7 +1909,6 @@ def find_entry(
                 retest_pos = pos
                 break
 
-        # SHORT retest must close below level.
         else:
 
             if c <= level:
@@ -1981,10 +1918,6 @@ def find_entry(
 
     if retest_pos is None:
         return None
-
-    # --------------------------------------------------------
-    # Confirmation AFTER retest candle
-    # --------------------------------------------------------
 
     confirmation_slice = future.iloc[
         retest_pos + 1:
@@ -2031,12 +1964,27 @@ def find_entry(
 # ============================================================
 # TRADE SIMULATION
 # ============================================================
+#
+# IMPORTANT:
+# This function now receives TP_PCT explicitly.
+#
+# Therefore the EXACT SAME ENTRY can be simulated with:
+#
+# RR 1.0
+# RR 1.5
+# RR 2.0
+#
+# No new entry signal is generated for each RR.
+#
+# ============================================================
 
 def simulate_trade(
     df_5m,
     entry_time,
     entry_price,
     direction,
+    tp_pct,
+    rr_name,
 ):
 
     if direction == "LONG":
@@ -2045,7 +1993,7 @@ def simulate_trade(
             entry_price
             * (
                 1.0
-                + TP_PCT
+                + tp_pct
             )
         )
 
@@ -2063,7 +2011,7 @@ def simulate_trade(
             entry_price
             * (
                 1.0
-                - TP_PCT
+                - tp_pct
             )
         )
 
@@ -2127,13 +2075,15 @@ def simulate_trade(
             )
 
         # ----------------------------------------------------
-        # Conservative same-candle rule:
+        # SAME CANDLE:
         # SL FIRST
         # ----------------------------------------------------
 
         if hit_tp and hit_sl:
 
             return {
+                "rr": rr_name,
+                "tp_pct": tp_pct,
                 "result": "FAILURE",
                 "exit_time": int(
                     row["timestamp"]
@@ -2141,11 +2091,14 @@ def simulate_trade(
                 "exit_price": sl_price,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
+                "r_multiple": -1.0,
             }
 
         if hit_sl:
 
             return {
+                "rr": rr_name,
+                "tp_pct": tp_pct,
                 "result": "FAILURE",
                 "exit_time": int(
                     row["timestamp"]
@@ -2153,11 +2106,14 @@ def simulate_trade(
                 "exit_price": sl_price,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
+                "r_multiple": -1.0,
             }
 
         if hit_tp:
 
             return {
+                "rr": rr_name,
+                "tp_pct": tp_pct,
                 "result": "SUCCESS",
                 "exit_time": int(
                     row["timestamp"]
@@ -2165,11 +2121,10 @@ def simulate_trade(
                 "exit_price": tp_price,
                 "tp_price": tp_price,
                 "sl_price": sl_price,
+                "r_multiple": (
+                    tp_pct / SL_PCT
+                ),
             }
-
-    # --------------------------------------------------------
-    # Unresolved = excluded
-    # --------------------------------------------------------
 
     return None
 
@@ -2224,10 +2179,6 @@ def detect_patterns(df):
         )
     )
 
-    # --------------------------------------------------------
-    # Flags
-    # --------------------------------------------------------
-
     start_flag = (
         FLAG_IMPULSE_LOOKBACK
         + FLAG_CONSOLIDATION_BARS
@@ -2271,10 +2222,6 @@ def detect_patterns(df):
     patterns = list(
         unique.values()
     )
-
-    # --------------------------------------------------------
-    # Chronological
-    # --------------------------------------------------------
 
     patterns.sort(
         key=lambda x: (
@@ -2331,6 +2278,7 @@ def detect_patterns(df):
                 break
 
         if not duplicate:
+
             accepted.append(p)
 
     return accepted
@@ -2365,7 +2313,7 @@ def process_asset(
             "asset": asset,
             "contract": None,
             "status": "NO_CONTRACT",
-            "trades": [],
+            "entries": [],
             "history_1h": 0,
             "history_5m": 0,
             "expected_1h": expected_candles(
@@ -2414,10 +2362,6 @@ def process_asset(
         f"5M={expected_5m}"
     )
 
-    # --------------------------------------------------------
-    # Do not backtest insufficient history.
-    # --------------------------------------------------------
-
     if status in (
         "INSUFFICIENT_1H",
         "INSUFFICIENT_5M",
@@ -2427,7 +2371,7 @@ def process_asset(
             "asset": asset,
             "contract": contract,
             "status": status,
-            "trades": [],
+            "entries": [],
             "history_1h": len(df_1h),
             "history_5m": len(df_5m),
             "expected_1h": expected_1h,
@@ -2436,7 +2380,7 @@ def process_asset(
         }
 
     # --------------------------------------------------------
-    # Pattern detection
+    # PATTERN DETECTION
     # --------------------------------------------------------
 
     patterns = detect_patterns(
@@ -2448,14 +2392,14 @@ def process_asset(
         f"{len(patterns)}"
     )
 
-    trades = []
+    entries = []
 
     consumed_events = set()
 
     lifecycle = {}
 
     # --------------------------------------------------------
-    # Pattern lifecycle
+    # PATTERN LIFECYCLE
     # --------------------------------------------------------
 
     for p in patterns:
@@ -2483,7 +2427,7 @@ def process_asset(
         ]["Candidates"] += 1
 
         # ----------------------------------------------------
-        # Search for first valid 1H breakout.
+        # FIRST VALID 1H BREAKOUT
         # ----------------------------------------------------
 
         breakout_i = None
@@ -2538,8 +2482,7 @@ def process_asset(
         )
 
         # ----------------------------------------------------
-        # Freeze pattern boundary.
-        # No future information.
+        # FREEZE PATTERN BOUNDARY
         # ----------------------------------------------------
 
         if (
@@ -2590,24 +2533,17 @@ def process_asset(
         ]["Confirmations"] += 1
 
         # ----------------------------------------------------
-        # Trade simulation starts AFTER confirmation candle.
+        # IMPORTANT:
+        #
+        # Store ENTRY ONLY.
+        #
+        # We DO NOT simulate RR here.
+        #
+        # This guarantees the exact same entry is used
+        # for RR 1.0, RR 1.5 and RR 2.0.
         # ----------------------------------------------------
 
-        result = simulate_trade(
-            df_5m,
-            entry[
-                "entry_time"
-            ],
-            entry[
-                "entry_price"
-            ],
-            p["direction"],
-        )
-
-        if result is None:
-            continue
-
-        trades.append(
+        entries.append(
             {
                 "asset": asset,
                 "symbol": contract,
@@ -2638,39 +2574,241 @@ def process_asset(
                 "entry_price": entry[
                     "entry_price"
                 ],
-                "tp_price": result[
-                    "tp_price"
-                ],
-                "sl_price": result[
-                    "sl_price"
-                ],
-                "exit_time": result[
-                    "exit_time"
-                ],
-                "exit_price": result[
-                    "exit_price"
-                ],
-                "result": result[
-                    "result"
-                ],
             }
         )
 
     print(
-        f"{asset}: completed trades="
-        f"{len(trades)}"
+        f"{asset}: completed entries="
+        f"{len(entries)}"
     )
 
     return {
         "asset": asset,
         "contract": contract,
         "status": status,
-        "trades": trades,
+        "entries": entries,
         "history_1h": len(df_1h),
         "history_5m": len(df_5m),
         "expected_1h": expected_1h,
         "expected_5m": expected_5m,
         "lifecycle": lifecycle,
+
+        # Keep dataframes available for RR simulation.
+        "df_5m": df_5m,
+    }
+
+
+# ============================================================
+# SIMULATE ALL RR VALUES
+# ============================================================
+#
+# Each ENTRY is tested independently against:
+#
+# RR 1.0
+# RR 1.5
+# RR 2.0
+#
+# ============================================================
+
+def simulate_all_rr(
+    results,
+):
+
+    all_trades = []
+
+    for result in results:
+
+        entries = result.get(
+            "entries",
+            []
+        )
+
+        df_5m = result.get(
+            "df_5m"
+        )
+
+        if df_5m is None:
+            continue
+
+        for entry in entries:
+
+            for rr_name, tp_pct in (
+                RR_TESTS.items()
+            ):
+
+                simulation = simulate_trade(
+                    df_5m,
+                    entry[
+                        "entry_time"
+                    ],
+                    entry[
+                        "entry_price"
+                    ],
+                    entry[
+                        "direction"
+                    ],
+                    tp_pct,
+                    rr_name,
+                )
+
+                if simulation is None:
+                    continue
+
+                trade = dict(entry)
+
+                trade.update(
+                    {
+                        "rr": rr_name,
+                        "tp_pct": tp_pct,
+                        "tp_price":
+                            simulation[
+                                "tp_price"
+                            ],
+                        "sl_price":
+                            simulation[
+                                "sl_price"
+                            ],
+                        "exit_time":
+                            simulation[
+                                "exit_time"
+                            ],
+                        "exit_price":
+                            simulation[
+                                "exit_price"
+                            ],
+                        "result":
+                            simulation[
+                                "result"
+                            ],
+                        "r_multiple":
+                            simulation[
+                                "r_multiple"
+                            ],
+                    }
+                )
+
+                all_trades.append(
+                    trade
+                )
+
+    return all_trades
+
+
+# ============================================================
+# RR SUMMARY
+# ============================================================
+
+def calculate_rr_stats(
+    trades,
+    rr_name,
+):
+
+    subset = [
+        x
+        for x in trades
+        if x["rr"] == rr_name
+    ]
+
+    wins = sum(
+        1
+        for x in subset
+        if x["result"]
+        == "SUCCESS"
+    )
+
+    losses = sum(
+        1
+        for x in subset
+        if x["result"]
+        == "FAILURE"
+    )
+
+    total = (
+        wins
+        + losses
+    )
+
+    if total:
+
+        win_rate = (
+            wins
+            / total
+            * 100
+        )
+
+    else:
+
+        win_rate = 0.0
+
+    tp_pct = RR_TESTS[
+        rr_name
+    ]
+
+    breakeven = (
+        SL_PCT
+        / (
+            tp_pct
+            + SL_PCT
+        )
+        * 100
+    )
+
+    net_r = sum(
+        x["r_multiple"]
+        for x in subset
+    )
+
+    gross_profit_r = sum(
+        x["r_multiple"]
+        for x in subset
+        if x["r_multiple"] > 0
+    )
+
+    gross_loss_r = abs(
+        sum(
+            x["r_multiple"]
+            for x in subset
+            if x["r_multiple"] < 0
+        )
+    )
+
+    if gross_loss_r > 0:
+
+        profit_factor = (
+            gross_profit_r
+            / gross_loss_r
+        )
+
+    else:
+
+        profit_factor = (
+            float("inf")
+            if gross_profit_r > 0
+            else 0.0
+        )
+
+    edge = (
+        win_rate
+        - breakeven
+    )
+
+    return {
+        "rr": rr_name,
+        "tp_pct": tp_pct,
+        "sl_pct": SL_PCT,
+        "total": total,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": win_rate,
+        "breakeven": breakeven,
+        "edge": edge,
+        "net_r": net_r,
+        "gross_profit_r":
+            gross_profit_r,
+        "gross_loss_r":
+            gross_loss_r,
+        "profit_factor":
+            profit_factor,
     }
 
 
@@ -2719,90 +2857,175 @@ def print_summary(
         f"{len(full_history)}"
     )
 
+    # --------------------------------------------------------
+    # ENTRY COUNT
+    # --------------------------------------------------------
+
+    total_entries = sum(
+        len(
+            r.get(
+                "entries",
+                []
+            )
+        )
+        for r in results
+    )
+
+    print()
     print(
-        f"TOTAL TRADES: "
-        f"{len(all_trades)}"
+        f"UNIQUE ENTRIES: "
+        f"{total_entries}"
     )
 
-    success = sum(
-        1
-        for x in all_trades
-        if x["result"]
-        == "SUCCESS"
+    print(
+        "Each entry tested on all RR values."
     )
 
-    failure = sum(
-        1
-        for x in all_trades
-        if x["result"]
-        == "FAILURE"
+    # ========================================================
+    # RR COMPARISON
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print("RR COMPARISON")
+    print("=" * 70)
+
+    print(
+        f"{'RR':<10}"
+        f"{'TP':>9}"
+        f"{'SL':>9}"
+        f"{'Trades':>10}"
+        f"{'Wins':>9}"
+        f"{'Losses':>9}"
+        f"{'WR':>9}"
+        f"{'BE':>9}"
+        f"{'Edge':>10}"
+        f"{'Net R':>12}"
+        f"{'PF':>10}"
     )
 
-    total = (
-        success
-        + failure
-    )
+    print("-" * 110)
 
-    if total:
+    for rr_name in RR_TESTS:
 
-        success_rate = (
-            success
-            / total
-            * 100
+        stats = calculate_rr_stats(
+            all_trades,
+            rr_name,
         )
 
-        failure_rate = (
-            failure
-            / total
-            * 100
+        pf = stats[
+            "profit_factor"
+        ]
+
+        pf_text = (
+            f"{pf:.3f}"
+            if np.isfinite(pf)
+            else "INF"
         )
 
-    else:
-
-        success_rate = 0.0
-        failure_rate = 0.0
-
-    raw_breakeven = (
-        SL_PCT
-        / (
-            TP_PCT
-            + SL_PCT
+        print(
+            f"{rr_name:<10}"
+            f"{stats['tp_pct'] * 100:>8.2f}%"
+            f"{SL_PCT * 100:>8.2f}%"
+            f"{stats['total']:>10}"
+            f"{stats['wins']:>9}"
+            f"{stats['losses']:>9}"
+            f"{stats['win_rate']:>8.2f}%"
+            f"{stats['breakeven']:>8.2f}%"
+            f"{stats['edge']:>+9.2f}pp"
+            f"{stats['net_r']:>12.2f}"
+            f"{pf_text:>10}"
         )
-        * 100
-    )
 
-    edge = (
-        success_rate
-        - raw_breakeven
-    )
+    # ========================================================
+    # RR DETAILED REPORT
+    # ========================================================
 
-    print(
-        f"SUCCESS: {success}"
-    )
+    for rr_name in RR_TESTS:
 
-    print(
-        f"FAILURE: {failure}"
-    )
+        stats = calculate_rr_stats(
+            all_trades,
+            rr_name,
+        )
 
-    print(
-        f"SUCCESS RATE: "
-        f"{success_rate:.2f}%"
-    )
+        print()
+        print("=" * 70)
+        print(
+            f"{rr_name} DETAILED RESULT"
+        )
+        print("=" * 70)
 
-    print(
-        f"FAILURE RATE: "
-        f"{failure_rate:.2f}%"
-    )
+        print(
+            f"TP: "
+            f"{stats['tp_pct'] * 100:.2f}%"
+        )
 
-    print(
-        f"RAW BREAK-EVEN: "
-        f"{raw_breakeven:.2f}%"
-    )
+        print(
+            f"SL: "
+            f"{SL_PCT * 100:.2f}%"
+        )
 
-    print(
-        f"EDGE VS RAW BREAK-EVEN: "
-        f"{edge:+.2f} pp"
-    )
+        print(
+            f"Trades: "
+            f"{stats['total']}"
+        )
+
+        print(
+            f"Wins: "
+            f"{stats['wins']}"
+        )
+
+        print(
+            f"Losses: "
+            f"{stats['losses']}"
+        )
+
+        print(
+            f"Win Rate: "
+            f"{stats['win_rate']:.2f}%"
+        )
+
+        print(
+            f"Break-Even: "
+            f"{stats['breakeven']:.2f}%"
+        )
+
+        print(
+            f"Edge vs Break-Even: "
+            f"{stats['edge']:+.2f} pp"
+        )
+
+        print(
+            f"Gross Profit: "
+            f"{stats['gross_profit_r']:.2f}R"
+        )
+
+        print(
+            f"Gross Loss: "
+            f"{stats['gross_loss_r']:.2f}R"
+        )
+
+        print(
+            f"Net R: "
+            f"{stats['net_r']:.2f}R"
+        )
+
+        pf = stats[
+            "profit_factor"
+        ]
+
+        if np.isfinite(pf):
+
+            print(
+                f"Profit Factor: "
+                f"{pf:.3f}"
+            )
+
+        else:
+
+            print(
+                "Profit Factor: INF"
+            )
 
     # ========================================================
     # UNIVERSE STATUS
@@ -2828,147 +3051,175 @@ def print_summary(
             f"{r['status']:<20} "
             f"1H={r['history_1h']:<6} "
             f"5M={r['history_5m']:<7} "
-            f"Trades="
-            f"{len(r['trades'])}"
+            f"Entries="
+            f"{len(r.get('entries', []))}"
         )
 
     # ========================================================
-    # PATTERN BREAKDOWN
+    # PATTERN BREAKDOWN BY RR
     # ========================================================
 
-    print()
-    print(
-        "PATTERN BREAKDOWN"
-    )
+    for rr_name in RR_TESTS:
 
-    print("-" * 70)
+        print()
+        print(
+            f"PATTERN BREAKDOWN - "
+            f"{rr_name}"
+        )
 
-    pattern_stats = {}
+        print("-" * 70)
 
-    for trade in all_trades:
+        pattern_stats = {}
 
-        p = trade[
-            "pattern"
-        ]
+        for trade in all_trades:
 
-        if p not in pattern_stats:
+            if trade["rr"] != rr_name:
+                continue
 
-            pattern_stats[p] = {
+            p = trade[
+                "pattern"
+            ]
+
+            if p not in pattern_stats:
+
+                pattern_stats[p] = {
+                    "total": 0,
+                    "success": 0,
+                    "failure": 0,
+                    "net_r": 0.0,
+                }
+
+            pattern_stats[
+                p
+            ]["total"] += 1
+
+            pattern_stats[
+                p
+            ]["net_r"] += trade[
+                "r_multiple"
+            ]
+
+            if (
+                trade["result"]
+                == "SUCCESS"
+            ):
+
+                pattern_stats[
+                    p
+                ]["success"] += 1
+
+            else:
+
+                pattern_stats[
+                    p
+                ]["failure"] += 1
+
+        for p, s in sorted(
+            pattern_stats.items(),
+            key=lambda x:
+            -x[1]["total"],
+        ):
+
+            wr = (
+                s["success"]
+                / s["total"]
+                * 100
+                if s["total"]
+                else 0.0
+            )
+
+            print(
+                f"{p:<24}"
+                f"{s['total']:>8}"
+                f"{s['success']:>8}"
+                f"{s['failure']:>8}"
+                f"{wr:>9.2f}%"
+                f"{s['net_r']:>12.2f}R"
+            )
+
+    # ========================================================
+    # ASSET BREAKDOWN BY RR
+    # ========================================================
+
+    for rr_name in RR_TESTS:
+
+        print()
+        print(
+            f"ASSET BREAKDOWN - "
+            f"{rr_name}"
+        )
+
+        print("-" * 70)
+
+        asset_stats = {}
+
+        for asset in FIXED_ASSETS:
+
+            asset_stats[
+                asset
+            ] = {
                 "total": 0,
                 "success": 0,
                 "failure": 0,
+                "net_r": 0.0,
             }
 
-        pattern_stats[
-            p
-        ]["total"] += 1
+        for trade in all_trades:
 
-        if (
-            trade["result"]
-            == "SUCCESS"
-        ):
+            if trade["rr"] != rr_name:
+                continue
 
-            pattern_stats[
-                p
-            ]["success"] += 1
-
-        else:
-
-            pattern_stats[
-                p
-            ]["failure"] += 1
-
-    for p, s in sorted(
-        pattern_stats.items(),
-        key=lambda x:
-        -x[1]["total"],
-    ):
-
-        wr = (
-            s["success"]
-            / s["total"]
-            * 100
-            if s["total"]
-            else 0.0
-        )
-
-        print(
-            f"{p:<24}"
-            f"{s['total']:>7}"
-            f"{s['success']:>8}"
-            f"{s['failure']:>8}"
-            f"{wr:>9.2f}%"
-        )
-
-    # ========================================================
-    # ASSET BREAKDOWN
-    # ========================================================
-
-    print()
-    print(
-        "ASSET BREAKDOWN"
-    )
-
-    print("-" * 70)
-
-    asset_stats = {}
-
-    for asset in FIXED_ASSETS:
-
-        asset_stats[
-            asset
-        ] = {
-            "total": 0,
-            "success": 0,
-            "failure": 0,
-        }
-
-    for trade in all_trades:
-
-        asset = trade[
-            "asset"
-        ]
-
-        asset_stats[
-            asset
-        ]["total"] += 1
-
-        if (
-            trade["result"]
-            == "SUCCESS"
-        ):
+            asset = trade[
+                "asset"
+            ]
 
             asset_stats[
                 asset
-            ]["success"] += 1
-
-        else:
+            ]["total"] += 1
 
             asset_stats[
                 asset
-            ]["failure"] += 1
+            ]["net_r"] += trade[
+                "r_multiple"
+            ]
 
-    for asset in FIXED_ASSETS:
+            if (
+                trade["result"]
+                == "SUCCESS"
+            ):
 
-        s = asset_stats[
-            asset
-        ]
+                asset_stats[
+                    asset
+                ]["success"] += 1
 
-        wr = (
-            s["success"]
-            / s["total"]
-            * 100
-            if s["total"]
-            else 0.0
-        )
+            else:
 
-        print(
-            f"{asset:<8}"
-            f"{s['total']:>8}"
-            f"{s['success']:>8}"
-            f"{s['failure']:>8}"
-            f"{wr:>9.2f}%"
-        )
+                asset_stats[
+                    asset
+                ]["failure"] += 1
+
+        for asset in FIXED_ASSETS:
+
+            s = asset_stats[
+                asset
+            ]
+
+            wr = (
+                s["success"]
+                / s["total"]
+                * 100
+                if s["total"]
+                else 0.0
+            )
+
+            print(
+                f"{asset:<8}"
+                f"{s['total']:>8}"
+                f"{s['success']:>8}"
+                f"{s['failure']:>8}"
+                f"{wr:>9.2f}%"
+                f"{s['net_r']:>12.2f}R"
+            )
 
     # ========================================================
     # LIFECYCLE DIAGNOSTICS
@@ -3045,10 +3296,13 @@ def save_results(
 ):
 
     filename = (
-        "kraken_pattern_backtest_1y_trades.csv"
+        "kraken_pattern_backtest_1y_rr_comparison.csv"
     )
 
     columns = [
+        "rr",
+        "tp_pct",
+        "sl_pct",
         "asset",
         "symbol",
         "pattern",
@@ -3064,6 +3318,7 @@ def save_results(
         "exit_time",
         "exit_price",
         "result",
+        "r_multiple",
     ]
 
     if all_trades:
@@ -3077,6 +3332,17 @@ def save_results(
         df = pd.DataFrame(
             columns=columns
         )
+
+    # Force desired column order.
+    existing_columns = [
+        c
+        for c in columns
+        if c in df.columns
+    ]
+
+    df = df[
+        existing_columns
+    ]
 
     df.to_csv(
         filename,
@@ -3101,7 +3367,7 @@ def main():
         "KRAKEN FUTURES PATTERN BACKTEST 1Y"
     )
     print(
-        "VERSION 4.3"
+        "VERSION 4.4 - RR COMPARISON"
     )
     print("=" * 70)
 
@@ -3120,15 +3386,27 @@ def main():
         f"{ENTRY_INTERVAL}"
     )
 
+    print()
     print(
-        f"TP: "
-        f"{TP_PCT * 100:.2f}%"
+        "RR TESTS:"
     )
 
-    print(
-        f"SL: "
-        f"{SL_PCT * 100:.2f}%"
-    )
+    for rr_name, tp_pct in (
+        RR_TESTS.items()
+    ):
+
+        rr_value = (
+            tp_pct / SL_PCT
+        )
+
+        print(
+            f"  {rr_name}: "
+            f"TP={tp_pct * 100:.2f}% "
+            f"SL={SL_PCT * 100:.2f}% "
+            f"RR={rr_value:.2f}"
+        )
+
+    print()
 
     print(
         f"Max hold: "
@@ -3179,7 +3457,7 @@ def main():
     )
 
     # ========================================================
-    # DYNAMIC CONTRACT DISCOVERY
+    # CONTRACT DISCOVERY
     # ========================================================
 
     universe = (
@@ -3187,12 +3465,10 @@ def main():
     )
 
     # ========================================================
-    # PROCESS ALL 20 ASSETS
+    # PROCESS ALL ASSETS
     # ========================================================
 
     results = []
-
-    all_trades = []
 
     for asset in FIXED_ASSETS:
 
@@ -3220,7 +3496,7 @@ def main():
                 "asset": asset,
                 "contract": contract,
                 "status": "ERROR",
-                "trades": [],
+                "entries": [],
                 "history_1h": 0,
                 "history_5m": 0,
                 "expected_1h":
@@ -3236,13 +3512,6 @@ def main():
 
         results.append(
             result
-        )
-
-        all_trades.extend(
-            result.get(
-                "trades",
-                [],
-            )
         )
 
     # ========================================================
@@ -3262,6 +3531,23 @@ def main():
         )
 
     # ========================================================
+    # SIMULATE SAME ENTRIES
+    # AGAINST ALL RR VALUES
+    # ========================================================
+
+    print()
+    print("=" * 70)
+    print(
+        "SIMULATING SAME ENTRIES "
+        "AGAINST ALL RR VALUES"
+    )
+    print("=" * 70)
+
+    all_trades = simulate_all_rr(
+        results
+    )
+
+    # ========================================================
     # FINAL REPORT
     # ========================================================
 
@@ -3269,6 +3555,10 @@ def main():
         results,
         all_trades,
     )
+
+    # ========================================================
+    # SAVE
+    # ========================================================
 
     save_results(
         all_trades
