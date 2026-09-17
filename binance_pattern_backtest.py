@@ -1,7 +1,9 @@
 # ============================================================
 # KRAKEN FUTURES MULTI-TIMEFRAME PATTERN BACKTEST
-# VERSION 4.0
+# VERSION 4.1
 # ============================================================
+#
+# FIXED 20-SYMBOL UNIVERSE
 #
 # 1H  = MAIN PATTERN
 # 5M  = ENTRY
@@ -22,18 +24,19 @@
 # NO API KEY
 #
 # IMPORTANT:
-# - Uses Kraken Futures public API
-# - Attempts to use 20 perpetual symbols
-# - If preferred symbols are unavailable, currently available
-#   Kraken perpetuals are used to fill the universe
+# - Exactly 20 symbols are defined in the universe.
+# - Symbols are NEVER silently removed from the universe.
+# - If Kraken does not provide data for a symbol:
+#       UNAVAILABLE / INSUFFICIENT HISTORY
+# - Such symbols are reported separately.
 #
 # ============================================================
 
 import time
-import math
 import requests
 import numpy as np
 import pandas as pd
+
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 
@@ -54,75 +57,117 @@ SL_PCT = 0.01
 
 MAX_HOLD_HOURS = 48
 
-TOP_N = 20
-
 REQUEST_TIMEOUT = 30
 REQUEST_SLEEP = 0.10
 
-# Pattern parameters
+# Historical API chunk size
+CANDLE_CHUNK = 1900
+
+# ------------------------------------------------------------
+# Pivot settings
+# ------------------------------------------------------------
+
 PIVOT_LEFT = 3
 PIVOT_RIGHT = 3
+
+# ------------------------------------------------------------
+# Double Top / Bottom
+# ------------------------------------------------------------
 
 DOUBLE_TOLERANCE = 0.015
 DOUBLE_MIN_SEPARATION = 5
 DOUBLE_MAX_SEPARATION = 60
 
+# ------------------------------------------------------------
+# Head & Shoulders
+# ------------------------------------------------------------
+
 HS_MIN_SEPARATION = 5
 HS_MAX_SEPARATION = 80
 
-STRUCTURE_LOOKBACK = 60
+# ------------------------------------------------------------
+# Triangle / Wedge
+# ------------------------------------------------------------
 
-# Triangle / wedge
 MIN_STRUCTURE_BARS = 12
 MAX_STRUCTURE_BARS = 60
 
+# ------------------------------------------------------------
 # Flag
+# ------------------------------------------------------------
+
 FLAG_IMPULSE_LOOKBACK = 35
 FLAG_CONSOLIDATION_BARS = 15
+
 FLAG_MIN_IMPULSE = 0.04
 FLAG_MAX_RETRACE = 0.55
 FLAG_MAX_RANGE_TO_IMPULSE = 0.60
 FLAG_MIN_DIRECTIONAL_EFFICIENCY = 0.45
 
+# ------------------------------------------------------------
 # Breakout
+# ------------------------------------------------------------
+
 BREAKOUT_BUFFER = 0.0010
 
+# ------------------------------------------------------------
 # Retest
+# ------------------------------------------------------------
+
 RETEST_MAX_BARS = 12
 
+# ------------------------------------------------------------
 # Confirmation
+# ------------------------------------------------------------
+
 CONFIRM_MAX_BARS = 6
 MIN_BODY_RATIO = 0.45
 MIN_CLOSE_POSITION = 0.60
 
-# Historical download
-CANDLE_CHUNK = 1900
 
-# We want a reasonably stable universe.
-# The code first tries these names, then fills from currently
-# available Kraken perpetuals if necessary.
-PREFERRED_BASES = [
-    "XBT",
-    "ETH",
-    "SOL",
-    "XRP",
-    "LTC",
-    "DOGE",
-    "ADA",
-    "LINK",
-    "AVAX",
-    "DOT",
-    "BCH",
-    "UNI",
-    "AAVE",
-    "ATOM",
-    "XLM",
-    "ALGO",
-    "FIL",
-    "ETC",
-    "SUI",
-    "HBAR",
+# ============================================================
+# FIXED 20-SYMBOL UNIVERSE
+# ============================================================
+#
+# IMPORTANT:
+# This list is fixed.
+# The program does NOT shrink it according to Kraken discovery.
+#
+# ============================================================
+
+FIXED_SYMBOLS = [
+    "PI_XBTUSD",
+    "PI_ETHUSD",
+    "PI_SOLUSD",
+    "PI_XRPUSD",
+    "PI_LTCUSD",
+    "PI_DOGEUSD",
+    "PI_ADAUSD",
+    "PI_LINKUSD",
+    "PI_AVAXUSD",
+    "PI_DOTUSD",
+    "PI_BCHUSD",
+    "PI_UNIUSD",
+    "PI_AAVEUSD",
+    "PI_ATOMUSD",
+    "PI_XLMUSD",
+    "PI_ALGOUSD",
+    "PI_FILUSD",
+    "PI_ETCUSD",
+    "PI_SUIUSD",
+    "PI_HBARUSD",
 ]
+
+
+# ============================================================
+# VALIDATE UNIVERSE
+# ============================================================
+
+if len(FIXED_SYMBOLS) != 20:
+    raise RuntimeError(
+        f"Universe configuration error: "
+        f"expected 20 symbols, got {len(FIXED_SYMBOLS)}"
+    )
 
 
 # ============================================================
@@ -133,7 +178,8 @@ SESSION = requests.Session()
 
 SESSION.headers.update(
     {
-        "User-Agent": "Mozilla/5.0 Kraken-Pattern-Backtest/4.0"
+        "User-Agent":
+        "Mozilla/5.0 Kraken-Pattern-Backtest/4.1"
     }
 )
 
@@ -143,85 +189,112 @@ SESSION.headers.update(
 # ============================================================
 
 def safe_float(value):
+
     try:
         return float(value)
+
     except Exception:
         return None
 
 
-def pct(a, b):
-    if b == 0:
-        return 0.0
-    return abs(a - b) / abs(b)
-
-
-def normalize_symbol(symbol):
-    return str(symbol).upper().strip()
-
-
 # ============================================================
-# KRAKEN API
+# KRAKEN GET
 # ============================================================
 
 def kraken_get(path, params=None):
+
     url = BASE_URL + path
 
+    last_error = None
+
     for attempt in range(5):
+
         try:
-            r = SESSION.get(
+
+            response = SESSION.get(
                 url,
                 params=params,
-                timeout=REQUEST_TIMEOUT,
+                timeout=REQUEST_TIMEOUT
             )
 
-            if r.status_code == 200:
-                data = r.json()
+            if response.status_code == 200:
 
-                if isinstance(data, dict):
-                    if data.get("result") == "error":
-                        raise RuntimeError(str(data))
+                data = response.json()
+
+                if (
+                    isinstance(data, dict)
+                    and data.get("result") == "error"
+                ):
+                    raise RuntimeError(
+                        str(data)
+                    )
 
                 return data
 
-            if r.status_code in (429, 500, 502, 503, 504):
-                time.sleep(1.5 * (attempt + 1))
+            if response.status_code in (
+                429,
+                500,
+                502,
+                503,
+                504
+            ):
+
+                time.sleep(
+                    1.5 * (attempt + 1)
+                )
+
                 continue
 
-            r.raise_for_status()
+            response.raise_for_status()
 
-        except Exception:
+        except Exception as e:
+
+            last_error = e
+
             if attempt == 4:
-                raise
+                break
 
-            time.sleep(1.5 * (attempt + 1))
+            time.sleep(
+                1.5 * (attempt + 1)
+            )
 
-    raise RuntimeError("Kraken request failed")
+    raise RuntimeError(
+        f"Kraken request failed: {last_error}"
+    )
 
 
 # ============================================================
-# DISCOVER KRAKEN PERPETUALS
+# OPTIONAL DISCOVERY
+# ============================================================
+#
+# Discovery is ONLY diagnostic.
+# It NEVER changes FIXED_SYMBOLS.
+#
 # ============================================================
 
-def get_available_perpetuals():
+def discover_available_symbols():
 
-    print("\nDiscovering Kraken Futures perpetuals...")
-
-    symbols = set()
+    available = set()
 
     # --------------------------------------------------------
     # TICKERS
     # --------------------------------------------------------
 
     try:
+
         data = kraken_get(
             "/derivatives/api/v3/tickers"
         )
 
-        tickers = data.get("tickers", [])
+        for item in data.get(
+            "tickers",
+            []
+        ):
 
-        for item in tickers:
-
-            if not isinstance(item, dict):
+            if not isinstance(
+                item,
+                dict
+            ):
                 continue
 
             symbol = (
@@ -233,152 +306,136 @@ def get_available_perpetuals():
             if not symbol:
                 continue
 
-            symbol = normalize_symbol(symbol)
+            symbol = str(
+                symbol
+            ).upper()
 
-            # PI_XXXXUSD are Kraken perpetual instruments
-            if symbol.startswith("PI_") and symbol.endswith("USD"):
-                symbols.add(symbol)
+            if (
+                symbol.startswith("PI_")
+                and symbol.endswith("USD")
+            ):
+                available.add(symbol)
 
     except Exception as e:
-        print("Ticker discovery warning:", e)
+
+        print(
+            "Ticker discovery warning:",
+            e
+        )
 
     # --------------------------------------------------------
     # INSTRUMENTS
     # --------------------------------------------------------
 
     try:
+
         data = kraken_get(
             "/derivatives/api/v3/instruments"
         )
 
-        instruments = data.get("instruments", [])
+        for item in data.get(
+            "instruments",
+            []
+        ):
 
-        for item in instruments:
-
-            if not isinstance(item, dict):
+            if not isinstance(
+                item,
+                dict
+            ):
                 continue
 
             symbol = (
                 item.get("symbol")
-                or item.get("instrument")
                 or item.get("pair")
+                or item.get("instrument")
             )
 
             if not symbol:
                 continue
 
-            symbol = normalize_symbol(symbol)
+            symbol = str(
+                symbol
+            ).upper()
 
-            if symbol.startswith("PI_") and symbol.endswith("USD"):
-                symbols.add(symbol)
+            if (
+                symbol.startswith("PI_")
+                and symbol.endswith("USD")
+            ):
+                available.add(symbol)
 
     except Exception as e:
-        print("Instrument discovery warning:", e)
 
-    return sorted(symbols)
-
-
-# ============================================================
-# BUILD 20-SYMBOL UNIVERSE
-# ============================================================
-
-def build_universe():
-
-    available = get_available_perpetuals()
-
-    print(f"Kraken perpetual symbols found: {len(available)}")
-
-    if not available:
-        raise RuntimeError(
-            "No Kraken perpetual symbols were discovered."
+        print(
+            "Instrument discovery warning:",
+            e
         )
 
-    preferred = []
+    return available
 
-    for base in PREFERRED_BASES:
 
-        wanted = f"PI_{base}USD"
+# ============================================================
+# PRINT FIXED UNIVERSE
+# ============================================================
 
-        if wanted in available:
-            preferred.append(wanted)
+def print_universe():
 
-    selected = preferred.copy()
+    print()
+    print("=" * 70)
+    print("FIXED 20-SYMBOL UNIVERSE")
+    print("=" * 70)
 
-    # --------------------------------------------------------
-    # FILL REMAINING SLOTS FROM AVAILABLE PERPETUALS
-    # --------------------------------------------------------
+    for i, symbol in enumerate(
+        FIXED_SYMBOLS,
+        start=1
+    ):
 
-    if len(selected) < TOP_N:
+        print(
+            f"{i:02d}. {symbol}"
+        )
 
-        remaining = [
-            s for s in available
-            if s not in selected
-        ]
-
-        # Stable alphabetical fill.
-        # This avoids random universe changes between runs.
-        remaining.sort()
-
-        for symbol in remaining:
-
-            if len(selected) >= TOP_N:
-                break
-
-            selected.append(symbol)
-
-    selected = selected[:TOP_N]
-
-    print("\nPREFERRED SYMBOLS FOUND:")
-
-    if preferred:
-        for s in preferred:
-            print(s)
-
-    print("\nSELECTED SYMBOLS:")
-
-    for s in selected:
-        print(s)
-
-    missing_preferred = [
-        f"PI_{base}USD"
-        for base in PREFERRED_BASES
-        if f"PI_{base}USD" not in available
-    ]
-
-    if missing_preferred:
-
-        print("\nPREFERRED SYMBOLS NOT AVAILABLE:")
-
-        for s in missing_preferred:
-            print(s)
-
+    print()
     print(
-        f"\nFINAL UNIVERSE SIZE: {len(selected)}"
+        f"FINAL UNIVERSE SIZE: "
+        f"{len(FIXED_SYMBOLS)}"
     )
-
-    return selected
 
 
 # ============================================================
 # FETCH CANDLES
 # ============================================================
 
-def fetch_candles(symbol, interval, start_dt, end_dt):
+def fetch_candles(
+    symbol,
+    interval,
+    start_dt,
+    end_dt
+):
 
-    start_ts = int(start_dt.timestamp())
-    end_ts = int(end_dt.timestamp())
+    start_ts = int(
+        start_dt.timestamp()
+    )
+
+    end_ts = int(
+        end_dt.timestamp()
+    )
 
     all_rows = []
 
     current = start_ts
 
+    interval_seconds = (
+        3600
+        if interval == "1h"
+        else 300
+    )
+
     while current < end_ts:
 
         chunk_end = min(
             end_ts,
-            current + (CANDLE_CHUNK - 1) * (
-                3600 if interval == "1h" else 300
-            )
+            current
+            + (CANDLE_CHUNK - 1)
+            * interval_seconds
         )
 
         params = {
@@ -387,11 +444,12 @@ def fetch_candles(symbol, interval, start_dt, end_dt):
         }
 
         path = (
-            f"/api/charts/v1/trade/"
+            "/api/charts/v1/trade/"
             f"{symbol}/{interval}"
         )
 
         try:
+
             data = kraken_get(
                 path,
                 params=params
@@ -399,21 +457,28 @@ def fetch_candles(symbol, interval, start_dt, end_dt):
 
         except Exception as e:
 
-            print(
-                f"  Candle request failed "
+            raise RuntimeError(
                 f"{symbol} {interval}: {e}"
             )
 
-            break
-
-        rows = data.get("candles", [])
+        rows = data.get(
+            "candles",
+            []
+        )
 
         if not rows:
             break
 
         for row in rows:
 
-            if isinstance(row, dict):
+            # ------------------------------------------------
+            # Dictionary response
+            # ------------------------------------------------
+
+            if isinstance(
+                row,
+                dict
+            ):
 
                 ts = (
                     row.get("time")
@@ -425,9 +490,12 @@ def fetch_candles(symbol, interval, start_dt, end_dt):
                 l = row.get("low")
                 c = row.get("close")
 
+            # ------------------------------------------------
+            # Array response
+            # ------------------------------------------------
+
             else:
 
-                # Defensive handling for array-style rows
                 if len(row) < 5:
                     continue
 
@@ -443,19 +511,30 @@ def fetch_candles(symbol, interval, start_dt, end_dt):
             l = safe_float(l)
             c = safe_float(c)
 
-            if None in (ts, o, h, l, c):
+            if None in (
+                ts,
+                o,
+                h,
+                l,
+                c
+            ):
                 continue
 
-            # Kraken may return milliseconds
+            # milliseconds -> seconds
             if ts > 10_000_000_000:
                 ts /= 1000.0
 
-            if ts < start_ts or ts > end_ts:
+            ts = int(ts)
+
+            if (
+                ts < start_ts
+                or ts > end_ts
+            ):
                 continue
 
             all_rows.append(
                 {
-                    "timestamp": int(ts),
+                    "timestamp": ts,
                     "open": o,
                     "high": h,
                     "low": l,
@@ -463,13 +542,17 @@ def fetch_candles(symbol, interval, start_dt, end_dt):
                 }
             )
 
+        if not all_rows:
+            break
+
         last_ts = max(
             r["timestamp"]
             for r in all_rows
-        ) if all_rows else current
+        )
 
-        next_current = last_ts + (
-            3600 if interval == "1h" else 300
+        next_current = (
+            last_ts
+            + interval_seconds
         )
 
         if next_current <= current:
@@ -477,9 +560,12 @@ def fetch_candles(symbol, interval, start_dt, end_dt):
 
         current = next_current
 
-        time.sleep(REQUEST_SLEEP)
+        time.sleep(
+            REQUEST_SLEEP
+        )
 
     if not all_rows:
+
         return pd.DataFrame(
             columns=[
                 "timestamp",
@@ -491,15 +577,23 @@ def fetch_candles(symbol, interval, start_dt, end_dt):
             ]
         )
 
-    df = pd.DataFrame(all_rows)
+    df = pd.DataFrame(
+        all_rows
+    )
 
     df = df.drop_duplicates(
-        subset=["timestamp"]
+        subset=[
+            "timestamp"
+        ]
     )
 
     df = df.sort_values(
         "timestamp"
-    ).reset_index(drop=True)
+    )
+
+    df = df.reset_index(
+        drop=True
+    )
 
     df["datetime"] = pd.to_datetime(
         df["timestamp"],
@@ -519,8 +613,13 @@ def find_pivots(df):
     highs = []
     lows = []
 
-    high_values = df["high"].values
-    low_values = df["low"].values
+    high_values = (
+        df["high"].values
+    )
+
+    low_values = (
+        df["low"].values
+    )
 
     n = len(df)
 
@@ -534,7 +633,8 @@ def find_pivots(df):
         ]
 
         right_highs = high_values[
-            i + 1:i + PIVOT_RIGHT + 1
+            i + 1:
+            i + PIVOT_RIGHT + 1
         ]
 
         left_lows = low_values[
@@ -542,7 +642,8 @@ def find_pivots(df):
         ]
 
         right_lows = low_values[
-            i + 1:i + PIVOT_RIGHT + 1
+            i + 1:
+            i + PIVOT_RIGHT + 1
         ]
 
         h = high_values[i]
@@ -552,22 +653,24 @@ def find_pivots(df):
             h > np.max(left_highs)
             and h >= np.max(right_highs)
         ):
+
             highs.append(i)
 
         if (
             l < np.min(left_lows)
             and l <= np.min(right_lows)
         ):
+
             lows.append(i)
 
     return highs, lows
 
 
 # ============================================================
-# PATTERN OBJECT
+# PATTERN FACTORY
 # ============================================================
 
-def pattern(
+def make_pattern(
     name,
     direction,
     start,
@@ -576,7 +679,7 @@ def pattern(
     upper_level=None,
     lower_level=None,
     anchors=None,
-    quality=0.0,
+    quality=0.0
 ):
 
     return {
@@ -584,7 +687,9 @@ def pattern(
         "direction": direction,
         "start": int(start),
         "end": int(end),
-        "breakout_level": float(breakout_level),
+        "breakout_level": (
+            float(breakout_level)
+        ),
         "upper_level": (
             float(upper_level)
             if upper_level is not None
@@ -598,11 +703,11 @@ def pattern(
         "anchors": tuple(
             anchors or []
         ),
-        "quality": float(quality),
-        "state": "WAITING_FOR_BREAKOUT",
-        "breakout_index": None,
-        "retest_index": None,
-        "confirmation_index": None,
+        "quality": float(
+            quality
+        ),
+        "state":
+            "WAITING_FOR_BREAKOUT",
     }
 
 
@@ -617,35 +722,51 @@ def detect_double_bottom(
 ):
 
     lows = [
-        x for x in pivot_lows
+        x
+        for x in pivot_lows
         if x < current_i
     ]
 
     if len(lows) < 2:
         return []
 
-    out = []
-
     b = lows[-1]
 
-    for a in reversed(lows[:-1]):
+    for a in reversed(
+        lows[:-1]
+    ):
 
         separation = b - a
 
-        if separation < DOUBLE_MIN_SEPARATION:
+        if (
+            separation
+            < DOUBLE_MIN_SEPARATION
+        ):
             continue
 
-        if separation > DOUBLE_MAX_SEPARATION:
+        if (
+            separation
+            > DOUBLE_MAX_SEPARATION
+        ):
             break
 
-        p1 = df.iloc[a]["low"]
-        p2 = df.iloc[b]["low"]
-
-        similarity = abs(p1 - p2) / (
-            (p1 + p2) / 2
+        p1 = float(
+            df.iloc[a]["low"]
         )
 
-        if similarity > DOUBLE_TOLERANCE:
+        p2 = float(
+            df.iloc[b]["low"]
+        )
+
+        similarity = (
+            abs(p1 - p2)
+            / ((p1 + p2) / 2)
+        )
+
+        if (
+            similarity
+            > DOUBLE_TOLERANCE
+        ):
             continue
 
         between = df.iloc[
@@ -656,29 +777,34 @@ def detect_double_bottom(
             between["high"].max()
         )
 
-        if neckline <= max(p1, p2):
+        if neckline <= max(
+            p1,
+            p2
+        ):
             continue
 
         quality = (
             1.0
-            - similarity / DOUBLE_TOLERANCE
+            - similarity
+            / DOUBLE_TOLERANCE
         )
 
-        out.append(
-            pattern(
+        return [
+            make_pattern(
                 "Double Bottom",
                 "LONG",
                 a,
                 b,
                 neckline,
-                anchors=[a, b],
+                anchors=[
+                    a,
+                    b
+                ],
                 quality=quality
             )
-        )
+        ]
 
-        break
-
-    return out
+    return []
 
 
 # ============================================================
@@ -692,35 +818,51 @@ def detect_double_top(
 ):
 
     highs = [
-        x for x in pivot_highs
+        x
+        for x in pivot_highs
         if x < current_i
     ]
 
     if len(highs) < 2:
         return []
 
-    out = []
-
     b = highs[-1]
 
-    for a in reversed(highs[:-1]):
+    for a in reversed(
+        highs[:-1]
+    ):
 
         separation = b - a
 
-        if separation < DOUBLE_MIN_SEPARATION:
+        if (
+            separation
+            < DOUBLE_MIN_SEPARATION
+        ):
             continue
 
-        if separation > DOUBLE_MAX_SEPARATION:
+        if (
+            separation
+            > DOUBLE_MAX_SEPARATION
+        ):
             break
 
-        p1 = df.iloc[a]["high"]
-        p2 = df.iloc[b]["high"]
-
-        similarity = abs(p1 - p2) / (
-            (p1 + p2) / 2
+        p1 = float(
+            df.iloc[a]["high"]
         )
 
-        if similarity > DOUBLE_TOLERANCE:
+        p2 = float(
+            df.iloc[b]["high"]
+        )
+
+        similarity = (
+            abs(p1 - p2)
+            / ((p1 + p2) / 2)
+        )
+
+        if (
+            similarity
+            > DOUBLE_TOLERANCE
+        ):
             continue
 
         between = df.iloc[
@@ -731,29 +873,34 @@ def detect_double_top(
             between["low"].min()
         )
 
-        if neckline >= min(p1, p2):
+        if neckline >= min(
+            p1,
+            p2
+        ):
             continue
 
         quality = (
             1.0
-            - similarity / DOUBLE_TOLERANCE
+            - similarity
+            / DOUBLE_TOLERANCE
         )
 
-        out.append(
-            pattern(
+        return [
+            make_pattern(
                 "Double Top",
                 "SHORT",
                 a,
                 b,
                 neckline,
-                anchors=[a, b],
+                anchors=[
+                    a,
+                    b
+                ],
                 quality=quality
             )
-        )
+        ]
 
-        break
-
-    return out
+    return []
 
 
 # ============================================================
@@ -768,7 +915,8 @@ def detect_head_shoulders(
 ):
 
     highs = [
-        x for x in pivot_highs
+        x
+        for x in pivot_highs
         if x < current_i
     ]
 
@@ -777,18 +925,35 @@ def detect_head_shoulders(
 
     h1, h2, h3 = highs[-3:]
 
-    if h3 - h1 > HS_MAX_SEPARATION:
+    if (
+        h3 - h1
+        > HS_MAX_SEPARATION
+    ):
         return []
 
-    if h2 - h1 < HS_MIN_SEPARATION:
+    if (
+        h2 - h1
+        < HS_MIN_SEPARATION
+    ):
         return []
 
-    if h3 - h2 < HS_MIN_SEPARATION:
+    if (
+        h3 - h2
+        < HS_MIN_SEPARATION
+    ):
         return []
 
-    p1 = df.iloc[h1]["high"]
-    p2 = df.iloc[h2]["high"]
-    p3 = df.iloc[h3]["high"]
+    p1 = float(
+        df.iloc[h1]["high"]
+    )
+
+    p2 = float(
+        df.iloc[h2]["high"]
+    )
+
+    p3 = float(
+        df.iloc[h3]["high"]
+    )
 
     if not (
         p2 > p1
@@ -801,11 +966,15 @@ def detect_head_shoulders(
         / ((p1 + p3) / 2)
     )
 
-    if shoulder_similarity > 0.20:
+    if (
+        shoulder_similarity
+        > 0.20
+    ):
         return []
 
     lows_between = [
-        x for x in pivot_lows
+        x
+        for x in pivot_lows
         if h1 < x < h3
     ]
 
@@ -816,17 +985,19 @@ def detect_head_shoulders(
     l2 = lows_between[-1]
 
     neckline = (
-        df.iloc[l1]["low"]
-        + df.iloc[l2]["low"]
+        float(df.iloc[l1]["low"])
+        + float(df.iloc[l2]["low"])
     ) / 2
 
     quality = max(
         0.0,
-        1.0 - shoulder_similarity / 0.20
+        1.0
+        - shoulder_similarity
+        / 0.20
     )
 
     return [
-        pattern(
+        make_pattern(
             "Head & Shoulders",
             "SHORT",
             h1,
@@ -837,7 +1008,7 @@ def detect_head_shoulders(
                 l1,
                 h2,
                 l2,
-                h3,
+                h3
             ],
             quality=quality
         )
@@ -856,7 +1027,8 @@ def detect_inverse_head_shoulders(
 ):
 
     lows = [
-        x for x in pivot_lows
+        x
+        for x in pivot_lows
         if x < current_i
     ]
 
@@ -865,18 +1037,35 @@ def detect_inverse_head_shoulders(
 
     l1, l2, l3 = lows[-3:]
 
-    if l3 - l1 > HS_MAX_SEPARATION:
+    if (
+        l3 - l1
+        > HS_MAX_SEPARATION
+    ):
         return []
 
-    if l2 - l1 < HS_MIN_SEPARATION:
+    if (
+        l2 - l1
+        < HS_MIN_SEPARATION
+    ):
         return []
 
-    if l3 - l2 < HS_MIN_SEPARATION:
+    if (
+        l3 - l2
+        < HS_MIN_SEPARATION
+    ):
         return []
 
-    p1 = df.iloc[l1]["low"]
-    p2 = df.iloc[l2]["low"]
-    p3 = df.iloc[l3]["low"]
+    p1 = float(
+        df.iloc[l1]["low"]
+    )
+
+    p2 = float(
+        df.iloc[l2]["low"]
+    )
+
+    p3 = float(
+        df.iloc[l3]["low"]
+    )
 
     if not (
         p2 < p1
@@ -889,11 +1078,15 @@ def detect_inverse_head_shoulders(
         / ((p1 + p3) / 2)
     )
 
-    if shoulder_similarity > 0.20:
+    if (
+        shoulder_similarity
+        > 0.20
+    ):
         return []
 
     highs_between = [
-        x for x in pivot_highs
+        x
+        for x in pivot_highs
         if l1 < x < l3
     ]
 
@@ -904,17 +1097,19 @@ def detect_inverse_head_shoulders(
     h2 = highs_between[-1]
 
     neckline = (
-        df.iloc[h1]["high"]
-        + df.iloc[h2]["high"]
+        float(df.iloc[h1]["high"])
+        + float(df.iloc[h2]["high"])
     ) / 2
 
     quality = max(
         0.0,
-        1.0 - shoulder_similarity / 0.20
+        1.0
+        - shoulder_similarity
+        / 0.20
     )
 
     return [
-        pattern(
+        make_pattern(
             "Inverse H&S",
             "LONG",
             l1,
@@ -925,34 +1120,11 @@ def detect_inverse_head_shoulders(
                 h1,
                 l2,
                 h2,
-                l3,
+                l3
             ],
             quality=quality
         )
     ]
-
-
-# ============================================================
-# LINEAR REGRESSION
-# ============================================================
-
-def regression_slope(values):
-
-    if len(values) < 2:
-        return 0.0
-
-    x = np.arange(len(values))
-
-    try:
-        return float(
-            np.polyfit(
-                x,
-                np.asarray(values),
-                1
-            )[0]
-        )
-    except Exception:
-        return 0.0
 
 
 # ============================================================
@@ -967,18 +1139,29 @@ def detect_triangle(
 ):
 
     highs = [
-        x for x in pivot_highs
-        if current_i - MAX_STRUCTURE_BARS
-        <= x < current_i
+        x
+        for x in pivot_highs
+        if (
+            current_i
+            - MAX_STRUCTURE_BARS
+            <= x < current_i
+        )
     ]
 
     lows = [
-        x for x in pivot_lows
-        if current_i - MAX_STRUCTURE_BARS
-        <= x < current_i
+        x
+        for x in pivot_lows
+        if (
+            current_i
+            - MAX_STRUCTURE_BARS
+            <= x < current_i
+        )
     ]
 
-    if len(highs) < 2 or len(lows) < 2:
+    if (
+        len(highs) < 2
+        or len(lows) < 2
+    ):
         return []
 
     h1, h2 = highs[-2:]
@@ -990,20 +1173,43 @@ def detect_triangle(
     ) < 3:
         return []
 
-    start = min(h1, l1)
-    end = max(h2, l2)
+    start = min(
+        h1,
+        l1
+    )
 
-    if end - start < MIN_STRUCTURE_BARS:
+    end = max(
+        h2,
+        l2
+    )
+
+    if (
+        end - start
+        < MIN_STRUCTURE_BARS
+    ):
         return []
 
-    if end - start > MAX_STRUCTURE_BARS:
+    if (
+        end - start
+        > MAX_STRUCTURE_BARS
+    ):
         return []
 
-    high1 = df.iloc[h1]["high"]
-    high2 = df.iloc[h2]["high"]
+    high1 = float(
+        df.iloc[h1]["high"]
+    )
 
-    low1 = df.iloc[l1]["low"]
-    low2 = df.iloc[l2]["low"]
+    high2 = float(
+        df.iloc[h2]["high"]
+    )
+
+    low1 = float(
+        df.iloc[l1]["low"]
+    )
+
+    low2 = float(
+        df.iloc[l2]["low"]
+    )
 
     upper_slope = (
         high2 - high1
@@ -1013,61 +1219,72 @@ def detect_triangle(
         low2 - low1
     ) / (l2 - l1)
 
-    # Triangle requires upper boundary
-    # descending and lower boundary ascending.
+    # Contracting triangle
     if upper_slope >= 0:
         return []
 
     if lower_slope <= 0:
         return []
 
-    # Width must actually contract.
-    width_start = high1 - low1
-    width_end = high2 - low2
+    width_start = (
+        high1 - low1
+    )
+
+    width_end = (
+        high2 - low2
+    )
 
     if width_start <= 0:
         return []
 
-    if width_end >= width_start * 0.90:
+    if (
+        width_end
+        >= width_start * 0.90
+    ):
         return []
 
     upper_now = (
         high2
-        + upper_slope * (
-            current_i - h2
-        )
+        + upper_slope
+        * (current_i - h2)
     )
 
     lower_now = (
         low2
-        + lower_slope * (
-            current_i - l2
-        )
+        + lower_slope
+        * (current_i - l2)
     )
 
-    if upper_now <= lower_now:
+    if (
+        upper_now
+        <= lower_now
+    ):
         return []
 
-    # One candidate. Direction is decided
-    # at breakout against the correct boundary.
+    quality = (
+        width_start
+        - width_end
+    ) / width_start
+
     return [
-        pattern(
+        make_pattern(
             "Triangle",
             "BOTH",
             start,
             end,
-            (upper_now + lower_now) / 2,
+            (
+                upper_now
+                + lower_now
+            ) / 2,
             upper_level=upper_now,
             lower_level=lower_now,
             anchors=[
                 h1,
                 h2,
                 l1,
-                l2,
+                l2
             ],
-            quality=(
-                width_start - width_end
-            ) / width_start
+            quality=quality
         )
     ]
 
@@ -1084,18 +1301,29 @@ def detect_wedge(
 ):
 
     highs = [
-        x for x in pivot_highs
-        if current_i - MAX_STRUCTURE_BARS
-        <= x < current_i
+        x
+        for x in pivot_highs
+        if (
+            current_i
+            - MAX_STRUCTURE_BARS
+            <= x < current_i
+        )
     ]
 
     lows = [
-        x for x in pivot_lows
-        if current_i - MAX_STRUCTURE_BARS
-        <= x < current_i
+        x
+        for x in pivot_lows
+        if (
+            current_i
+            - MAX_STRUCTURE_BARS
+            <= x < current_i
+        )
     ]
 
-    if len(highs) < 2 or len(lows) < 2:
+    if (
+        len(highs) < 2
+        or len(lows) < 2
+    ):
         return []
 
     h1, h2 = highs[-2:]
@@ -1107,20 +1335,43 @@ def detect_wedge(
     ) < 3:
         return []
 
-    start = min(h1, l1)
-    end = max(h2, l2)
+    start = min(
+        h1,
+        l1
+    )
 
-    if end - start < MIN_STRUCTURE_BARS:
+    end = max(
+        h2,
+        l2
+    )
+
+    if (
+        end - start
+        < MIN_STRUCTURE_BARS
+    ):
         return []
 
-    if end - start > MAX_STRUCTURE_BARS:
+    if (
+        end - start
+        > MAX_STRUCTURE_BARS
+    ):
         return []
 
-    high1 = df.iloc[h1]["high"]
-    high2 = df.iloc[h2]["high"]
+    high1 = float(
+        df.iloc[h1]["high"]
+    )
 
-    low1 = df.iloc[l1]["low"]
-    low2 = df.iloc[l2]["low"]
+    high2 = float(
+        df.iloc[h2]["high"]
+    )
+
+    low1 = float(
+        df.iloc[l1]["low"]
+    )
+
+    low2 = float(
+        df.iloc[l2]["low"]
+    )
 
     upper_slope = (
         high2 - high1
@@ -1130,69 +1381,92 @@ def detect_wedge(
         low2 - low1
     ) / (l2 - l1)
 
-    # Falling wedge:
-    if upper_slope < 0 and lower_slope < 0:
+    # Falling wedge
+    if (
+        upper_slope < 0
+        and lower_slope < 0
+    ):
 
-        if abs(lower_slope) <= abs(upper_slope):
+        if (
+            abs(lower_slope)
+            <= abs(upper_slope)
+        ):
             return []
 
-        wedge_type = "FALLING"
+    # Rising wedge
+    elif (
+        upper_slope > 0
+        and lower_slope > 0
+    ):
 
-    # Rising wedge:
-    elif upper_slope > 0 and lower_slope > 0:
-
-        if abs(upper_slope) <= abs(lower_slope):
+        if (
+            abs(upper_slope)
+            <= abs(lower_slope)
+        ):
             return []
-
-        wedge_type = "RISING"
 
     else:
         return []
 
-    width_start = high1 - low1
-    width_end = high2 - low2
+    width_start = (
+        high1 - low1
+    )
+
+    width_end = (
+        high2 - low2
+    )
 
     if width_start <= 0:
         return []
 
-    if width_end >= width_start * 0.90:
+    if (
+        width_end
+        >= width_start * 0.90
+    ):
         return []
 
     upper_now = (
         high2
-        + upper_slope * (
-            current_i - h2
-        )
+        + upper_slope
+        * (current_i - h2)
     )
 
     lower_now = (
         low2
-        + lower_slope * (
-            current_i - l2
-        )
+        + lower_slope
+        * (current_i - l2)
     )
 
-    if upper_now <= lower_now:
+    if (
+        upper_now
+        <= lower_now
+    ):
         return []
 
+    quality = (
+        width_start
+        - width_end
+    ) / width_start
+
     return [
-        pattern(
+        make_pattern(
             "Wedge",
             "BOTH",
             start,
             end,
-            (upper_now + lower_now) / 2,
+            (
+                upper_now
+                + lower_now
+            ) / 2,
             upper_level=upper_now,
             lower_level=lower_now,
             anchors=[
                 h1,
                 h2,
                 l1,
-                l2,
+                l2
             ],
-            quality=(
-                width_start - width_end
-            ) / width_start
+            quality=quality
         )
     ]
 
@@ -1206,7 +1480,10 @@ def detect_flag(
     current_i
 ):
 
-    if current_i < FLAG_IMPULSE_LOOKBACK:
+    if (
+        current_i
+        < FLAG_IMPULSE_LOOKBACK
+    ):
         return []
 
     impulse_start = (
@@ -1232,7 +1509,10 @@ def detect_flag(
     if len(impulse) < 10:
         return []
 
-    if len(consolidation) < FLAG_CONSOLIDATION_BARS:
+    if (
+        len(consolidation)
+        < FLAG_CONSOLIDATION_BARS
+    ):
         return []
 
     impulse_open = float(
@@ -1251,11 +1531,12 @@ def detect_flag(
         - impulse_open
     ) / impulse_open
 
-    if abs(impulse_return) < FLAG_MIN_IMPULSE:
+    if (
+        abs(impulse_return)
+        < FLAG_MIN_IMPULSE
+    ):
         return []
 
-    # Directional efficiency:
-    # net move / total absolute candle movement
     candle_moves = (
         impulse["close"]
         - impulse["open"]
@@ -1265,11 +1546,17 @@ def detect_flag(
         return []
 
     efficiency = (
-        abs(impulse_close - impulse_open)
+        abs(
+            impulse_close
+            - impulse_open
+        )
         / candle_moves
     )
 
-    if efficiency < FLAG_MIN_DIRECTIONAL_EFFICIENCY:
+    if (
+        efficiency
+        < FLAG_MIN_DIRECTIONAL_EFFICIENCY
+    ):
         return []
 
     direction = (
@@ -1314,7 +1601,6 @@ def detect_flag(
     ):
         return []
 
-    # Flag should not retrace excessively.
     if direction == "LONG":
 
         retracement = (
@@ -1322,13 +1608,20 @@ def detect_flag(
             - consolidation_low
         ) / impulse_range
 
-        if retracement < 0:
-            retracement = 0
+        retracement = max(
+            0,
+            retracement
+        )
 
-        if retracement > FLAG_MAX_RETRACE:
+        if (
+            retracement
+            > FLAG_MAX_RETRACE
+        ):
             return []
 
-        breakout_level = consolidation_high
+        breakout_level = (
+            consolidation_high
+        )
 
     else:
 
@@ -1337,16 +1630,23 @@ def detect_flag(
             - impulse_close
         ) / impulse_range
 
-        if retracement < 0:
-            retracement = 0
+        retracement = max(
+            0,
+            retracement
+        )
 
-        if retracement > FLAG_MAX_RETRACE:
+        if (
+            retracement
+            > FLAG_MAX_RETRACE
+        ):
             return []
 
-        breakout_level = consolidation_low
+        breakout_level = (
+            consolidation_low
+        )
 
     return [
-        pattern(
+        make_pattern(
             "Flag",
             direction,
             impulse_start,
@@ -1355,7 +1655,7 @@ def detect_flag(
             anchors=[
                 impulse_start,
                 consolidation_start,
-                current_i - 1,
+                current_i - 1
             ],
             quality=efficiency
         )
@@ -1363,7 +1663,7 @@ def detect_flag(
 
 
 # ============================================================
-# DETECT ALL PATTERNS
+# ALL PATTERNS
 # ============================================================
 
 def detect_patterns(
@@ -1427,8 +1727,6 @@ def detect_patterns(
         )
     )
 
-    # Flag only generated on sufficiently mature
-    # structure points.
     patterns.extend(
         detect_flag(
             df,
@@ -1458,7 +1756,10 @@ def pattern_fingerprint(p):
 # STRUCTURAL OVERLAP
 # ============================================================
 
-def structures_overlap(a, b):
+def structures_overlap(
+    a,
+    b
+):
 
     a_start = a["start"]
     a_end = a["end"]
@@ -1476,7 +1777,10 @@ def structures_overlap(a, b):
         b_end
     )
 
-    if overlap_end < overlap_start:
+    if (
+        overlap_end
+        < overlap_start
+    ):
         return False
 
     overlap = (
@@ -1499,7 +1803,7 @@ def structures_overlap(a, b):
 
 
 # ============================================================
-# BREAKOUT CHECK
+# BREAKOUT
 # ============================================================
 
 def breakout_signal(
@@ -1520,17 +1824,20 @@ def breakout_signal(
     )
 
     # --------------------------------------------------------
-    # Direction already defined
+    # LONG
     # --------------------------------------------------------
 
     if p["direction"] == "LONG":
 
-        level = p["breakout_level"]
+        level = p[
+            "breakout_level"
+        ]
 
         if (
             prev_close <= level
-            and close >
-            level * (
+            and close
+            > level
+            * (
                 1 + BREAKOUT_BUFFER
             )
         ):
@@ -1538,14 +1845,21 @@ def breakout_signal(
 
         return None
 
+    # --------------------------------------------------------
+    # SHORT
+    # --------------------------------------------------------
+
     if p["direction"] == "SHORT":
 
-        level = p["breakout_level"]
+        level = p[
+            "breakout_level"
+        ]
 
         if (
             prev_close >= level
-            and close <
-            level * (
+            and close
+            < level
+            * (
                 1 - BREAKOUT_BUFFER
             )
         ):
@@ -1554,13 +1868,18 @@ def breakout_signal(
         return None
 
     # --------------------------------------------------------
-    # Triangle / Wedge
+    # TRIANGLE / WEDGE
     # --------------------------------------------------------
 
     if p["direction"] == "BOTH":
 
-        upper = p["upper_level"]
-        lower = p["lower_level"]
+        upper = p[
+            "upper_level"
+        ]
+
+        lower = p[
+            "lower_level"
+        ]
 
         if (
             upper is None
@@ -1568,19 +1887,23 @@ def breakout_signal(
         ):
             return None
 
+        # Upper boundary -> LONG
         if (
             prev_close <= upper
-            and close >
-            upper * (
+            and close
+            > upper
+            * (
                 1 + BREAKOUT_BUFFER
             )
         ):
             return "LONG"
 
+        # Lower boundary -> SHORT
         if (
             prev_close >= lower
-            and close <
-            lower * (
+            and close
+            < lower
+            * (
                 1 - BREAKOUT_BUFFER
             )
         ):
@@ -1600,10 +1923,9 @@ def find_entry(
     breakout_level
 ):
 
-    # We ONLY inspect candles after the 1H
-    # breakout candle has completely closed.
     future = df5[
-        df5["datetime"] > breakout_time
+        df5["datetime"]
+        > breakout_time
     ].copy()
 
     if future.empty:
@@ -1615,7 +1937,9 @@ def find_entry(
         + 5
     )
 
-    rows = future.to_dict("records")
+    rows = future.to_dict(
+        "records"
+    )
 
     retest_pos = None
 
@@ -1623,14 +1947,25 @@ def find_entry(
     # FIRST RETEST ONLY
     # --------------------------------------------------------
 
-    for pos, row in enumerate(rows):
+    for pos, row in enumerate(
+        rows
+    ):
 
-        high = float(row["high"])
-        low = float(row["low"])
-        close = float(row["close"])
+        high = float(
+            row["high"]
+        )
+
+        low = float(
+            row["low"]
+        )
+
+        close = float(
+            row["close"]
+        )
 
         touched = (
-            low <= breakout_level
+            low
+            <= breakout_level
             <= high
         )
 
@@ -1639,13 +1974,19 @@ def find_entry(
 
         if direction == "LONG":
 
-            if close >= breakout_level:
+            if (
+                close
+                >= breakout_level
+            ):
                 retest_pos = pos
                 break
 
         else:
 
-            if close <= breakout_level:
+            if (
+                close
+                <= breakout_level
+            ):
                 retest_pos = pos
                 break
 
@@ -1656,84 +1997,124 @@ def find_entry(
     # CONFIRMATION AFTER RETEST
     # --------------------------------------------------------
 
-    start = retest_pos + 1
+    start = (
+        retest_pos + 1
+    )
 
     end = min(
         len(rows),
         start + CONFIRM_MAX_BARS
     )
 
-    for pos in range(start, end):
+    for pos in range(
+        start,
+        end
+    ):
 
         row = rows[pos]
 
-        o = float(row["open"])
-        h = float(row["high"])
-        l = float(row["low"])
-        c = float(row["close"])
+        o = float(
+            row["open"]
+        )
 
-        candle_range = h - l
+        h = float(
+            row["high"]
+        )
+
+        l = float(
+            row["low"]
+        )
+
+        c = float(
+            row["close"]
+        )
+
+        candle_range = (
+            h - l
+        )
 
         if candle_range <= 0:
             continue
 
-        body = abs(c - o)
+        body = abs(
+            c - o
+        )
 
         body_ratio = (
-            body / candle_range
-        )
-
-        close_position = (
-            (c - l)
+            body
             / candle_range
         )
+
+        if (
+            body_ratio
+            < MIN_BODY_RATIO
+        ):
+            continue
+
+        # ----------------------------------------------------
+        # LONG CONFIRMATION
+        # ----------------------------------------------------
 
         if direction == "LONG":
 
             if c <= o:
                 continue
 
-            if body_ratio < MIN_BODY_RATIO:
+            close_position = (
+                c - l
+            ) / candle_range
+
+            if (
+                close_position
+                < MIN_CLOSE_POSITION
+            ):
                 continue
 
-            if close_position < MIN_CLOSE_POSITION:
+            if (
+                c
+                <= breakout_level
+            ):
                 continue
 
-            if c <= breakout_level:
-                continue
+        # ----------------------------------------------------
+        # SHORT CONFIRMATION
+        # ----------------------------------------------------
 
         else:
 
             if c >= o:
                 continue
 
-            if body_ratio < MIN_BODY_RATIO:
-                continue
-
-            # For short, close should be near low.
-            short_close_position = (
-                (h - c)
-                / candle_range
-            )
+            close_position = (
+                h - c
+            ) / candle_range
 
             if (
-                short_close_position
+                close_position
                 < MIN_CLOSE_POSITION
             ):
                 continue
 
-            if c >= breakout_level:
+            if (
+                c
+                >= breakout_level
+            ):
                 continue
 
         return {
-            "entry_time": row["datetime"],
-            "entry_price": c,
-            "retest_time": rows[
-                retest_pos
-            ]["datetime"],
-            "confirmation_time": row[
-                "datetime"
-            ],
+            "entry_time":
+                row["datetime"],
+
+            "entry_price":
+                c,
+
+            "retest_time":
+                rows[
+                    retest_pos
+                ]["datetime"],
+
+            "confirmation_time":
+                row["datetime"],
         }
 
     return None
@@ -1751,188 +2132,134 @@ def simulate_trade(
 ):
 
     future = df5[
-        df5["datetime"] > entry_time
+        df5["datetime"]
+        > entry_time
     ].copy()
 
     if future.empty:
         return None
 
     max_bars = int(
-        MAX_HOLD_HOURS * 60 / 5
+        MAX_HOLD_HOURS
+        * 60
+        / 5
     )
 
-    future = future.head(max_bars)
+    future = future.head(
+        max_bars
+    )
 
     if direction == "LONG":
 
-        tp = entry_price * (
-            1 + TP_PCT
+        tp = (
+            entry_price
+            * (1 + TP_PCT)
         )
 
-        sl = entry_price * (
-            1 - SL_PCT
+        sl = (
+            entry_price
+            * (1 - SL_PCT)
         )
 
     else:
 
-        tp = entry_price * (
-            1 - TP_PCT
+        tp = (
+            entry_price
+            * (1 - TP_PCT)
         )
 
-        sl = entry_price * (
-            1 + SL_PCT
+        sl = (
+            entry_price
+            * (1 + SL_PCT)
         )
 
     for _, row in future.iterrows():
 
-        high = float(row["high"])
-        low = float(row["low"])
+        high = float(
+            row["high"]
+        )
 
-        # Conservative assumption:
-        # if TP and SL are both touched in
-        # the same candle, SL is considered first.
+        low = float(
+            row["low"]
+        )
+
         if direction == "LONG":
 
-            hit_sl = low <= sl
-            hit_tp = high >= tp
+            hit_tp = (
+                high >= tp
+            )
+
+            hit_sl = (
+                low <= sl
+            )
 
         else:
 
-            hit_sl = high >= sl
-            hit_tp = low <= tp
+            hit_tp = (
+                low <= tp
+            )
 
-        if hit_sl and hit_tp:
+            hit_sl = (
+                high >= sl
+            )
+
+        # ----------------------------------------------------
+        # CONSERVATIVE SAME-CANDLE RULE
+        # ----------------------------------------------------
+
+        if (
+            hit_tp
+            and hit_sl
+        ):
 
             return {
-                "result": "FAILURE",
-                "exit_time": row["datetime"],
-                "exit_price": sl,
+                "result":
+                    "FAILURE",
+
+                "exit_time":
+                    row["datetime"],
+
+                "exit_price":
+                    sl,
             }
 
         if hit_sl:
 
             return {
-                "result": "FAILURE",
-                "exit_time": row["datetime"],
-                "exit_price": sl,
+                "result":
+                    "FAILURE",
+
+                "exit_time":
+                    row["datetime"],
+
+                "exit_price":
+                    sl,
             }
 
         if hit_tp:
 
             return {
-                "result": "SUCCESS",
-                "exit_time": row["datetime"],
-                "exit_price": tp,
+                "result":
+                    "SUCCESS",
+
+                "exit_time":
+                    row["datetime"],
+
+                "exit_price":
+                    tp,
             }
 
-    # Neither TP nor SL reached.
-    # Per requested methodology, exclude it.
+    # Unresolved = excluded
     return None
 
 
 # ============================================================
-# PATTERN QUALITY
+# EMPTY DIAGNOSTICS
 # ============================================================
 
-def pattern_quality_score(p):
+def empty_diagnostics():
 
-    score = p.get(
-        "quality",
-        0.0
-    )
-
-    # Slight preference for patterns
-    # with more structural information.
-    anchors = len(
-        p.get("anchors", [])
-    )
-
-    score += anchors * 0.01
-
-    return score
-
-
-# ============================================================
-# PROCESS ONE SYMBOL
-# ============================================================
-
-def process_symbol(
-    symbol,
-    start_dt,
-    end_dt
-):
-
-    print(
-        f"\n{'=' * 60}"
-    )
-
-    print(
-        f"{symbol}"
-    )
-
-    print(
-        f"{'=' * 60}"
-    )
-
-    # --------------------------------------------------------
-    # DOWNLOAD
-    # --------------------------------------------------------
-
-    df1h = fetch_candles(
-        symbol,
-        MAIN_INTERVAL,
-        start_dt,
-        end_dt
-    )
-
-    df5 = fetch_candles(
-        symbol,
-        ENTRY_INTERVAL,
-        start_dt,
-        end_dt
-    )
-
-    print(
-        f"{symbol} "
-        f"1H={len(df1h):,} "
-        f"5M={len(df5):,}"
-    )
-
-    if len(df1h) < 500:
-        print(
-            f"{symbol}: insufficient 1H history"
-        )
-        return []
-
-    if len(df5) < 5000:
-        print(
-            f"{symbol}: insufficient 5M history"
-        )
-        return []
-
-    # --------------------------------------------------------
-    # PIVOTS
-    # --------------------------------------------------------
-
-    pivot_highs, pivot_lows = find_pivots(
-        df1h
-    )
-
-    # --------------------------------------------------------
-    # ACTIVE PATTERNS
-    # --------------------------------------------------------
-
-    active = []
-
-    seen_fingerprints = set()
-
-    # Prevent repeated trades from the same
-    # structural breakout event.
-    consumed_events = set()
-
-    trades = []
-
-    diagnostics = defaultdict(
+    return defaultdict(
         lambda: {
             "candidates": 0,
             "breakouts": 0,
@@ -1941,17 +2268,134 @@ def process_symbol(
         }
     )
 
+
+# ============================================================
+# PROCESS SYMBOL
+# ============================================================
+
+def process_symbol(
+    symbol,
+    start_dt,
+    end_dt
+):
+
+    print()
+    print("=" * 60)
+    print(symbol)
+    print("=" * 60)
+
+    diagnostics = (
+        empty_diagnostics()
+    )
+
     # --------------------------------------------------------
-    # PROCESS 1H CANDLES
+    # 1H
     # --------------------------------------------------------
 
+    try:
+
+        df1h = fetch_candles(
+            symbol,
+            MAIN_INTERVAL,
+            start_dt,
+            end_dt
+        )
+
+    except Exception as e:
+
+        print(
+            f"{symbol} UNAVAILABLE "
+            f"1H: {e}"
+        )
+
+        return [], diagnostics, "UNAVAILABLE"
+
+    # --------------------------------------------------------
+    # 5M
+    # --------------------------------------------------------
+
+    try:
+
+        df5 = fetch_candles(
+            symbol,
+            ENTRY_INTERVAL,
+            start_dt,
+            end_dt
+        )
+
+    except Exception as e:
+
+        print(
+            f"{symbol} UNAVAILABLE "
+            f"5M: {e}"
+        )
+
+        return [], diagnostics, "UNAVAILABLE"
+
+    print(
+        f"{symbol} "
+        f"1H={len(df1h):,} "
+        f"5M={len(df5):,}"
+    )
+
+    # --------------------------------------------------------
+    # Minimum data
+    # --------------------------------------------------------
+
+    if len(df1h) < 500:
+
+        print(
+            f"{symbol}: "
+            f"INSUFFICIENT 1H HISTORY"
+        )
+
+        return [], diagnostics, "INSUFFICIENT"
+
+    if len(df5) < 5000:
+
+        print(
+            f"{symbol}: "
+            f"INSUFFICIENT 5M HISTORY"
+        )
+
+        return [], diagnostics, "INSUFFICIENT"
+
+    # --------------------------------------------------------
+    # PIVOTS
+    # --------------------------------------------------------
+
+    pivot_highs, pivot_lows = (
+        find_pivots(df1h)
+    )
+
+    active = []
+
+    seen_fingerprints = set()
+
+    # Same symbol + same 1H breakout candle
+    # cannot create multiple trades.
+    consumed_events = set()
+
+    trades = []
+
+    # --------------------------------------------------------
+    # 1H LOOP
+    # --------------------------------------------------------
+
+    start_index = max(
+        100,
+        PIVOT_LEFT
+        + PIVOT_RIGHT
+        + 10
+    )
+
     for i in range(
-        max(100, PIVOT_LEFT + PIVOT_RIGHT + 10),
+        start_index,
         len(df1h)
     ):
 
         # ----------------------------------------------------
-        # FIRST: DETECT NEW PATTERNS
+        # NEW PATTERNS
         # ----------------------------------------------------
 
         new_patterns = detect_patterns(
@@ -1963,14 +2407,17 @@ def process_symbol(
 
         for p in new_patterns:
 
-            fp = pattern_fingerprint(p)
+            fp = pattern_fingerprint(
+                p
+            )
 
             if fp in seen_fingerprints:
                 continue
 
-            # -----------------------------------------------
-            # Avoid excessive overlapping structures.
-            # -----------------------------------------------
+            # ------------------------------------------------
+            # Avoid repeated same-type structures
+            # overlapping heavily.
+            # ------------------------------------------------
 
             overlap = False
 
@@ -1982,10 +2429,16 @@ def process_symbol(
                 ):
                     continue
 
-                if old["name"] != p["name"]:
+                if (
+                    old["name"]
+                    != p["name"]
+                ):
                     continue
 
-                if old["direction"] != p["direction"]:
+                if (
+                    old["direction"]
+                    != p["direction"]
+                ):
                     continue
 
                 if structures_overlap(
@@ -1998,16 +2451,20 @@ def process_symbol(
             if overlap:
                 continue
 
-            seen_fingerprints.add(fp)
+            seen_fingerprints.add(
+                fp
+            )
 
-            active.append(p)
+            active.append(
+                p
+            )
 
             diagnostics[
                 p["name"]
             ]["candidates"] += 1
 
         # ----------------------------------------------------
-        # PROCESS ACTIVE PATTERNS
+        # ACTIVE PATTERNS
         # ----------------------------------------------------
 
         still_active = []
@@ -2020,14 +2477,14 @@ def process_symbol(
             ):
                 continue
 
-            # ------------------------------------------------
-            # Pattern expiry.
-            # A pattern cannot wait forever.
-            # ------------------------------------------------
-
-            if i - p["end"] > 30:
+            # Pattern expiration
+            if (
+                i - p["end"]
+                > 30
+            ):
 
                 p["state"] = "DEAD"
+
                 continue
 
             signal = breakout_signal(
@@ -2038,7 +2495,10 @@ def process_symbol(
 
             if signal is None:
 
-                still_active.append(p)
+                still_active.append(
+                    p
+                )
+
                 continue
 
             # ------------------------------------------------
@@ -2051,9 +2511,13 @@ def process_symbol(
                 signal
             )
 
-            if breakout_event in consumed_events:
+            if (
+                breakout_event
+                in consumed_events
+            ):
 
                 p["state"] = "DEAD"
+
                 continue
 
             consumed_events.add(
@@ -2064,14 +2528,18 @@ def process_symbol(
                 p["name"]
             ]["breakouts"] += 1
 
+            # 1H candle closes one hour after
+            # its opening timestamp.
             breakout_time = (
                 df1h.iloc[i]["datetime"]
-                + pd.Timedelta(hours=1)
+                + pd.Timedelta(
+                    hours=1
+                )
             )
 
-            # -----------------------------------------------
-            # Use actual direction-specific level.
-            # -----------------------------------------------
+            # ------------------------------------------------
+            # Direction-specific level
+            # ------------------------------------------------
 
             if signal == "LONG":
 
@@ -2079,10 +2547,13 @@ def process_symbol(
                     p["direction"]
                     == "BOTH"
                 ):
+
                     breakout_level = (
                         p["upper_level"]
                     )
+
                 else:
+
                     breakout_level = (
                         p["breakout_level"]
                     )
@@ -2093,16 +2564,21 @@ def process_symbol(
                     p["direction"]
                     == "BOTH"
                 ):
+
                     breakout_level = (
                         p["lower_level"]
                     )
+
                 else:
+
                     breakout_level = (
                         p["breakout_level"]
                     )
 
             if breakout_level is None:
+
                 p["state"] = "DEAD"
+
                 continue
 
             # ------------------------------------------------
@@ -2113,12 +2589,15 @@ def process_symbol(
                 df5,
                 breakout_time,
                 signal,
-                float(breakout_level)
+                float(
+                    breakout_level
+                )
             )
 
             if entry is None:
 
                 p["state"] = "DEAD"
+
                 continue
 
             diagnostics[
@@ -2140,51 +2619,72 @@ def process_symbol(
                 signal
             )
 
-            # Unresolved trade is excluded.
+            # Unresolved trade
             if trade is None:
 
                 p["state"] = "DEAD"
+
                 continue
 
             trades.append(
                 {
-                    "symbol": symbol,
-                    "pattern": p["name"],
-                    "direction": signal,
-                    "pattern_start": df1h.iloc[
-                        p["start"]
-                    ]["datetime"],
-                    "pattern_end": df1h.iloc[
-                        p["end"]
-                    ]["datetime"],
-                    "breakout_time": df1h.iloc[
-                        i
-                    ]["datetime"],
-                    "retest_time": entry[
-                        "retest_time"
-                    ],
-                    "entry_time": entry[
-                        "entry_time"
-                    ],
-                    "entry_price": entry[
-                        "entry_price"
-                    ],
-                    "result": trade[
-                        "result"
-                    ],
-                    "exit_time": trade[
-                        "exit_time"
-                    ],
-                    "exit_price": trade[
-                        "exit_price"
-                    ],
+                    "symbol":
+                        symbol,
+
+                    "pattern":
+                        p["name"],
+
+                    "direction":
+                        signal,
+
+                    "pattern_start":
+                        df1h.iloc[
+                            p["start"]
+                        ]["datetime"],
+
+                    "pattern_end":
+                        df1h.iloc[
+                            p["end"]
+                        ]["datetime"],
+
+                    "breakout_time":
+                        df1h.iloc[
+                            i
+                        ]["datetime"],
+
+                    "retest_time":
+                        entry[
+                            "retest_time"
+                        ],
+
+                    "entry_time":
+                        entry[
+                            "entry_time"
+                        ],
+
+                    "entry_price":
+                        entry[
+                            "entry_price"
+                        ],
+
+                    "result":
+                        trade[
+                            "result"
+                        ],
+
+                    "exit_time":
+                        trade[
+                            "exit_time"
+                        ],
+
+                    "exit_price":
+                        trade[
+                            "exit_price"
+                        ],
                 }
             )
 
-            # ------------------------------------------------
-            # ONE TRADE PER PATTERN
-            # ------------------------------------------------
-
+            # One trade per pattern
             p["state"] = "DEAD"
 
         active = still_active
@@ -2194,94 +2694,150 @@ def process_symbol(
         f"{len(trades)}"
     )
 
-    return trades, diagnostics
+    return (
+        trades,
+        diagnostics,
+        "OK"
+    )
 
 
 # ============================================================
-# SUMMARY
+# FINAL SUMMARY
 # ============================================================
 
 def print_summary(
     all_trades,
     all_diagnostics,
-    symbols
+    symbols,
+    symbol_status
 ):
 
-    print("\n")
+    print()
     print("=" * 70)
-    print(
-        "FINAL BACKTEST RESULT"
-    )
+    print("FINAL BACKTEST RESULT")
     print("=" * 70)
 
-    total = len(all_trades)
+    total = len(
+        all_trades
+    )
 
     success = sum(
         1
         for t in all_trades
-        if t["result"] == "SUCCESS"
+        if t["result"]
+        == "SUCCESS"
     )
 
     failure = sum(
         1
         for t in all_trades
-        if t["result"] == "FAILURE"
+        if t["result"]
+        == "FAILURE"
     )
 
     if total > 0:
 
         success_rate = (
-            success / total
-        ) * 100
+            success
+            / total
+            * 100
+        )
 
         failure_rate = (
-            failure / total
-        ) * 100
+            failure
+            / total
+            * 100
+        )
 
     else:
 
-        success_rate = 0
-        failure_rate = 0
+        success_rate = 0.0
+        failure_rate = 0.0
 
-    print(
-        f"Symbols tested: {len(symbols)}"
+    raw_break_even = (
+        SL_PCT
+        / (
+            TP_PCT
+            + SL_PCT
+        )
+        * 100
     )
 
     print(
-        f"TOTAL TRADES: {total}"
+        f"Universe configured: "
+        f"{len(symbols)}"
+    )
+
+    tested = sum(
+        1
+        for s in symbols
+        if symbol_status.get(s)
+        == "OK"
     )
 
     print(
-        f"SUCCESS: {success}"
+        f"Symbols with usable data: "
+        f"{tested}"
     )
 
     print(
-        f"FAILURE: {failure}"
+        f"TOTAL TRADES: "
+        f"{total}"
     )
 
     print(
-        f"SUCCESS RATE: {success_rate:.2f}%"
+        f"SUCCESS: "
+        f"{success}"
     )
 
     print(
-        f"FAILURE RATE: {failure_rate:.2f}%"
+        f"FAILURE: "
+        f"{failure}"
+    )
+
+    print(
+        f"SUCCESS RATE: "
+        f"{success_rate:.2f}%"
+    )
+
+    print(
+        f"FAILURE RATE: "
+        f"{failure_rate:.2f}%"
     )
 
     print(
         f"RAW BREAK-EVEN: "
-        f"{SL_PCT / (TP_PCT + SL_PCT) * 100:.2f}%"
+        f"{raw_break_even:.2f}%"
     )
 
     print(
         f"EDGE VS RAW BREAK-EVEN: "
-        f"{success_rate - (SL_PCT / (TP_PCT + SL_PCT) * 100):+.2f} pp"
+        f"{success_rate - raw_break_even:+.2f} pp"
     )
+
+    # --------------------------------------------------------
+    # SYMBOL STATUS
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "20-SYMBOL STATUS"
+    )
+
+    print("-" * 70)
+
+    for symbol in symbols:
+
+        print(
+            f"{symbol:<18} "
+            f"{symbol_status.get(symbol, 'UNKNOWN')}"
+        )
 
     # --------------------------------------------------------
     # PATTERN BREAKDOWN
     # --------------------------------------------------------
 
-    print("\n")
+    print()
     print(
         "PATTERN BREAKDOWN"
     )
@@ -2300,16 +2856,29 @@ def print_summary(
 
         p = t["pattern"]
 
-        pattern_stats[p]["trades"] += 1
+        pattern_stats[p][
+            "trades"
+        ] += 1
 
-        if t["result"] == "SUCCESS":
-            pattern_stats[p]["success"] += 1
+        if (
+            t["result"]
+            == "SUCCESS"
+        ):
+
+            pattern_stats[p][
+                "success"
+            ] += 1
+
         else:
-            pattern_stats[p]["failure"] += 1
+
+            pattern_stats[p][
+                "failure"
+            ] += 1
 
     for p, s in sorted(
         pattern_stats.items(),
-        key=lambda x: -x[1]["trades"]
+        key=lambda x:
+        -x[1]["trades"]
     ):
 
         trades = s["trades"]
@@ -2324,9 +2893,9 @@ def print_summary(
 
         print(
             f"{p:<22}"
-            f"{trades:>6} "
-            f"{s['success']:>6} "
-            f"{s['failure']:>6} "
+            f"{trades:>7} "
+            f"{s['success']:>7} "
+            f"{s['failure']:>7} "
             f"{wr:>7.2f}%"
         )
 
@@ -2334,7 +2903,7 @@ def print_summary(
     # SYMBOL BREAKDOWN
     # --------------------------------------------------------
 
-    print("\n")
+    print()
     print(
         "SYMBOL BREAKDOWN"
     )
@@ -2353,18 +2922,34 @@ def print_summary(
 
         s = t["symbol"]
 
-        symbol_stats[s]["trades"] += 1
+        symbol_stats[s][
+            "trades"
+        ] += 1
 
-        if t["result"] == "SUCCESS":
-            symbol_stats[s]["success"] += 1
+        if (
+            t["result"]
+            == "SUCCESS"
+        ):
+
+            symbol_stats[s][
+                "success"
+            ] += 1
+
         else:
-            symbol_stats[s]["failure"] += 1
+
+            symbol_stats[s][
+                "failure"
+            ] += 1
 
     for symbol in symbols:
 
-        s = symbol_stats[symbol]
+        s = symbol_stats[
+            symbol
+        ]
 
-        trades = s["trades"]
+        trades = s[
+            "trades"
+        ]
 
         wr = (
             s["success"]
@@ -2383,10 +2968,10 @@ def print_summary(
         )
 
     # --------------------------------------------------------
-    # LIFECYCLE DIAGNOSTICS
+    # LIFECYCLE
     # --------------------------------------------------------
 
-    print("\n")
+    print()
     print(
         "LIFECYCLE DIAGNOSTICS"
     )
@@ -2417,35 +3002,54 @@ def print_summary(
 
         print(
             f"{name:<22}"
-            f"Candidates={d['candidates']:<6} "
-            f"Breakouts={d['breakouts']:<6} "
-            f"Retests={d['retests']:<6} "
-            f"Confirmations={d['confirmations']:<6}"
+            f"Candidates="
+            f"{d['candidates']:<6} "
+            f"Breakouts="
+            f"{d['breakouts']:<6} "
+            f"Retests="
+            f"{d['retests']:<6} "
+            f"Confirmations="
+            f"{d['confirmations']:<6}"
         )
 
 
 # ============================================================
-# SAVE TRADES
+# SAVE RESULTS
 # ============================================================
 
-def save_results(all_trades):
+def save_results(
+    all_trades
+):
 
     if not all_trades:
+
+        print(
+            "\nNo completed trades "
+            "to save."
+        )
+
         return
 
-    df = pd.DataFrame(all_trades)
+    df = pd.DataFrame(
+        all_trades
+    )
+
+    filename = (
+        "kraken_pattern_backtest_1y_trades.csv"
+    )
 
     df.to_csv(
-        "kraken_pattern_backtest_1y_trades.csv",
+        filename,
         index=False
     )
 
+    print()
     print(
-        "\nTrade file saved:"
+        "Trade file saved:"
     )
 
     print(
-        "kraken_pattern_backtest_1y_trades.csv"
+        filename
     )
 
 
@@ -2455,25 +3059,20 @@ def save_results(all_trades):
 
 def main():
 
+    print()
+    print("=" * 70)
     print(
-        "=" * 70
+        "KRAKEN FUTURES "
+        "MULTI-TIMEFRAME PATTERN BACKTEST"
     )
+    print(
+        "VERSION: 4.1"
+    )
+    print("=" * 70)
 
     print(
-        "KRAKEN FUTURES MULTI-TIMEFRAME "
-        "PATTERN BACKTEST"
-    )
-
-    print(
-        "VERSION: 4.0"
-    )
-
-    print(
-        "=" * 70
-    )
-
-    print(
-        f"Period: {DAYS} days"
+        f"Period: "
+        f"{DAYS} days"
     )
 
     print(
@@ -2485,15 +3084,18 @@ def main():
     )
 
     print(
-        f"TP: {TP_PCT * 100:.2f}%"
+        f"TP: "
+        f"{TP_PCT * 100:.2f}%"
     )
 
     print(
-        f"SL: {SL_PCT * 100:.2f}%"
+        f"SL: "
+        f"{SL_PCT * 100:.2f}%"
     )
 
     print(
-        f"Max hold: {MAX_HOLD_HOURS} hours"
+        f"Max hold: "
+        f"{MAX_HOLD_HOURS} hours"
     )
 
     print(
@@ -2515,6 +3117,45 @@ def main():
     )
 
     # --------------------------------------------------------
+    # UNIVERSE
+    # --------------------------------------------------------
+
+    print_universe()
+
+    # --------------------------------------------------------
+    # DIAGNOSTIC DISCOVERY
+    # --------------------------------------------------------
+
+    print()
+    print(
+        "Checking Kraken symbol availability..."
+    )
+
+    available = (
+        discover_available_symbols()
+    )
+
+    print(
+        f"Kraken perpetuals discovered: "
+        f"{len(available)}"
+    )
+
+    for symbol in FIXED_SYMBOLS:
+
+        if symbol in available:
+
+            print(
+                f"{symbol:<18} AVAILABLE"
+            )
+
+        else:
+
+            print(
+                f"{symbol:<18} "
+                f"NOT FOUND IN DISCOVERY"
+            )
+
+    # --------------------------------------------------------
     # PERIOD
     # --------------------------------------------------------
 
@@ -2524,36 +3165,28 @@ def main():
 
     start_dt = (
         end_dt
-        - timedelta(days=DAYS)
+        - timedelta(
+            days=DAYS
+        )
     )
 
     # --------------------------------------------------------
-    # UNIVERSE
+    # RESULTS
     # --------------------------------------------------------
-
-    symbols = build_universe()
-
-    if not symbols:
-        raise RuntimeError(
-            "No symbols selected."
-        )
 
     all_trades = []
 
-    all_diagnostics = defaultdict(
-        lambda: {
-            "candidates": 0,
-            "breakouts": 0,
-            "retests": 0,
-            "confirmations": 0,
-        }
+    all_diagnostics = (
+        empty_diagnostics()
     )
 
+    symbol_status = {}
+
     # --------------------------------------------------------
-    # PROCESS SYMBOLS
+    # PROCESS ALL 20
     # --------------------------------------------------------
 
-    for symbol in symbols:
+    for symbol in FIXED_SYMBOLS:
 
         try:
 
@@ -2563,16 +3196,21 @@ def main():
                 end_dt
             )
 
-            if not result:
-                continue
+            trades, diagnostics, status = (
+                result
+            )
 
-            trades, diagnostics = result
+            symbol_status[
+                symbol
+            ] = status
 
             all_trades.extend(
                 trades
             )
 
-            for name, d in diagnostics.items():
+            for name, d in (
+                diagnostics.items()
+            ):
 
                 for key in [
                     "candidates",
@@ -2587,20 +3225,30 @@ def main():
 
         except Exception as e:
 
+            print()
             print(
-                f"\nERROR processing "
-                f"{symbol}: {e}"
+                f"{symbol} ERROR: "
+                f"{e}"
             )
 
+            symbol_status[
+                symbol
+            ] = "ERROR"
+
     # --------------------------------------------------------
-    # FINAL REPORT
+    # SUMMARY
     # --------------------------------------------------------
 
     print_summary(
         all_trades,
         all_diagnostics,
-        symbols
+        FIXED_SYMBOLS,
+        symbol_status
     )
+
+    # --------------------------------------------------------
+    # SAVE
+    # --------------------------------------------------------
 
     save_results(
         all_trades
@@ -2612,4 +3260,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
