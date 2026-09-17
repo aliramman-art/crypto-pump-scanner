@@ -1,9 +1,20 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.1 - RR 1.0 + CLEAN TELEGRAM REPORT
+# VERSION 5.2
 # ============================================================
 #
-# STRATEGY:
+# CHANGES FROM v5.1:
+#
+# - 10 fixed assets
+# - NO MAX OPEN TRADE LIMIT
+# - DUPLICATE EFFECTIVE SIGNALS REMOVED
+# - NEW DATABASE -> START AGGREGATE STATS FROM ZERO
+# - AGGREGATE STATS REMAIN PERSISTENT AFTER START
+# - CLEAN TELEGRAM REPORT
+# - DIRECTIONAL PERCENTAGES FIXED
+# - SAME-RUN CLOSED SIGNALS REMOVED FROM NEW SIGNALS
+#
+# STRATEGY UNCHANGED:
 #
 #   1H Pattern
 #       ↓
@@ -32,6 +43,7 @@
 # - REAL TRADING DISABLED
 # - TELEGRAM REPORTING
 # - SQLITE PERSISTENCE
+# - NO MAX OPEN TRADE LIMIT
 #
 # ============================================================
 
@@ -92,9 +104,12 @@ CANDLE_CHUNK = 1900
 
 # ------------------------------------------------------------
 # DATABASE
+#
+# New database intentionally starts aggregate statistics
+# from zero. It remains persistent across future runs.
 # ------------------------------------------------------------
 
-DB_FILE = "kraken_pattern_live.db"
+DB_FILE = "kraken_pattern_live_v52.db"
 
 # ------------------------------------------------------------
 # TELEGRAM
@@ -112,7 +127,7 @@ TELEGRAM_CHAT_ID = os.getenv(
 
 
 # ============================================================
-# FIXED 20-ASSET UNIVERSE
+# FIXED 10-ASSET UNIVERSE
 # ============================================================
 
 FIXED_ASSETS = [
@@ -126,16 +141,6 @@ FIXED_ASSETS = [
     "LINK",
     "AVAX",
     "DOT",
-    "BCH",
-    "UNI",
-    "AAVE",
-    "ATOM",
-    "XLM",
-    "ALGO",
-    "FIL",
-    "ETC",
-    "SUI",
-    "HBAR",
 ]
 
 EXPECTED_UNIVERSE_SIZE = len(
@@ -187,7 +192,7 @@ SESSION.headers.update(
     {
         "User-Agent":
             "Mozilla/5.0 "
-            "KrakenPatternLive/5.1"
+            "KrakenPatternLive/5.2"
     }
 )
 
@@ -285,9 +290,6 @@ def tp_sl_pct_from_entry(
     direction,
 ):
     """
-    Returns TP/SL percentages relative to entry
-    with market direction preserved.
-
     LONG:
         TP +1%
         SL -1%
@@ -948,6 +950,58 @@ def trade_exists(
         """,
         (
             signal_key,
+        ),
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
+# ============================================================
+# EFFECTIVE DUPLICATE CHECK
+# ============================================================
+#
+# A duplicate means:
+#
+#   SAME ASSET
+#   SAME DIRECTION
+#   SAME ENTRY TIME
+#
+# Pattern name is intentionally ignored.
+#
+# This prevents:
+#
+#   DOGE LONG Double Bottom
+#   DOGE LONG Flag
+#
+# from becoming two separate trades if they actually
+# produce the same entry candle.
+#
+# ============================================================
+
+def effective_trade_exists(
+    asset,
+    direction,
+    entry_time,
+):
+
+    conn = db_connect()
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM trades
+        WHERE
+            asset = ?
+            AND direction = ?
+            AND entry_time = ?
+        LIMIT 1
+        """,
+        (
+            asset,
+            direction,
+            entry_time,
         ),
     ).fetchone()
 
@@ -3159,29 +3213,35 @@ def aggregate_stats():
         """
         SELECT
             COUNT(*) AS total,
+
             SUM(
                 CASE
                     WHEN result = 'SUCCESS'
                     THEN 1 ELSE 0
                 END
             ) AS wins,
+
             SUM(
                 CASE
                     WHEN result = 'FAILURE'
                     THEN 1 ELSE 0
                 END
             ) AS losses,
+
             SUM(
                 CASE
                     WHEN result = 'TIME_EXIT'
                     THEN 1 ELSE 0
                 END
             ) AS time_exits,
+
             COALESCE(
                 SUM(r_multiple),
                 0
             ) AS net_r
+
         FROM trades
+
         WHERE status = 'CLOSED'
         """
     ).fetchone()
@@ -3208,7 +3268,6 @@ def aggregate_stats():
         row["net_r"] or 0.0
     )
 
-    # WR is based on decided TP/SL trades.
     decided = (
         wins
         + losses
@@ -3605,12 +3664,6 @@ def send_report(
     closed_now,
 ):
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # A trade opened and closed during the same run
-    # belongs only in CLOSED THIS RUN.
-    # --------------------------------------------------------
-
     new_trades = (
         filter_new_trades_after_closure(
             new_trades,
@@ -3630,7 +3683,9 @@ def send_report(
         f"⚙️ TP {TP_PCT * 100:.2f}%  |  "
         f"SL {SL_PCT * 100:.2f}%  |  "
         f"RR {RR:.2f}\n"
-        f"🧪 PAPER TRADING"
+        f"🧪 Real trading: DISABLED\n"
+        f"🪙 Universe: {EXPECTED_UNIVERSE_SIZE} assets\n"
+        f"📂 Open trade limit: NONE"
     )
 
     # --------------------------------------------------------
@@ -3790,12 +3845,21 @@ def main():
         "KRAKEN FUTURES PATTERN LIVE SCANNER"
     )
     print(
-        "VERSION 5.1 - RR 1.0"
+        "VERSION 5.2"
     )
     print("=" * 70)
 
     print(
         "Real trading: DISABLED"
+    )
+
+    print(
+        f"Universe: "
+        f"{EXPECTED_UNIVERSE_SIZE} assets"
+    )
+
+    print(
+        "Open trade limit: NONE"
     )
 
     print(
@@ -3808,6 +3872,15 @@ def main():
 
     print(
         "RR: 1.00"
+    )
+
+    print(
+        "Duplicate filter: "
+        "ASSET + DIRECTION + ENTRY TIME"
+    )
+
+    print(
+        f"Database: {DB_FILE}"
     )
 
     print("=" * 70)
@@ -3874,6 +3947,13 @@ def main():
     # --------------------------------------------------------
 
     new_trades = []
+
+    # --------------------------------------------------------
+    # Prevent duplicate signals during
+    # the current scan.
+    # --------------------------------------------------------
+
+    scan_entries = []
 
     print()
     print(
@@ -3954,17 +4034,94 @@ def main():
 
             for trade in entries:
 
+                # ------------------------------------------------
+                # EXACT SIGNAL KEY DUPLICATE
+                # ------------------------------------------------
+
                 if trade_exists(
                     trade["signal_key"]
                 ):
 
+                    print(
+                        f"DUPLICATE SKIPPED: "
+                        f"{asset} "
+                        f"{trade['direction']} "
+                        f"same signal key"
+                    )
+
                     continue
+
+                # ------------------------------------------------
+                # EFFECTIVE DUPLICATE
+                #
+                # Same asset + same direction +
+                # same entry candle.
+                #
+                # Pattern name is ignored.
+                # ------------------------------------------------
+
+                if effective_trade_exists(
+                    trade["asset"],
+                    trade["direction"],
+                    trade["entry_time"],
+                ):
+
+                    print(
+                        f"DUPLICATE SKIPPED: "
+                        f"{asset} "
+                        f"{trade['direction']} "
+                        f"entry="
+                        f"{trade['entry_time']}"
+                    )
+
+                    continue
+
+                # ------------------------------------------------
+                # DUPLICATE DURING CURRENT SCAN
+                # ------------------------------------------------
+
+                current_scan_duplicate = False
+
+                for existing in scan_entries:
+
+                    if (
+                        existing["asset"]
+                        == trade["asset"]
+                        and
+                        existing["direction"]
+                        == trade["direction"]
+                        and
+                        existing["entry_time"]
+                        == trade["entry_time"]
+                    ):
+
+                        current_scan_duplicate = True
+                        break
+
+                if current_scan_duplicate:
+
+                    print(
+                        f"DUPLICATE SKIPPED: "
+                        f"{asset} "
+                        f"{trade['direction']} "
+                        f"same entry in scan"
+                    )
+
+                    continue
+
+                # ------------------------------------------------
+                # INSERT
+                # ------------------------------------------------
 
                 insert_trade(
                     trade
                 )
 
                 new_trades.append(
+                    trade
+                )
+
+                scan_entries.append(
                     trade
                 )
 
@@ -3985,11 +4142,19 @@ def main():
             )
 
     # --------------------------------------------------------
-    # CHECK NEWLY CREATED OPEN TRADES
+    # GET ALL CURRENT OPEN TRADES
+    #
+    # NO LIMIT APPLIED.
     # --------------------------------------------------------
 
     open_trades = (
         get_open_trades()
+    )
+
+    print()
+    print(
+        f"OPEN TRADES BEFORE PRICE CHECK: "
+        f"{len(open_trades)}"
     )
 
     # --------------------------------------------------------
@@ -3998,22 +4163,17 @@ def main():
 
     for trade in open_trades:
 
-        if (
-            trade["symbol"]
-            not in prices
-        ):
-
-            price = (
-                fetch_current_price(
-                    trade["symbol"]
-                )
+        price = (
+            fetch_current_price(
+                trade["symbol"]
             )
+        )
 
-            if price is not None:
+        if price is not None:
 
-                prices[
-                    trade["symbol"]
-                ] = price
+            prices[
+                trade["symbol"]
+            ] = price
 
     # --------------------------------------------------------
     # PROCESS CURRENT PRICE
@@ -4034,34 +4194,35 @@ def main():
 
     # --------------------------------------------------------
     # IMPORTANT:
-    # Refresh prices for trades that remain OPEN.
+    # Get only trades that are STILL OPEN.
     # --------------------------------------------------------
 
     open_trades = (
         get_open_trades()
     )
 
+    # --------------------------------------------------------
+    # REFRESH CURRENT PRICES FOR TRADES
+    # THAT REMAIN OPEN.
+    # --------------------------------------------------------
+
     for trade in open_trades:
 
-        if (
-            trade["symbol"]
-            not in prices
-        ):
-
-            price = (
-                fetch_current_price(
-                    trade["symbol"]
-                )
+        price = (
+            fetch_current_price(
+                trade["symbol"]
             )
+        )
 
-            if price is not None:
+        if price is not None:
 
-                prices[
-                    trade["symbol"]
-                ] = price
+            prices[
+                trade["symbol"]
+            ] = price
 
     # --------------------------------------------------------
-    # REMOVE SAME-RUN CLOSED SIGNALS FROM NEW SIGNALS
+    # REMOVE SAME-RUN CLOSED SIGNALS
+    # FROM NEW SIGNALS
     # --------------------------------------------------------
 
     new_trades = (
@@ -4096,6 +4257,11 @@ def main():
     print("=" * 70)
 
     print(
+        f"Assets Scanned: "
+        f"{EXPECTED_UNIVERSE_SIZE}"
+    )
+
+    print(
         f"New Signals: "
         f"{len(new_trades)}"
     )
@@ -4106,12 +4272,16 @@ def main():
     )
 
     print(
+        "Open Trade Limit: NONE"
+    )
+
+    print(
         f"Closed This Run: "
         f"{len(closed_now)}"
     )
 
     print(
-        f"Total Trades: "
+        f"Total Closed Trades: "
         f"{stats['total']}"
     )
 
@@ -4142,6 +4312,11 @@ def main():
 
     print(
         "Real trading: DISABLED"
+    )
+
+    print(
+        f"Database: "
+        f"{DB_FILE}"
     )
 
     print("=" * 70)
