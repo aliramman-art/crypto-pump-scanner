@@ -1,13 +1,15 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.3
+# VERSION 5.4
 # ============================================================
 #
-# CHANGES FROM v5.2:
+# CHANGES FROM v5.3:
 #
 # - FIXED REPEATED NEW SIGNAL REPORTING
 # - A TRADE IS NEW ONLY IF ACTUALLY INSERTED INTO DB
 # - EXISTING OPEN TRADES ARE NOT REPORTED AS NEW AGAIN
+# - ONE OPEN TRADE PER ASSET + DIRECTION
+# - OPPOSITE DIRECTIONS ON THE SAME ASSET ARE ALLOWED
 #
 # STRATEGY UNCHANGED:
 #
@@ -38,7 +40,8 @@
 # - REAL TRADING DISABLED
 # - TELEGRAM REPORTING
 # - SQLITE PERSISTENCE
-# - NO MAX OPEN TRADE LIMIT
+# - ONE OPEN TRADE PER ASSET + DIRECTION
+# - OPPOSITE DIRECTIONS ARE ALLOWED
 #
 # ============================================================
 
@@ -77,6 +80,9 @@ REQUEST_SLEEP = 0.10
 
 CANDLE_CHUNK = 1900
 
+# IMPORTANT:
+# Keep the existing DB filename so historical statistics
+# and open trades are NOT reset.
 DB_FILE = "kraken_pattern_live_v52.db"
 
 TELEGRAM_BOT_TOKEN = os.getenv(
@@ -156,7 +162,7 @@ SESSION.headers.update(
     {
         "User-Agent":
             "Mozilla/5.0 "
-            "KrakenPatternLive/5.3"
+            "KrakenPatternLive/5.4"
     }
 )
 
@@ -932,6 +938,52 @@ def effective_trade_exists(
             asset,
             direction,
             entry_time,
+        ),
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
+# ============================================================
+# ONE OPEN TRADE PER ASSET + DIRECTION
+#
+# IMPORTANT:
+#
+# SAME ASSET + OPPOSITE DIRECTION = ALLOWED
+#
+# Examples:
+#
+#   SOL LONG  + SOL SHORT = ALLOWED
+#   SOL SHORT + SOL SHORT = BLOCKED
+#   SOL LONG  + SOL LONG  = BLOCKED
+#
+# This applies ONLY to currently OPEN trades.
+# Once a trade is CLOSED, a new trade in that
+# asset + direction is allowed again.
+# ============================================================
+
+def open_same_direction_exists(
+    asset,
+    direction,
+):
+
+    conn = db_connect()
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM trades
+        WHERE
+            asset = ?
+            AND direction = ?
+            AND status = 'OPEN'
+        LIMIT 1
+        """,
+        (
+            asset,
+            direction,
         ),
     ).fetchone()
 
@@ -3629,7 +3681,8 @@ def send_report(
         f"RR {RR:.2f}\n"
         f"🧪 Real trading: DISABLED\n"
         f"🪙 Universe: {EXPECTED_UNIVERSE_SIZE} assets\n"
-        f"📂 Open trade limit: NONE"
+        f"📂 Open trade rule: "
+        f"ONE PER ASSET + DIRECTION"
     )
 
     # --------------------------------------------------------
@@ -3785,7 +3838,7 @@ def main():
         "KRAKEN FUTURES PATTERN LIVE SCANNER"
     )
     print(
-        "VERSION 5.3"
+        "VERSION 5.4"
     )
     print("=" * 70)
 
@@ -3799,7 +3852,12 @@ def main():
     )
 
     print(
-        "Open trade limit: NONE"
+        "Open trade rule: "
+        "ONE OPEN PER ASSET + DIRECTION"
+    )
+
+    print(
+        "Opposite directions: ALLOWED"
     )
 
     print(
@@ -4015,6 +4073,30 @@ def main():
                     continue
 
                 # ------------------------------------------------
+                # ONE OPEN TRADE PER ASSET + DIRECTION
+                #
+                # Opposite direction remains allowed.
+                #
+                # Example:
+                # SOL LONG  + SOL SHORT = ALLOWED
+                # SOL SHORT + SOL SHORT = BLOCKED
+                # ------------------------------------------------
+
+                if open_same_direction_exists(
+                    trade["asset"],
+                    trade["direction"],
+                ):
+
+                    print(
+                        f"OPEN SAME-DIRECTION SKIPPED: "
+                        f"{asset} "
+                        f"{trade['direction']} "
+                        f"already has an OPEN trade"
+                    )
+
+                    continue
+
+                # ------------------------------------------------
                 # DUPLICATE DURING CURRENT SCAN
                 # ------------------------------------------------
 
@@ -4225,7 +4307,12 @@ def main():
     )
 
     print(
-        "Open Trade Limit: NONE"
+        "Open Trade Rule: "
+        "ONE PER ASSET + DIRECTION"
+    )
+
+    print(
+        "Opposite Directions: ALLOWED"
     )
 
     print(
