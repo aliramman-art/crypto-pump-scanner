@@ -65,6 +65,7 @@ import numpy as np
 import pandas as pd
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 
 # ============================================================
@@ -108,6 +109,15 @@ TELEGRAM_CHAT_ID = os.getenv(
 
 
 # ============================================================
+# TIMEZONE
+# ============================================================
+
+TEHRAN_TZ = ZoneInfo(
+    "Asia/Tehran"
+)
+
+
+# ============================================================
 # LBANK FUTURES PUBLIC MARKET DATA
 # ============================================================
 
@@ -126,11 +136,23 @@ LBANK_ASSET_MAP = {
     "LINK": "LINK",
     "AVAX": "AVAX",
     "DOT": "DOT",
+
+    # Added 10 assets
+    "BNB": "BNB",
+    "TRX": "TRX",
+    "UNI": "UNI",
+    "AAVE": "AAVE",
+    "SUI": "SUI",
+    "NEAR": "NEAR",
+    "ATOM": "ATOM",
+    "FIL": "FIL",
+    "ARB": "ARB",
+    "OP": "OP",
 }
 
 
 # ============================================================
-# FIXED 10-ASSET UNIVERSE
+# FIXED 20-ASSET UNIVERSE
 # ============================================================
 
 FIXED_ASSETS = [
@@ -144,6 +166,17 @@ FIXED_ASSETS = [
     "LINK",
     "AVAX",
     "DOT",
+
+    "BNB",
+    "TRX",
+    "UNI",
+    "AAVE",
+    "SUI",
+    "NEAR",
+    "ATOM",
+    "FIL",
+    "ARB",
+    "OP",
 ]
 
 EXPECTED_UNIVERSE_SIZE = len(
@@ -211,13 +244,138 @@ def utc_now():
     )
 
 
+# ============================================================
+# GREGORIAN -> JALALI
+# ============================================================
+
+def gregorian_to_jalali(
+    gy,
+    gm,
+    gd,
+):
+
+    g_d_m = [
+        0,
+        31,
+        59,
+        90,
+        120,
+        151,
+        181,
+        212,
+        243,
+        273,
+        304,
+        334,
+    ]
+
+    if gy >= 1600:
+
+        jy = 979
+        gy -= 1600
+
+    else:
+
+        jy = 0
+        gy -= 621
+
+    if gm > 2:
+
+        gy2 = gy + 1
+
+    else:
+
+        gy2 = gy
+
+    days = (
+        365 * gy
+        + (gy2 + 3) // 4
+        - (gy2 + 99) // 100
+        + (gy2 + 399) // 400
+        - 80
+        + gd
+        + g_d_m[gm - 1]
+    )
+
+    if gm > 2:
+        days += 1
+
+    jy += 33 * (
+        days // 12053
+    )
+
+    days %= 12053
+
+    jy += 4 * (
+        days // 1461
+    )
+
+    days %= 1461
+
+    if days > 365:
+
+        jy += (
+            days - 1
+        ) // 365
+
+        days = (
+            days - 1
+        ) % 365
+
+    if days < 186:
+
+        jm = (
+            1
+            + days // 31
+        )
+
+        jd = (
+            1
+            + days % 31
+        )
+
+    else:
+
+        jm = (
+            7
+            + (
+                days - 186
+            ) // 30
+        )
+
+        jd = (
+            1
+            + (
+                days - 186
+            ) % 30
+        )
+
+    return jy, jm, jd
+
+
 def format_time(ts):
 
-    return datetime.fromtimestamp(
+    dt = datetime.fromtimestamp(
         int(ts),
         tz=timezone.utc,
-    ).strftime(
-        "%Y-%m-%d %H:%M UTC"
+    ).astimezone(
+        TEHRAN_TZ
+    )
+
+    jy, jm, jd = (
+        gregorian_to_jalali(
+            dt.year,
+            dt.month,
+            dt.day,
+        )
+    )
+
+    return (
+        f"{jy:04d}-"
+        f"{jm:02d}-"
+        f"{jd:02d} "
+        f"{dt.hour:02d}:"
+        f"{dt.minute:02d} تهران"
     )
 
 
@@ -4000,7 +4158,7 @@ def send_new_signal_alert(
 
     text = (
         "<b>🚨 NEW SIGNAL</b>\n"
-        f"🕐 {utc_now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
+        f"🕐 {format_time(utc_now().timestamp())}\n\n"
         f"{format_signal(display_trade, display_price)}"
     )
 
@@ -4373,7 +4531,7 @@ def send_periodic_report(
 
     parts.append(
         "<b>📊 KRAKEN PATTERN SCANNER</b>\n"
-        f"🕐 {utc_now().strftime('%Y-%m-%d %H:%M UTC')}\n"
+        f"🕐 {format_time(utc_now().timestamp())}\n"
         f"🔄 30-MINUTE PERIODIC REPORT\n"
         f"⚙️ TP {TP_PCT * 100:.2f}%  |  "
         f"SL {SL_PCT * 100:.2f}%  |  "
