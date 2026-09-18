@@ -47,6 +47,14 @@
 # - ONE OPEN TRADE PER ASSET + DIRECTION
 # - OPPOSITE DIRECTIONS ARE ALLOWED
 #
+# LBANK DISPLAY:
+#
+# - SIGNAL LOGIC REMAINS KRAKEN
+# - TELEGRAM NEW SIGNAL PRICE DISPLAY USES LBANK FUTURES
+# - NO LBANK ORDER IS SENT
+# - NO LBANK API KEY IS REQUIRED
+# - INTERNAL DATABASE / TRADE MANAGEMENT REMAINS KRAKEN
+#
 # ============================================================
 
 import os
@@ -97,6 +105,28 @@ TELEGRAM_CHAT_ID = os.getenv(
     "TELEGRAM_CHAT_ID",
     ""
 )
+
+
+# ============================================================
+# LBANK FUTURES PUBLIC MARKET DATA
+# ============================================================
+
+LBANK_BASE_URL = "https://lbkperp.lbank.com"
+
+LBANK_PRODUCT_GROUP = "SwapU"
+
+LBANK_ASSET_MAP = {
+    "XBT": "BTC",
+    "ETH": "ETH",
+    "SOL": "SOL",
+    "XRP": "XRP",
+    "LTC": "LTC",
+    "DOGE": "DOGE",
+    "ADA": "ADA",
+    "LINK": "LINK",
+    "AVAX": "AVAX",
+    "DOT": "DOT",
+}
 
 
 # ============================================================
@@ -295,7 +325,7 @@ def distance_pct(
 
 
 # ============================================================
-# API
+# KRAKEN API
 # ============================================================
 
 def api_get(
@@ -360,6 +390,289 @@ def api_get(
         f"API request failed: "
         f"{path} | {last_error}"
     )
+
+
+# ============================================================
+# LBANK FUTURES API
+# ============================================================
+
+def lbank_api_get(
+    path,
+    params=None,
+):
+
+    url = (
+        LBANK_BASE_URL
+        + path
+    )
+
+    last_error = None
+
+    for attempt in range(3):
+
+        try:
+
+            response = SESSION.get(
+                url,
+                params=params,
+                timeout=REQUEST_TIMEOUT,
+            )
+
+            response.raise_for_status()
+
+            data = response.json()
+
+            if isinstance(
+                data,
+                dict,
+            ):
+
+                error_code = data.get(
+                    "error_code"
+                )
+
+                if (
+                    error_code is not None
+                    and str(error_code) != "0"
+                ):
+
+                    raise RuntimeError(
+                        str(data)
+                    )
+
+            time.sleep(
+                REQUEST_SLEEP
+            )
+
+            return data
+
+        except Exception as exc:
+
+            last_error = exc
+
+            if attempt < 2:
+
+                time.sleep(
+                    1.0
+                    * (attempt + 1)
+                )
+
+    raise RuntimeError(
+        f"LBank API request failed: "
+        f"{path} | {last_error}"
+    )
+
+
+def normalize_lbank_symbol(
+    symbol,
+):
+
+    if symbol is None:
+        return ""
+
+    return (
+        str(symbol)
+        .upper()
+        .replace(
+            "_",
+            "",
+        )
+        .replace(
+            "-",
+            "",
+        )
+        .replace(
+            "/",
+            "",
+        )
+    )
+
+
+def fetch_lbank_futures_prices():
+
+    prices = {}
+
+    try:
+
+        data = lbank_api_get(
+            "/cfd/openApi/v1/pub/marketData",
+            params={
+                "productGroup":
+                    LBANK_PRODUCT_GROUP
+            },
+        )
+
+        rows = []
+
+        if isinstance(
+            data,
+            dict,
+        ):
+
+            value = data.get(
+                "data"
+            )
+
+            if isinstance(
+                value,
+                list,
+            ):
+
+                rows = value
+
+            elif isinstance(
+                value,
+                dict,
+            ):
+
+                rows = [value]
+
+        elif isinstance(
+            data,
+            list,
+        ):
+
+            rows = data
+
+        wanted = {
+            normalize_lbank_symbol(
+                f"{base}USDT"
+            ): asset
+            for asset, base
+            in LBANK_ASSET_MAP.items()
+        }
+
+        for row in rows:
+
+            if not isinstance(
+                row,
+                dict,
+            ):
+                continue
+
+            symbol = normalize_lbank_symbol(
+                row.get("symbol")
+            )
+
+            asset = wanted.get(
+                symbol
+            )
+
+            if asset is None:
+                continue
+
+            value = (
+                row.get("lastPrice")
+            )
+
+            if value is None:
+                continue
+
+            try:
+
+                prices[asset] = float(
+                    value
+                )
+
+            except Exception:
+
+                continue
+
+        print()
+        print(
+            "LBANK FUTURES PRICES"
+        )
+
+        for asset in FIXED_ASSETS:
+
+            price = prices.get(
+                asset
+            )
+
+            print(
+                f"{asset:<8} -> "
+                f"{fmt_price(price) if price is not None else 'NO PRICE'}"
+            )
+
+    except Exception as exc:
+
+        print(
+            f"LBank futures price error: "
+            f"{exc}"
+        )
+
+    return prices
+
+
+def make_lbank_display_trade(
+    trade,
+    lbank_price,
+):
+
+    if lbank_price is None:
+        return None
+
+    display_trade = dict(
+        trade
+    )
+
+    entry = float(
+        lbank_price
+    )
+
+    direction = trade[
+        "direction"
+    ]
+
+    if direction == "LONG":
+
+        tp = (
+            entry
+            * (
+                1.0
+                + TP_PCT
+            )
+        )
+
+        sl = (
+            entry
+            * (
+                1.0
+                - SL_PCT
+            )
+        )
+
+    else:
+
+        tp = (
+            entry
+            * (
+                1.0
+                - TP_PCT
+            )
+        )
+
+        sl = (
+            entry
+            * (
+                1.0
+                + SL_PCT
+            )
+        )
+
+    display_trade[
+        "entry_price"
+    ] = entry
+
+    display_trade[
+        "tp_price"
+    ] = tp
+
+    display_trade[
+        "sl_price"
+    ] = sl
+
+    return display_trade
 
 
 # ============================================================
@@ -1329,7 +1642,7 @@ def find_pivots(df):
 
         if (
             l[i] < left_l.min()
-            and l[i] <= right_l.min()
+            and l[i] <= right_l.max()
         ):
 
             lows.append(i)
@@ -3665,12 +3978,30 @@ def format_signal(
 def send_new_signal_alert(
     trade,
     current_price,
+    lbank_price=None,
 ):
+
+    display_trade = (
+        make_lbank_display_trade(
+            trade,
+            lbank_price,
+        )
+    )
+
+    if display_trade is None:
+
+        display_trade = trade
+
+        display_price = current_price
+
+    else:
+
+        display_price = lbank_price
 
     text = (
         "<b>🚨 NEW SIGNAL</b>\n"
         f"🕐 {utc_now().strftime('%Y-%m-%d %H:%M UTC')}\n\n"
-        f"{format_signal(trade, current_price)}"
+        f"{format_signal(display_trade, display_price)}"
     )
 
     print(
@@ -3763,6 +4094,7 @@ def send_close_alert(
 
 def format_new_signals(
     trades,
+    lbank_prices=None,
 ):
 
     lines = [
@@ -3779,9 +4111,24 @@ def format_new_signals(
             lines
         )
 
+    if lbank_prices is None:
+        lbank_prices = {}
+
     for trade in trades:
 
-        direction = trade[
+        display_trade = (
+            make_lbank_display_trade(
+                trade,
+                lbank_prices.get(
+                    trade["asset"]
+                ),
+            )
+        )
+
+        if display_trade is None:
+            display_trade = trade
+
+        direction = display_trade[
             "direction"
         ]
 
@@ -3792,28 +4139,34 @@ def format_new_signals(
         )
 
         entry = float(
-            trade["entry_price"]
+            display_trade[
+                "entry_price"
+            ]
         )
 
         tp = float(
-            trade["tp_price"]
+            display_trade[
+                "tp_price"
+            ]
         )
 
         sl = float(
-            trade["sl_price"]
+            display_trade[
+                "sl_price"
+            ]
         )
 
         lines.append("")
 
         lines.append(
             f"{emoji} <b>"
-            f"{trade['asset']} "
+            f"{display_trade['asset']} "
             f"{direction}</b>"
         )
 
         lines.append(
             f"Pattern: "
-            f"{trade['pattern']}"
+            f"{display_trade['pattern']}"
         )
 
         lines.append(
@@ -3833,7 +4186,7 @@ def format_new_signals(
 
         lines.append(
             f"Entry time: "
-            f"{format_time(trade['entry_time'])}"
+            f"{format_time(display_trade['entry_time'])}"
         )
 
     return "\n".join(
@@ -4013,6 +4366,7 @@ def send_periodic_report(
     open_trades,
     prices,
     new_trades,
+    lbank_prices=None,
 ):
 
     parts = []
@@ -4030,7 +4384,8 @@ def send_periodic_report(
 
     parts.append(
         format_new_signals(
-            new_trades
+            new_trades,
+            lbank_prices,
         )
     )
 
@@ -4147,6 +4502,14 @@ def main():
     print("=" * 70)
 
     init_db()
+
+    # ========================================================
+    # LBANK FUTURES PRICE SNAPSHOT
+    # ========================================================
+
+    lbank_prices = (
+        fetch_lbank_futures_prices()
+    )
 
     universe = (
         build_dynamic_universe()
@@ -4391,9 +4754,18 @@ def main():
                             trade["symbol"]
                         ] = current_price
 
+                # ------------------------------------------------
+                # IMPORTANT:
+                # Signal logic and DB remain Kraken.
+                # Telegram NEW SIGNAL uses LBank Futures price.
+                # ------------------------------------------------
+
                 send_new_signal_alert(
                     trade,
                     current_price,
+                    lbank_prices.get(
+                        asset
+                    ),
                 )
 
         except Exception as exc:
@@ -4465,6 +4837,7 @@ def main():
             open_trades,
             prices,
             new_trades,
+            lbank_prices,
         )
 
     else:
