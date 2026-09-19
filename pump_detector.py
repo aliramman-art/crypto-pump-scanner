@@ -1,34 +1,26 @@
 # ============================================================
 # KRAKEN FUTURES PUMP DETECTOR
-# VERSION 2.0
+# VERSION 2.1
 # ============================================================
 #
-# PURPOSE
-# -------
-# Independent 5-minute Pump / Dump detector.
+# Independent 5-minute Pump / Dump detector
 #
-# - Downloads historical Kraken Futures candles automatically
-# - No uploaded files required
+# - Downloads historical Kraken Futures data automatically
 # - 6 months backtest + warmup
-# - Uses PF_*USD perpetual futures
+# - Selects PF_*USD perpetual markets
 # - Ranks markets by current 24h volume
 # - Detects abnormal volume + momentum + breakout
 # - No look-ahead bias
 # - Conservative same-candle TP/SL handling
 # - Includes fees + slippage
-# - Saves SQLite database
-# - Exports CSV
-#
-# IMPORTANT
-# ---------
-# This is a research/backtest system.
-# It does NOT place real orders.
+# - SQLite database
+# - CSV export
+# - NO REAL TRADING
 #
 # ============================================================
 
 import csv
 import math
-import os
 import sqlite3
 import statistics
 import time
@@ -41,10 +33,15 @@ import requests
 # CONFIG
 # ============================================================
 
-VERSION = "2.0"
+VERSION = "2.1"
 
 BASE_URL = "https://futures.kraken.com/api/charts/v1"
-TICKERS_URL = "https://futures.kraken.com/derivatives/api/v3/tickers"
+INSTRUMENTS_URL = (
+    "https://futures.kraken.com/derivatives/api/v3/instruments"
+)
+TICKERS_URL = (
+    "https://futures.kraken.com/derivatives/api/v3/tickers"
+)
 
 DB_FILE = "pump_detector.db"
 CSV_FILE = "pump_trades.csv"
@@ -57,16 +54,16 @@ WARMUP_DAYS = 14
 
 TOP_N = 100
 
-# Kraken request size
 CANDLE_CHUNK = 1000
 
 REQUEST_TIMEOUT = 30
 REQUEST_SLEEP = 0.25
 MAX_RETRIES = 5
 
-# ------------------------------------------------------------
-# Signal parameters
-# ------------------------------------------------------------
+
+# ============================================================
+# SIGNAL PARAMETERS
+# ============================================================
 
 RVOL_LOOKBACK = 48
 MIN_RVOL = 3.0
@@ -82,12 +79,12 @@ BREAKOUT_LOOKBACK = 24
 RANGE_LOOKBACK = 20
 MIN_RANGE_EXPANSION = 1.25
 
-# Score
 MIN_SCORE = 7
 
-# ------------------------------------------------------------
-# Trade parameters
-# ------------------------------------------------------------
+
+# ============================================================
+# TRADE PARAMETERS
+# ============================================================
 
 TP_PCT = 2.00
 SL_PCT = 1.00
@@ -98,9 +95,10 @@ MAX_HOLD_BARS = 24
 
 COOLDOWN_BARS = 6
 
-# ------------------------------------------------------------
-# Trading costs
-# ------------------------------------------------------------
+
+# ============================================================
+# COSTS
+# ============================================================
 
 FEE_PER_SIDE_PCT = 0.04
 SLIPPAGE_PER_SIDE_PCT = 0.02
@@ -110,19 +108,16 @@ TOTAL_ROUND_TRIP_COST_PCT = (
     + SLIPPAGE_PER_SIDE_PCT * 2
 )
 
-# 0.12% total by default
-TOTAL_COST_DECIMAL = TOTAL_ROUND_TRIP_COST_PCT / 100.0
-
 
 # ============================================================
-# SESSION
+# HTTP SESSION
 # ============================================================
 
 session = requests.Session()
 
 session.headers.update(
     {
-        "User-Agent": "PumpDetector/2.0",
+        "User-Agent": "PumpDetector/2.1",
         "Accept": "application/json",
     }
 )
@@ -133,6 +128,7 @@ session.headers.update(
 # ============================================================
 
 def init_db():
+
     conn = sqlite3.connect(DB_FILE)
 
     cur = conn.cursor()
@@ -184,15 +180,17 @@ def init_db():
 
 
 # ============================================================
-# HTTP
+# HTTP REQUEST
 # ============================================================
 
 def get_json(url, params=None):
+
     last_error = None
 
     for attempt in range(1, MAX_RETRIES + 1):
 
         try:
+
             response = session.get(
                 url,
                 params=params,
@@ -207,14 +205,17 @@ def get_json(url, params=None):
 
             last_error = exc
 
-            wait = min(2 ** (attempt - 1), 10)
-
             print(
                 f"    Request failed "
                 f"(attempt {attempt}/{MAX_RETRIES}): {exc}"
             )
 
-            time.sleep(wait)
+            wait_seconds = min(
+                2 ** (attempt - 1),
+                10,
+            )
+
+            time.sleep(wait_seconds)
 
     raise RuntimeError(
         f"Request failed after {MAX_RETRIES} attempts: "
@@ -227,27 +228,24 @@ def get_json(url, params=None):
 # ============================================================
 
 def discover_markets():
-    """
-    Discover currently listed perpetual USD futures.
 
-    We use the instruments endpoint first because it is more
-    reliable for identifying currently available markets.
-    """
-
-    print("\nDiscovering Kraken Futures markets...")
-
-    url = (
-        "https://futures.kraken.com/"
-        "derivatives/api/v3/instruments"
-    )
+    print()
+    print("=" * 75)
+    print("DISCOVERING KRAKEN FUTURES MARKETS")
+    print("=" * 75)
 
     markets = []
 
     try:
 
-        data = get_json(url)
+        data = get_json(
+            INSTRUMENTS_URL
+        )
 
-        instruments = data.get("instruments", [])
+        instruments = data.get(
+            "instruments",
+            []
+        )
 
         for item in instruments:
 
@@ -256,7 +254,6 @@ def discover_markets():
             if not symbol:
                 continue
 
-            # Perpetual USD contracts
             if not symbol.startswith("PF_"):
                 continue
 
@@ -271,7 +268,9 @@ def discover_markets():
             f"Instrument discovery failed: {exc}"
         )
 
-    markets = sorted(set(markets))
+    markets = sorted(
+        set(markets)
+    )
 
     print(
         f"Discovered {len(markets)} PF_*USD markets."
@@ -280,28 +279,30 @@ def discover_markets():
     if not markets:
 
         raise RuntimeError(
-            "No PF_*USD markets were discovered."
+            "No PF_*USD markets discovered."
         )
 
     return markets
 
 
 # ============================================================
-# CURRENT VOLUME RANKING
+# MARKET VOLUME RANKING
 # ============================================================
 
 def rank_markets_by_volume(markets):
-    """
-    Rank markets using current 24h volume data.
 
-    Kraken's ticker endpoint returns current market data.
-    """
+    print()
+    print("=" * 75)
+    print("RANKING MARKETS BY CURRENT 24H VOLUME")
+    print("=" * 75)
 
-    print("\nRanking markets by current 24h volume...")
+    market_set = set(markets)
 
     try:
 
-        data = get_json(TICKERS_URL)
+        data = get_json(
+            TICKERS_URL
+        )
 
     except Exception as exc:
 
@@ -310,32 +311,37 @@ def rank_markets_by_volume(markets):
         )
 
         print(
-            "Falling back to alphabetical market selection."
+            "Using first available markets as fallback."
         )
 
         return markets[:TOP_N]
 
-    tickers = data.get("tickers", [])
+    tickers = data.get(
+        "tickers",
+        []
+    )
 
     ranked = []
 
-    market_set = set(markets)
-
     for ticker in tickers:
 
-        symbol = ticker.get("symbol")
+        symbol = ticker.get(
+            "symbol"
+        )
 
         if symbol not in market_set:
             continue
 
-        volume = (
+        raw_volume = (
             ticker.get("volume24h")
             or ticker.get("volume")
             or 0
         )
 
         try:
-            volume = float(volume)
+            volume = float(
+                raw_volume
+            )
         except Exception:
             volume = 0.0
 
@@ -347,7 +353,7 @@ def rank_markets_by_volume(markets):
         )
 
     ranked.sort(
-        key=lambda x: x[1],
+        key=lambda item: item[1],
         reverse=True,
     )
 
@@ -359,31 +365,30 @@ def rank_markets_by_volume(markets):
     if not selected:
 
         print(
-            "Volume ranking returned no usable data."
+            "No usable volume data."
         )
 
         return markets[:TOP_N]
 
     print(
-        f"Selected top {len(selected)} markets."
+        f"Selected {len(selected)} markets."
     )
 
-    print(
-        "Top markets:"
-    )
+    print()
+    print("Top 10 current-volume markets:")
 
     for symbol, volume in ranked[:10]:
 
         print(
             f"  {symbol:<18} "
-            f"24h volume={volume:,.2f}"
+            f"24h volume = {volume:,.2f}"
         )
 
     return selected
 
 
 # ============================================================
-# CANDLE DOWNLOAD
+# DOWNLOAD CANDLES
 # ============================================================
 
 def download_candles(
@@ -391,23 +396,17 @@ def download_candles(
     start_ts,
     end_ts,
 ):
-    """
-    Download candles using Kraken Futures Charts API.
 
-    Endpoint:
-    /api/charts/v1/trade/{symbol}/{resolution}
-
-    Kraken reports whether more candles exist through
-    'more_candles'.
-    """
-
+    print()
     print(
-        f"\nDownloading {symbol}..."
+        f"Downloading {symbol}..."
     )
 
     all_rows = []
 
-    current_from = int(start_ts)
+    current_from = int(
+        start_ts
+    )
 
     safety_counter = 0
 
@@ -416,6 +415,7 @@ def download_candles(
         safety_counter += 1
 
         if safety_counter > 10000:
+
             raise RuntimeError(
                 f"Pagination safety stop for {symbol}"
             )
@@ -452,14 +452,14 @@ def download_candles(
 
             try:
 
-                ts_ms = int(
+                timestamp = int(
                     candle["time"]
                 )
 
                 row = (
                     symbol,
                     TIMEFRAME,
-                    ts_ms,
+                    timestamp,
                     float(candle["open"]),
                     float(candle["high"]),
                     float(candle["low"]),
@@ -476,19 +476,21 @@ def download_candles(
             break
 
         parsed.sort(
-            key=lambda x: x[2]
+            key=lambda row: row[2]
         )
 
-        all_rows.extend(parsed)
+        all_rows.extend(
+            parsed
+        )
 
-        last_ts_ms = parsed[-1][2]
+        last_timestamp_ms = parsed[-1][2]
 
-        last_ts_sec = (
-            last_ts_ms // 1000
+        last_timestamp_sec = (
+            last_timestamp_ms // 1000
         )
 
         next_from = (
-            last_ts_sec + 1
+            last_timestamp_sec + 1
         )
 
         if next_from <= current_from:
@@ -496,33 +498,36 @@ def download_candles(
 
         current_from = next_from
 
-        more = bool(
-            data.get(
-                "more_candles",
-                False
-            )
+        last_time_text = datetime.fromtimestamp(
+            last_timestamp_sec,
+            tz=timezone.utc,
+        ).strftime(
+            "%Y-%m-%d %H:%M"
         )
 
         print(
             f"    candles={len(all_rows):,} "
-            f"through "
-            f"{datetime.fromtimestamp("
-            f"last_ts_sec, "
-            f"tz=timezone.utc"
-            f").strftime('%Y-%m-%d %H:%M')}"
+            f"through {last_time_text} UTC"
         )
 
-        if not more:
+        more_candles = bool(
+            data.get(
+                "more_candles",
+                False,
+            )
+        )
+
+        if not more_candles:
             break
 
         time.sleep(
             REQUEST_SLEEP
         )
 
-    # Deduplicate
     unique = {}
 
     for row in all_rows:
+
         unique[row[2]] = row
 
     result = list(
@@ -530,7 +535,7 @@ def download_candles(
     )
 
     result.sort(
-        key=lambda x: x[2]
+        key=lambda row: row[2]
     )
 
     print(
@@ -544,7 +549,10 @@ def download_candles(
 # SAVE CANDLES
 # ============================================================
 
-def save_candles(conn, rows):
+def save_candles(
+    conn,
+    rows,
+):
 
     if not rows:
         return
@@ -608,9 +616,7 @@ def load_candles(
         ),
     )
 
-    rows = cur.fetchall()
-
-    return rows
+    return cur.fetchall()
 
 
 # ============================================================
@@ -656,23 +662,6 @@ def detect_signal(
     candles,
     i,
 ):
-    """
-    Returns:
-
-        {
-            side,
-            score,
-            rvol,
-            momentum_pct
-        }
-
-    or None.
-
-    IMPORTANT:
-    Signal is calculated ONLY using candles up to i.
-    Entry occurs at the close of candle i.
-    Trade simulation begins at candle i+1.
-    """
 
     minimum_history = max(
         RVOL_LOOKBACK + 1,
@@ -687,7 +676,12 @@ def detect_signal(
 
     current = candles[i]
 
-    ts, op, high, low, close, volume = current
+    timestamp = current[0]
+    open_price = current[1]
+    high = current[2]
+    low = current[3]
+    close = current[4]
+    volume = current[5]
 
     # --------------------------------------------------------
     # RVOL
@@ -697,7 +691,7 @@ def detect_signal(
         candles[j][5]
         for j in range(
             i - RVOL_LOOKBACK,
-            i
+            i,
         )
     ]
 
@@ -730,13 +724,15 @@ def detect_signal(
     # Candle body
     # --------------------------------------------------------
 
-    candle_range = high - low
+    candle_range = (
+        high - low
+    )
 
     if candle_range <= 0:
         return None
 
     body = abs(
-        close - op
+        close - open_price
     )
 
     body_ratio = safe_div(
@@ -748,14 +744,14 @@ def detect_signal(
         return None
 
     # --------------------------------------------------------
-    # Previous breakout range
+    # Breakout
     # --------------------------------------------------------
 
     previous_highs = [
         candles[j][2]
         for j in range(
             i - BREAKOUT_LOOKBACK,
-            i
+            i,
         )
     ]
 
@@ -763,7 +759,7 @@ def detect_signal(
         candles[j][3]
         for j in range(
             i - BREAKOUT_LOOKBACK,
-            i
+            i,
         )
     ]
 
@@ -791,7 +787,7 @@ def detect_signal(
         candles[j][2] - candles[j][3]
         for j in range(
             i - RANGE_LOOKBACK,
-            i
+            i,
         )
     ]
 
@@ -819,65 +815,80 @@ def detect_signal(
 
     # Volume
     if rvol >= 3.0:
+
         long_score += 2
         short_score += 2
 
     if rvol >= 5.0:
+
         long_score += 1
         short_score += 1
 
     # Momentum
     if momentum_pct >= 1.0:
+
         long_score += 2
 
     if momentum_pct <= -1.0:
+
         short_score += 2
 
     if momentum_pct >= 2.0:
+
         long_score += 1
 
     if momentum_pct <= -2.0:
+
         short_score += 1
 
     # Candle direction
-    if close > op:
+    if close > open_price:
+
         long_score += 1
 
-    if close < op:
+    elif close < open_price:
+
         short_score += 1
 
-    # Body
+    # Strong body
     if body_ratio >= 0.65:
-        if close > op:
+
+        if close > open_price:
+
             long_score += 1
-        elif close < op:
+
+        elif close < open_price:
+
             short_score += 1
 
     # Breakout
     if long_breakout:
+
         long_score += 2
 
     if short_breakout:
+
         short_score += 2
 
     # Range expansion
     if range_expansion >= 1.5:
 
-        if close > op:
+        if close > open_price:
+
             long_score += 1
 
-        elif close < op:
+        elif close < open_price:
+
             short_score += 1
 
     # --------------------------------------------------------
-    # Direction validation
+    # Final direction
     # --------------------------------------------------------
 
     if (
         long_score >= MIN_SCORE
-        and momentum_pct
-        >= MIN_MOMENTUM_PCT
-        and close > op
+        and momentum_pct >= MIN_MOMENTUM_PCT
+        and close > open_price
     ):
 
         return {
@@ -889,9 +900,8 @@ def detect_signal(
 
     if (
         short_score >= MIN_SCORE
-        and momentum_pct
-        <= -MIN_MOMENTUM_PCT
-        and close < op
+        and momentum_pct <= -MIN_MOMENTUM_PCT
+        and close < open_price
     ):
 
         return {
@@ -914,9 +924,7 @@ def simulate_trade(
     signal,
 ):
 
-    entry_index = (
-        signal_index
-    )
+    entry_index = signal_index
 
     entry = candles[
         entry_index
@@ -927,6 +935,26 @@ def simulate_trade(
     ][0]
 
     side = signal["side"]
+
+    # --------------------------------------------------------
+    # Validate RR
+    # --------------------------------------------------------
+
+    risk_pct = SL_PCT
+    reward_pct = TP_PCT
+
+    rr = safe_div(
+        reward_pct,
+        risk_pct,
+    )
+
+    if rr < MIN_RR:
+
+        return None
+
+    # --------------------------------------------------------
+    # SL / TP
+    # --------------------------------------------------------
 
     if side == "LONG":
 
@@ -953,21 +981,6 @@ def simulate_trade(
         )
 
     # --------------------------------------------------------
-    # RR validation
-    # --------------------------------------------------------
-
-    risk_pct = SL_PCT
-    reward_pct = TP_PCT
-
-    rr = safe_div(
-        reward_pct,
-        risk_pct,
-    )
-
-    if rr < MIN_RR:
-        return None
-
-    # --------------------------------------------------------
     # Future candles only
     # --------------------------------------------------------
 
@@ -988,7 +1001,9 @@ def simulate_trade(
 
         candle = candles[j]
 
-        ts, op, high, low, close, volume = candle
+        timestamp = candle[0]
+        high = candle[2]
+        low = candle[3]
 
         hold_bars += 1
 
@@ -1002,21 +1017,24 @@ def simulate_trade(
                 high >= tp
             )
 
-            # Conservative assumption:
-            # if both happen in same candle,
-            # SL is counted first.
+            # Conservative:
+            # if both TP and SL occur in the
+            # same candle, count SL first.
+
             if hit_sl:
 
                 exit_price = sl
-                exit_time = ts
+                exit_time = timestamp
                 result = "LOSS"
+
                 break
 
             if hit_tp:
 
                 exit_price = tp
-                exit_time = ts
+                exit_time = timestamp
                 result = "WIN"
+
                 break
 
         else:
@@ -1032,15 +1050,17 @@ def simulate_trade(
             if hit_sl:
 
                 exit_price = sl
-                exit_time = ts
+                exit_time = timestamp
                 result = "LOSS"
+
                 break
 
             if hit_tp:
 
                 exit_price = tp
-                exit_time = ts
+                exit_time = timestamp
                 result = "WIN"
+
                 break
 
     # --------------------------------------------------------
@@ -1055,6 +1075,7 @@ def simulate_trade(
 
         exit_price = exit_candle[4]
         exit_time = exit_candle[0]
+
         result = "TIME"
 
     # --------------------------------------------------------
@@ -1116,28 +1137,32 @@ def backtest_symbol(
     trades = []
 
     if len(candles) < 300:
+
         return trades
 
-    last_trade_index = -10_000
+    last_trade_index = -10000
 
-    start_index = max(
-        RVOL_LOOKBACK,
-        MOMENTUM_BARS,
-        BODY_LOOKBACK,
-        BREAKOUT_LOOKBACK,
-        RANGE_LOOKBACK,
-    ) + 2
+    start_index = (
+        max(
+            RVOL_LOOKBACK,
+            MOMENTUM_BARS,
+            BODY_LOOKBACK,
+            BREAKOUT_LOOKBACK,
+            RANGE_LOOKBACK,
+        )
+        + 2
+    )
 
     for i in range(
         start_index,
         len(candles) - 2,
     ):
 
-        # Cooldown after previous trade
         if (
             i - last_trade_index
             <= COOLDOWN_BARS
         ):
+
             continue
 
         signal = detect_signal(
@@ -1146,6 +1171,7 @@ def backtest_symbol(
         )
 
         if signal is None:
+
             continue
 
         trade = simulate_trade(
@@ -1155,6 +1181,7 @@ def backtest_symbol(
         )
 
         if trade is None:
+
             continue
 
         trade["symbol"] = symbol
@@ -1178,6 +1205,7 @@ def save_trades(
 ):
 
     if not trades:
+
         return
 
     cur = conn.cursor()
@@ -1294,9 +1322,11 @@ def export_csv(
         "w",
         newline="",
         encoding="utf-8",
-    ) as f:
+    ) as file:
 
-        writer = csv.writer(f)
+        writer = csv.writer(
+            file
+        )
 
         writer.writerow(
             headers
@@ -1326,7 +1356,8 @@ def calculate_performance(
         SELECT
             net_pct,
             result,
-            hold_bars
+            hold_bars,
+            exit_time
         FROM trades
         ORDER BY exit_time ASC
         """
@@ -1335,6 +1366,7 @@ def calculate_performance(
     rows = cur.fetchall()
 
     if not rows:
+
         return None
 
     net_returns = [
@@ -1343,15 +1375,15 @@ def calculate_performance(
     ]
 
     wins = [
-        x
-        for x in net_returns
-        if x > 0
+        value
+        for value in net_returns
+        if value > 0
     ]
 
     losses = [
-        x
-        for x in net_returns
-        if x <= 0
+        value
+        for value in net_returns
+        if value <= 0
     ]
 
     total = len(
@@ -1380,12 +1412,10 @@ def calculate_performance(
         sum(losses)
     )
 
-    profit_factor = (
-        safe_div(
-            gross_profit,
-            gross_loss,
-            default=math.inf,
-        )
+    profit_factor = safe_div(
+        gross_profit,
+        gross_loss,
+        default=math.inf,
     )
 
     net_pnl = sum(
@@ -1411,15 +1441,20 @@ def calculate_performance(
 
     expectancy = average_trade
 
-    max_drawdown = 0.0
-    peak = 0.0
+    # --------------------------------------------------------
+    # Additive equity drawdown
+    # --------------------------------------------------------
+
     equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
 
     for value in net_returns:
 
         equity += value
 
         if equity > peak:
+
             peak = equity
 
         drawdown = (
@@ -1427,6 +1462,7 @@ def calculate_performance(
         )
 
         if drawdown > max_drawdown:
+
             max_drawdown = drawdown
 
     best_trade = max(
@@ -1437,9 +1473,15 @@ def calculate_performance(
         net_returns
     )
 
-    avg_hold = statistics.mean(
+    average_hold = statistics.mean(
         row[2]
         for row in rows
+    )
+
+    time_exits = sum(
+        1
+        for row in rows
+        if row[1] == "TIME"
     )
 
     return {
@@ -1456,12 +1498,13 @@ def calculate_performance(
         "max_drawdown": max_drawdown,
         "best_trade": best_trade,
         "worst_trade": worst_trade,
-        "avg_hold_bars": avg_hold,
+        "avg_hold_bars": average_hold,
+        "time_exits": time_exits,
     }
 
 
 # ============================================================
-# MARKET PERFORMANCE
+# MARKET SUMMARY
 # ============================================================
 
 def print_market_summary(
@@ -1492,20 +1535,13 @@ def print_market_summary(
     rows = cur.fetchall()
 
     if not rows:
+
         return
 
-    print(
-        "\n"
-        + "=" * 75
-    )
-
-    print(
-        "MARKET SUMMARY"
-    )
-
-    print(
-        "=" * 75
-    )
+    print()
+    print("=" * 75)
+    print("MARKET SUMMARY")
+    print("=" * 75)
 
     print(
         f"{'SYMBOL':<18}"
@@ -1515,67 +1551,74 @@ def print_market_summary(
         f"{'NET P&L%':>13}"
     )
 
-    print(
-        "-" * 75
-    )
+    print("-" * 75)
 
     for symbol, trades, wins, pnl in rows:
 
-        wr = (
-            wins / trades * 100.0
-            if trades
-            else 0
-        )
+        if trades:
+
+            win_rate = (
+                wins
+                / trades
+                * 100.0
+            )
+
+        else:
+
+            win_rate = 0.0
 
         print(
             f"{symbol:<18}"
             f"{trades:>8}"
             f"{wins:>8}"
-            f"{wr:>8.2f}%"
+            f"{win_rate:>8.2f}%"
             f"{pnl:>12.2f}%"
         )
 
 
 # ============================================================
-# PRINT FINAL REPORT
+# FINAL REPORT
 # ============================================================
 
 def print_final_report(
     performance,
 ):
 
-    print(
-        "\n"
-        + "=" * 75
-    )
-
-    print(
-        "PUMP DETECTOR BACKTEST RESULT"
-    )
-
-    print(
-        "=" * 75
-    )
+    print()
+    print("=" * 75)
+    print("PUMP DETECTOR BACKTEST RESULT")
+    print("=" * 75)
 
     if performance is None:
 
-        print(
-            "\nNO TRADES FOUND."
-        )
-
+        print()
+        print("NO TRADES FOUND.")
         return
 
-    pf = performance[
-        "profit_factor"
-    ]
+    profit_factor = (
+        performance["profit_factor"]
+    )
 
-    if math.isinf(pf):
+    if math.isinf(
+        profit_factor
+    ):
+
         pf_text = "INF"
-    else:
-        pf_text = f"{pf:.3f}"
 
+    else:
+
+        pf_text = (
+            f"{profit_factor:.3f}"
+        )
+
+    rr = safe_div(
+        TP_PCT,
+        SL_PCT,
+    )
+
+    print()
     print(
-        f"\nVersion             : {VERSION}"
+        f"Version             : {VERSION}"
     )
 
     print(
@@ -1595,8 +1638,7 @@ def print_final_report(
     )
 
     print(
-        f"RR                  : "
-        f"{TP_PCT / SL_PCT:.2f}"
+        f"RR                  : {rr:.2f}"
     )
 
     print(
@@ -1604,9 +1646,8 @@ def print_final_report(
         f"{TOTAL_ROUND_TRIP_COST_PCT:.2f}%"
     )
 
-    print(
-        "\n---------------- PERFORMANCE ----------------"
-    )
+    print()
+    print("---------------- PERFORMANCE ----------------")
 
     print(
         f"Total trades        : "
@@ -1621,6 +1662,11 @@ def print_final_report(
     print(
         f"Losses              : "
         f"{performance['losses']}"
+    )
+
+    print(
+        f"Time exits          : "
+        f"{performance['time_exits']}"
     )
 
     print(
@@ -1678,12 +1724,10 @@ def print_final_report(
         f"{performance['avg_hold_bars']:.2f} candles"
     )
 
+    print()
+    print("IMPORTANT:")
     print(
-        "\nNOTE:"
-    )
-
-    print(
-        "Net P&L above is the sum of individual "
+        "Net P&L is the sum of individual "
         "trade returns."
     )
 
@@ -1695,9 +1739,7 @@ def print_final_report(
         "No real orders were sent."
     )
 
-    print(
-        "=" * 75
-    )
+    print("=" * 75)
 
 
 # ============================================================
@@ -1708,30 +1750,15 @@ def main():
 
     started = time.time()
 
-    print(
-        "\n"
-        + "=" * 75
-    )
+    print()
+    print("=" * 75)
+    print("KRAKEN FUTURES PUMP DETECTOR")
+    print(f"VERSION {VERSION}")
+    print("=" * 75)
 
-    print(
-        "KRAKEN FUTURES PUMP DETECTOR"
-    )
-
-    print(
-        f"VERSION {VERSION}"
-    )
-
-    print(
-        "=" * 75
-    )
-
-    print(
-        "\nNo real trading."
-    )
-
-    print(
-        "Historical data will be downloaded automatically."
-    )
+    print()
+    print("MODE: BACKTEST ONLY")
+    print("REAL TRADING: DISABLED")
 
     # --------------------------------------------------------
     # Database
@@ -1767,25 +1794,27 @@ def main():
         end_dt.timestamp()
     )
 
+    print()
+    print("DATA RANGE")
     print(
-        "\nData range:"
-    )
-
-    print(
-        f"  From: "
+        f"From: "
         f"{start_dt.strftime('%Y-%m-%d %H:%M UTC')}"
     )
 
     print(
-        f"  To  : "
+        f"To  : "
         f"{end_dt.strftime('%Y-%m-%d %H:%M UTC')}"
     )
 
     # --------------------------------------------------------
-    # Markets
+    # Discover markets
     # --------------------------------------------------------
 
     markets = discover_markets()
+
+    # --------------------------------------------------------
+    # Rank markets
+    # --------------------------------------------------------
 
     selected_markets = (
         rank_markets_by_volume(
@@ -1793,8 +1822,9 @@ def main():
         )
     )
 
+    print()
     print(
-        f"\nMarkets to backtest: "
+        f"Markets to backtest: "
         f"{len(selected_markets)}"
     )
 
@@ -1809,7 +1839,7 @@ def main():
     conn.commit()
 
     # --------------------------------------------------------
-    # Download + backtest
+    # Process markets
     # --------------------------------------------------------
 
     successful = 0
@@ -1821,10 +1851,8 @@ def main():
         start=1,
     ):
 
-        print(
-            "\n"
-            + "-" * 75
-        )
+        print()
+        print("-" * 75)
 
         print(
             f"[{number}/{len(selected_markets)}] "
@@ -1903,7 +1931,7 @@ def main():
         )
 
     # --------------------------------------------------------
-    # Final report
+    # Performance
     # --------------------------------------------------------
 
     performance = (
@@ -1912,18 +1940,14 @@ def main():
         )
     )
 
-    print(
-        "\n"
-        + "=" * 75
-    )
+    # --------------------------------------------------------
+    # Reports
+    # --------------------------------------------------------
 
-    print(
-        "DOWNLOAD / BACKTEST SUMMARY"
-    )
-
-    print(
-        "=" * 75
-    )
+    print()
+    print("=" * 75)
+    print("DOWNLOAD / BACKTEST SUMMARY")
+    print("=" * 75)
 
     print(
         f"Markets selected   : "
@@ -1959,19 +1983,17 @@ def main():
 
     conn.close()
 
-    elapsed = (
+    elapsed_minutes = (
         time.time()
         - started
-    )
+    ) / 60.0
 
-    print(
-        "\n"
-        + "=" * 75
-    )
+    print()
+    print("=" * 75)
 
     print(
         f"Completed in "
-        f"{elapsed / 60:.2f} minutes"
+        f"{elapsed_minutes:.2f} minutes"
     )
 
     print(
@@ -1982,9 +2004,7 @@ def main():
         f"CSV     : {CSV_FILE}"
     )
 
-    print(
-        "=" * 75
-    )
+    print("=" * 75)
 
 
 # ============================================================
@@ -1992,4 +2012,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
