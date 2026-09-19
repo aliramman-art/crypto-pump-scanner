@@ -3,7 +3,21 @@
 # VERSION 5.4
 # ============================================================
 #
-# FRESHNESS UPDATE:
+# FIXED:
+#
+# - Kraken Futures OHLC endpoint updated to Charts API
+# - Uses:
+#     /api/charts/v1/trade/{symbol}/{resolution}
+#
+# - Old /derivatives/api/v3/ohlc endpoint removed
+#
+# - SQLite safe migration added for:
+#     contract
+#     exit_reason
+#
+# - Existing database/trades are preserved
+#
+# FRESHNESS:
 #
 # - SCANNER CAN RUN EVERY 1 MINUTE
 # - NEW SIGNAL TELEGRAM IS SENT IMMEDIATELY
@@ -35,11 +49,6 @@
 #   5M Confirmation
 #       ↓
 #   Entry
-#
-# FRESHNESS:
-#
-#   Only latest closed 5M candle
-#   or one previous 5M candle
 #
 # REAL TRADING = DISABLED
 #
@@ -79,6 +88,8 @@ ENTRY_LOOKBACK = 1500
 
 REQUEST_TIMEOUT = 30
 REQUEST_SLEEP = 0.10
+
+# Number of candles requested per chart API request.
 CANDLE_CHUNK = 1900
 
 # PERIODIC REPORT EVERY 15 MINUTES
@@ -259,6 +270,9 @@ def kraken_get(
         url,
         params=params,
         timeout=REQUEST_TIMEOUT,
+        headers={
+            "Accept": "application/json",
+        },
     )
 
     r.raise_for_status()
@@ -337,6 +351,20 @@ def find_contract_for_asset(
 # ============================================================
 # CANDLES
 # ============================================================
+#
+# CURRENT KRAKEN FUTURES CHARTS API:
+#
+#   GET
+#   /api/charts/v1/{tick_type}/{symbol}/{resolution}
+#
+# Example:
+#
+#   /api/charts/v1/trade/PF_XBTUSD/5m
+#
+# The API returns candle "time" in milliseconds.
+# Internally this scanner uses seconds.
+#
+# ============================================================
 
 def fetch_recent_candles(
     contract,
@@ -358,7 +386,9 @@ def fetch_recent_candles(
         "30m": 1800,
         "1h": 3600,
         "4h": 14400,
+        "12h": 43200,
         "1d": 86400,
+        "1w": 604800,
     }.get(interval)
 
     if interval_seconds is None:
@@ -397,16 +427,20 @@ def fetch_recent_candles(
         )
 
         params = {
-            "symbol": symbol,
-            "resolution": interval,
             "from": current_start,
             "to": current_end,
         }
 
+        path = (
+            "/api/charts/v1/trade/"
+            f"{symbol}/"
+            f"{interval}"
+        )
+
         try:
 
             data = kraken_get(
-                "/derivatives/api/v3/ohlc",
+                path,
                 params=params,
             )
 
@@ -423,7 +457,9 @@ def fetch_recent_candles(
             []
         )
 
-        rows.extend(candles)
+        if candles:
+
+            rows.extend(candles)
 
         current_start = (
             current_end
@@ -473,11 +509,17 @@ def fetch_recent_candles(
                     else 0
                 )
 
+            # ------------------------------------------------
+            # Kraken Charts API returns milliseconds.
+            # Convert to seconds.
+            # ------------------------------------------------
+
             ts = int(
                 float(ts)
             )
 
             if ts > 10_000_000_000:
+
                 ts //= 1000
 
             parsed.append(
@@ -1742,20 +1784,6 @@ def init_db():
     # ========================================================
     # SAFE MIGRATION FOR OLD DATABASES
     # ========================================================
-    #
-    # SQLite's:
-    #
-    #   CREATE TABLE IF NOT EXISTS
-    #
-    # does NOT modify an existing table.
-    #
-    # Therefore an older DB may not have the newer "contract"
-    # column.
-    #
-    # Add only the missing ordinary column.
-    # Existing trade data is preserved.
-    #
-    # ========================================================
 
     cur.execute(
         "PRAGMA table_info(trades)"
@@ -1765,6 +1793,10 @@ def init_db():
         row["name"]
         for row in cur.fetchall()
     }
+
+    # --------------------------------------------------------
+    # contract
+    # --------------------------------------------------------
 
     if "contract" not in existing_columns:
 
@@ -1777,6 +1809,63 @@ def init_db():
             """
             ALTER TABLE trades
             ADD COLUMN contract TEXT
+            """
+        )
+
+    # --------------------------------------------------------
+    # exit_reason
+    # --------------------------------------------------------
+    #
+    # THIS FIXES:
+    #
+    # sqlite3.OperationalError:
+    # no such column: exit_reason
+    #
+    # --------------------------------------------------------
+
+    if "exit_reason" not in existing_columns:
+
+        print(
+            "Migrating old DB: adding "
+            "'exit_reason' column..."
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE trades
+            ADD COLUMN exit_reason TEXT
+            """
+        )
+
+    # --------------------------------------------------------
+    # Defensive migration for notification flags
+    # --------------------------------------------------------
+
+    if "notified_new" not in existing_columns:
+
+        print(
+            "Migrating old DB: adding "
+            "'notified_new' column..."
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE trades
+            ADD COLUMN notified_new INTEGER DEFAULT 0
+            """
+        )
+
+    if "notified_close" not in existing_columns:
+
+        print(
+            "Migrating old DB: adding "
+            "'notified_close' column..."
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE trades
+            ADD COLUMN notified_close INTEGER DEFAULT 0
             """
         )
 
@@ -1930,25 +2019,6 @@ def insert_trade(
 
 # ============================================================
 # KRAKEN LIVE PRICE
-# ============================================================
-#
-# IMPORTANT:
-#
-# Current price is ALWAYS Kraken Futures ticker.last.
-#
-# This function fetches the ticker snapshot ONCE per scanner
-# run and converts contract symbols into the same asset keys
-# used everywhere else in the scanner.
-#
-# Example:
-#
-#   Kraken symbol: PF_DOGEUSD
-#   ticker last:   0.12456
-#
-# becomes:
-#
-#   prices["DOGE"] = 0.12456
-#
 # ============================================================
 
 def get_kraken_live_prices(
@@ -2636,11 +2706,6 @@ def update_open_trades_from_history(
             "asset"
         ]
 
-        # ----------------------------------------------------
-        # First try stored Kraken contract.
-        # Then resolve from asset for old DB records.
-        # ----------------------------------------------------
-
         contract_key = trade.get(
             "contract"
         )
@@ -2753,10 +2818,6 @@ def process_current_price_exits(
             "asset"
         ]
 
-        # ----------------------------------------------------
-        # CURRENT PRICE = KRAKEN FUTURES TICKER.LAST
-        # ----------------------------------------------------
-
         current = prices.get(
             asset
         )
@@ -2821,7 +2882,6 @@ def process_current_price_exits(
                 >= MAX_HOLD_HOURS
             ):
 
-                # TIME exit uses current Kraken ticker price.
                 exit_price = current
                 reason = "TIME"
 
@@ -3005,12 +3065,6 @@ def send_periodic_report(
                 row
             )
 
-            # ------------------------------------------------
-            # CURRENT PRICE
-            #
-            # DIRECTLY FROM KRAKEN FUTURES TICKER.LAST
-            # ------------------------------------------------
-
             current_price = (
                 kraken_prices.get(
                     trade["asset"]
@@ -3028,10 +3082,6 @@ def send_periodic_report(
             tp = float(
                 trade["tp_price"]
             )
-
-            # ------------------------------------------------
-            # CURRENT PNL
-            # ------------------------------------------------
 
             if current_price is not None:
 
@@ -3066,10 +3116,6 @@ def send_periodic_report(
                 current_text = (
                     "💵 Current: -\n"
                 )
-
-            # ------------------------------------------------
-            # SL / TP PERCENTAGES
-            # ------------------------------------------------
 
             if trade["direction"] == "LONG":
 
@@ -3213,7 +3259,20 @@ def scan_new_signals(
                 df_1h.empty
                 or df_5m.empty
             ):
+
+                print(
+                    f"No candle data for "
+                    f"{asset}"
+                )
+
                 continue
+
+            print(
+                f"OHLC loaded: "
+                f"{asset} "
+                f"1H={len(df_1h)} "
+                f"5M={len(df_5m)}"
+            )
 
             entries = (
                 generate_live_entries(
@@ -3291,17 +3350,13 @@ def main():
         build_contract_map()
     )
 
+    print(
+        f"Kraken contracts loaded: "
+        f"{len(contract_map)}"
+    )
+
     # --------------------------------------------------------
     # KRAKEN LIVE PRICES
-    # --------------------------------------------------------
-    #
-    # IMPORTANT:
-    # One ticker snapshot per scanner run.
-    #
-    # Current = Kraken Futures ticker.last
-    #
-    # No LBank request.
-    #
     # --------------------------------------------------------
 
     print(
@@ -3358,8 +3413,6 @@ def main():
 
         # ----------------------------------------------------
         # NEW SIGNAL CURRENT PRICE
-        #
-        # DIRECTLY FROM KRAKEN FUTURES ticker.last
         # ----------------------------------------------------
 
         display_price = (
@@ -3474,10 +3527,6 @@ def main():
         print(
             "Sending periodic report..."
         )
-
-        # ----------------------------------------------------
-        # CURRENT PRICE = KRAKEN FUTURES ticker.last
-        # ----------------------------------------------------
 
         send_periodic_report(
             kraken_prices
