@@ -15,6 +15,15 @@
 # - SQLITE ROWS ARE READ BY COLUMN NAME
 # - COMPATIBLE WITH OLDER SQLITE DATABASE SCHEMAS
 #
+# CURRENT PRICE:
+#
+# - CURRENT PRICE COMES DIRECTLY FROM KRAKEN FUTURES
+# - SOURCE = /derivatives/api/v3/tickers
+# - PRICE FIELD = "last"
+# - NO LBANK
+# - NO CANDLE CLOSE
+# - NO ENTRY PRICE AS CURRENT PRICE
+#
 # STRATEGY:
 #
 #   1H Pattern
@@ -81,14 +90,6 @@ DB_FILE = "kraken_pattern_live_v52.db"
 # ============================================================
 # SIGNAL FRESHNESS
 # ============================================================
-
-# 0 = only latest closed 5M candle
-# 1 = latest closed 5M candle + one previous candle
-#
-# With value 1:
-# Entry 10:30 -> accepted
-# Entry 10:25 -> accepted
-# Entry 10:20 or older -> rejected
 
 MAX_ENTRY_AGE_CANDLES = 1
 
@@ -1691,12 +1692,6 @@ def db_connect():
         DB_FILE
     )
 
-    # IMPORTANT:
-    # Always return SQLite rows by column name.
-    #
-    # This prevents an old physical column order from causing
-    # entry_time to be interpreted as entry_price, etc.
-
     conn.row_factory = sqlite3.Row
 
     return conn
@@ -1743,6 +1738,47 @@ def init_db():
         )
         """
     )
+
+    # ========================================================
+    # SAFE MIGRATION FOR OLD DATABASES
+    # ========================================================
+    #
+    # SQLite's:
+    #
+    #   CREATE TABLE IF NOT EXISTS
+    #
+    # does NOT modify an existing table.
+    #
+    # Therefore an older DB may not have the newer "contract"
+    # column.
+    #
+    # Add only the missing ordinary column.
+    # Existing trade data is preserved.
+    #
+    # ========================================================
+
+    cur.execute(
+        "PRAGMA table_info(trades)"
+    )
+
+    existing_columns = {
+        row["name"]
+        for row in cur.fetchall()
+    }
+
+    if "contract" not in existing_columns:
+
+        print(
+            "Migrating old DB: adding "
+            "'contract' column..."
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE trades
+            ADD COLUMN contract TEXT
+            """
+        )
 
     conn.commit()
 
@@ -1893,19 +1929,31 @@ def insert_trade(
 
 
 # ============================================================
-# KRAKEN PRICE
+# KRAKEN LIVE PRICE
+# ============================================================
+#
+# IMPORTANT:
+#
+# Current price is ALWAYS Kraken Futures ticker.last.
+#
+# This function fetches the ticker snapshot ONCE per scanner
+# run and converts contract symbols into the same asset keys
+# used everywhere else in the scanner.
+#
+# Example:
+#
+#   Kraken symbol: PF_DOGEUSD
+#   ticker last:   0.12456
+#
+# becomes:
+#
+#   prices["DOGE"] = 0.12456
+#
 # ============================================================
 
-def get_kraken_ticker(
-    contract
+def get_kraken_live_prices(
+    contract_map
 ):
-
-    symbol = contract.get(
-        "symbol"
-    )
-
-    if not symbol:
-        return None
 
     try:
 
@@ -1918,95 +1966,84 @@ def get_kraken_ticker(
             []
         )
 
-        for t in tickers:
+        ticker_by_symbol = {}
 
-            if (
-                t.get("symbol")
-                == symbol
-            ):
+        for ticker in tickers:
 
-                price = (
-                    t.get("last")
-                    or t.get("lastPrice")
+            symbol = ticker.get(
+                "symbol"
+            )
+
+            if not symbol:
+                continue
+
+            last = ticker.get(
+                "last"
+            )
+
+            if last is None:
+                continue
+
+            try:
+
+                last = float(
+                    last
                 )
 
-                if price is not None:
+            except (
+                TypeError,
+                ValueError,
+            ):
 
-                    return float(
-                        price
-                    )
+                continue
+
+            if last <= 0:
+                continue
+
+            ticker_by_symbol[
+                symbol
+            ] = last
+
+        prices = {}
+
+        for asset in ASSETS:
+
+            contract = (
+                find_contract_for_asset(
+                    asset,
+                    contract_map,
+                )
+            )
+
+            if contract is None:
+                continue
+
+            symbol = contract.get(
+                "symbol"
+            )
+
+            if not symbol:
+                continue
+
+            last = ticker_by_symbol.get(
+                symbol
+            )
+
+            if last is None:
+                continue
+
+            prices[asset] = last
+
+        return prices
 
     except Exception as e:
 
         print(
-            "Ticker error:",
-            symbol,
+            "Kraken live ticker error:",
             e,
         )
 
-    return None
-
-
-# ============================================================
-# LBANK PRICE
-# ============================================================
-
-def get_lbank_price(
-    asset
-):
-
-    try:
-
-        symbol = (
-            f"{asset.lower()}usdt"
-        )
-
-        url = (
-            "https://lbkperp.lbank.com"
-            "/cfd/openApi/v1/ticker"
-        )
-
-        r = requests.get(
-            url,
-            params={
-                "symbol": symbol
-            },
-            timeout=10,
-        )
-
-        if not r.ok:
-            return None
-
-        data = r.json()
-
-        return float(
-            data["data"]["last"]
-        )
-
-    except Exception:
-
-        return None
-
-
-def get_lbank_snapshot():
-
-    result = {}
-
-    for asset in ASSETS:
-
-        price = get_lbank_price(
-            asset
-        )
-
-        if price is not None:
-
-            result[asset] = price
-
-        time.sleep(
-            0.05
-        )
-
-    return result
+        return {}
 
 
 # ============================================================
@@ -2054,6 +2091,10 @@ def format_signal(
     current_text = ""
 
     if current_price is not None:
+
+        current_price = float(
+            current_price
+        )
 
         if direction == "LONG":
 
@@ -2205,36 +2246,6 @@ def send_close_alert(
 # ============================================================
 # ROW -> TRADE
 # ============================================================
-#
-# IMPORTANT DATABASE COMPATIBILITY FIX
-#
-# Existing SQLite databases may have been created by an older
-# version of the scanner.
-#
-# CREATE TABLE IF NOT EXISTS does NOT change the structure of
-# an existing table.
-#
-# Therefore an old DB may:
-#
-#   - have a different physical column order
-#   - be missing newer columns such as "contract"
-#
-# The scanner must NOT assume that every column exists.
-#
-# We therefore:
-#
-#   1. Convert sqlite3.Row to a dictionary.
-#   2. Read values by column name.
-#   3. Use safe defaults for columns missing in older DBs.
-#
-# This prevents errors such as:
-#
-#   IndexError: No item with that key
-#
-# and prevents timestamp values from being interpreted as
-# entry prices.
-#
-# ============================================================
 
 def row_to_trade(
     row
@@ -2242,10 +2253,6 @@ def row_to_trade(
 
     if row is None:
         return None
-
-    # --------------------------------------------------------
-    # Convert SQLite Row / Mapping to dictionary
-    # --------------------------------------------------------
 
     try:
 
@@ -2267,15 +2274,6 @@ def row_to_trade(
             }
 
         else:
-
-            # ------------------------------------------------
-            # Legacy tuple fallback
-            # ------------------------------------------------
-            #
-            # This branch is only used if a tuple is passed
-            # manually from somewhere outside db_connect().
-            #
-            # ------------------------------------------------
 
             return {
                 "id": row[0],
@@ -2309,62 +2307,37 @@ def row_to_trade(
 
         raise
 
-    # --------------------------------------------------------
-    # Safe column access
-    # --------------------------------------------------------
-    #
-    # IMPORTANT:
-    #
-    # "contract" may not exist in an older database.
-    #
-    # In that case we use asset as the fallback.
-    #
-    # This is safe because update_open_trades_from_history()
-    # can still resolve the actual current Kraken contract from
-    # the current contract map when the stored contract is absent.
-    #
-    # --------------------------------------------------------
-
-    asset = data.get(
-        "asset",
-        ""
-    )
-
-    contract = data.get(
-        "contract"
-    )
-
-    if not contract:
-        contract = asset
-
     return {
         "id":
-            data.get(
-                "id"
-            ),
+            data.get("id"),
 
         "signal_key":
             data.get(
                 "signal_key",
-                ""
+                "",
             ),
 
         "asset":
-            asset,
+            data.get(
+                "asset",
+                "",
+            ),
 
         "contract":
-            contract,
+            data.get(
+                "contract"
+            ),
 
         "pattern":
             data.get(
                 "pattern",
-                ""
+                "",
             ),
 
         "direction":
             data.get(
                 "direction",
-                ""
+                "",
             ),
 
         "breakout_time":
@@ -2420,7 +2393,7 @@ def row_to_trade(
         "status":
             data.get(
                 "status",
-                ""
+                "",
             ),
 
         "detected_at":
@@ -2431,13 +2404,13 @@ def row_to_trade(
         "notified_new":
             data.get(
                 "notified_new",
-                0
+                0,
             ),
 
         "notified_close":
             data.get(
                 "notified_close",
-                0
+                0,
             ),
     }
 
@@ -2664,18 +2637,8 @@ def update_open_trades_from_history(
         ]
 
         # ----------------------------------------------------
-        # Resolve current Kraken contract
-        #
-        # Older DBs may store:
-        #
-        #   contract = "TRX"
-        #
-        # instead of:
-        #
-        #   PF_TRXUSD
-        #
-        # So first try the stored contract, then fall back
-        # to finding the contract from the asset.
+        # First try stored Kraken contract.
+        # Then resolve from asset for old DB records.
         # ----------------------------------------------------
 
         contract_key = trade.get(
@@ -2685,11 +2648,13 @@ def update_open_trades_from_history(
         contract = None
 
         if contract_key:
+
             contract = contract_map.get(
                 contract_key
             )
 
         if contract is None:
+
             contract = (
                 find_contract_for_asset(
                     asset,
@@ -2760,7 +2725,7 @@ def update_open_trades_from_history(
 
 
 # ============================================================
-# CURRENT PRICE EXITS
+# CURRENT KRAKEN PRICE EXITS
 # ============================================================
 
 def process_current_price_exits(
@@ -2788,11 +2753,19 @@ def process_current_price_exits(
             "asset"
         ]
 
-        if asset not in prices:
+        # ----------------------------------------------------
+        # CURRENT PRICE = KRAKEN FUTURES TICKER.LAST
+        # ----------------------------------------------------
+
+        current = prices.get(
+            asset
+        )
+
+        if current is None:
             continue
 
         current = float(
-            prices[asset]
+            current
         )
 
         direction = trade[
@@ -2848,6 +2821,7 @@ def process_current_price_exits(
                 >= MAX_HOLD_HOURS
             ):
 
+                # TIME exit uses current Kraken ticker price.
                 exit_price = current
                 reason = "TIME"
 
@@ -2998,7 +2972,7 @@ def performance_stats():
 # ============================================================
 
 def send_periodic_report(
-    lbank_prices=None
+    kraken_prices=None
 ):
 
     stats = performance_stats()
@@ -3007,12 +2981,8 @@ def send_periodic_report(
         get_open_trades()
     )
 
-    if lbank_prices is None:
-        lbank_prices = {}
-
-    # --------------------------------------------------------
-    # HEADER
-    # --------------------------------------------------------
+    if kraken_prices is None:
+        kraken_prices = {}
 
     text = (
         "<b>📊 KRAKEN PATTERN SCANNER</b>\n\n"
@@ -3036,11 +3006,13 @@ def send_periodic_report(
             )
 
             # ------------------------------------------------
-            # Current LBank price
+            # CURRENT PRICE
+            #
+            # DIRECTLY FROM KRAKEN FUTURES TICKER.LAST
             # ------------------------------------------------
 
             current_price = (
-                lbank_prices.get(
+                kraken_prices.get(
                     trade["asset"]
                 )
             )
@@ -3058,10 +3030,14 @@ def send_periodic_report(
             )
 
             # ------------------------------------------------
-            # Current PnL
+            # CURRENT PNL
             # ------------------------------------------------
 
             if current_price is not None:
+
+                current_price = float(
+                    current_price
+                )
 
                 if trade["direction"] == "LONG":
 
@@ -3092,7 +3068,7 @@ def send_periodic_report(
                 )
 
             # ------------------------------------------------
-            # SL / TP percentages
+            # SL / TP PERCENTAGES
             # ------------------------------------------------
 
             if trade["direction"] == "LONG":
@@ -3128,10 +3104,6 @@ def send_periodic_report(
                 if trade["direction"] == "LONG"
                 else "🔴"
             )
-
-            # ------------------------------------------------
-            # Trade block
-            # ------------------------------------------------
 
             text += (
                 f"{emoji} "
@@ -3308,18 +3280,6 @@ def main():
     init_db()
 
     # --------------------------------------------------------
-    # LBANK DISPLAY PRICE
-    # --------------------------------------------------------
-
-    print(
-        "Fetching LBank prices..."
-    )
-
-    lbank_prices = (
-        get_lbank_snapshot()
-    )
-
-    # --------------------------------------------------------
     # CONTRACTS
     # --------------------------------------------------------
 
@@ -3329,6 +3289,34 @@ def main():
 
     contract_map = (
         build_contract_map()
+    )
+
+    # --------------------------------------------------------
+    # KRAKEN LIVE PRICES
+    # --------------------------------------------------------
+    #
+    # IMPORTANT:
+    # One ticker snapshot per scanner run.
+    #
+    # Current = Kraken Futures ticker.last
+    #
+    # No LBank request.
+    #
+    # --------------------------------------------------------
+
+    print(
+        "Fetching Kraken live prices..."
+    )
+
+    kraken_prices = (
+        get_kraken_live_prices(
+            contract_map
+        )
+    )
+
+    print(
+        f"Kraken live prices loaded: "
+        f"{len(kraken_prices)}"
     )
 
     # --------------------------------------------------------
@@ -3368,8 +3356,14 @@ def main():
 
         new_count += 1
 
+        # ----------------------------------------------------
+        # NEW SIGNAL CURRENT PRICE
+        #
+        # DIRECTLY FROM KRAKEN FUTURES ticker.last
+        # ----------------------------------------------------
+
         display_price = (
-            lbank_prices.get(
+            kraken_prices.get(
                 trade["asset"]
             )
         )
@@ -3380,9 +3374,13 @@ def main():
             trade["direction"],
             trade["pattern"],
             "Entry=",
+            trade["entry_price"],
+            "EntryTime=",
             format_time(
                 trade["entry_time"]
             ),
+            "Current=",
+            display_price,
             "Detected=",
             format_time(
                 trade["detected_at"]
@@ -3422,15 +3420,15 @@ def main():
     )
 
     # --------------------------------------------------------
-    # CURRENT PRICE EXITS
+    # CURRENT KRAKEN PRICE EXITS
     # --------------------------------------------------------
 
     print(
-        "Processing current-price exits..."
+        "Processing Kraken current-price exits..."
     )
 
     process_current_price_exits(
-        lbank_prices
+        kraken_prices
     )
 
     # --------------------------------------------------------
@@ -3477,11 +3475,12 @@ def main():
             "Sending periodic report..."
         )
 
-        # Use the already-fetched LBank snapshot.
-        # No additional LBank request for every open trade.
+        # ----------------------------------------------------
+        # CURRENT PRICE = KRAKEN FUTURES ticker.last
+        # ----------------------------------------------------
 
         send_periodic_report(
-            lbank_prices
+            kraken_prices
         )
 
         try:
