@@ -13,6 +13,7 @@
 # - PERIODIC REPORT EVERY 15 MINUTES
 # - PERIODIC REPORT INCLUDES OPEN TRADES
 # - SQLITE ROWS ARE READ BY COLUMN NAME
+# - COMPATIBLE WITH OLDER SQLITE DATABASE SCHEMAS
 #
 # STRATEGY:
 #
@@ -531,8 +532,7 @@ def fetch_recent_candles(
         (
             df["timestamp"]
             + interval_seconds
-        )
-        <= now_ts
+        ) <= now_ts
     ]
 
     return df.tail(
@@ -1692,8 +1692,11 @@ def db_connect():
     )
 
     # IMPORTANT:
-    # Return SQLite rows by column name instead of relying
-    # on the physical column order in the database.
+    # Always return SQLite rows by column name.
+    #
+    # This prevents an old physical column order from causing
+    # entry_time to be interpreted as entry_price, etc.
+
     conn.row_factory = sqlite3.Row
 
     return conn
@@ -2203,26 +2206,33 @@ def send_close_alert(
 # ROW -> TRADE
 # ============================================================
 #
-# IMPORTANT FIX:
+# IMPORTANT DATABASE COMPATIBILITY FIX
 #
-# The old version used:
+# Existing SQLite databases may have been created by an older
+# version of the scanner.
 #
-#     row[0], row[1], row[2] ...
+# CREATE TABLE IF NOT EXISTS does NOT change the structure of
+# an existing table.
 #
-# This assumes the SQLite column order never changes.
+# Therefore an old DB may:
 #
-# The existing DB may have been created by an older version
-# with a different physical column order.
+#   - have a different physical column order
+#   - be missing newer columns such as "contract"
 #
-# That can cause:
+# The scanner must NOT assume that every column exists.
 #
-#     entry_time -> displayed as entry_price
+# We therefore:
 #
-# and produce numbers such as:
+#   1. Convert sqlite3.Row to a dictionary.
+#   2. Read values by column name.
+#   3. Use safe defaults for columns missing in older DBs.
 #
-#     1.7897628e+09
+# This prevents errors such as:
 #
-# We now read every field by its actual SQLite column name.
+#   IndexError: No item with that key
+#
+# and prevents timestamp values from being interpreted as
+# entry prices.
 #
 # ============================================================
 
@@ -2234,101 +2244,201 @@ def row_to_trade(
         return None
 
     # --------------------------------------------------------
-    # sqlite3.Row
+    # Convert SQLite Row / Mapping to dictionary
     # --------------------------------------------------------
 
-    if isinstance(
-        row,
-        sqlite3.Row
-    ):
+    try:
 
-        return {
-            "id": row["id"],
-            "signal_key": row["signal_key"],
-            "asset": row["asset"],
-            "contract": row["contract"],
-            "pattern": row["pattern"],
-            "direction": row["direction"],
-            "breakout_time": row["breakout_time"],
-            "retest_time": row["retest_time"],
-            "confirm_time": row["confirm_time"],
-            "entry_time": row["entry_time"],
-            "entry_price": row["entry_price"],
-            "sl_price": row["sl_price"],
-            "tp_price": row["tp_price"],
-            "exit_time": row["exit_time"],
-            "exit_price": row["exit_price"],
-            "exit_reason": row["exit_reason"],
-            "status": row["status"],
-            "detected_at": row["detected_at"],
-            "notified_new": row["notified_new"],
-            "notified_close": row["notified_close"],
-        }
+        if isinstance(
+            row,
+            sqlite3.Row
+        ):
+
+            data = dict(row)
+
+        elif hasattr(
+            row,
+            "keys"
+        ):
+
+            data = {
+                key: row[key]
+                for key in row.keys()
+            }
+
+        else:
+
+            # ------------------------------------------------
+            # Legacy tuple fallback
+            # ------------------------------------------------
+            #
+            # This branch is only used if a tuple is passed
+            # manually from somewhere outside db_connect().
+            #
+            # ------------------------------------------------
+
+            return {
+                "id": row[0],
+                "signal_key": row[1],
+                "asset": row[2],
+                "contract": row[3],
+                "pattern": row[4],
+                "direction": row[5],
+                "breakout_time": row[6],
+                "retest_time": row[7],
+                "confirm_time": row[8],
+                "entry_time": row[9],
+                "entry_price": row[10],
+                "sl_price": row[11],
+                "tp_price": row[12],
+                "exit_time": row[13],
+                "exit_price": row[14],
+                "exit_reason": row[15],
+                "status": row[16],
+                "detected_at": row[17],
+                "notified_new": row[18],
+                "notified_close": row[19],
+            }
+
+    except Exception as e:
+
+        print(
+            "row_to_trade conversion error:",
+            e,
+        )
+
+        raise
 
     # --------------------------------------------------------
-    # Generic mapping support
-    # --------------------------------------------------------
-
-    if hasattr(
-        row,
-        "keys"
-    ):
-
-        return {
-            "id": row["id"],
-            "signal_key": row["signal_key"],
-            "asset": row["asset"],
-            "contract": row["contract"],
-            "pattern": row["pattern"],
-            "direction": row["direction"],
-            "breakout_time": row["breakout_time"],
-            "retest_time": row["retest_time"],
-            "confirm_time": row["confirm_time"],
-            "entry_time": row["entry_time"],
-            "entry_price": row["entry_price"],
-            "sl_price": row["sl_price"],
-            "tp_price": row["tp_price"],
-            "exit_time": row["exit_time"],
-            "exit_price": row["exit_price"],
-            "exit_reason": row["exit_reason"],
-            "status": row["status"],
-            "detected_at": row["detected_at"],
-            "notified_new": row["notified_new"],
-            "notified_close": row["notified_close"],
-        }
-
-    # --------------------------------------------------------
-    # Legacy tuple fallback
+    # Safe column access
     # --------------------------------------------------------
     #
-    # Normally this branch is no longer used because db_connect()
-    # returns sqlite3.Row objects.
+    # IMPORTANT:
     #
-    # It is kept for safety if a tuple is passed manually.
+    # "contract" may not exist in an older database.
+    #
+    # In that case we use asset as the fallback.
+    #
+    # This is safe because update_open_trades_from_history()
+    # can still resolve the actual current Kraken contract from
+    # the current contract map when the stored contract is absent.
     #
     # --------------------------------------------------------
+
+    asset = data.get(
+        "asset",
+        ""
+    )
+
+    contract = data.get(
+        "contract"
+    )
+
+    if not contract:
+        contract = asset
 
     return {
-        "id": row[0],
-        "signal_key": row[1],
-        "asset": row[2],
-        "contract": row[3],
-        "pattern": row[4],
-        "direction": row[5],
-        "breakout_time": row[6],
-        "retest_time": row[7],
-        "confirm_time": row[8],
-        "entry_time": row[9],
-        "entry_price": row[10],
-        "sl_price": row[11],
-        "tp_price": row[12],
-        "exit_time": row[13],
-        "exit_price": row[14],
-        "exit_reason": row[15],
-        "status": row[16],
-        "detected_at": row[17],
-        "notified_new": row[18],
-        "notified_close": row[19],
+        "id":
+            data.get(
+                "id"
+            ),
+
+        "signal_key":
+            data.get(
+                "signal_key",
+                ""
+            ),
+
+        "asset":
+            asset,
+
+        "contract":
+            contract,
+
+        "pattern":
+            data.get(
+                "pattern",
+                ""
+            ),
+
+        "direction":
+            data.get(
+                "direction",
+                ""
+            ),
+
+        "breakout_time":
+            data.get(
+                "breakout_time"
+            ),
+
+        "retest_time":
+            data.get(
+                "retest_time"
+            ),
+
+        "confirm_time":
+            data.get(
+                "confirm_time"
+            ),
+
+        "entry_time":
+            data.get(
+                "entry_time"
+            ),
+
+        "entry_price":
+            data.get(
+                "entry_price"
+            ),
+
+        "sl_price":
+            data.get(
+                "sl_price"
+            ),
+
+        "tp_price":
+            data.get(
+                "tp_price"
+            ),
+
+        "exit_time":
+            data.get(
+                "exit_time"
+            ),
+
+        "exit_price":
+            data.get(
+                "exit_price"
+            ),
+
+        "exit_reason":
+            data.get(
+                "exit_reason"
+            ),
+
+        "status":
+            data.get(
+                "status",
+                ""
+            ),
+
+        "detected_at":
+            data.get(
+                "detected_at"
+            ),
+
+        "notified_new":
+            data.get(
+                "notified_new",
+                0
+            ),
+
+        "notified_close":
+            data.get(
+                "notified_close",
+                0
+            ),
     }
 
 
@@ -2553,11 +2663,39 @@ def update_open_trades_from_history(
             "asset"
         ]
 
-        contract = (
-            contract_map.get(
-                trade["contract"]
-            )
+        # ----------------------------------------------------
+        # Resolve current Kraken contract
+        #
+        # Older DBs may store:
+        #
+        #   contract = "TRX"
+        #
+        # instead of:
+        #
+        #   PF_TRXUSD
+        #
+        # So first try the stored contract, then fall back
+        # to finding the contract from the asset.
+        # ----------------------------------------------------
+
+        contract_key = trade.get(
+            "contract"
         )
+
+        contract = None
+
+        if contract_key:
+            contract = contract_map.get(
+                contract_key
+            )
+
+        if contract is None:
+            contract = (
+                find_contract_for_asset(
+                    asset,
+                    contract_map,
+                )
+            )
 
         if contract is None:
             continue
@@ -3341,6 +3479,7 @@ def main():
 
         # Use the already-fetched LBank snapshot.
         # No additional LBank request for every open trade.
+
         send_periodic_report(
             lbank_prices
         )
