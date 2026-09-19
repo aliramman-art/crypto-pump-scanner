@@ -10,7 +10,8 @@
 # - CLOSE TELEGRAM IS SENT IMMEDIATELY
 # - NO REPEATED NEW SIGNAL ALERTS
 # - NO REPEATED CLOSE ALERTS
-# - PERIODIC REPORT
+# - PERIODIC REPORT EVERY 15 MINUTES
+# - PERIODIC REPORT INCLUDES OPEN TRADES
 #
 # STRATEGY:
 #
@@ -69,7 +70,8 @@ REQUEST_TIMEOUT = 30
 REQUEST_SLEEP = 0.10
 CANDLE_CHUNK = 1900
 
-PERIODIC_REPORT_SECONDS = 30 * 60
+# PERIODIC REPORT EVERY 15 MINUTES
+PERIODIC_REPORT_SECONDS = 15 * 60
 
 DB_FILE = "kraken_pattern_live_v52.db"
 
@@ -2042,14 +2044,21 @@ def format_signal(
 
     if current_price is not None:
 
-        current_pct = (
-            (
+        if direction == "LONG":
+
+            current_pct = (
                 current_price
-                - entry
-            )
-            / entry
-            * 100
-        )
+                / entry
+                - 1
+            ) * 100
+
+        else:
+
+            current_pct = (
+                1
+                - current_price
+                / entry
+            ) * 100
 
         current_text = (
             f"💵 Current: "
@@ -2099,10 +2108,6 @@ def send_new_signal_alert(
         detected_at = int(
             utc_now().timestamp()
         )
-
-    # IMPORTANT:
-    # Keep the function call in a normal f-string.
-    # This avoids nested f-string syntax problems.
 
     signal_text = format_signal(
         trade,
@@ -2756,10 +2761,161 @@ def send_periodic_report():
         get_open_trades()
     )
 
+    # --------------------------------------------------------
+    # HEADER
+    # --------------------------------------------------------
+
     text = (
         "<b>📊 KRAKEN PATTERN SCANNER</b>\n\n"
-        f"🟢 Open: "
-        f"{len(open_rows)}\n"
+    )
+
+    # --------------------------------------------------------
+    # OPEN TRADES
+    # --------------------------------------------------------
+
+    if open_rows:
+
+        text += (
+            f"<b>🟢 OPEN TRADES: "
+            f"{len(open_rows)}</b>\n\n"
+        )
+
+        for row in open_rows:
+
+            trade = row_to_trade(
+                row
+            )
+
+            # ------------------------------------------------
+            # Current LBank price
+            # ------------------------------------------------
+
+            current_price = (
+                get_lbank_price(
+                    trade["asset"]
+                )
+            )
+
+            entry = float(
+                trade["entry_price"]
+            )
+
+            sl = float(
+                trade["sl_price"]
+            )
+
+            tp = float(
+                trade["tp_price"]
+            )
+
+            # ------------------------------------------------
+            # Current PnL
+            # ------------------------------------------------
+
+            if current_price is not None:
+
+                if trade["direction"] == "LONG":
+
+                    current_pnl = (
+                        current_price
+                        / entry
+                        - 1
+                    ) * 100
+
+                else:
+
+                    current_pnl = (
+                        1
+                        - current_price
+                        / entry
+                    ) * 100
+
+                current_text = (
+                    f"💵 Current: "
+                    f"{current_price:.8g} "
+                    f"({current_pnl:+.2f}%)\n"
+                )
+
+            else:
+
+                current_text = (
+                    "💵 Current: -\n"
+                )
+
+            # ------------------------------------------------
+            # SL / TP percentages
+            # ------------------------------------------------
+
+            if trade["direction"] == "LONG":
+
+                sl_pct = (
+                    (sl - entry)
+                    / entry
+                    * 100
+                )
+
+                tp_pct = (
+                    (tp - entry)
+                    / entry
+                    * 100
+                )
+
+            else:
+
+                sl_pct = (
+                    (entry - sl)
+                    / entry
+                    * 100
+                )
+
+                tp_pct = (
+                    (entry - tp)
+                    / entry
+                    * 100
+                )
+
+            emoji = (
+                "🟢"
+                if trade["direction"] == "LONG"
+                else "🔴"
+            )
+
+            # ------------------------------------------------
+            # Trade block
+            # ------------------------------------------------
+
+            text += (
+                f"{emoji} "
+                f"<b>{trade['asset']} "
+                f"{trade['direction']}</b>\n"
+                f"📌 Pattern: "
+                f"{trade['pattern']}\n"
+                f"💰 Entry: "
+                f"{entry:.8g}\n"
+                f"{current_text}"
+                f"🛑 SL: "
+                f"{sl:.8g} "
+                f"({sl_pct:+.2f}%)\n"
+                f"🎯 TP: "
+                f"{tp:.8g} "
+                f"({tp_pct:+.2f}%)\n"
+                f"⚙️ RR: "
+                f"{RR:.2f}\n"
+                f"🕐 Entry: "
+                f"{format_time(trade['entry_time'])}\n\n"
+            )
+
+    else:
+
+        text += (
+            "<b>🟢 OPEN TRADES: 0</b>\n\n"
+        )
+
+    # --------------------------------------------------------
+    # PERFORMANCE
+    # --------------------------------------------------------
+
+    text += (
         f"📦 Total: "
         f"{stats['total']}\n"
         f"🔒 Closed: "
@@ -2895,6 +3051,11 @@ def main():
         f"{MAX_ENTRY_AGE_CANDLES}"
     )
 
+    print(
+        f"PERIODIC_REPORT_SECONDS = "
+        f"{PERIODIC_REPORT_SECONDS}"
+    )
+
     init_db()
 
     # --------------------------------------------------------
@@ -2978,6 +3139,10 @@ def main():
                 trade["detected_at"]
             ),
         )
+
+        # ----------------------------------------------------
+        # IMMEDIATE NEW SIGNAL ALERT
+        # ----------------------------------------------------
 
         send_new_signal_alert(
             trade,
