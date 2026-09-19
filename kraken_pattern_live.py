@@ -12,6 +12,7 @@
 # - NO REPEATED CLOSE ALERTS
 # - PERIODIC REPORT EVERY 15 MINUTES
 # - PERIODIC REPORT INCLUDES OPEN TRADES
+# - SQLITE ROWS ARE READ BY COLUMN NAME
 #
 # STRATEGY:
 #
@@ -1686,9 +1687,16 @@ def generate_live_entries(
 
 def db_connect():
 
-    return sqlite3.connect(
+    conn = sqlite3.connect(
         DB_FILE
     )
+
+    # IMPORTANT:
+    # Return SQLite rows by column name instead of relying
+    # on the physical column order in the database.
+    conn.row_factory = sqlite3.Row
+
+    return conn
 
 
 def init_db():
@@ -2194,6 +2202,29 @@ def send_close_alert(
 # ============================================================
 # ROW -> TRADE
 # ============================================================
+#
+# IMPORTANT FIX:
+#
+# The old version used:
+#
+#     row[0], row[1], row[2] ...
+#
+# This assumes the SQLite column order never changes.
+#
+# The existing DB may have been created by an older version
+# with a different physical column order.
+#
+# That can cause:
+#
+#     entry_time -> displayed as entry_price
+#
+# and produce numbers such as:
+#
+#     1.7897628e+09
+#
+# We now read every field by its actual SQLite column name.
+#
+# ============================================================
 
 def row_to_trade(
     row
@@ -2201,6 +2232,81 @@ def row_to_trade(
 
     if row is None:
         return None
+
+    # --------------------------------------------------------
+    # sqlite3.Row
+    # --------------------------------------------------------
+
+    if isinstance(
+        row,
+        sqlite3.Row
+    ):
+
+        return {
+            "id": row["id"],
+            "signal_key": row["signal_key"],
+            "asset": row["asset"],
+            "contract": row["contract"],
+            "pattern": row["pattern"],
+            "direction": row["direction"],
+            "breakout_time": row["breakout_time"],
+            "retest_time": row["retest_time"],
+            "confirm_time": row["confirm_time"],
+            "entry_time": row["entry_time"],
+            "entry_price": row["entry_price"],
+            "sl_price": row["sl_price"],
+            "tp_price": row["tp_price"],
+            "exit_time": row["exit_time"],
+            "exit_price": row["exit_price"],
+            "exit_reason": row["exit_reason"],
+            "status": row["status"],
+            "detected_at": row["detected_at"],
+            "notified_new": row["notified_new"],
+            "notified_close": row["notified_close"],
+        }
+
+    # --------------------------------------------------------
+    # Generic mapping support
+    # --------------------------------------------------------
+
+    if hasattr(
+        row,
+        "keys"
+    ):
+
+        return {
+            "id": row["id"],
+            "signal_key": row["signal_key"],
+            "asset": row["asset"],
+            "contract": row["contract"],
+            "pattern": row["pattern"],
+            "direction": row["direction"],
+            "breakout_time": row["breakout_time"],
+            "retest_time": row["retest_time"],
+            "confirm_time": row["confirm_time"],
+            "entry_time": row["entry_time"],
+            "entry_price": row["entry_price"],
+            "sl_price": row["sl_price"],
+            "tp_price": row["tp_price"],
+            "exit_time": row["exit_time"],
+            "exit_price": row["exit_price"],
+            "exit_reason": row["exit_reason"],
+            "status": row["status"],
+            "detected_at": row["detected_at"],
+            "notified_new": row["notified_new"],
+            "notified_close": row["notified_close"],
+        }
+
+    # --------------------------------------------------------
+    # Legacy tuple fallback
+    # --------------------------------------------------------
+    #
+    # Normally this branch is no longer used because db_connect()
+    # returns sqlite3.Row objects.
+    #
+    # It is kept for safety if a tuple is passed manually.
+    #
+    # --------------------------------------------------------
 
     return {
         "id": row[0],
@@ -2753,13 +2859,18 @@ def performance_stats():
 # PERIODIC REPORT
 # ============================================================
 
-def send_periodic_report():
+def send_periodic_report(
+    lbank_prices=None
+):
 
     stats = performance_stats()
 
     open_rows = (
         get_open_trades()
     )
+
+    if lbank_prices is None:
+        lbank_prices = {}
 
     # --------------------------------------------------------
     # HEADER
@@ -2791,7 +2902,7 @@ def send_periodic_report():
             # ------------------------------------------------
 
             current_price = (
-                get_lbank_price(
+                lbank_prices.get(
                     trade["asset"]
                 )
             )
@@ -3228,7 +3339,11 @@ def main():
             "Sending periodic report..."
         )
 
-        send_periodic_report()
+        # Use the already-fetched LBank snapshot.
+        # No additional LBank request for every open trade.
+        send_periodic_report(
+            lbank_prices
+        )
 
         try:
 
