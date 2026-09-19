@@ -1,134 +1,92 @@
 # ============================================================
-# KRAKEN FUTURES PUMP / DUMP DETECTOR
-# VERSION 1.0
+# KRAKEN FUTURES PUMP DETECTOR
+# VERSION 2.0
 # ============================================================
 #
-# PURPOSE:
-#   Independent pump/dump detection strategy
-#   Automatic Kraken Futures historical data download
-#   6-month 5-minute backtest
-#   SQLite local storage
-#   No input files required from the user
+# PURPOSE
+# -------
+# Independent 5-minute Pump / Dump detector.
 #
-# DATA:
-#   Kraken Futures public REST API
+# - Downloads historical Kraken Futures candles automatically
+# - No uploaded files required
+# - 6 months backtest + warmup
+# - Uses PF_*USD perpetual futures
+# - Ranks markets by current 24h volume
+# - Detects abnormal volume + momentum + breakout
+# - No look-ahead bias
+# - Conservative same-candle TP/SL handling
+# - Includes fees + slippage
+# - Saves SQLite database
+# - Exports CSV
 #
-# MODE:
-#   BACKTEST ONLY
+# IMPORTANT
+# ---------
+# This is a research/backtest system.
+# It does NOT place real orders.
 #
-# IMPORTANT:
-#   This is NOT live trading code.
 # ============================================================
 
-import os
-import time
+import csv
 import math
+import os
 import sqlite3
-import requests
 import statistics
-from datetime import datetime, timezone, timedelta
-from collections import deque
+import time
+from datetime import datetime, timedelta, timezone
+
+import requests
+
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-VERSION = "1.0"
+VERSION = "2.0"
 
 BASE_URL = "https://futures.kraken.com/api/charts/v1"
+TICKERS_URL = "https://futures.kraken.com/derivatives/api/v3/tickers"
 
 DB_FILE = "pump_detector.db"
-
-# ------------------------------------------------------------
-# BACKTEST
-# ------------------------------------------------------------
-
-BACKTEST_DAYS = 180
+CSV_FILE = "pump_trades.csv"
 
 TIMEFRAME = "5m"
+TICK_TYPE = "trade"
 
-# Extra candles needed before the first test candle
+BACKTEST_DAYS = 180
 WARMUP_DAYS = 14
 
-# ------------------------------------------------------------
-# MARKET UNIVERSE
-# ------------------------------------------------------------
-#
-# These are common Kraken Futures perpetual symbols.
-#
-# The program also tries to discover currently active markets
-# automatically. If discovery fails, this fallback list is used.
-#
-
-FALLBACK_SYMBOLS = [
-    "PF_XBTUSD",
-    "PF_ETHUSD",
-    "PF_SOLUSD",
-    "PF_XRPUSD",
-    "PF_DOGEUSD",
-    "PF_ADAUSD",
-    "PF_LINKUSD",
-    "PF_AVAXUSD",
-    "PF_DOTUSD",
-    "PF_LTCUSD",
-    "PF_BCHUSD",
-    "PF_UNIUSD",
-    "PF_ATOMUSD",
-    "PF_FILUSD",
-    "PF_AAVEUSD",
-    "PF_ALGOUSD",
-    "PF_ETCUSD",
-    "PF_XLMUSD",
-    "PF_SUIUSD",
-    "PF_NEARUSD",
-]
-
-# How many markets to test.
-# 0 = all discovered USD perpetual markets.
 TOP_N = 100
 
-# ------------------------------------------------------------
-# DATA DOWNLOAD
-# ------------------------------------------------------------
-
-REQUEST_TIMEOUT = 30
-
-# Number of candles requested per API call.
-# Smaller chunks are safer for API limits.
+# Kraken request size
 CANDLE_CHUNK = 1000
 
-REQUEST_SLEEP = 0.35
-
+REQUEST_TIMEOUT = 30
+REQUEST_SLEEP = 0.25
 MAX_RETRIES = 5
 
 # ------------------------------------------------------------
-# SIGNAL
+# Signal parameters
 # ------------------------------------------------------------
 
-# Volume abnormality
-RVOL_PERIOD = 48
-
+RVOL_LOOKBACK = 48
 MIN_RVOL = 3.0
 
-# Price momentum
-MOMENTUM_LOOKBACK = 3
+MOMENTUM_BARS = 3
+MIN_MOMENTUM_PCT = 1.0
 
-MIN_PRICE_MOVE_PCT = 1.00
-
-# Candle strength
+BODY_LOOKBACK = 20
 MIN_BODY_RATIO = 0.55
 
-# Breakout lookback
 BREAKOUT_LOOKBACK = 24
 
-# Minimum range expansion
+RANGE_LOOKBACK = 20
 MIN_RANGE_EXPANSION = 1.25
 
 # Score
 MIN_SCORE = 7
 
 # ------------------------------------------------------------
-# TRADE
+# Trade parameters
 # ------------------------------------------------------------
 
 TP_PCT = 2.00
@@ -136,39 +94,51 @@ SL_PCT = 1.00
 
 MIN_RR = 1.50
 
-# Maximum holding period
 MAX_HOLD_BARS = 24
 
-# Prevent immediate repeated entries
 COOLDOWN_BARS = 6
 
-# One position per symbol
-ONE_POSITION_PER_SYMBOL = True
-
 # ------------------------------------------------------------
-# COSTS
+# Trading costs
 # ------------------------------------------------------------
 
-# Estimated round-trip trading cost.
-# Adjust later if you want to model your exact exchange fees.
-FEE_PCT_PER_SIDE = 0.04
+FEE_PER_SIDE_PCT = 0.04
+SLIPPAGE_PER_SIDE_PCT = 0.02
 
-# Estimated slippage per side.
-SLIPPAGE_PCT_PER_SIDE = 0.02
-
-# Total cost applied to every completed trade.
-ROUND_TRIP_COST_PCT = (
-    FEE_PCT_PER_SIDE * 2
-    + SLIPPAGE_PCT_PER_SIDE * 2
+TOTAL_ROUND_TRIP_COST_PCT = (
+    FEE_PER_SIDE_PCT * 2
+    + SLIPPAGE_PER_SIDE_PCT * 2
 )
 
+# 0.12% total by default
+TOTAL_COST_DECIMAL = TOTAL_ROUND_TRIP_COST_PCT / 100.0
+
+
 # ============================================================
-# SQLITE
+# SESSION
 # ============================================================
 
-def db_connect():
+session = requests.Session()
+
+session.headers.update(
+    {
+        "User-Agent": "PumpDetector/2.0",
+        "Accept": "application/json",
+    }
+)
+
+
+# ============================================================
+# DATABASE
+# ============================================================
+
+def init_db():
     conn = sqlite3.connect(DB_FILE)
-    conn.execute("""
+
+    cur = conn.cursor()
+
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS candles (
             symbol TEXT NOT NULL,
             timeframe TEXT NOT NULL,
@@ -180,32 +150,36 @@ def db_connect():
             volume REAL NOT NULL,
             PRIMARY KEY(symbol, timeframe, timestamp)
         )
-    """)
+        """
+    )
 
-    conn.execute("""
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT,
-            direction TEXT,
-            signal_time INTEGER,
-            entry_time INTEGER,
-            exit_time INTEGER,
-            entry REAL,
-            exit REAL,
-            sl REAL,
-            tp REAL,
-            pnl_pct REAL,
-            gross_pnl_pct REAL,
-            cost_pct REAL,
-            hold_bars INTEGER,
-            exit_reason TEXT,
-            score INTEGER,
-            rvol REAL,
-            momentum_pct REAL
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            signal_time INTEGER NOT NULL,
+            entry_time INTEGER NOT NULL,
+            exit_time INTEGER NOT NULL,
+            entry REAL NOT NULL,
+            exit REAL NOT NULL,
+            sl REAL NOT NULL,
+            tp REAL NOT NULL,
+            gross_pct REAL NOT NULL,
+            cost_pct REAL NOT NULL,
+            net_pct REAL NOT NULL,
+            result TEXT NOT NULL,
+            hold_bars INTEGER NOT NULL,
+            score INTEGER NOT NULL,
+            rvol REAL NOT NULL,
+            momentum_pct REAL NOT NULL
         )
-    """)
+        """
+    )
 
     conn.commit()
+
     return conn
 
 
@@ -213,250 +187,372 @@ def db_connect():
 # HTTP
 # ============================================================
 
-SESSION = requests.Session()
+def get_json(url, params=None):
+    last_error = None
 
-SESSION.headers.update({
-    "User-Agent": "PumpDetector/1.0",
-    "Accept": "application/json",
-})
-
-
-def http_get(url, params=None):
     for attempt in range(1, MAX_RETRIES + 1):
 
         try:
-            response = SESSION.get(
+            response = session.get(
                 url,
                 params=params,
-                timeout=REQUEST_TIMEOUT
+                timeout=REQUEST_TIMEOUT,
             )
 
-            if response.status_code == 200:
-                return response.json()
+            response.raise_for_status()
 
-            if response.status_code in (429, 500, 502, 503, 504):
-                wait = attempt * 2
-                print(
-                    f"HTTP {response.status_code} "
-                    f"| retry {attempt}/{MAX_RETRIES} "
-                    f"| wait {wait}s"
-                )
-                time.sleep(wait)
-                continue
+            return response.json()
+
+        except Exception as exc:
+
+            last_error = exc
+
+            wait = min(2 ** (attempt - 1), 10)
 
             print(
-                f"HTTP ERROR {response.status_code}: "
-                f"{response.text[:300]}"
+                f"    Request failed "
+                f"(attempt {attempt}/{MAX_RETRIES}): {exc}"
             )
 
-        except requests.RequestException as e:
-            print(
-                f"NETWORK ERROR | attempt "
-                f"{attempt}/{MAX_RETRIES}: {e}"
-            )
-            time.sleep(attempt * 2)
+            time.sleep(wait)
 
-    return None
+    raise RuntimeError(
+        f"Request failed after {MAX_RETRIES} attempts: "
+        f"{last_error}"
+    )
 
 
 # ============================================================
 # MARKET DISCOVERY
 # ============================================================
 
-def discover_symbols():
-
+def discover_markets():
     """
-    Try Kraken public instruments endpoint.
+    Discover currently listed perpetual USD futures.
 
-    If unavailable, use fallback symbols.
+    We use the instruments endpoint first because it is more
+    reliable for identifying currently available markets.
     """
 
-    urls = [
-        "https://futures.kraken.com/derivatives/api/v3/instruments",
-        "https://futures.kraken.com/derivatives/api/v3/tickers",
-    ]
+    print("\nDiscovering Kraken Futures markets...")
 
-    # --------------------------------------------------------
-    # Try instruments
-    # --------------------------------------------------------
+    url = (
+        "https://futures.kraken.com/"
+        "derivatives/api/v3/instruments"
+    )
 
-    data = http_get(urls[0])
+    markets = []
 
-    symbols = []
+    try:
 
-    if data:
+        data = get_json(url)
 
         instruments = data.get("instruments", [])
 
         for item in instruments:
 
-            if not isinstance(item, dict):
-                continue
-
-            symbol = (
-                item.get("symbol")
-                or item.get("tradeable")
-            )
+            symbol = item.get("symbol")
 
             if not symbol:
                 continue
 
-            symbol = str(symbol)
-
-            # Only USD perpetual-style products
+            # Perpetual USD contracts
             if not symbol.startswith("PF_"):
                 continue
 
             if not symbol.endswith("USD"):
                 continue
 
-            symbols.append(symbol)
+            markets.append(symbol)
 
-    # --------------------------------------------------------
-    # Fallback
-    # --------------------------------------------------------
+    except Exception as exc:
 
-    if not symbols:
+        print(
+            f"Instrument discovery failed: {exc}"
+        )
 
-        print("Automatic market discovery failed.")
-        print("Using fallback symbol list.")
+    markets = sorted(set(markets))
 
-        symbols = FALLBACK_SYMBOLS.copy()
+    print(
+        f"Discovered {len(markets)} PF_*USD markets."
+    )
 
-    # Remove duplicates
-    symbols = sorted(set(symbols))
+    if not markets:
 
-    if TOP_N > 0:
-        symbols = symbols[:TOP_N]
+        raise RuntimeError(
+            "No PF_*USD markets were discovered."
+        )
 
-    print()
-    print("Markets discovered:", len(symbols))
+    return markets
 
-    return symbols
+
+# ============================================================
+# CURRENT VOLUME RANKING
+# ============================================================
+
+def rank_markets_by_volume(markets):
+    """
+    Rank markets using current 24h volume data.
+
+    Kraken's ticker endpoint returns current market data.
+    """
+
+    print("\nRanking markets by current 24h volume...")
+
+    try:
+
+        data = get_json(TICKERS_URL)
+
+    except Exception as exc:
+
+        print(
+            f"Ticker request failed: {exc}"
+        )
+
+        print(
+            "Falling back to alphabetical market selection."
+        )
+
+        return markets[:TOP_N]
+
+    tickers = data.get("tickers", [])
+
+    ranked = []
+
+    market_set = set(markets)
+
+    for ticker in tickers:
+
+        symbol = ticker.get("symbol")
+
+        if symbol not in market_set:
+            continue
+
+        volume = (
+            ticker.get("volume24h")
+            or ticker.get("volume")
+            or 0
+        )
+
+        try:
+            volume = float(volume)
+        except Exception:
+            volume = 0.0
+
+        ranked.append(
+            (
+                symbol,
+                volume,
+            )
+        )
+
+    ranked.sort(
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    selected = [
+        symbol
+        for symbol, volume in ranked[:TOP_N]
+    ]
+
+    if not selected:
+
+        print(
+            "Volume ranking returned no usable data."
+        )
+
+        return markets[:TOP_N]
+
+    print(
+        f"Selected top {len(selected)} markets."
+    )
+
+    print(
+        "Top markets:"
+    )
+
+    for symbol, volume in ranked[:10]:
+
+        print(
+            f"  {symbol:<18} "
+            f"24h volume={volume:,.2f}"
+        )
+
+    return selected
 
 
 # ============================================================
 # CANDLE DOWNLOAD
 # ============================================================
 
-def fetch_candles(
+def download_candles(
     symbol,
-    resolution=TIMEFRAME,
-    start_ts=None,
-    end_ts=None
+    start_ts,
+    end_ts,
 ):
+    """
+    Download candles using Kraken Futures Charts API.
 
-    url = (
-        f"{BASE_URL}/trade/"
-        f"{symbol}/"
-        f"{resolution}"
+    Endpoint:
+    /api/charts/v1/trade/{symbol}/{resolution}
+
+    Kraken reports whether more candles exist through
+    'more_candles'.
+    """
+
+    print(
+        f"\nDownloading {symbol}..."
     )
 
-    all_candles = []
+    all_rows = []
 
-    current_from = start_ts
+    current_from = int(start_ts)
+
+    safety_counter = 0
 
     while current_from < end_ts:
 
+        safety_counter += 1
+
+        if safety_counter > 10000:
+            raise RuntimeError(
+                f"Pagination safety stop for {symbol}"
+            )
+
+        url = (
+            f"{BASE_URL}/"
+            f"{TICK_TYPE}/"
+            f"{symbol}/"
+            f"{TIMEFRAME}"
+        )
+
         params = {
-            "from": int(current_from),
+            "from": current_from,
             "to": int(end_ts),
             "count": CANDLE_CHUNK,
         }
 
-        data = http_get(url, params)
+        data = get_json(
+            url,
+            params=params,
+        )
 
-        if not data:
-            print(
-                f"{symbol}: no response "
-                f"from Kraken."
-            )
-            break
-
-        candles = data.get("candles", [])
+        candles = data.get(
+            "candles",
+            []
+        )
 
         if not candles:
             break
 
-        candles = sorted(
-            candles,
-            key=lambda x: int(x["time"])
-        )
+        parsed = []
 
-        all_candles.extend(candles)
+        for candle in candles:
 
-        last_ts_ms = int(candles[-1]["time"])
-        last_ts = last_ts_ms // 1000
+            try:
 
-        if last_ts <= current_from:
+                ts_ms = int(
+                    candle["time"]
+                )
+
+                row = (
+                    symbol,
+                    TIMEFRAME,
+                    ts_ms,
+                    float(candle["open"]),
+                    float(candle["high"]),
+                    float(candle["low"]),
+                    float(candle["close"]),
+                    float(candle["volume"]),
+                )
+
+                parsed.append(row)
+
+            except Exception:
+                continue
+
+        if not parsed:
             break
 
-        current_from = last_ts + 1
+        parsed.sort(
+            key=lambda x: x[2]
+        )
+
+        all_rows.extend(parsed)
+
+        last_ts_ms = parsed[-1][2]
+
+        last_ts_sec = (
+            last_ts_ms // 1000
+        )
+
+        next_from = (
+            last_ts_sec + 1
+        )
+
+        if next_from <= current_from:
+            break
+
+        current_from = next_from
+
+        more = bool(
+            data.get(
+                "more_candles",
+                False
+            )
+        )
 
         print(
-            f"{symbol}: downloaded "
-            f"{len(all_candles):,} candles",
-            end="\r"
+            f"    candles={len(all_rows):,} "
+            f"through "
+            f"{datetime.fromtimestamp("
+            f"last_ts_sec, "
+            f"tz=timezone.utc"
+            f").strftime('%Y-%m-%d %H:%M')}"
         )
 
-        if not data.get("more_candles", False):
+        if not more:
             break
 
-        time.sleep(REQUEST_SLEEP)
-
-    print()
+        time.sleep(
+            REQUEST_SLEEP
+        )
 
     # Deduplicate
     unique = {}
 
-    for c in all_candles:
+    for row in all_rows:
+        unique[row[2]] = row
 
-        try:
-            ts = int(c["time"])
-
-            unique[ts] = {
-                "timestamp": ts // 1000,
-                "open": float(c["open"]),
-                "high": float(c["high"]),
-                "low": float(c["low"]),
-                "close": float(c["close"]),
-                "volume": float(c["volume"]),
-            }
-
-        except Exception:
-            continue
-
-    return sorted(
-        unique.values(),
-        key=lambda x: x["timestamp"]
+    result = list(
+        unique.values()
     )
 
+    result.sort(
+        key=lambda x: x[2]
+    )
+
+    print(
+        f"    downloaded {len(result):,} candles"
+    )
+
+    return result
+
 
 # ============================================================
-# DATABASE CANDLE STORAGE
+# SAVE CANDLES
 # ============================================================
 
-def save_candles(conn, symbol, candles):
+def save_candles(conn, rows):
 
-    if not candles:
+    if not rows:
         return
 
-    rows = []
+    cur = conn.cursor()
 
-    for c in candles:
-
-        rows.append((
-            symbol,
-            TIMEFRAME,
-            c["timestamp"],
-            c["open"],
-            c["high"],
-            c["low"],
-            c["close"],
-            c["volume"],
-        ))
-
-    conn.executemany("""
+    cur.executemany(
+        """
         INSERT OR REPLACE INTO candles
         (
             symbol,
@@ -469,18 +565,28 @@ def save_candles(conn, symbol, candles):
             volume
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, rows)
+        """,
+        rows,
+    )
 
     conn.commit()
 
 
 # ============================================================
-# DATABASE LOAD
+# LOAD CANDLES
 # ============================================================
 
-def load_candles(conn, symbol):
+def load_candles(
+    conn,
+    symbol,
+    start_ts_ms,
+    end_ts_ms,
+):
 
-    rows = conn.execute("""
+    cur = conn.cursor()
+
+    cur.execute(
+        """
         SELECT
             timestamp,
             open,
@@ -491,248 +597,311 @@ def load_candles(conn, symbol):
         FROM candles
         WHERE symbol = ?
           AND timeframe = ?
+          AND timestamp BETWEEN ? AND ?
         ORDER BY timestamp ASC
-    """, (symbol, TIMEFRAME)).fetchall()
+        """,
+        (
+            symbol,
+            TIMEFRAME,
+            start_ts_ms,
+            end_ts_ms,
+        ),
+    )
 
-    candles = []
+    rows = cur.fetchall()
 
-    for r in rows:
-
-        candles.append({
-            "timestamp": int(r[0]),
-            "open": float(r[1]),
-            "high": float(r[2]),
-            "low": float(r[3]),
-            "close": float(r[4]),
-            "volume": float(r[5]),
-        })
-
-    return candles
+    return rows
 
 
 # ============================================================
-# STATISTICS
+# SAFE DIVISION
 # ============================================================
 
-def mean(values):
-
-    if not values:
-        return 0.0
-
-    return sum(values) / len(values)
-
-
-def median(values):
-
-    if not values:
-        return 0.0
-
-    return statistics.median(values)
-
-
-def safe_pct(a, b):
+def safe_div(
+    a,
+    b,
+    default=0.0,
+):
 
     if b == 0:
+        return default
+
+    return a / b
+
+
+# ============================================================
+# PERCENT CHANGE
+# ============================================================
+
+def pct_change(
+    old,
+    new,
+):
+
+    if old == 0:
         return 0.0
 
-    return ((a / b) - 1.0) * 100.0
+    return (
+        (new - old)
+        / old
+        * 100.0
+    )
 
 
 # ============================================================
-# SIGNAL ENGINE
+# SIGNAL DETECTION
 # ============================================================
 
-def calculate_signal(candles, i):
+def detect_signal(
+    candles,
+    i,
+):
+    """
+    Returns:
 
-    if i < max(
-        RVOL_PERIOD,
-        BREAKOUT_LOOKBACK,
-        MOMENTUM_LOOKBACK
-    ):
+        {
+            side,
+            score,
+            rvol,
+            momentum_pct
+        }
+
+    or None.
+
+    IMPORTANT:
+    Signal is calculated ONLY using candles up to i.
+    Entry occurs at the close of candle i.
+    Trade simulation begins at candle i+1.
+    """
+
+    minimum_history = max(
+        RVOL_LOOKBACK + 1,
+        MOMENTUM_BARS + 1,
+        BODY_LOOKBACK + 1,
+        BREAKOUT_LOOKBACK + 1,
+        RANGE_LOOKBACK + 1,
+    )
+
+    if i < minimum_history:
         return None
 
-    c = candles[i]
+    current = candles[i]
 
-    close = c["close"]
-    high = c["high"]
-    low = c["low"]
-    open_price = c["open"]
-    volume = c["volume"]
-
-    if close <= 0 or volume <= 0:
-        return None
-
-    score_long = 0
-    score_short = 0
+    ts, op, high, low, close, volume = current
 
     # --------------------------------------------------------
-    # 1. RVOL
+    # RVOL
     # --------------------------------------------------------
 
     previous_volumes = [
-        x["volume"]
-        for x in candles[
-            i - RVOL_PERIOD:i
-        ]
-        if x["volume"] > 0
+        candles[j][5]
+        for j in range(
+            i - RVOL_LOOKBACK,
+            i
+        )
     ]
 
-    if len(previous_volumes) < RVOL_PERIOD // 2:
-        return None
-
-    avg_volume = mean(previous_volumes)
-
-    if avg_volume <= 0:
-        return None
-
-    rvol = volume / avg_volume
-
-    if rvol >= MIN_RVOL:
-        score_long += 2
-        score_short += 2
-
-    elif rvol >= 2.0:
-        score_long += 1
-        score_short += 1
-
-    # --------------------------------------------------------
-    # 2. Price momentum
-    # --------------------------------------------------------
-
-    previous_close = candles[
-        i - MOMENTUM_LOOKBACK
-    ]["close"]
-
-    momentum_pct = safe_pct(
-        close,
-        previous_close
+    avg_volume = statistics.mean(
+        previous_volumes
     )
 
-    if momentum_pct >= MIN_PRICE_MOVE_PCT:
+    rvol = safe_div(
+        volume,
+        avg_volume,
+    )
 
-        score_long += 2
-
-    if momentum_pct <= -MIN_PRICE_MOVE_PCT:
-
-        score_short += 2
+    if rvol < MIN_RVOL:
+        return None
 
     # --------------------------------------------------------
-    # 3. Candle body
+    # Momentum
+    # --------------------------------------------------------
+
+    reference_close = candles[
+        i - MOMENTUM_BARS
+    ][4]
+
+    momentum_pct = pct_change(
+        reference_close,
+        close,
+    )
+
+    # --------------------------------------------------------
+    # Candle body
     # --------------------------------------------------------
 
     candle_range = high - low
 
-    if candle_range > 0:
+    if candle_range <= 0:
+        return None
 
-        body_ratio = abs(
-            close - open_price
-        ) / candle_range
+    body = abs(
+        close - op
+    )
 
-    else:
-        body_ratio = 0
+    body_ratio = safe_div(
+        body,
+        candle_range,
+    )
 
-    if body_ratio >= MIN_BODY_RATIO:
-
-        if close > open_price:
-            score_long += 1
-
-        elif close < open_price:
-            score_short += 1
+    if body_ratio < MIN_BODY_RATIO:
+        return None
 
     # --------------------------------------------------------
-    # 4. Breakout
+    # Previous breakout range
     # --------------------------------------------------------
 
     previous_highs = [
-        x["high"]
-        for x in candles[
-            i - BREAKOUT_LOOKBACK:i
-        ]
+        candles[j][2]
+        for j in range(
+            i - BREAKOUT_LOOKBACK,
+            i
+        )
     ]
 
     previous_lows = [
-        x["low"]
-        for x in candles[
-            i - BREAKOUT_LOOKBACK:i
-        ]
-    ]
-
-    resistance = max(previous_highs)
-    support = min(previous_lows)
-
-    breakout_long = close > resistance
-    breakout_short = close < support
-
-    if breakout_long:
-        score_long += 2
-
-    if breakout_short:
-        score_short += 2
-
-    # --------------------------------------------------------
-    # 5. Range expansion
-    # --------------------------------------------------------
-
-    ranges = [
-        x["high"] - x["low"]
-        for x in candles[
-            i - RVOL_PERIOD:i
-        ]
-        if x["high"] > x["low"]
-    ]
-
-    avg_range = mean(ranges)
-
-    current_range = high - low
-
-    if avg_range > 0:
-
-        range_ratio = (
-            current_range / avg_range
+        candles[j][3]
+        for j in range(
+            i - BREAKOUT_LOOKBACK,
+            i
         )
+    ]
 
-    else:
-        range_ratio = 0
+    previous_high = max(
+        previous_highs
+    )
 
-    if range_ratio >= MIN_RANGE_EXPANSION:
+    previous_low = min(
+        previous_lows
+    )
 
-        if close > open_price:
-            score_long += 1
+    long_breakout = (
+        close > previous_high
+    )
 
-        elif close < open_price:
-            score_short += 1
+    short_breakout = (
+        close < previous_low
+    )
 
     # --------------------------------------------------------
-    # FINAL DECISION
+    # Range expansion
     # --------------------------------------------------------
 
-    direction = None
-    score = 0
+    previous_ranges = [
+        candles[j][2] - candles[j][3]
+        for j in range(
+            i - RANGE_LOOKBACK,
+            i
+        )
+    ]
+
+    avg_range = statistics.mean(
+        previous_ranges
+    )
+
+    range_expansion = safe_div(
+        candle_range,
+        avg_range,
+    )
 
     if (
-        score_long >= MIN_SCORE
-        and score_long > score_short
+        range_expansion
+        < MIN_RANGE_EXPANSION
     ):
-        direction = "LONG"
-        score = score_long
-
-    elif (
-        score_short >= MIN_SCORE
-        and score_short > score_long
-    ):
-        direction = "SHORT"
-        score = score_short
-
-    if direction is None:
         return None
 
-    return {
-        "direction": direction,
-        "score": score,
-        "rvol": rvol,
-        "momentum_pct": momentum_pct,
-        "entry": close,
-    }
+    # --------------------------------------------------------
+    # Scores
+    # --------------------------------------------------------
+
+    long_score = 0
+    short_score = 0
+
+    # Volume
+    if rvol >= 3.0:
+        long_score += 2
+        short_score += 2
+
+    if rvol >= 5.0:
+        long_score += 1
+        short_score += 1
+
+    # Momentum
+    if momentum_pct >= 1.0:
+        long_score += 2
+
+    if momentum_pct <= -1.0:
+        short_score += 2
+
+    if momentum_pct >= 2.0:
+        long_score += 1
+
+    if momentum_pct <= -2.0:
+        short_score += 1
+
+    # Candle direction
+    if close > op:
+        long_score += 1
+
+    if close < op:
+        short_score += 1
+
+    # Body
+    if body_ratio >= 0.65:
+        if close > op:
+            long_score += 1
+        elif close < op:
+            short_score += 1
+
+    # Breakout
+    if long_breakout:
+        long_score += 2
+
+    if short_breakout:
+        short_score += 2
+
+    # Range expansion
+    if range_expansion >= 1.5:
+
+        if close > op:
+            long_score += 1
+
+        elif close < op:
+            short_score += 1
+
+    # --------------------------------------------------------
+    # Direction validation
+    # --------------------------------------------------------
+
+    if (
+        long_score >= MIN_SCORE
+        and momentum_pct
+        >= MIN_MOMENTUM_PCT
+        and close > op
+    ):
+
+        return {
+            "side": "LONG",
+            "score": long_score,
+            "rvol": rvol,
+            "momentum_pct": momentum_pct,
+        }
+
+    if (
+        short_score >= MIN_SCORE
+        and momentum_pct
+        <= -MIN_MOMENTUM_PCT
+        and close < op
+    ):
+
+        return {
+            "side": "SHORT",
+            "score": short_score,
+            "rvol": rvol,
+            "momentum_pct": momentum_pct,
+        }
+
+    return None
 
 
 # ============================================================
@@ -741,228 +910,194 @@ def calculate_signal(candles, i):
 
 def simulate_trade(
     candles,
-    entry_index,
-    signal
+    signal_index,
+    signal,
 ):
 
-    direction = signal["direction"]
+    entry_index = (
+        signal_index
+    )
 
-    entry = signal["entry"]
+    entry = candles[
+        entry_index
+    ][4]
 
-    if direction == "LONG":
+    entry_time = candles[
+        entry_index
+    ][0]
 
-        sl = entry * (
-            1 - SL_PCT / 100
+    side = signal["side"]
+
+    if side == "LONG":
+
+        sl = (
+            entry
+            * (1.0 - SL_PCT / 100.0)
         )
 
-        tp = entry * (
-            1 + TP_PCT / 100
+        tp = (
+            entry
+            * (1.0 + TP_PCT / 100.0)
         )
 
     else:
 
-        sl = entry * (
-            1 + SL_PCT / 100
+        sl = (
+            entry
+            * (1.0 + SL_PCT / 100.0)
         )
 
-        tp = entry * (
-            1 - TP_PCT / 100
+        tp = (
+            entry
+            * (1.0 - TP_PCT / 100.0)
         )
 
-    max_exit_index = min(
-        len(candles) - 1,
-        entry_index + MAX_HOLD_BARS
+    # --------------------------------------------------------
+    # RR validation
+    # --------------------------------------------------------
+
+    risk_pct = SL_PCT
+    reward_pct = TP_PCT
+
+    rr = safe_div(
+        reward_pct,
+        risk_pct,
     )
+
+    if rr < MIN_RR:
+        return None
+
+    # --------------------------------------------------------
+    # Future candles only
+    # --------------------------------------------------------
+
+    last_index = min(
+        len(candles) - 1,
+        entry_index + MAX_HOLD_BARS,
+    )
+
+    exit_price = None
+    exit_time = None
+    result = None
+    hold_bars = 0
 
     for j in range(
         entry_index + 1,
-        max_exit_index + 1
+        last_index + 1,
     ):
 
         candle = candles[j]
 
-        high = candle["high"]
-        low = candle["low"]
+        ts, op, high, low, close, volume = candle
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # If both SL and TP are touched in the same candle,
-        # assume SL is hit first.
-        #
-        # This is deliberately conservative because OHLC
-        # candles do not reveal intrabar order.
-        # ----------------------------------------------------
+        hold_bars += 1
 
-        if direction == "LONG":
+        if side == "LONG":
 
-            hit_sl = low <= sl
-            hit_tp = high >= tp
+            hit_sl = (
+                low <= sl
+            )
 
-            if hit_sl and hit_tp:
+            hit_tp = (
+                high >= tp
+            )
 
-                exit_price = sl
-                reason = "SL_AND_TP_SAME_CANDLE"
-
-                return make_trade_result(
-                    signal,
-                    entry,
-                    exit_price,
-                    j,
-                    entry_index,
-                    reason,
-                    sl,
-                    tp,
-                    candles
-                )
-
+            # Conservative assumption:
+            # if both happen in same candle,
+            # SL is counted first.
             if hit_sl:
 
-                return make_trade_result(
-                    signal,
-                    entry,
-                    sl,
-                    j,
-                    entry_index,
-                    "SL",
-                    sl,
-                    tp,
-                    candles
-                )
+                exit_price = sl
+                exit_time = ts
+                result = "LOSS"
+                break
 
             if hit_tp:
 
-                return make_trade_result(
-                    signal,
-                    entry,
-                    tp,
-                    j,
-                    entry_index,
-                    "TP",
-                    sl,
-                    tp,
-                    candles
-                )
+                exit_price = tp
+                exit_time = ts
+                result = "WIN"
+                break
 
         else:
 
-            hit_sl = high >= sl
-            hit_tp = low <= tp
+            hit_sl = (
+                high >= sl
+            )
 
-            if hit_sl and hit_tp:
-
-                exit_price = sl
-                reason = "SL_AND_TP_SAME_CANDLE"
-
-                return make_trade_result(
-                    signal,
-                    entry,
-                    exit_price,
-                    j,
-                    entry_index,
-                    reason,
-                    sl,
-                    tp,
-                    candles
-                )
+            hit_tp = (
+                low <= tp
+            )
 
             if hit_sl:
 
-                return make_trade_result(
-                    signal,
-                    entry,
-                    sl,
-                    j,
-                    entry_index,
-                    "SL",
-                    sl,
-                    tp,
-                    candles
-                )
+                exit_price = sl
+                exit_time = ts
+                result = "LOSS"
+                break
 
             if hit_tp:
 
-                return make_trade_result(
-                    signal,
-                    entry,
-                    tp,
-                    j,
-                    entry_index,
-                    "TP",
-                    sl,
-                    tp,
-                    candles
-                )
+                exit_price = tp
+                exit_time = ts
+                result = "WIN"
+                break
 
     # --------------------------------------------------------
-    # TIME EXIT
+    # Time exit
     # --------------------------------------------------------
 
-    exit_index = max_exit_index
+    if exit_price is None:
 
-    exit_price = candles[
-        exit_index
-    ]["close"]
+        exit_candle = candles[
+            last_index
+        ]
 
-    return make_trade_result(
-        signal,
-        entry,
-        exit_price,
-        exit_index,
-        entry_index,
-        "TIME_EXIT",
-        sl,
-        tp,
-        candles
-    )
+        exit_price = exit_candle[4]
+        exit_time = exit_candle[0]
+        result = "TIME"
 
+    # --------------------------------------------------------
+    # Gross return
+    # --------------------------------------------------------
 
-# ============================================================
-# TRADE RESULT
-# ============================================================
+    if side == "LONG":
 
-def make_trade_result(
-    signal,
-    entry,
-    exit_price,
-    exit_index,
-    entry_index,
-    reason,
-    sl,
-    tp,
-    candles
-):
-
-    direction = signal["direction"]
-
-    if direction == "LONG":
-
-        gross_pnl = (
-            (exit_price / entry) - 1
-        ) * 100
+        gross_pct = pct_change(
+            entry,
+            exit_price,
+        )
 
     else:
 
-        gross_pnl = (
-            (entry / exit_price) - 1
-        ) * 100
+        gross_pct = pct_change(
+            exit_price,
+            entry,
+        )
 
-    net_pnl = (
-        gross_pnl
-        - ROUND_TRIP_COST_PCT
+    # --------------------------------------------------------
+    # Costs
+    # --------------------------------------------------------
+
+    net_pct = (
+        gross_pct
+        - TOTAL_ROUND_TRIP_COST_PCT
     )
 
     return {
-        "direction": direction,
+        "side": side,
+        "signal_time": entry_time,
+        "entry_time": entry_time,
+        "exit_time": exit_time,
         "entry": entry,
         "exit": exit_price,
         "sl": sl,
         "tp": tp,
-        "gross_pnl_pct": gross_pnl,
-        "pnl_pct": net_pnl,
-        "cost_pct": ROUND_TRIP_COST_PCT,
-        "hold_bars": exit_index - entry_index,
-        "exit_reason": reason,
-        "exit_index": exit_index,
+        "gross_pct": gross_pct,
+        "cost_pct": TOTAL_ROUND_TRIP_COST_PCT,
+        "net_pct": net_pct,
+        "result": result,
+        "hold_bars": hold_bars,
         "score": signal["score"],
         "rvol": signal["rvol"],
         "momentum_pct": signal["momentum_pct"],
@@ -970,33 +1105,148 @@ def make_trade_result(
 
 
 # ============================================================
-# SAVE TRADE
+# BACKTEST ONE MARKET
 # ============================================================
 
-def save_trade(
-    conn,
+def backtest_symbol(
+    candles,
     symbol,
-    signal_index,
-    signal,
-    result,
-    candles
 ):
 
-    signal_time = candles[
-        signal_index
-    ]["timestamp"]
+    trades = []
 
-    entry_time = signal_time
+    if len(candles) < 300:
+        return trades
 
-    exit_time = candles[
-        result["exit_index"]
-    ]["timestamp"]
+    last_trade_index = -10_000
 
-    conn.execute("""
-        INSERT INTO trades
-        (
+    start_index = max(
+        RVOL_LOOKBACK,
+        MOMENTUM_BARS,
+        BODY_LOOKBACK,
+        BREAKOUT_LOOKBACK,
+        RANGE_LOOKBACK,
+    ) + 2
+
+    for i in range(
+        start_index,
+        len(candles) - 2,
+    ):
+
+        # Cooldown after previous trade
+        if (
+            i - last_trade_index
+            <= COOLDOWN_BARS
+        ):
+            continue
+
+        signal = detect_signal(
+            candles,
+            i,
+        )
+
+        if signal is None:
+            continue
+
+        trade = simulate_trade(
+            candles,
+            i,
+            signal,
+        )
+
+        if trade is None:
+            continue
+
+        trade["symbol"] = symbol
+
+        trades.append(
+            trade
+        )
+
+        last_trade_index = i
+
+    return trades
+
+
+# ============================================================
+# SAVE TRADES
+# ============================================================
+
+def save_trades(
+    conn,
+    trades,
+):
+
+    if not trades:
+        return
+
+    cur = conn.cursor()
+
+    for trade in trades:
+
+        cur.execute(
+            """
+            INSERT INTO trades
+            (
+                symbol,
+                side,
+                signal_time,
+                entry_time,
+                exit_time,
+                entry,
+                exit,
+                sl,
+                tp,
+                gross_pct,
+                cost_pct,
+                net_pct,
+                result,
+                hold_bars,
+                score,
+                rvol,
+                momentum_pct
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                trade["symbol"],
+                trade["side"],
+                trade["signal_time"],
+                trade["entry_time"],
+                trade["exit_time"],
+                trade["entry"],
+                trade["exit"],
+                trade["sl"],
+                trade["tp"],
+                trade["gross_pct"],
+                trade["cost_pct"],
+                trade["net_pct"],
+                trade["result"],
+                trade["hold_bars"],
+                trade["score"],
+                trade["rvol"],
+                trade["momentum_pct"],
+            ),
+        )
+
+    conn.commit()
+
+
+# ============================================================
+# EXPORT CSV
+# ============================================================
+
+def export_csv(
+    conn,
+):
+
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT
             symbol,
-            direction,
+            side,
             signal_time,
             entry_time,
             exit_time,
@@ -1004,244 +1254,192 @@ def save_trade(
             exit,
             sl,
             tp,
-            pnl_pct,
-            gross_pnl_pct,
+            gross_pct,
             cost_pct,
+            net_pct,
+            result,
             hold_bars,
-            exit_reason,
             score,
             rvol,
             momentum_pct
+        FROM trades
+        ORDER BY exit_time ASC
+        """
+    )
+
+    rows = cur.fetchall()
+
+    headers = [
+        "symbol",
+        "side",
+        "signal_time",
+        "entry_time",
+        "exit_time",
+        "entry",
+        "exit",
+        "sl",
+        "tp",
+        "gross_pct",
+        "cost_pct",
+        "net_pct",
+        "result",
+        "hold_bars",
+        "score",
+        "rvol",
+        "momentum_pct",
+    ]
+
+    with open(
+        CSV_FILE,
+        "w",
+        newline="",
+        encoding="utf-8",
+    ) as f:
+
+        writer = csv.writer(f)
+
+        writer.writerow(
+            headers
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        symbol,
-        result["direction"],
-        signal_time,
-        entry_time,
-        exit_time,
-        result["entry"],
-        result["exit"],
-        result["sl"],
-        result["tp"],
-        result["pnl_pct"],
-        result["gross_pnl_pct"],
-        result["cost_pct"],
-        result["hold_bars"],
-        result["exit_reason"],
-        result["score"],
-        result["rvol"],
-        result["momentum_pct"],
-    ))
+
+        writer.writerows(
+            rows
+        )
+
+    print(
+        f"\nCSV exported: {CSV_FILE}"
+    )
 
 
 # ============================================================
-# BACKTEST ONE SYMBOL
+# PERFORMANCE
 # ============================================================
 
-def backtest_symbol(
+def calculate_performance(
     conn,
-    symbol,
-    candles
 ):
 
-    if len(candles) < 300:
+    cur = conn.cursor()
 
-        print(
-            f"{symbol}: insufficient candles"
-        )
-
-        return []
-
-    trades = []
-
-    i = max(
-        RVOL_PERIOD,
-        BREAKOUT_LOOKBACK,
-        MOMENTUM_LOOKBACK
-    )
-
-    last_trade_index = -999999
-
-    while i < len(candles) - 1:
-
-        # ----------------------------------------------------
-        # Cooldown
-        # ----------------------------------------------------
-
-        if (
-            i - last_trade_index
-            < COOLDOWN_BARS
-        ):
-            i += 1
-            continue
-
-        signal = calculate_signal(
-            candles,
-            i
-        )
-
-        if signal is None:
-
-            i += 1
-            continue
-
-        # ----------------------------------------------------
-        # Trade
-        # ----------------------------------------------------
-
-        result = simulate_trade(
-            candles,
-            i,
-            signal
-        )
-
-        if result is None:
-
-            i += 1
-            continue
-
-        save_trade(
-            conn,
-            symbol,
-            i,
-            signal,
+    cur.execute(
+        """
+        SELECT
+            net_pct,
             result,
-            candles
-        )
-
-        trades.append({
-            "symbol": symbol,
-            **result,
-            "signal_time": candles[i]["timestamp"],
-        })
-
-        last_trade_index = (
-            result["exit_index"]
-        )
-
-        # ----------------------------------------------------
-        # Jump after trade closes.
-        # ----------------------------------------------------
-
-        i = (
-            result["exit_index"]
-            + COOLDOWN_BARS
-        )
-
-    conn.commit()
-
-    return trades
-
-
-# ============================================================
-# EQUITY / PERFORMANCE
-# ============================================================
-
-def calculate_performance(trades):
-
-    if not trades:
-
-        return {
-            "total": 0,
-            "wins": 0,
-            "losses": 0,
-            "win_rate": 0,
-            "net_pnl": 0,
-            "profit_factor": 0,
-            "max_drawdown": 0,
-            "avg_trade": 0,
-            "avg_win": 0,
-            "avg_loss": 0,
-            "expectancy": 0,
-            "best": 0,
-            "worst": 0,
-        }
-
-    ordered = sorted(
-        trades,
-        key=lambda x: x["signal_time"]
+            hold_bars
+        FROM trades
+        ORDER BY exit_time ASC
+        """
     )
 
-    pnls = [
-        float(x["pnl_pct"])
-        for x in ordered
+    rows = cur.fetchall()
+
+    if not rows:
+        return None
+
+    net_returns = [
+        float(row[0])
+        for row in rows
     ]
 
     wins = [
-        x for x in pnls
+        x
+        for x in net_returns
         if x > 0
     ]
 
     losses = [
-        x for x in pnls
+        x
+        for x in net_returns
         if x <= 0
     ]
 
-    total = len(pnls)
-
-    win_count = len(wins)
-
-    loss_count = len(losses)
-
-    win_rate = (
-        win_count / total * 100
-        if total
-        else 0
+    total = len(
+        net_returns
     )
 
-    net_pnl = sum(pnls)
+    win_count = len(
+        wins
+    )
 
-    gross_profit = sum(wins)
+    loss_count = len(
+        losses
+    )
 
-    gross_loss = abs(sum(losses))
+    win_rate = (
+        win_count
+        / total
+        * 100.0
+    )
 
-    if gross_loss > 0:
+    gross_profit = sum(
+        wins
+    )
 
-        profit_factor = (
-            gross_profit / gross_loss
+    gross_loss = abs(
+        sum(losses)
+    )
+
+    profit_factor = (
+        safe_div(
+            gross_profit,
+            gross_loss,
+            default=math.inf,
         )
+    )
 
-    else:
+    net_pnl = sum(
+        net_returns
+    )
 
-        profit_factor = float("inf")
+    average_trade = (
+        net_pnl
+        / total
+    )
 
-    # --------------------------------------------------------
-    # Equity curve
-    # --------------------------------------------------------
+    average_win = (
+        statistics.mean(wins)
+        if wins
+        else 0.0
+    )
 
-    equity = 0.0
-    peak = 0.0
+    average_loss = (
+        statistics.mean(losses)
+        if losses
+        else 0.0
+    )
+
+    expectancy = average_trade
+
     max_drawdown = 0.0
+    peak = 0.0
+    equity = 0.0
 
-    for pnl in pnls:
+    for value in net_returns:
 
-        equity += pnl
+        equity += value
 
-        peak = max(
-            peak,
-            equity
-        )
+        if equity > peak:
+            peak = equity
 
         drawdown = (
-            equity - peak
+            peak - equity
         )
 
-        max_drawdown = min(
-            max_drawdown,
-            drawdown
-        )
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
 
-    avg_trade = mean(pnls)
+    best_trade = max(
+        net_returns
+    )
 
-    avg_win = mean(wins)
+    worst_trade = min(
+        net_returns
+    )
 
-    avg_loss = mean(losses)
-
-    expectancy = (
-        (win_rate / 100) * avg_win
-        + ((100 - win_rate) / 100)
-        * avg_loss
+    avg_hold = statistics.mean(
+        row[2]
+        for row in rows
     )
 
     return {
@@ -1249,188 +1447,301 @@ def calculate_performance(trades):
         "wins": win_count,
         "losses": loss_count,
         "win_rate": win_rate,
-        "net_pnl": net_pnl,
         "profit_factor": profit_factor,
-        "max_drawdown": max_drawdown,
-        "avg_trade": avg_trade,
-        "avg_win": avg_win,
-        "avg_loss": avg_loss,
+        "net_pnl": net_pnl,
+        "average_trade": average_trade,
+        "average_win": average_win,
+        "average_loss": average_loss,
         "expectancy": expectancy,
-        "best": max(pnls),
-        "worst": min(pnls),
+        "max_drawdown": max_drawdown,
+        "best_trade": best_trade,
+        "worst_trade": worst_trade,
+        "avg_hold_bars": avg_hold,
     }
 
 
 # ============================================================
-# PRINT PERFORMANCE
+# MARKET PERFORMANCE
 # ============================================================
 
-def print_performance(performance):
+def print_market_summary(
+    conn,
+):
 
-    pf = performance["profit_factor"]
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT
+            symbol,
+            COUNT(*) AS trades,
+            SUM(
+                CASE
+                    WHEN net_pct > 0
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS wins,
+            SUM(net_pct) AS pnl
+        FROM trades
+        GROUP BY symbol
+        ORDER BY pnl DESC
+        """
+    )
+
+    rows = cur.fetchall()
+
+    if not rows:
+        return
+
+    print(
+        "\n"
+        + "=" * 75
+    )
+
+    print(
+        "MARKET SUMMARY"
+    )
+
+    print(
+        "=" * 75
+    )
+
+    print(
+        f"{'SYMBOL':<18}"
+        f"{'TRADES':>8}"
+        f"{'WINS':>8}"
+        f"{'WR%':>9}"
+        f"{'NET P&L%':>13}"
+    )
+
+    print(
+        "-" * 75
+    )
+
+    for symbol, trades, wins, pnl in rows:
+
+        wr = (
+            wins / trades * 100.0
+            if trades
+            else 0
+        )
+
+        print(
+            f"{symbol:<18}"
+            f"{trades:>8}"
+            f"{wins:>8}"
+            f"{wr:>8.2f}%"
+            f"{pnl:>12.2f}%"
+        )
+
+
+# ============================================================
+# PRINT FINAL REPORT
+# ============================================================
+
+def print_final_report(
+    performance,
+):
+
+    print(
+        "\n"
+        + "=" * 75
+    )
+
+    print(
+        "PUMP DETECTOR BACKTEST RESULT"
+    )
+
+    print(
+        "=" * 75
+    )
+
+    if performance is None:
+
+        print(
+            "\nNO TRADES FOUND."
+        )
+
+        return
+
+    pf = performance[
+        "profit_factor"
+    ]
 
     if math.isinf(pf):
         pf_text = "INF"
     else:
-        pf_text = f"{pf:.2f}"
-
-    print()
-    print("=" * 60)
-    print("           PUMP / DUMP DETECTOR")
-    print("              6M BACKTEST")
-    print("=" * 60)
+        pf_text = f"{pf:.3f}"
 
     print(
-        f"Total Trades       : "
-        f"{performance['total']:,}"
+        f"\nVersion             : {VERSION}"
     )
 
     print(
-        f"Wins               : "
-        f"{performance['wins']:,}"
+        f"Timeframe           : {TIMEFRAME}"
     )
 
     print(
-        f"Losses             : "
-        f"{performance['losses']:,}"
+        f"Backtest period     : {BACKTEST_DAYS} days"
     )
 
     print(
-        f"Win Rate           : "
+        f"TP                  : {TP_PCT:.2f}%"
+    )
+
+    print(
+        f"SL                  : {SL_PCT:.2f}%"
+    )
+
+    print(
+        f"RR                  : "
+        f"{TP_PCT / SL_PCT:.2f}"
+    )
+
+    print(
+        f"Trading cost        : "
+        f"{TOTAL_ROUND_TRIP_COST_PCT:.2f}%"
+    )
+
+    print(
+        "\n---------------- PERFORMANCE ----------------"
+    )
+
+    print(
+        f"Total trades        : "
+        f"{performance['total']}"
+    )
+
+    print(
+        f"Wins                : "
+        f"{performance['wins']}"
+    )
+
+    print(
+        f"Losses              : "
+        f"{performance['losses']}"
+    )
+
+    print(
+        f"Win rate            : "
         f"{performance['win_rate']:.2f}%"
     )
 
     print(
-        f"Net P&L            : "
-        f"{performance['net_pnl']:.2f}%"
-    )
-
-    print(
-        f"Profit Factor      : "
+        f"Profit factor       : "
         f"{pf_text}"
     )
 
     print(
-        f"Max Drawdown       : "
-        f"{performance['max_drawdown']:.2f}%"
+        f"Net P&L             : "
+        f"{performance['net_pnl']:.2f}%"
     )
 
     print(
-        f"Average Trade      : "
-        f"{performance['avg_trade']:.3f}%"
+        f"Average trade       : "
+        f"{performance['average_trade']:.3f}%"
     )
 
     print(
-        f"Average Win        : "
-        f"{performance['avg_win']:.3f}%"
+        f"Average win         : "
+        f"{performance['average_win']:.3f}%"
     )
 
     print(
-        f"Average Loss       : "
-        f"{performance['avg_loss']:.3f}%"
+        f"Average loss        : "
+        f"{performance['average_loss']:.3f}%"
     )
 
     print(
-        f"Expectancy         : "
+        f"Expectancy          : "
         f"{performance['expectancy']:.3f}%"
     )
 
     print(
-        f"Best Trade         : "
-        f"{performance['best']:.3f}%"
+        f"Max drawdown        : "
+        f"{performance['max_drawdown']:.2f}%"
     )
 
     print(
-        f"Worst Trade        : "
-        f"{performance['worst']:.3f}%"
+        f"Best trade          : "
+        f"{performance['best_trade']:.3f}%"
     )
-
-    print("=" * 60)
-
-
-# ============================================================
-# MARKET SUMMARY
-# ============================================================
-
-def print_market_summary(all_trades):
-
-    if not all_trades:
-        print("No trades.")
-        return
-
-    by_symbol = {}
-
-    for trade in all_trades:
-
-        symbol = trade["symbol"]
-
-        by_symbol.setdefault(
-            symbol,
-            []
-        ).append(trade)
-
-    rows = []
-
-    for symbol, trades in by_symbol.items():
-
-        perf = calculate_performance(
-            trades
-        )
-
-        rows.append((
-            symbol,
-            perf["total"],
-            perf["win_rate"],
-            perf["net_pnl"],
-            perf["profit_factor"],
-        ))
-
-    rows.sort(
-        key=lambda x: x[3],
-        reverse=True
-    )
-
-    print()
-    print("=" * 75)
-    print("MARKET PERFORMANCE")
-    print("=" * 75)
 
     print(
-        f"{'SYMBOL':15}"
-        f"{'TRADES':>8}"
-        f"{'WR%':>10}"
-        f"{'PNL%':>12}"
-        f"{'PF':>10}"
+        f"Worst trade         : "
+        f"{performance['worst_trade']:.3f}%"
     )
 
-    print("-" * 75)
+    print(
+        f"Avg hold            : "
+        f"{performance['avg_hold_bars']:.2f} candles"
+    )
 
-    for row in rows:
+    print(
+        "\nNOTE:"
+    )
 
-        symbol, total, wr, pnl, pf = row
+    print(
+        "Net P&L above is the sum of individual "
+        "trade returns."
+    )
 
-        pf_text = (
-            "INF"
-            if math.isinf(pf)
-            else f"{pf:.2f}"
-        )
+    print(
+        "It is NOT a compounded portfolio return."
+    )
 
-        print(
-            f"{symbol:15}"
-            f"{total:8d}"
-            f"{wr:10.2f}"
-            f"{pnl:12.2f}"
-            f"{pf_text:>10}"
-        )
+    print(
+        "No real orders were sent."
+    )
 
-    print("=" * 75)
+    print(
+        "=" * 75
+    )
 
 
 # ============================================================
-# DOWNLOAD ALL DATA
+# MAIN
 # ============================================================
 
-def download_all(conn, symbols):
+def main():
+
+    started = time.time()
+
+    print(
+        "\n"
+        + "=" * 75
+    )
+
+    print(
+        "KRAKEN FUTURES PUMP DETECTOR"
+    )
+
+    print(
+        f"VERSION {VERSION}"
+    )
+
+    print(
+        "=" * 75
+    )
+
+    print(
+        "\nNo real trading."
+    )
+
+    print(
+        "Historical data will be downloaded automatically."
+    )
+
+    # --------------------------------------------------------
+    # Database
+    # --------------------------------------------------------
+
+    conn = init_db()
+
+    # --------------------------------------------------------
+    # Date range
+    # --------------------------------------------------------
 
     now = datetime.now(
         timezone.utc
@@ -1441,8 +1752,10 @@ def download_all(conn, symbols):
     start_dt = (
         now
         - timedelta(
-            days=BACKTEST_DAYS
-            + WARMUP_DAYS
+            days=(
+                BACKTEST_DAYS
+                + WARMUP_DAYS
+            )
         )
     )
 
@@ -1454,75 +1767,40 @@ def download_all(conn, symbols):
         end_dt.timestamp()
     )
 
-    print()
-    print("=" * 60)
-    print("DOWNLOADING KRAKEN FUTURES DATA")
-    print("=" * 60)
+    print(
+        "\nData range:"
+    )
 
     print(
-        "From:",
-        start_dt.strftime(
-            "%Y-%m-%d %H:%M UTC"
+        f"  From: "
+        f"{start_dt.strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+    print(
+        f"  To  : "
+        f"{end_dt.strftime('%Y-%m-%d %H:%M UTC')}"
+    )
+
+    # --------------------------------------------------------
+    # Markets
+    # --------------------------------------------------------
+
+    markets = discover_markets()
+
+    selected_markets = (
+        rank_markets_by_volume(
+            markets
         )
     )
 
     print(
-        "To  :",
-        end_dt.strftime(
-            "%Y-%m-%d %H:%M UTC"
-        )
+        f"\nMarkets to backtest: "
+        f"{len(selected_markets)}"
     )
 
-    print(
-        "Markets:",
-        len(symbols)
-    )
-
-    print()
-
-    for number, symbol in enumerate(
-        symbols,
-        start=1
-    ):
-
-        print(
-            f"[{number}/{len(symbols)}] "
-            f"{symbol}"
-        )
-
-        candles = fetch_candles(
-            symbol,
-            TIMEFRAME,
-            start_ts,
-            end_ts
-        )
-
-        if candles:
-
-            save_candles(
-                conn,
-                symbol,
-                candles
-            )
-
-            print(
-                f"Saved {len(candles):,} candles."
-            )
-
-        else:
-
-            print(
-                f"No data for {symbol}."
-            )
-
-        print()
-
-
-# ============================================================
-# CLEAR OLD TRADES
-# ============================================================
-
-def clear_backtest_trades(conn):
+    # --------------------------------------------------------
+    # Clear previous trades
+    # --------------------------------------------------------
 
     conn.execute(
         "DELETE FROM trades"
@@ -1530,239 +1808,188 @@ def clear_backtest_trades(conn):
 
     conn.commit()
 
+    # --------------------------------------------------------
+    # Download + backtest
+    # --------------------------------------------------------
 
-# ============================================================
-# RUN BACKTEST
-# ============================================================
-
-def run_backtest(conn, symbols):
-
-    print()
-    print("=" * 60)
-    print("RUNNING BACKTEST")
-    print("=" * 60)
-
-    all_trades = []
+    successful = 0
+    failed = 0
+    total_trades = 0
 
     for number, symbol in enumerate(
-        symbols,
-        start=1
+        selected_markets,
+        start=1,
     ):
 
-        candles = load_candles(
-            conn,
-            symbol
+        print(
+            "\n"
+            + "-" * 75
         )
-
-        if not candles:
-
-            print(
-                f"[{number}/{len(symbols)}] "
-                f"{symbol}: no candles"
-            )
-
-            continue
 
         print(
-            f"[{number}/{len(symbols)}] "
-            f"{symbol}: "
-            f"{len(candles):,} candles"
+            f"[{number}/{len(selected_markets)}] "
+            f"{symbol}"
         )
 
-        trades = backtest_symbol(
-            conn,
-            symbol,
-            candles
-        )
+        try:
 
-        all_trades.extend(
-            trades
-        )
+            rows = download_candles(
+                symbol,
+                start_ts,
+                end_ts,
+            )
 
-        if trades:
+            if not rows:
+
+                print(
+                    "    No candle data."
+                )
+
+                failed += 1
+                continue
+
+            save_candles(
+                conn,
+                rows,
+            )
+
+            candles = load_candles(
+                conn,
+                symbol,
+                start_ts * 1000,
+                end_ts * 1000,
+            )
+
+            if len(candles) < 300:
+
+                print(
+                    "    Not enough candles."
+                )
+
+                failed += 1
+                continue
+
+            trades = backtest_symbol(
+                candles,
+                symbol,
+            )
+
+            save_trades(
+                conn,
+                trades,
+            )
+
+            total_trades += len(
+                trades
+            )
+
+            successful += 1
 
             print(
-                f"    Signals: "
+                f"    Trades found: "
                 f"{len(trades)}"
             )
 
-    return all_trades
+        except Exception as exc:
 
+            failed += 1
 
-# ============================================================
-# EXPORT SIMPLE CSV
-# ============================================================
+            print(
+                f"    ERROR: {exc}"
+            )
 
-def export_trades_csv(
-    trades,
-    filename="pump_trades.csv"
-):
-
-    if not trades:
-        return
-
-    import csv
-
-    fields = [
-        "symbol",
-        "direction",
-        "signal_time",
-        "entry",
-        "exit",
-        "sl",
-        "tp",
-        "gross_pnl_pct",
-        "pnl_pct",
-        "cost_pct",
-        "hold_bars",
-        "exit_reason",
-        "score",
-        "rvol",
-        "momentum_pct",
-    ]
-
-    with open(
-        filename,
-        "w",
-        newline="",
-        encoding="utf-8"
-    ) as f:
-
-        writer = csv.DictWriter(
-            f,
-            fieldnames=fields
+        time.sleep(
+            REQUEST_SLEEP
         )
 
-        writer.writeheader()
+    # --------------------------------------------------------
+    # Final report
+    # --------------------------------------------------------
 
-        for trade in trades:
-
-            writer.writerow({
-                key: trade.get(key)
-                for key in fields
-            })
-
-    print()
-    print(
-        f"Trade CSV exported: "
-        f"{filename}"
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-
-    print()
-    print("=" * 60)
-    print("KRAKEN FUTURES PUMP / DUMP DETECTOR")
-    print(f"VERSION {VERSION}")
-    print("=" * 60)
-
-    print()
-    print("Mode              : BACKTEST")
-    print("Timeframe         :", TIMEFRAME)
-    print(
-        "Backtest period   :",
-        BACKTEST_DAYS,
-        "days"
-    )
-    print(
-        "Warmup            :",
-        WARMUP_DAYS,
-        "days"
-    )
-    print(
-        "TP                :",
-        f"{TP_PCT:.2f}%"
-    )
-    print(
-        "SL                :",
-        f"{SL_PCT:.2f}%"
-    )
-    print(
-        "Minimum RR        :",
-        f"{MIN_RR:.2f}"
-    )
-    print(
-        "Round-trip cost   :",
-        f"{ROUND_TRIP_COST_PCT:.3f}%"
-    )
-
-    conn = db_connect()
-
-    symbols = discover_symbols()
-
-    if not symbols:
-
-        print(
-            "No markets available."
+    performance = (
+        calculate_performance(
+            conn
         )
-
-        return
-
-    # --------------------------------------------------------
-    # Download
-    # --------------------------------------------------------
-
-    download_all(
-        conn,
-        symbols
     )
 
-    # --------------------------------------------------------
-    # Clear old results
-    # --------------------------------------------------------
-
-    clear_backtest_trades(
-        conn
+    print(
+        "\n"
+        + "=" * 75
     )
 
-    # --------------------------------------------------------
-    # Backtest
-    # --------------------------------------------------------
-
-    all_trades = run_backtest(
-        conn,
-        symbols
+    print(
+        "DOWNLOAD / BACKTEST SUMMARY"
     )
 
-    # --------------------------------------------------------
-    # Performance
-    # --------------------------------------------------------
-
-    performance = calculate_performance(
-        all_trades
+    print(
+        "=" * 75
     )
 
-    print_performance(
+    print(
+        f"Markets selected   : "
+        f"{len(selected_markets)}"
+    )
+
+    print(
+        f"Markets successful : "
+        f"{successful}"
+    )
+
+    print(
+        f"Markets failed     : "
+        f"{failed}"
+    )
+
+    print(
+        f"Total trades       : "
+        f"{total_trades}"
+    )
+
+    print_final_report(
         performance
     )
 
     print_market_summary(
-        all_trades
+        conn
     )
 
-    # --------------------------------------------------------
-    # Export
-    # --------------------------------------------------------
-
-    export_trades_csv(
-        all_trades
+    export_csv(
+        conn
     )
 
-    print()
-    print("=" * 60)
-    print("BACKTEST FINISHED")
-    print("=" * 60)
+    conn.close()
 
-    print()
-    print("Database :", DB_FILE)
-    print("Trades   : pump_trades.csv")
-    print()
+    elapsed = (
+        time.time()
+        - started
+    )
 
+    print(
+        "\n"
+        + "=" * 75
+    )
+
+    print(
+        f"Completed in "
+        f"{elapsed / 60:.2f} minutes"
+    )
+
+    print(
+        f"Database: {DB_FILE}"
+    )
+
+    print(
+        f"CSV     : {CSV_FILE}"
+    )
+
+    print(
+        "=" * 75
+    )
+
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
