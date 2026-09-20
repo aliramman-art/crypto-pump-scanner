@@ -1,14 +1,19 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.9
+# VERSION 5.9.1
 # ============================================================
 #
-# V5.9:
+# V5.9.1:
 #
-# - V5.8 STRATEGY FULLY PRESERVED
-# - FIXED DATABASE INSERT FOR REQUIRED "symbol" COLUMN
+# - V5.9 STRATEGY FULLY PRESERVED
+# - FIXED DATABASE INSERT FOR REQUIRED "created_at" COLUMN
 # - EXISTING DATABASE PRESERVED
 # - DATABASE MIGRATION CHECK FOR "symbol"
+# - DATABASE MIGRATION CHECK FOR "contract"
+# - DATABASE MIGRATION CHECK FOR "exit_reason"
+# - DATABASE MIGRATION CHECK FOR "confirm_time"
+# - DATABASE MIGRATION CHECK FOR NOTIFICATION COLUMNS
+# - CREATED_AT IS NOW WRITTEN DURING INSERT
 # - DUPLICATE SIGNAL_KEYS WITHIN SAME SCAN ARE REMOVED
 # - SAME SIGNAL IS INSERTED/PROCESSED ONLY ONCE PER RUN
 # - TELEGRAM NEW SIGNAL LOGIC PRESERVED
@@ -1829,6 +1834,11 @@ def generate_live_entries(
                         int(
                             utc_now().timestamp()
                         ),
+
+                    "created_at":
+                        int(
+                            utc_now().timestamp()
+                        ),
                 }
             )
 
@@ -1906,6 +1916,7 @@ def init_db():
             status TEXT,
 
             detected_at INTEGER,
+            created_at INTEGER,
 
             notified_new INTEGER DEFAULT 0,
             notified_close INTEGER DEFAULT 0
@@ -1940,6 +1951,10 @@ def init_db():
             """
         )
 
+    # --------------------------------------------------------
+    # CONTRACT MIGRATION
+    # --------------------------------------------------------
+
     if "contract" not in existing_columns:
 
         print(
@@ -1953,6 +1968,10 @@ def init_db():
             ADD COLUMN contract TEXT
             """
         )
+
+    # --------------------------------------------------------
+    # EXIT REASON MIGRATION
+    # --------------------------------------------------------
 
     if "exit_reason" not in existing_columns:
 
@@ -1968,6 +1987,10 @@ def init_db():
             """
         )
 
+    # --------------------------------------------------------
+    # CONFIRM TIME MIGRATION
+    # --------------------------------------------------------
+
     if "confirm_time" not in existing_columns:
 
         print(
@@ -1982,6 +2005,28 @@ def init_db():
             """
         )
 
+    # --------------------------------------------------------
+    # CREATED AT MIGRATION
+    # --------------------------------------------------------
+
+    if "created_at" not in existing_columns:
+
+        print(
+            "Migrating old DB: adding "
+            "'created_at' column..."
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE trades
+            ADD COLUMN created_at INTEGER
+            """
+        )
+
+    # --------------------------------------------------------
+    # NOTIFIED NEW MIGRATION
+    # --------------------------------------------------------
+
     if "notified_new" not in existing_columns:
 
         print(
@@ -1995,6 +2040,10 @@ def init_db():
             ADD COLUMN notified_new INTEGER DEFAULT 0
             """
         )
+
+    # --------------------------------------------------------
+    # NOTIFIED CLOSE MIGRATION
+    # --------------------------------------------------------
 
     if "notified_close" not in existing_columns:
 
@@ -2046,6 +2095,41 @@ def init_db():
             e,
         )
 
+    # --------------------------------------------------------
+    # BACKFILL CREATED_AT WHERE POSSIBLE
+    # --------------------------------------------------------
+
+    if "created_at" in existing_columns:
+
+        try:
+
+            cur.execute(
+                """
+                UPDATE trades
+                SET created_at = detected_at
+                WHERE created_at IS NULL
+                  AND detected_at IS NOT NULL
+                """
+            )
+
+            updated_created_rows = (
+                cur.rowcount
+            )
+
+            if updated_created_rows:
+
+                print(
+                    "Backfilled created_at from detected_at: "
+                    f"{updated_created_rows} rows"
+                )
+
+        except Exception as e:
+
+            print(
+                "created_at backfill warning:",
+                e,
+            )
+
     conn.commit()
 
     cur.execute(
@@ -2076,6 +2160,7 @@ def init_db():
         "exit_reason",
         "status",
         "detected_at",
+        "created_at",
         "notified_new",
         "notified_close",
     }
@@ -2350,6 +2435,20 @@ def insert_trade(
             return False
 
         # ----------------------------------------------------
+        # CREATED AT
+        # ----------------------------------------------------
+
+        created_at = trade.get(
+            "created_at"
+        )
+
+        if created_at is None:
+
+            created_at = int(
+                utc_now().timestamp()
+            )
+
+        # ----------------------------------------------------
         # INSERT
         # ----------------------------------------------------
 
@@ -2374,13 +2473,14 @@ def insert_trade(
                 exit_reason,
                 status,
                 detected_at,
+                created_at,
                 notified_new,
                 notified_close
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, NULL, NULL, NULL,
-                'OPEN', ?, 0, 0
+                'OPEN', ?, ?, 0, 0
             )
             """,
             (
@@ -2400,6 +2500,7 @@ def insert_trade(
                 trade["sl_price"],
                 trade["tp_price"],
                 trade["detected_at"],
+                created_at,
             ),
         )
 
@@ -2441,6 +2542,11 @@ def insert_trade(
         print(
             f"Entry time: "
             f"{format_time(trade['entry_time'])}"
+        )
+
+        print(
+            f"Created at: "
+            f"{format_time(created_at)}"
         )
 
         print(
@@ -2905,8 +3011,9 @@ def row_to_trade(
                 "exit_reason": row[16],
                 "status": row[17],
                 "detected_at": row[18],
-                "notified_new": row[19],
-                "notified_close": row[20],
+                "created_at": row[19],
+                "notified_new": row[20],
+                "notified_close": row[21],
             }
 
     except Exception as e:
@@ -3015,6 +3122,11 @@ def row_to_trade(
         "detected_at":
             data.get(
                 "detected_at"
+            ),
+
+        "created_at":
+            data.get(
+                "created_at"
             ),
 
         "notified_new":
@@ -3983,7 +4095,7 @@ def main():
     )
 
     print(
-        "VERSION 5.9"
+        "VERSION 5.9.1"
     )
 
     print(
