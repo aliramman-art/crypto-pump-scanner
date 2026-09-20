@@ -17,6 +17,7 @@
 #   ARE SKIPPED BEFORE RETEST SEARCH
 # - ORIGINAL STRATEGY FILTERS PRESERVED
 # - ORIGINAL DATABASE PRESERVED
+# - DATABASE MIGRATION FOR confirm_time ADDED
 # - REAL TRADING DISABLED
 #
 # STRATEGY:
@@ -1310,16 +1311,6 @@ def find_entry(
 
     # --------------------------------------------------------
     # FRESHNESS WINDOW
-    #
-    # Confirmation/entry must be within the allowed
-    # freshness window relative to the latest closed 5M.
-    #
-    # This prevents historical entries such as:
-    # Entry 10:30
-    # Latest 5M 11:05
-    # Age 35m
-    #
-    # from being processed as a possible live entry.
     # --------------------------------------------------------
 
     max_entry_age_seconds = (
@@ -1359,8 +1350,10 @@ def find_entry(
 
             continue
 
-        # Do not accept an entry candle that is newer
-        # than the latest closed 5M candle.
+        # ----------------------------------------------------
+        # DO NOT USE A FUTURE CANDLE
+        # ----------------------------------------------------
+
         if (
             latest_5m_ts is not None
             and entry_timestamp
@@ -1522,18 +1515,6 @@ def generate_live_entries(
     # ========================================================
     # MAXIMUM AGE OF A BREAKOUT THAT CAN STILL PRODUCE
     # A FRESH ENTRY
-    #
-    # Retest window:
-    #   RETEST_MAX_BARS
-    #
-    # Confirmation window:
-    #   CONFIRM_MAX_BARS
-    #
-    # Entry freshness:
-    #   MAX_ENTRY_AGE_CANDLES
-    #
-    # Anything older than this cannot possibly produce
-    # a currently fresh entry.
     # ========================================================
 
     max_entry_age_seconds = (
@@ -1649,7 +1630,6 @@ def generate_live_entries(
         )
 
         # ====================================================
-        # V5.7:
         # NEWEST BREAKOUT FIRST
         # ====================================================
 
@@ -1663,9 +1643,6 @@ def generate_live_entries(
 
             # ------------------------------------------------
             # EARLY OLD-BREAKOUT FILTER
-            #
-            # If this breakout is too old to possibly create
-            # a fresh entry, do not call find_entry().
             # ------------------------------------------------
 
             if (
@@ -1732,7 +1709,6 @@ def generate_live_entries(
                     f"{max_entry_age_seconds // 60}m"
                 )
 
-                # Continue to another breakout.
                 continue
 
             # =================================================
@@ -1890,6 +1866,13 @@ def init_db():
 
     cur = conn.cursor()
 
+    # ========================================================
+    # CREATE TABLE
+    #
+    # This is the complete/current schema for new databases.
+    # Existing databases are NOT deleted or reset.
+    # ========================================================
+
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS trades (
@@ -1927,7 +1910,13 @@ def init_db():
     )
 
     # ========================================================
-    # SAFE MIGRATION
+    # SAFE DATABASE MIGRATION
+    #
+    # IMPORTANT:
+    # Existing kraken_pattern_live_v52.db is preserved.
+    #
+    # V5.7 introduced confirm_time, but the old DB did not
+    # contain that column. This migration adds it safely.
     # ========================================================
 
     cur.execute(
@@ -1938,6 +1927,10 @@ def init_db():
         row["name"]
         for row in cur.fetchall()
     }
+
+    # --------------------------------------------------------
+    # CONTRACT
+    # --------------------------------------------------------
 
     if "contract" not in existing_columns:
 
@@ -1953,6 +1946,10 @@ def init_db():
             """
         )
 
+    # --------------------------------------------------------
+    # EXIT REASON
+    # --------------------------------------------------------
+
     if "exit_reason" not in existing_columns:
 
         print(
@@ -1967,6 +1964,33 @@ def init_db():
             """
         )
 
+    # --------------------------------------------------------
+    # CONFIRM TIME
+    #
+    # THIS IS THE FIX FOR THE CURRENT ERROR:
+    #
+    # sqlite3.OperationalError:
+    # table trades has no column named confirm_time
+    # --------------------------------------------------------
+
+    if "confirm_time" not in existing_columns:
+
+        print(
+            "Migrating old DB: adding "
+            "'confirm_time' column..."
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE trades
+            ADD COLUMN confirm_time INTEGER
+            """
+        )
+
+    # --------------------------------------------------------
+    # NEW NOTIFICATION FLAG
+    # --------------------------------------------------------
+
     if "notified_new" not in existing_columns:
 
         print(
@@ -1980,6 +2004,10 @@ def init_db():
             ADD COLUMN notified_new INTEGER DEFAULT 0
             """
         )
+
+    # --------------------------------------------------------
+    # CLOSE NOTIFICATION FLAG
+    # --------------------------------------------------------
 
     if "notified_close" not in existing_columns:
 
@@ -1996,6 +2024,60 @@ def init_db():
         )
 
     conn.commit()
+
+    # ========================================================
+    # VERIFY REQUIRED COLUMNS AFTER MIGRATION
+    # ========================================================
+
+    cur.execute(
+        "PRAGMA table_info(trades)"
+    )
+
+    final_columns = {
+        row["name"]
+        for row in cur.fetchall()
+    }
+
+    required_columns = {
+        "signal_key",
+        "asset",
+        "contract",
+        "pattern",
+        "direction",
+        "breakout_time",
+        "retest_time",
+        "confirm_time",
+        "entry_time",
+        "entry_price",
+        "sl_price",
+        "tp_price",
+        "exit_time",
+        "exit_price",
+        "exit_reason",
+        "status",
+        "detected_at",
+        "notified_new",
+        "notified_close",
+    }
+
+    missing_columns = (
+        required_columns
+        - final_columns
+    )
+
+    if missing_columns:
+
+        conn.close()
+
+        raise RuntimeError(
+            "Database migration incomplete. "
+            f"Missing columns: "
+            f"{sorted(missing_columns)}"
+        )
+
+    print(
+        "Database schema verified."
+    )
 
     conn.close()
 
@@ -2763,6 +2845,7 @@ def resolve_open_trade_from_candles(
             hit_sl = high >= sl
             hit_tp = low <= tp
 
+        # Same candle TP + SL = SL first
         if hit_sl and hit_tp:
 
             return {
@@ -3558,6 +3641,10 @@ def main():
         f"PERIODIC_REPORT_SECONDS = "
         f"{PERIODIC_REPORT_SECONDS}"
     )
+
+    # ========================================================
+    # DATABASE INITIALIZATION + SAFE MIGRATION
+    # ========================================================
 
     init_db()
 
