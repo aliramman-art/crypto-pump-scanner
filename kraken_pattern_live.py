@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 6.4.0
+# VERSION 6.4.1
 # ============================================================
 #
 # PAPER ONLY
@@ -37,6 +37,13 @@
 # - Maximum confirmation age = 30 minutes AFTER
 #   the confirmation candle has CLOSED.
 #
+# FIXES:
+# - get_meta() added
+# - set_meta() added
+# - periodic Telegram report fixed
+# - Telegram report timestamp saved only after successful send
+# - chart pattern points fixed
+#
 # EXISTING DB PRESERVED:
 #   kraken_pattern_live_v52.db
 # ============================================================
@@ -60,7 +67,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "6.4.0"
+VERSION = "6.4.1"
 
 REAL_TRADING = False
 
@@ -87,15 +94,7 @@ KRAKEN_CHART_URL = (
 HTTP_RETRIES = 3
 HTTP_TIMEOUT = 20
 
-# ------------------------------------------------------------
-# TRADE MANAGEMENT
-# ------------------------------------------------------------
-
 MAX_HOLD_HOURS = 48
-
-# ------------------------------------------------------------
-# DATA
-# ------------------------------------------------------------
 
 PATTERN_LOOKBACK_1H = 240
 PATTERN_LOOKBACK_15M = 240
@@ -109,58 +108,20 @@ BREAKOUT_LOOKAHEAD_15M = 32
 RETEST_LOOKAHEAD_15M = 16
 CONFIRMATION_LOOKAHEAD_15M = 4
 
-# ------------------------------------------------------------
-# SIGNAL FRESHNESS
-# ------------------------------------------------------------
-#
-# Scanner runs every 5 minutes.
-#
-# A confirmation remains eligible for 30 minutes AFTER
-# the confirmation candle has closed.
-#
-# Example:
-# Confirmation candle starts: 23:00
-# 15M candle closes:          23:15
-# Last valid signal time:     23:45
-#
-# This prevents old signals from being discovered later.
-# ------------------------------------------------------------
-
 MAX_CONFIRMATION_AGE_MINUTES = 30
-
-# ------------------------------------------------------------
-# SIGNAL LIMIT
-# ------------------------------------------------------------
 
 MAX_SIGNALS_PER_SCAN = 1
 
-# ------------------------------------------------------------
-# PATTERN QUALITY
-# ------------------------------------------------------------
-
 DOUBLE_LEVEL_TOLERANCE = 0.012
-
 MIN_PATTERN_DEPTH_PCT = 0.004
-
 MIN_PATTERN_SEPARATION_BARS = 3
-
 MAX_DOUBLE_PATTERN_BARS = 48
-
 MAX_HS_PATTERN_BARS = 72
-
 HS_SHOULDER_TOLERANCE = 0.025
-
 HS_MIN_HEAD_ADVANTAGE_PCT = 0.003
-
 MIN_HS_DEPTH_PCT = 0.004
-
 INVALIDATION_BUFFER = 0.001
-
 SWING_LEFT_RIGHT = 3
-
-# ------------------------------------------------------------
-# TELEGRAM / CHART
-# ------------------------------------------------------------
 
 CHART_CANDLES = 100
 
@@ -213,7 +174,6 @@ ASSETS = [
     "PEPE",
     "WIF",
 ]
-
 
 CONTRACTS = {
     asset: f"PF_{asset}USD"
@@ -349,22 +309,15 @@ def duration_text(
 def confirmation_age_minutes(
     confirmation_timestamp
 ):
-    """
-    Confirmation timestamp is candle START time.
-    15M candle must close 15 minutes later.
-    """
-
     confirmation_close = (
         int(confirmation_timestamp)
         + 15 * 60
     )
 
-    age_seconds = (
+    return (
         now_ts()
         - confirmation_close
-    )
-
-    return age_seconds / 60.0
+    ) / 60.0
 
 
 # ============================================================
@@ -413,9 +366,15 @@ def http_get(
 
 def telegram_send_text(text):
     if not TELEGRAM_BOT_TOKEN:
+        print(
+            "Telegram: BOT TOKEN missing."
+        )
         return False
 
     if not TELEGRAM_CHAT_ID:
+        print(
+            "Telegram: CHAT ID missing."
+        )
         return False
 
     url = (
@@ -439,6 +398,15 @@ def telegram_send_text(text):
 
         response.raise_for_status()
 
+        data = response.json()
+
+        if not data.get("ok", False):
+            print(
+                "Telegram API returned not ok:",
+                data,
+            )
+            return False
+
         return True
 
     except Exception as exc:
@@ -455,9 +423,15 @@ def telegram_send_photo(
     caption,
 ):
     if not TELEGRAM_BOT_TOKEN:
+        print(
+            "Telegram: BOT TOKEN missing."
+        )
         return False
 
     if not TELEGRAM_CHAT_ID:
+        print(
+            "Telegram: CHAT ID missing."
+        )
         return False
 
     url = (
@@ -490,6 +464,15 @@ def telegram_send_photo(
 
         response.raise_for_status()
 
+        data = response.json()
+
+        if not data.get("ok", False):
+            print(
+                "Telegram photo API returned not ok:",
+                data,
+            )
+            return False
+
         return True
 
     except Exception as exc:
@@ -501,12 +484,8 @@ def telegram_send_photo(
         return False
 
 
-def send_telegram(
-    text,
-):
-    return telegram_send_text(
-        text
-    )
+def send_telegram(text):
+    return telegram_send_text(text)
 
 
 # ============================================================
@@ -643,29 +622,83 @@ def init_db():
 
 
 # ============================================================
+# SCANNER META
+# ============================================================
+
+def get_meta(key):
+    conn = db_connect()
+
+    try:
+        row = conn.execute(
+            """
+            SELECT value
+            FROM scanner_meta
+            WHERE key = ?
+            LIMIT 1
+            """,
+            (key,),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        return row["value"]
+
+    finally:
+        conn.close()
+
+
+def set_meta(key, value):
+    conn = db_connect()
+
+    try:
+        conn.execute(
+            """
+            INSERT INTO scanner_meta (
+                key,
+                value
+            )
+            VALUES (?, ?)
+            ON CONFLICT(key)
+            DO UPDATE SET
+                value = excluded.value
+            """,
+            (
+                key,
+                str(value),
+            ),
+        )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+# ============================================================
 # DATABASE HELPERS
 # ============================================================
 
-def has_signal(
-    signal_key,
-):
+def has_signal(signal_key):
     conn = db_connect()
 
-    row = conn.execute(
-        """
-        SELECT id
-        FROM trades
-        WHERE signal_key = ?
-        LIMIT 1
-        """,
-        (
-            signal_key,
-        ),
-    ).fetchone()
+    try:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM trades
+            WHERE signal_key = ?
+            LIMIT 1
+            """,
+            (
+                signal_key,
+            ),
+        ).fetchone()
 
-    conn.close()
+        return row is not None
 
-    return row is not None
+    finally:
+        conn.close()
 
 
 def has_open_trade(
@@ -674,46 +707,46 @@ def has_open_trade(
 ):
     conn = db_connect()
 
-    row = conn.execute(
-        """
-        SELECT id
-        FROM trades
-        WHERE asset = ?
-          AND direction = ?
-          AND status = 'OPEN'
-        LIMIT 1
-        """,
-        (
-            asset,
-            direction,
-        ),
-    ).fetchone()
+    try:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM trades
+            WHERE asset = ?
+              AND direction = ?
+              AND status = 'OPEN'
+            LIMIT 1
+            """,
+            (
+                asset,
+                direction,
+            ),
+        ).fetchone()
 
-    conn.close()
+        return row is not None
 
-    return row is not None
+    finally:
+        conn.close()
 
 
 def get_open_trades():
     conn = db_connect()
 
-    rows = conn.execute(
-        """
-        SELECT *
-        FROM trades
-        WHERE status = 'OPEN'
-        ORDER BY entry_time ASC
-        """
-    ).fetchall()
+    try:
+        return conn.execute(
+            """
+            SELECT *
+            FROM trades
+            WHERE status = 'OPEN'
+            ORDER BY entry_time ASC
+            """
+        ).fetchall()
 
-    conn.close()
+    finally:
+        conn.close()
 
-    return rows
 
-
-def insert_trade(
-    trade,
-):
+def insert_trade(trade):
     conn = db_connect()
 
     try:
@@ -739,7 +772,10 @@ def insert_trade(
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
                 trade["symbol"],
@@ -747,18 +783,10 @@ def insert_trade(
                 trade["direction"],
                 trade["pattern"],
                 trade["signal_key"],
-                trade["pattern15m"][
-                    "pattern_time"
-                ],
-                trade["breakout15m"][
-                    "timestamp"
-                ],
-                trade["retest15m"][
-                    "timestamp"
-                ],
-                trade["confirmation15m"][
-                    "timestamp"
-                ],
+                trade["pattern15m"]["pattern_time"],
+                trade["breakout15m"]["timestamp"],
+                trade["retest15m"]["timestamp"],
+                trade["confirmation15m"]["timestamp"],
                 trade["entry_time"],
                 trade["entry_price"],
                 trade["sl_price"],
@@ -772,11 +800,7 @@ def insert_trade(
 
         conn.commit()
 
-        inserted = (
-            cur.rowcount == 1
-        )
-
-        return inserted
+        return cur.rowcount == 1
 
     finally:
         conn.close()
@@ -786,9 +810,7 @@ def insert_trade(
 # KRAKEN
 # ============================================================
 
-def get_contract(
-    asset,
-):
+def get_contract(asset):
     return CONTRACTS.get(
         asset,
         f"PF_{asset}USD",
@@ -837,16 +859,15 @@ def load_prices():
     LIVE_PRICES = prices
 
 
-def get_live_price(
-    asset,
-):
+def get_live_price(asset):
     return LIVE_PRICES.get(
         get_contract(asset)
     )
 
 
 def get_all_current_prices():
-    load_prices()
+    if not LIVE_PRICES:
+        load_prices()
 
     result = {}
 
@@ -908,37 +929,31 @@ def get_candles(
 
                 timestamp = (
                     candle.get("time")
-                    or candle.get(
-                        "timestamp"
-                    )
+                    or candle.get("timestamp")
                     or candle.get("t")
                 )
 
                 open_price = (
                     candle.get("open")
-                    if candle.get("open")
-                    is not None
+                    if candle.get("open") is not None
                     else candle.get("o")
                 )
 
                 high_price = (
                     candle.get("high")
-                    if candle.get("high")
-                    is not None
+                    if candle.get("high") is not None
                     else candle.get("h")
                 )
 
                 low_price = (
                     candle.get("low")
-                    if candle.get("low")
-                    is not None
+                    if candle.get("low") is not None
                     else candle.get("l")
                 )
 
                 close_price = (
                     candle.get("close")
-                    if candle.get("close")
-                    is not None
+                    if candle.get("close") is not None
                     else candle.get("c")
                 )
 
@@ -953,11 +968,19 @@ def get_candles(
                 low_price = candle[3]
                 close_price = candle[4]
 
+            if (
+                timestamp is None
+                or open_price is None
+                or high_price is None
+                or low_price is None
+                or close_price is None
+            ):
+                continue
+
             timestamp = int(
                 float(timestamp)
             )
 
-            # Some APIs return milliseconds.
             if timestamp > 10_000_000_000:
                 timestamp //= 1000
 
@@ -987,9 +1010,7 @@ def get_candles(
     )
 
     df = df.drop_duplicates(
-        subset=[
-            "timestamp"
-        ]
+        subset=["timestamp"]
     )
 
     df = df.sort_values(
@@ -1005,10 +1026,6 @@ def get_candles(
         900,
     )
 
-    # --------------------------------------------------------
-    # CLOSED CANDLES ONLY
-    # --------------------------------------------------------
-
     current_time = now_ts()
 
     df = df[
@@ -1019,9 +1036,7 @@ def get_candles(
     ]
 
     if limit:
-        df = df.tail(
-            limit
-        )
+        df = df.tail(limit)
 
     return df.reset_index(
         drop=True
@@ -1053,8 +1068,7 @@ def is_local_high(
     ]["high"]
 
     right_values = df.iloc[
-        index + 1:
-        index + right + 1
+        index + 1:index + right + 1
     ]["high"]
 
     return (
@@ -1084,8 +1098,7 @@ def is_local_low(
     ]["low"]
 
     right_values = df.iloc[
-        index + 1:
-        index + right + 1
+        index + 1:index + right + 1
     ]["low"]
 
     return (
@@ -1120,10 +1133,7 @@ def pivot_lows(df):
 # HELPERS
 # ============================================================
 
-def pct_diff(
-    a,
-    b,
-):
+def pct_diff(a, b):
     if a == 0:
         return 999.0
 
@@ -1142,24 +1152,15 @@ def make_pattern(
     score,
 ):
     return {
-        "pattern":
-            name,
-        "direction":
-            direction,
-        "points":
-            points,
-        "neckline":
-            float(neckline),
-        "neckline_idx":
-            neckline_idx,
-        "target":
-            float(target),
-        "stop":
-            float(stop),
-        "pattern_time":
-            int(pattern_time),
-        "score":
-            float(score),
+        "pattern": name,
+        "direction": direction,
+        "points": points,
+        "neckline": float(neckline),
+        "neckline_idx": neckline_idx,
+        "target": float(target),
+        "stop": float(stop),
+        "pattern_time": int(pattern_time),
+        "score": float(score),
     }
 
 
@@ -1167,17 +1168,14 @@ def make_pattern(
 # DOUBLE TOP
 # ============================================================
 
-def detect_double_top(
-    df,
-):
+def detect_double_top(df):
+
     highs = pivot_highs(df)
     lows = pivot_lows(df)
 
     patterns = []
 
-    for a in range(
-        len(highs)
-    ):
+    for a in range(len(highs)):
 
         left = highs[a]
 
@@ -1188,9 +1186,7 @@ def detect_double_top(
 
             right = highs[b]
 
-            distance = (
-                right - left
-            )
+            distance = right - left
 
             if distance < MIN_PATTERN_SEPARATION_BARS:
                 continue
@@ -1248,23 +1244,12 @@ def detect_double_top(
                 continue
 
             neckline = valley_price
+            height = peak - neckline
 
-            height = (
-                peak
-                - neckline
-            )
+            target = neckline - height
 
-            target = (
-                neckline
-                - height
-            )
-
-            stop = (
-                peak
-                * (
-                    1
-                    + INVALIDATION_BUFFER
-                )
+            stop = peak * (
+                1 + INVALIDATION_BUFFER
             )
 
             score = (
@@ -1273,8 +1258,7 @@ def detect_double_top(
                     depth * 1000,
                 )
                 + (
-                    1
-                    - similarity
+                    1 - similarity
                 ) * 5
             )
 
@@ -1283,20 +1267,15 @@ def detect_double_top(
                     "Double Top",
                     "SHORT",
                     {
-                        "left_idx":
-                            left,
-                        "valley_idx":
-                            valley,
-                        "right_idx":
-                            right,
+                        "left_idx": left,
+                        "valley_idx": valley,
+                        "right_idx": right,
                     },
                     neckline,
                     valley,
                     target,
                     stop,
-                    df.iloc[
-                        right
-                    ]["timestamp"],
+                    df.iloc[right]["timestamp"],
                     score,
                 )
             )
@@ -1308,17 +1287,14 @@ def detect_double_top(
 # DOUBLE BOTTOM
 # ============================================================
 
-def detect_double_bottom(
-    df,
-):
+def detect_double_bottom(df):
+
     lows = pivot_lows(df)
     highs = pivot_highs(df)
 
     patterns = []
 
-    for a in range(
-        len(lows)
-    ):
+    for a in range(len(lows)):
 
         left = lows[a]
 
@@ -1329,9 +1305,7 @@ def detect_double_bottom(
 
             right = lows[b]
 
-            distance = (
-                right - left
-            )
+            distance = right - left
 
             if distance < MIN_PATTERN_SEPARATION_BARS:
                 continue
@@ -1382,31 +1356,18 @@ def detect_double_bottom(
             )
 
             depth = (
-                peak_price
-                - bottom
+                peak_price - bottom
             ) / peak_price
 
             if depth < MIN_PATTERN_DEPTH_PCT:
                 continue
 
             neckline = peak_price
+            height = neckline - bottom
+            target = neckline + height
 
-            height = (
-                neckline
-                - bottom
-            )
-
-            target = (
-                neckline
-                + height
-            )
-
-            stop = (
-                bottom
-                * (
-                    1
-                    - INVALIDATION_BUFFER
-                )
+            stop = bottom * (
+                1 - INVALIDATION_BUFFER
             )
 
             score = (
@@ -1415,8 +1376,7 @@ def detect_double_bottom(
                     depth * 1000,
                 )
                 + (
-                    1
-                    - similarity
+                    1 - similarity
                 ) * 5
             )
 
@@ -1425,20 +1385,15 @@ def detect_double_bottom(
                     "Double Bottom",
                     "LONG",
                     {
-                        "left_idx":
-                            left,
-                        "peak_idx":
-                            peak,
-                        "right_idx":
-                            right,
+                        "left_idx": left,
+                        "peak_idx": peak,
+                        "right_idx": right,
                     },
                     neckline,
                     peak,
                     target,
                     stop,
-                    df.iloc[
-                        right
-                    ]["timestamp"],
+                    df.iloc[right]["timestamp"],
                     score,
                 )
             )
@@ -1450,17 +1405,14 @@ def detect_double_bottom(
 # HEAD & SHOULDERS
 # ============================================================
 
-def detect_head_shoulders(
-    df,
-):
+def detect_head_shoulders(df):
+
     highs = pivot_highs(df)
     lows = pivot_lows(df)
 
     patterns = []
 
-    for a in range(
-        len(highs)
-    ):
+    for a in range(len(highs)):
 
         left = highs[a]
 
@@ -1484,16 +1436,10 @@ def detect_head_shoulders(
 
                 right = highs[c]
 
-                if (
-                    right - head
-                    < MIN_PATTERN_SEPARATION_BARS
-                ):
+                if right - head < MIN_PATTERN_SEPARATION_BARS:
                     continue
 
-                if (
-                    right - left
-                    > MAX_HS_PATTERN_BARS
-                ):
+                if right - left > MAX_HS_PATTERN_BARS:
                     break
 
                 left_price = float(
@@ -1513,22 +1459,14 @@ def detect_head_shoulders(
                     right_price,
                 )
 
-                if (
-                    shoulder_diff
-                    > HS_SHOULDER_TOLERANCE
-                ):
+                if shoulder_diff > HS_SHOULDER_TOLERANCE:
                     continue
 
-                if (
-                    head_price
-                    <= max(
-                        left_price,
-                        right_price,
-                    )
-                    * (
-                        1
-                        + HS_MIN_HEAD_ADVANTAGE_PCT
-                    )
+                if head_price <= max(
+                    left_price,
+                    right_price,
+                ) * (
+                    1 + HS_MIN_HEAD_ADVANTAGE_PCT
                 ):
                     continue
 
@@ -1565,39 +1503,26 @@ def detect_head_shoulders(
 
                 neckline = (
                     float(
-                        df.iloc[
-                            low1
-                        ]["low"]
+                        df.iloc[low1]["low"]
                     )
                     + float(
-                        df.iloc[
-                            low2
-                        ]["low"]
+                        df.iloc[low2]["low"]
                     )
                 ) / 2.0
 
                 depth = (
-                    head_price
-                    - neckline
+                    head_price - neckline
                 ) / head_price
 
                 if depth < MIN_HS_DEPTH_PCT:
                     continue
 
-                target = (
-                    neckline
-                    - (
-                        head_price
-                        - neckline
-                    )
+                target = neckline - (
+                    head_price - neckline
                 )
 
-                stop = (
-                    head_price
-                    * (
-                        1
-                        + INVALIDATION_BUFFER
-                    )
+                stop = head_price * (
+                    1 + INVALIDATION_BUFFER
                 )
 
                 score = (
@@ -1606,8 +1531,7 @@ def detect_head_shoulders(
                         depth * 1000,
                     )
                     + (
-                        1
-                        - shoulder_diff
+                        1 - shoulder_diff
                     ) * 5
                 )
 
@@ -1616,24 +1540,17 @@ def detect_head_shoulders(
                         "Head & Shoulders",
                         "SHORT",
                         {
-                            "left_idx":
-                                left,
-                            "head_idx":
-                                head,
-                            "right_idx":
-                                right,
-                            "neck_left_idx":
-                                low1,
-                            "neck_right_idx":
-                                low2,
+                            "left_idx": left,
+                            "head_idx": head,
+                            "right_idx": right,
+                            "neck_left_idx": low1,
+                            "neck_right_idx": low2,
                         },
                         neckline,
                         low2,
                         target,
                         stop,
-                        df.iloc[
-                            right
-                        ]["timestamp"],
+                        df.iloc[right]["timestamp"],
                         score,
                     )
                 )
@@ -1645,17 +1562,14 @@ def detect_head_shoulders(
 # INVERSE HEAD & SHOULDERS
 # ============================================================
 
-def detect_inverse_head_shoulders(
-    df,
-):
+def detect_inverse_head_shoulders(df):
+
     lows = pivot_lows(df)
     highs = pivot_highs(df)
 
     patterns = []
 
-    for a in range(
-        len(lows)
-    ):
+    for a in range(len(lows)):
 
         left = lows[a]
 
@@ -1679,16 +1593,10 @@ def detect_inverse_head_shoulders(
 
                 right = lows[c]
 
-                if (
-                    right - head
-                    < MIN_PATTERN_SEPARATION_BARS
-                ):
+                if right - head < MIN_PATTERN_SEPARATION_BARS:
                     continue
 
-                if (
-                    right - left
-                    > MAX_HS_PATTERN_BARS
-                ):
+                if right - left > MAX_HS_PATTERN_BARS:
                     break
 
                 left_price = float(
@@ -1708,22 +1616,14 @@ def detect_inverse_head_shoulders(
                     right_price,
                 )
 
-                if (
-                    shoulder_diff
-                    > HS_SHOULDER_TOLERANCE
-                ):
+                if shoulder_diff > HS_SHOULDER_TOLERANCE:
                     continue
 
-                if (
-                    head_price
-                    >= min(
-                        left_price,
-                        right_price,
-                    )
-                    * (
-                        1
-                        - HS_MIN_HEAD_ADVANTAGE_PCT
-                    )
+                if head_price >= min(
+                    left_price,
+                    right_price,
+                ) * (
+                    1 - HS_MIN_HEAD_ADVANTAGE_PCT
                 ):
                     continue
 
@@ -1760,39 +1660,26 @@ def detect_inverse_head_shoulders(
 
                 neckline = (
                     float(
-                        df.iloc[
-                            high1
-                        ]["high"]
+                        df.iloc[high1]["high"]
                     )
                     + float(
-                        df.iloc[
-                            high2
-                        ]["high"]
+                        df.iloc[high2]["high"]
                     )
                 ) / 2.0
 
                 depth = (
-                    neckline
-                    - head_price
+                    neckline - head_price
                 ) / neckline
 
                 if depth < MIN_HS_DEPTH_PCT:
                     continue
 
-                target = (
-                    neckline
-                    + (
-                        neckline
-                        - head_price
-                    )
+                target = neckline + (
+                    neckline - head_price
                 )
 
-                stop = (
-                    head_price
-                    * (
-                        1
-                        - INVALIDATION_BUFFER
-                    )
+                stop = head_price * (
+                    1 - INVALIDATION_BUFFER
                 )
 
                 score = (
@@ -1801,8 +1688,7 @@ def detect_inverse_head_shoulders(
                         depth * 1000,
                     )
                     + (
-                        1
-                        - shoulder_diff
+                        1 - shoulder_diff
                     ) * 5
                 )
 
@@ -1811,24 +1697,17 @@ def detect_inverse_head_shoulders(
                         "Inverse Head & Shoulders",
                         "LONG",
                         {
-                            "left_idx":
-                                left,
-                            "head_idx":
-                                head,
-                            "right_idx":
-                                right,
-                            "neck_left_idx":
-                                high1,
-                            "neck_right_idx":
-                                high2,
+                            "left_idx": left,
+                            "head_idx": head,
+                            "right_idx": right,
+                            "neck_left_idx": high1,
+                            "neck_right_idx": high2,
                         },
                         neckline,
                         high2,
                         target,
                         stop,
-                        df.iloc[
-                            right
-                        ]["timestamp"],
+                        df.iloc[right]["timestamp"],
                         score,
                     )
                 )
@@ -1840,36 +1719,26 @@ def detect_inverse_head_shoulders(
 # ALL PATTERNS
 # ============================================================
 
-def detect_patterns(
-    df,
-):
+def detect_patterns(df):
+
     patterns = []
 
     patterns.extend(
-        detect_double_top(
-            df
-        )
+        detect_double_top(df)
     )
 
     patterns.extend(
-        detect_double_bottom(
-            df
-        )
+        detect_double_bottom(df)
     )
 
     patterns.extend(
-        detect_head_shoulders(
-            df
-        )
+        detect_head_shoulders(df)
     )
 
     patterns.extend(
-        detect_inverse_head_shoulders(
-            df
-        )
+        detect_inverse_head_shoulders(df)
     )
 
-    # Remove duplicates.
     unique = {}
 
     for p in patterns:
@@ -1888,8 +1757,7 @@ def detect_patterns(
 
         if (
             old is None
-            or p["score"]
-            > old["score"]
+            or p["score"] > old["score"]
         ):
             unique[key] = p
 
@@ -1902,9 +1770,8 @@ def detect_patterns(
 # 1H PATTERN
 # ============================================================
 
-def find_1h_pattern(
-    df1h,
-):
+def find_1h_pattern(df1h):
+
     patterns = detect_patterns(
         df1h
     )
@@ -1914,15 +1781,13 @@ def find_1h_pattern(
 
     cutoff = (
         now_ts()
-        - RECENT_PATTERN_HOURS_1H
-        * 3600
+        - RECENT_PATTERN_HOURS_1H * 3600
     )
 
     candidates = [
         p
         for p in patterns
-        if p["pattern_time"]
-        >= cutoff
+        if p["pattern_time"] >= cutoff
     ]
 
     if not candidates:
@@ -1947,23 +1812,21 @@ def find_1h_breakout(
     df1h,
     pattern,
 ):
-    pattern_time = (
-        pattern["pattern_time"]
-    )
+
+    pattern_time = pattern[
+        "pattern_time"
+    ]
 
     end_time = (
         pattern_time
-        + BREAKOUT_LOOKAHEAD_1H
-        * 3600
+        + BREAKOUT_LOOKAHEAD_1H * 3600
     )
 
-    direction = (
-        pattern["direction"]
-    )
+    direction = pattern[
+        "direction"
+    ]
 
-    for i in range(
-        len(df1h)
-    ):
+    for i in range(len(df1h)):
 
         row = df1h.iloc[i]
 
@@ -1988,25 +1851,21 @@ def find_1h_breakout(
         if direction == "LONG":
 
             if close > neckline:
+
                 return {
-                    "index":
-                        i,
-                    "timestamp":
-                        ts,
-                    "price":
-                        close,
+                    "index": i,
+                    "timestamp": ts,
+                    "price": close,
                 }
 
         else:
 
             if close < neckline:
+
                 return {
-                    "index":
-                        i,
-                    "timestamp":
-                        ts,
-                    "price":
-                        close,
+                    "index": i,
+                    "timestamp": ts,
+                    "price": close,
                 }
 
     return None
@@ -2021,26 +1880,24 @@ def find_15m_pattern(
     breakout_1h,
     required_direction,
 ):
+
     patterns = detect_patterns(
         df15
     )
 
-    cutoff_start = (
-        breakout_1h["timestamp"]
-    )
+    cutoff_start = breakout_1h[
+        "timestamp"
+    ]
 
     cutoff_end = (
         cutoff_start
-        + RECENT_PATTERN_HOURS_15M
-        * 3600
+        + RECENT_PATTERN_HOURS_15M * 3600
     )
 
     candidates = []
 
     for pattern in patterns:
 
-        # Pattern name may differ.
-        # Direction MUST match 1H.
         if (
             pattern["direction"]
             != required_direction
@@ -2083,23 +1940,21 @@ def find_15m_breakout(
     df15,
     pattern15,
 ):
-    pattern_time = (
-        pattern15["pattern_time"]
-    )
+
+    pattern_time = pattern15[
+        "pattern_time"
+    ]
 
     end_time = (
         pattern_time
-        + BREAKOUT_LOOKAHEAD_15M
-        * 900
+        + BREAKOUT_LOOKAHEAD_15M * 900
     )
 
-    direction = (
-        pattern15["direction"]
-    )
+    direction = pattern15[
+        "direction"
+    ]
 
-    for i in range(
-        len(df15)
-    ):
+    for i in range(len(df15)):
 
         row = df15.iloc[i]
 
@@ -2124,25 +1979,21 @@ def find_15m_breakout(
         if direction == "LONG":
 
             if close > neckline:
+
                 return {
-                    "index":
-                        i,
-                    "timestamp":
-                        ts,
-                    "price":
-                        close,
+                    "index": i,
+                    "timestamp": ts,
+                    "price": close,
                 }
 
         else:
 
             if close < neckline:
+
                 return {
-                    "index":
-                        i,
-                    "timestamp":
-                        ts,
-                    "price":
-                        close,
+                    "index": i,
+                    "timestamp": ts,
+                    "price": close,
                 }
 
     return None
@@ -2157,17 +2008,17 @@ def find_first_retest(
     pattern15,
     breakout15,
 ):
+
     neckline = float(
         pattern15["neckline"]
     )
 
-    direction = (
-        pattern15["direction"]
-    )
+    direction = pattern15[
+        "direction"
+    ]
 
     start_index = (
-        breakout15["index"]
-        + 1
+        breakout15["index"] + 1
     )
 
     end_index = min(
@@ -2197,9 +2048,7 @@ def find_first_retest(
         )
 
         touched = (
-            low
-            <= neckline
-            <= high
+            low <= neckline <= high
         )
 
         if not touched:
@@ -2210,16 +2059,11 @@ def find_first_retest(
             if close >= neckline:
 
                 return {
-                    "index":
-                        i,
-                    "timestamp":
-                        int(
-                            row[
-                                "timestamp"
-                            ]
-                        ),
-                    "price":
-                        close,
+                    "index": i,
+                    "timestamp": int(
+                        row["timestamp"]
+                    ),
+                    "price": close,
                 }
 
         else:
@@ -2227,16 +2071,11 @@ def find_first_retest(
             if close <= neckline:
 
                 return {
-                    "index":
-                        i,
-                    "timestamp":
-                        int(
-                            row[
-                                "timestamp"
-                            ]
-                        ),
-                    "price":
-                        close,
+                    "index": i,
+                    "timestamp": int(
+                        row["timestamp"]
+                    ),
+                    "price": close,
                 }
 
     return None
@@ -2251,17 +2090,17 @@ def find_confirmation(
     pattern15,
     retest15,
 ):
-    direction = (
-        pattern15["direction"]
-    )
+
+    direction = pattern15[
+        "direction"
+    ]
 
     neckline = float(
         pattern15["neckline"]
     )
 
     start_index = (
-        retest15["index"]
-        + 1
+        retest15["index"] + 1
     )
 
     end_index = min(
@@ -2300,61 +2139,39 @@ def find_confirmation(
 
         if direction == "LONG":
 
-            bullish = (
-                close
-                > open_price
-            )
-
             if (
-                bullish
-                and close
-                > neckline
+                close > open_price
+                and close > neckline
             ):
 
                 return {
-                    "index":
-                        i,
-                    "timestamp":
-                        ts,
-                    "price":
-                        close,
-                    "high":
-                        high,
-                    "low":
-                        low,
+                    "index": i,
+                    "timestamp": ts,
+                    "price": close,
+                    "high": high,
+                    "low": low,
                 }
 
         else:
 
-            bearish = (
-                close
-                < open_price
-            )
-
             if (
-                bearish
-                and close
-                < neckline
+                close < open_price
+                and close < neckline
             ):
 
                 return {
-                    "index":
-                        i,
-                    "timestamp":
-                        ts,
-                    "price":
-                        close,
-                    "high":
-                        high,
-                    "low":
-                        low,
+                    "index": i,
+                    "timestamp": ts,
+                    "price": close,
+                    "high": high,
+                    "low": low,
                 }
 
     return None
 
 
 # ============================================================
-# TRADE LEVEL VALIDATION
+# LEVEL VALIDATION
 # ============================================================
 
 def validate_trade_levels(
@@ -2363,6 +2180,7 @@ def validate_trade_levels(
     tp,
     sl,
 ):
+
     if direction == "LONG":
 
         return (
@@ -2384,11 +2202,8 @@ def analyze_asset(
     asset,
     symbol,
 ):
-    global BEST_CANDIDATE
 
-    # --------------------------------------------------------
-    # 1H DATA
-    # --------------------------------------------------------
+    global BEST_CANDIDATE
 
     df1h = get_candles(
         asset,
@@ -2402,10 +2217,6 @@ def analyze_asset(
     ):
         return None
 
-    # --------------------------------------------------------
-    # 15M DATA
-    # --------------------------------------------------------
-
     df15 = get_candles(
         asset,
         "15m",
@@ -2418,10 +2229,6 @@ def analyze_asset(
     ):
         return None
 
-    # --------------------------------------------------------
-    # 1H PATTERN
-    # --------------------------------------------------------
-
     pattern1h = find_1h_pattern(
         df1h
     )
@@ -2429,13 +2236,7 @@ def analyze_asset(
     if not pattern1h:
         return None
 
-    STATS[
-        "patterns_1h"
-    ] += 1
-
-    # --------------------------------------------------------
-    # 1H BREAKOUT
-    # --------------------------------------------------------
+    STATS["patterns_1h"] += 1
 
     breakout1h = find_1h_breakout(
         df1h,
@@ -2445,17 +2246,11 @@ def analyze_asset(
     if not breakout1h:
         return None
 
-    STATS[
-        "breakouts_1h"
-    ] += 1
+    STATS["breakouts_1h"] += 1
 
-    direction = (
-        pattern1h["direction"]
-    )
-
-    # --------------------------------------------------------
-    # 15M PATTERN
-    # --------------------------------------------------------
+    direction = pattern1h[
+        "direction"
+    ]
 
     pattern15 = find_15m_pattern(
         df15,
@@ -2466,13 +2261,7 @@ def analyze_asset(
     if not pattern15:
         return None
 
-    STATS[
-        "patterns_15m"
-    ] += 1
-
-    # --------------------------------------------------------
-    # 15M BREAKOUT
-    # --------------------------------------------------------
+    STATS["patterns_15m"] += 1
 
     breakout15 = find_15m_breakout(
         df15,
@@ -2482,13 +2271,7 @@ def analyze_asset(
     if not breakout15:
         return None
 
-    STATS[
-        "breakouts_15m"
-    ] += 1
-
-    # --------------------------------------------------------
-    # FIRST RETEST
-    # --------------------------------------------------------
+    STATS["breakouts_15m"] += 1
 
     retest15 = find_first_retest(
         df15,
@@ -2499,13 +2282,7 @@ def analyze_asset(
     if not retest15:
         return None
 
-    STATS[
-        "retests_15m"
-    ] += 1
-
-    # --------------------------------------------------------
-    # FIRST CONFIRMATION
-    # --------------------------------------------------------
+    STATS["retests_15m"] += 1
 
     confirmation15 = find_confirmation(
         df15,
@@ -2521,22 +2298,12 @@ def analyze_asset(
     ] += 1
 
     # --------------------------------------------------------
-    # FRESHNESS FILTER
-    # --------------------------------------------------------
-    #
-    # IMPORTANT:
-    #
-    # confirmation timestamp = candle START
-    #
-    # Therefore we calculate age AFTER the 15M candle
-    # has actually closed.
+    # FRESHNESS
     # --------------------------------------------------------
 
     age_minutes = (
         confirmation_age_minutes(
-            confirmation15[
-                "timestamp"
-            ]
+            confirmation15["timestamp"]
         )
     )
 
@@ -2574,10 +2341,6 @@ def analyze_asset(
         pattern15["stop"]
     )
 
-    # --------------------------------------------------------
-    # LEVEL VALIDATION
-    # --------------------------------------------------------
-
     if not validate_trade_levels(
         direction,
         entry,
@@ -2586,28 +2349,16 @@ def analyze_asset(
     ):
         return None
 
-    # --------------------------------------------------------
-    # SIGNAL KEY
-    # --------------------------------------------------------
-
     signal_key = (
         f"{asset}|"
         f"{direction}|"
         f"{int(confirmation15['timestamp'])}"
     )
 
-    # --------------------------------------------------------
-    # DATABASE DUPLICATE CHECK
-    # --------------------------------------------------------
-
     if has_signal(
         signal_key
     ):
         return None
-
-    # --------------------------------------------------------
-    # ONE OPEN TRADE PER ASSET + DIRECTION
-    # --------------------------------------------------------
 
     if has_open_trade(
         asset,
@@ -2615,43 +2366,20 @@ def analyze_asset(
     ):
         return None
 
-    # --------------------------------------------------------
-    # BUILD TRADE
-    # --------------------------------------------------------
-
     trade = {
-        "symbol":
-            symbol,
+        "symbol": symbol,
+        "asset": asset,
+        "direction": direction,
+        "pattern": pattern15["pattern"],
+        "signal_key": signal_key,
 
-        "asset":
-            asset,
+        "pattern1h": pattern1h,
+        "breakout1h": breakout1h,
 
-        "direction":
-            direction,
-
-        "pattern":
-            pattern15["pattern"],
-
-        "signal_key":
-            signal_key,
-
-        "pattern1h":
-            pattern1h,
-
-        "breakout1h":
-            breakout1h,
-
-        "pattern15m":
-            pattern15,
-
-        "breakout15m":
-            breakout15,
-
-        "retest15m":
-            retest15,
-
-        "confirmation15m":
-            confirmation15,
+        "pattern15m": pattern15,
+        "breakout15m": breakout15,
+        "retest15m": retest15,
+        "confirmation15m": confirmation15,
 
         "entry_time":
             int(
@@ -2660,14 +2388,9 @@ def analyze_asset(
                 ]
             ),
 
-        "entry_price":
-            entry,
-
-        "tp_price":
-            tp,
-
-        "sl_price":
-            sl,
+        "entry_price": entry,
+        "tp_price": tp,
+        "sl_price": sl,
 
         "confirmation_age":
             age_minutes,
@@ -2680,17 +2403,10 @@ def analyze_asset(
         "candidates"
     ] += 1
 
-    # --------------------------------------------------------
-    # BEST CANDIDATE
-    # --------------------------------------------------------
-
     BEST_CANDIDATE = {
-        "asset":
-            asset,
-        "stage":
-            "Signal Ready",
-        "score":
-            pattern15["score"],
+        "asset": asset,
+        "stage": "Signal Ready",
+        "score": pattern15["score"],
         "reason":
             (
                 f"{pattern15['pattern']} | "
@@ -2745,6 +2461,7 @@ def mark_chart_point(
     label,
     prefer_high=True,
 ):
+
     if idx is None:
         return
 
@@ -2753,24 +2470,15 @@ def mark_chart_point(
 
     start_index = chart_df.index[0]
 
-    x = (
-        idx
-        - start_index
-    )
+    x = idx - start_index
 
-    row = original_df.iloc[
-        idx
-    ]
+    row = original_df.iloc[idx]
 
     if prefer_high:
-        y = float(
-            row["high"]
-        )
+        y = float(row["high"])
         offset = 12
     else:
-        y = float(
-            row["low"]
-        )
+        y = float(row["low"])
         offset = -16
 
     draw_annotation(
@@ -2786,9 +2494,8 @@ def mark_chart_point(
 # CHART
 # ============================================================
 
-def make_chart(
-    trade,
-):
+def make_chart(trade):
+
     df = trade.get(
         "df15"
     )
@@ -2813,18 +2520,15 @@ def make_chart(
         )
     )
 
+    start_index = chart_df.index[0]
+
     # --------------------------------------------------------
     # CANDLES
     # --------------------------------------------------------
 
-    start_index = chart_df.index[0]
-
     for idx, row in chart_df.iterrows():
 
-        x = (
-            idx
-            - start_index
-        )
+        x = idx - start_index
 
         open_price = float(
             row["open"]
@@ -2855,14 +2559,12 @@ def make_chart(
         )
 
         height = abs(
-            close
-            - open_price
+            close - open_price
         )
 
         if height == 0:
             height = max(
-                close
-                * 0.00005,
+                close * 0.00005,
                 1e-12,
             )
 
@@ -2878,50 +2580,47 @@ def make_chart(
     ]
 
     # --------------------------------------------------------
-    # IMPORTANT LEVELS
+    # LEVELS
     # --------------------------------------------------------
 
     ax.axhline(
-        pattern[
-            "neckline"
-        ],
+        pattern["neckline"],
         linestyle="--",
         linewidth=1.3,
         label="NECKLINE",
     )
 
     ax.axhline(
-        trade[
-            "entry_price"
-        ],
+        trade["entry_price"],
         linestyle="-",
         linewidth=1.5,
         label="ENTRY",
     )
 
     ax.axhline(
-        trade[
-            "tp_price"
-        ],
+        trade["tp_price"],
         linestyle="--",
         linewidth=1.3,
         label="TP",
     )
 
     ax.axhline(
-        trade[
-            "sl_price"
-        ],
+        trade["sl_price"],
         linestyle="--",
         linewidth=1.3,
         label="SL",
     )
 
     # --------------------------------------------------------
-    # PATTERN POINTS
+    # REAL PATTERN POINTS
     # --------------------------------------------------------
 
     p = pattern
+
+    points = p.get(
+        "points",
+        {},
+    )
 
     if p["pattern"] == "Double Top":
 
@@ -2929,7 +2628,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("left_idx"),
+            points.get("left_idx"),
             "P1",
             True,
         )
@@ -2938,7 +2637,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("right_idx"),
+            points.get("right_idx"),
             "P2",
             True,
         )
@@ -2947,7 +2646,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("valley_idx"),
+            points.get("valley_idx"),
             "NL",
             False,
         )
@@ -2958,7 +2657,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("left_idx"),
+            points.get("left_idx"),
             "P1",
             False,
         )
@@ -2967,7 +2666,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("right_idx"),
+            points.get("right_idx"),
             "P2",
             False,
         )
@@ -2976,7 +2675,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("peak_idx"),
+            points.get("peak_idx"),
             "NL",
             True,
         )
@@ -2987,7 +2686,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("left_idx"),
+            points.get("left_idx"),
             "LS",
             True,
         )
@@ -2996,7 +2695,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("head_idx"),
+            points.get("head_idx"),
             "H",
             True,
         )
@@ -3005,7 +2704,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("right_idx"),
+            points.get("right_idx"),
             "RS",
             True,
         )
@@ -3014,7 +2713,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("neck_left_idx"),
+            points.get("neck_left_idx"),
             "NL1",
             False,
         )
@@ -3023,21 +2722,18 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("neck_right_idx"),
+            points.get("neck_right_idx"),
             "NL2",
             False,
         )
 
-    elif (
-        p["pattern"]
-        == "Inverse Head & Shoulders"
-    ):
+    elif p["pattern"] == "Inverse Head & Shoulders":
 
         mark_chart_point(
             ax,
             chart_df,
             df,
-            p.get("left_idx"),
+            points.get("left_idx"),
             "LS",
             False,
         )
@@ -3046,7 +2742,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("head_idx"),
+            points.get("head_idx"),
             "H",
             False,
         )
@@ -3055,7 +2751,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("right_idx"),
+            points.get("right_idx"),
             "RS",
             False,
         )
@@ -3064,7 +2760,7 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("neck_left_idx"),
+            points.get("neck_left_idx"),
             "NL1",
             True,
         )
@@ -3073,13 +2769,13 @@ def make_chart(
             ax,
             chart_df,
             df,
-            p.get("neck_right_idx"),
+            points.get("neck_right_idx"),
             "NL2",
             True,
         )
 
     # --------------------------------------------------------
-    # BREAKOUT / RETEST / CONFIRMATION / ENTRY
+    # STAGE POINTS
     # --------------------------------------------------------
 
     def stage_point(
@@ -3087,6 +2783,7 @@ def make_chart(
         label,
         prefer_high=True,
     ):
+
         item = trade.get(
             stage
         )
@@ -3104,24 +2801,15 @@ def make_chart(
         if idx not in chart_df.index:
             return
 
-        x = (
-            idx
-            - start_index
-        )
+        x = idx - start_index
 
-        row = df.iloc[
-            idx
-        ]
+        row = df.iloc[idx]
 
         if prefer_high:
-            y = float(
-                row["high"]
-            )
+            y = float(row["high"])
             offset = 24
         else:
-            y = float(
-                row["low"]
-            )
+            y = float(row["low"])
             offset = -28
 
         draw_annotation(
@@ -3176,7 +2864,6 @@ def make_chart(
             False,
         )
 
-    # Entry marker
     confirmation = trade[
         "confirmation15m"
     ]
@@ -3264,9 +2951,8 @@ def make_chart(
 # SIGNAL MESSAGE
 # ============================================================
 
-def build_signal_message(
-    trade,
-):
+def build_signal_message(trade):
+
     direction = trade[
         "direction"
     ]
@@ -3319,10 +3005,11 @@ def build_signal_message(
 
 
 # ============================================================
-# OPEN TRADES MESSAGE
+# OPEN TRADES
 # ============================================================
 
 def build_open_trades_message():
+
     rows = get_open_trades()
 
     if not rows:
@@ -3339,13 +3026,8 @@ def build_open_trades_message():
 
     for row in rows:
 
-        asset = row[
-            "asset"
-        ]
-
-        direction = row[
-            "direction"
-        ]
+        asset = row["asset"]
+        direction = row["direction"]
 
         entry = float(
             row["entry_price"]
@@ -3370,8 +3052,7 @@ def build_open_trades_message():
 
             pnl = (
                 (
-                    current
-                    - entry
+                    current - entry
                 )
                 / entry
             ) * 100
@@ -3380,8 +3061,7 @@ def build_open_trades_message():
 
             pnl = (
                 (
-                    entry
-                    - current
+                    entry - current
                 )
                 / entry
             ) * 100
@@ -3428,9 +3108,7 @@ def build_open_trades_message():
             ]
         )
 
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -3438,40 +3116,48 @@ def build_open_trades_message():
 # ============================================================
 
 def build_performance_message():
+
     conn = db_connect()
 
-    row = conn.execute(
-        """
-        SELECT
-            COUNT(*) AS total,
-            SUM(
-                CASE
-                    WHEN status='CLOSED'
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS closed,
-            SUM(
-                CASE
-                    WHEN status='CLOSED'
-                     AND exit_reason='TP'
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS wins,
-            SUM(
-                CASE
-                    WHEN status='CLOSED'
-                     AND exit_reason='SL'
-                    THEN 1
-                    ELSE 0
-                END
-            ) AS losses
-        FROM trades
-        """
-    ).fetchone()
+    try:
 
-    conn.close()
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+
+                SUM(
+                    CASE
+                        WHEN status='CLOSED'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS closed,
+
+                SUM(
+                    CASE
+                        WHEN status='CLOSED'
+                         AND exit_reason='TP'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS wins,
+
+                SUM(
+                    CASE
+                        WHEN status='CLOSED'
+                         AND exit_reason='SL'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS losses
+
+            FROM trades
+            """
+        ).fetchone()
+
+    finally:
+        conn.close()
 
     total = int(
         row["total"] or 0
@@ -3489,13 +3175,11 @@ def build_performance_message():
         row["losses"] or 0
     )
 
-    if closed:
-        win_rate = (
-            wins
-            / closed
-        ) * 100
-    else:
-        win_rate = 0.0
+    win_rate = (
+        (wins / closed) * 100
+        if closed
+        else 0.0
+    )
 
     return (
         "📈 <b>PERFORMANCE</b>\n\n"
@@ -3512,6 +3196,7 @@ def build_performance_message():
 # ============================================================
 
 def build_scan_summary():
+
     scanned = STATS[
         "assets_scanned"
     ]
@@ -3602,35 +3287,33 @@ def build_scan_summary():
             ]
         )
 
+    elif scanned < total_assets:
+
+        lines.extend(
+            [
+                "⚠️ <b>SCAN INCOMPLETE</b>",
+                "",
+                (
+                    "Some assets failed during "
+                    "data retrieval."
+                ),
+                "",
+            ]
+        )
+
     else:
 
-        if (
-            scanned
-            < total_assets
-        ):
-
-            lines.extend(
-                [
-                    "⚠️ <b>SCAN INCOMPLETE</b>",
-                    "",
-                    "Some assets failed during data retrieval.",
-                    "",
-                ]
-            )
-
-        else:
-
-            lines.extend(
-                [
-                    "ℹ️ <b>NO VIABLE CANDIDATE</b>",
-                    "",
-                    (
-                        "No fresh valid setup "
-                        "reached Entry."
-                    ),
-                    "",
-                ]
-            )
+        lines.extend(
+            [
+                "ℹ️ <b>NO VIABLE CANDIDATE</b>",
+                "",
+                (
+                    "No fresh valid setup "
+                    "reached Entry."
+                ),
+                "",
+            ]
+        )
 
     lines.append(
         build_open_trades_message()
@@ -3642,9 +3325,7 @@ def build_scan_summary():
         build_performance_message()
     )
 
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -3656,6 +3337,7 @@ def close_trade(
     exit_price,
     reason,
 ):
+
     conn = db_connect()
 
     try:
@@ -3694,6 +3376,7 @@ def close_trade(
 # ============================================================
 
 def reconcile_open_trades():
+
     rows = get_open_trades()
 
     if not rows:
@@ -3737,6 +3420,7 @@ def reconcile_open_trades():
         conn = db_connect()
 
         try:
+
             conn.execute(
                 """
                 UPDATE trades
@@ -3769,8 +3453,7 @@ def reconcile_open_trades():
                     row["entry_time"]
                 )
             )
-            >= MAX_HOLD_HOURS
-            * 3600
+            >= MAX_HOLD_HOURS * 3600
         ):
 
             close_trade(
@@ -3841,8 +3524,7 @@ def reconcile_open_trades():
 
             pnl = (
                 (
-                    current
-                    - entry
+                    current - entry
                 )
                 / entry
             ) * 100
@@ -3851,8 +3533,7 @@ def reconcile_open_trades():
 
             pnl = (
                 (
-                    entry
-                    - current
+                    entry - current
                 )
                 / entry
             ) * 100
@@ -3884,36 +3565,58 @@ def reconcile_open_trades():
 
 
 # ============================================================
+# RESET PER-SCAN STATS
+# ============================================================
+
+def reset_scan_stats():
+
+    STATS["assets_scanned"] = 0
+
+    STATS["patterns_1h"] = 0
+    STATS["breakouts_1h"] = 0
+
+    STATS["patterns_15m"] = 0
+    STATS["breakouts_15m"] = 0
+
+    STATS["retests_15m"] = 0
+    STATS["confirmations_15m"] = 0
+
+    STATS["fresh_confirmations"] = 0
+    STATS["stale_confirmations"] = 0
+
+    STATS["candidates"] = 0
+
+    STATS["unique_entries"] = 0
+    STATS["signals_sent"] = 0
+
+    STATS["closed_trades"] = 0
+    STATS["errors"] = 0
+
+
+# ============================================================
 # SCAN
 # ============================================================
 
 def scan():
+
     global BEST_CANDIDATE
 
     STATS["scans"] += 1
 
-    STATS[
-        "assets_scanned"
-    ] = 0
-
-    for key in (
-        "patterns_1h",
-        "breakouts_1h",
-        "patterns_15m",
-        "breakouts_15m",
-        "retests_15m",
-        "confirmations_15m",
-        "fresh_confirmations",
-        "stale_confirmations",
-        "candidates",
-    ):
-        STATS[key] = 0
+    reset_scan_stats()
 
     BEST_CANDIDATE = None
 
+    # --------------------------------------------------------
+    # LOAD PRICES
+    # --------------------------------------------------------
+
     try:
+
         load_prices()
+
     except Exception as exc:
+
         print(
             "Price loading error:",
             exc,
@@ -3922,7 +3625,7 @@ def scan():
     candidates = []
 
     # --------------------------------------------------------
-    # SCAN ALL 40 ASSETS
+    # SCAN ALL ASSETS
     # --------------------------------------------------------
 
     for asset in ASSETS:
@@ -3966,10 +3669,8 @@ def scan():
 
     candidates.sort(
         key=lambda t: (
-            t["pattern15m"][
-                "score"
-            ],
-            t["confirmation_age"],
+            t["pattern15m"]["score"],
+            -t["confirmation_age"],
         ),
         reverse=True,
     )
@@ -4010,26 +3711,27 @@ def scan():
 
             if chart_path:
 
-                caption = message
-
                 ok = telegram_send_photo(
                     chart_path,
-                    caption,
+                    message,
                 )
 
                 if ok:
+
                     sent += 1
+
                     STATS[
                         "signals_sent"
                     ] += 1
 
                 else:
 
-                    # If photo fails, still try text.
                     if send_telegram(
                         message
                     ):
+
                         sent += 1
+
                         STATS[
                             "signals_sent"
                         ] += 1
@@ -4039,7 +3741,9 @@ def scan():
                 if send_telegram(
                     message
                 ):
+
                     sent += 1
+
                     STATS[
                         "signals_sent"
                     ] += 1
@@ -4051,10 +3755,14 @@ def scan():
                 exc,
             )
 
+            traceback.print_exc()
+
             if send_telegram(
                 message
             ):
+
                 sent += 1
+
                 STATS[
                     "signals_sent"
                 ] += 1
@@ -4067,6 +3775,7 @@ def scan():
                     chart_path
                 )
             ):
+
                 try:
                     os.remove(
                         chart_path
@@ -4075,7 +3784,7 @@ def scan():
                     pass
 
     # --------------------------------------------------------
-    # PERIODIC REPORT
+    # PERIODIC TELEGRAM REPORT
     # --------------------------------------------------------
 
     last_report = get_meta(
@@ -4085,34 +3794,54 @@ def scan():
     should_report = False
 
     if last_report is None:
+
         should_report = True
 
     else:
 
         try:
 
-            should_report = (
+            elapsed = (
                 now_ts()
                 - int(last_report)
+            )
+
+            should_report = (
+                elapsed
                 >= PERIODIC_REPORT_SECONDS
             )
 
         except Exception:
+
             should_report = True
 
     if should_report:
 
         try:
+
             report = build_scan_summary()
 
-            send_telegram(
+            telegram_ok = send_telegram(
                 report
             )
 
-            set_meta(
-                "last_periodic_report",
-                now_ts(),
-            )
+            if telegram_ok:
+
+                set_meta(
+                    "last_periodic_report",
+                    now_ts(),
+                )
+
+                print(
+                    "Periodic Telegram report sent."
+                )
+
+            else:
+
+                print(
+                    "Periodic Telegram report "
+                    "FAILED to send."
+                )
 
         except Exception as exc:
 
@@ -4121,12 +3850,15 @@ def scan():
                 exc,
             )
 
+            traceback.print_exc()
+
 
 # ============================================================
 # MAIN
 # ============================================================
 
 def main():
+
     print(
         "=" * 60
     )
@@ -4154,13 +3886,31 @@ def main():
         "=" * 60
     )
 
-    init_db()
-
     # --------------------------------------------------------
-    # FIRST: RECONCILE EXISTING TRADES
+    # DATABASE
     # --------------------------------------------------------
 
     try:
+
+        init_db()
+
+    except Exception as exc:
+
+        print(
+            "Database initialization error:",
+            exc,
+        )
+
+        traceback.print_exc()
+
+        return
+
+    # --------------------------------------------------------
+    # RECONCILE
+    # --------------------------------------------------------
+
+    try:
+
         reconcile_open_trades()
 
     except Exception as exc:
@@ -4181,6 +3931,7 @@ def main():
     # --------------------------------------------------------
 
     try:
+
         scan()
 
     except Exception as exc:
