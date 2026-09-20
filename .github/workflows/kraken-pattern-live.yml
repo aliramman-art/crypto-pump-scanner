@@ -26,6 +26,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       # ======================================================
       # PYTHON
@@ -73,10 +75,13 @@ jobs:
       - name: Save scanner state
         if: always()
         run: |
+          set -e
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if [ -f "kraken_pattern_live_v52.db" ]; then
+
             echo "Database found:"
             ls -lh kraken_pattern_live_v52.db
 
@@ -84,10 +89,39 @@ jobs:
 
             if git diff --cached --quiet; then
               echo "No database changes."
-            else
-              git commit -m "Update Kraken live scanner state"
-              git push
+              exit 0
             fi
+
+            git commit -m "Update Kraken live scanner state"
+
+            echo "Fetching latest remote main..."
+            git fetch origin main
+
+            echo "Rebasing local changes onto latest remote main..."
+            git rebase origin/main
+
+            echo "Pushing scanner state..."
+
+            for attempt in 1 2 3 4 5; do
+              if git push origin HEAD:main; then
+                echo "Database state pushed successfully."
+                exit 0
+              fi
+
+              echo "Push failed on attempt $attempt."
+
+              if [ "$attempt" -lt 5 ]; then
+                echo "Fetching latest remote main and retrying..."
+
+                git fetch origin main
+
+                git rebase origin/main
+              fi
+            done
+
+            echo "ERROR: Failed to push database state after 5 attempts."
+            exit 1
+
           else
             echo "ERROR: kraken_pattern_live_v52.db was not created/found."
             exit 1
