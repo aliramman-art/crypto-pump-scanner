@@ -41,14 +41,12 @@
 # - Performance starts from zero for this strategy version.
 # - Existing historical closed trades are preserved in DB
 #   but excluded from current Performance.
-# - Existing OPEN trades from previous strategy are cleared
-#   ONCE on first run of this version.
+# - Existing OPEN trades are preserved.
 # - New trades are counted from strategy_performance_start.
 # - PNL is stored in trades.pnl_pct.
 # - LONG and SHORT PNL are calculated correctly.
 # - TP / SL / TIME are reported separately.
 # - Total PNL and Average PNL are included.
-# - OPEN TRADES section has been removed.
 #
 # EXISTING DB PRESERVED:
 #   kraken_pattern_live_v52.db
@@ -592,7 +590,6 @@ def init_db():
         "current_price": "REAL",
         "status": "TEXT",
         "exit_time": "TEXT",
-        "exit_price": "REAL",
         "exit_reason": "TEXT",
         "pnl_pct": "REAL",
         "created_at": "INTEGER",
@@ -707,9 +704,8 @@ def initialize_new_strategy():
 
     On the first run of VERSION 6.5.0:
     1. Save current timestamp as strategy start.
-    2. Delete all currently OPEN trades because they belong
-       to the previous strategy.
-    3. Mark the cleanup as completed.
+    2. Existing OPEN trades are preserved.
+    3. Mark the initialization as completed.
 
     Historical CLOSED trades remain in the database.
     They are simply excluded from Performance by created_at.
@@ -754,32 +750,13 @@ def initialize_new_strategy():
 
     if cleanup_done != "1":
 
-        conn = db_connect()
-
-        try:
-
-            cur = conn.execute(
-                """
-                DELETE FROM trades
-                WHERE status = 'OPEN'
-                """
-            )
-
-            deleted = cur.rowcount
-
-            conn.commit()
-
-        finally:
-            conn.close()
-
         set_meta(
             LEGACY_OPEN_CLEARED_META_KEY,
             "1",
         )
 
         print(
-            "Legacy OPEN trades removed:",
-            deleted,
+            "Existing OPEN trades preserved."
         )
 
     return start
@@ -3322,6 +3299,126 @@ def build_performance_message():
 
 
 # ============================================================
+# OPEN TRADES
+# ============================================================
+
+def build_open_trades_message():
+
+    rows = get_open_trades()
+
+    if not rows:
+        return None
+
+    # Refresh live prices if necessary.
+    try:
+        prices = get_all_current_prices()
+    except Exception:
+        prices = {}
+
+    lines = [
+        f"🟢 <b>OPEN TRADES: {len(rows)}</b>",
+        "",
+    ]
+
+    for row in rows:
+
+        direction = row["direction"]
+
+        emoji = (
+            "🟢"
+            if direction == "LONG"
+            else "🔴"
+        )
+
+        entry = float(
+            row["entry_price"]
+        )
+
+        tp = float(
+            row["tp_price"]
+        )
+
+        sl = float(
+            row["sl_price"]
+        )
+
+        symbol = str(
+            row["symbol"]
+        ).upper()
+
+        current = prices.get(
+            symbol
+        )
+
+        if current is None:
+
+            try:
+                current = float(
+                    row["current_price"]
+                )
+            except Exception:
+                current = entry
+
+        current_pnl = calculate_pnl_pct(
+            direction,
+            entry,
+            current,
+        )
+
+        tp_pnl = calculate_pnl_pct(
+            direction,
+            entry,
+            tp,
+        )
+
+        sl_pnl = calculate_pnl_pct(
+            direction,
+            entry,
+            sl,
+        )
+
+        lines.extend(
+            [
+                (
+                    f"{emoji} "
+                    f"<b>{row['asset']} "
+                    f"{direction}</b>"
+                ),
+                (
+                    f"📌 Pattern: "
+                    f"{row['pattern']}"
+                ),
+                (
+                    f"💰 Entry: "
+                    f"{entry:.10g}"
+                ),
+                (
+                    f"💵 Current: "
+                    f"<b>{current:.10g} "
+                    f"({current_pnl:+.2f}%)</b>"
+                ),
+                (
+                    f"🛑 SL: "
+                    f"{sl:.10g} "
+                    f"({sl_pnl:+.2f}%)"
+                ),
+                (
+                    f"🎯 TP: "
+                    f"{tp:.10g} "
+                    f"({tp_pnl:+.2f}%)"
+                ),
+                (
+                    f"⏱ Duration: "
+                    f"{duration_text(row['entry_time'])}"
+                ),
+                "",
+            ]
+        )
+
+    return "\n".join(lines)
+
+
+# ============================================================
 # SCAN SUMMARY
 # ============================================================
 
@@ -3446,7 +3543,24 @@ def build_scan_summary():
         )
 
     # --------------------------------------------------------
-    # NO OPEN TRADES SECTION
+    # OPEN TRADES
+    # --------------------------------------------------------
+
+    open_trades_message = (
+        build_open_trades_message()
+    )
+
+    if open_trades_message:
+
+        lines.extend(
+            [
+                open_trades_message,
+                "",
+            ]
+        )
+
+    # --------------------------------------------------------
+    # PERFORMANCE
     # --------------------------------------------------------
 
     lines.append(
