@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.9.8
+# VERSION 6.0.0
 # ============================================================
 #
 # IMPORTANT:
@@ -22,31 +22,38 @@
 #      ->
 # Entry at confirmation candle CLOSE
 #
-# SAFETY:
-# - Entry candle is NOT used for TP/SL
-# - Same candle TP + SL => SL first
-# - One OPEN trade per asset + direction
-# - Opposite direction is allowed
-# - No real trading
-#
-# VERSION 5.9.8 CHANGES:
-# - FIXED legacy DB trades.symbol NOT NULL issue
-# - symbol is now inserted when present in existing DB
-# - symbol column is created if missing
-# - Existing rows are backfilled with symbol = asset
-# - Existing DB is NOT deleted/rebuilt
-# - Strategy logic unchanged
-# - Telegram NEW SIGNAL is sent after successful DB insert
-# - Detailed DB diagnostics retained
+# VERSION 6.0.0:
+# - Moderate pattern-quality filters
+# - Better visual Double Top / Bottom detection
+# - Better visual Head & Shoulders detection
+# - Minimum pattern depth
+# - Minimum separation between pattern sides
+# - Only ONE best new signal is inserted per scan
+# - Existing DB is preserved
+# - Telegram NEW SIGNAL now includes chart image
+# - Chart shows:
+#       Pattern
+#       Neckline
+#       Breakout
+#       Retest
+#       Confirmation
+#       Entry
+#       TP
+#       SL
+# - Existing trade logic preserved
+# - Opposite direction remains allowed
+# - REAL_TRADING remains False
 #
 # ============================================================
 
 import os
 import time
 import sqlite3
+import tempfile
 import requests
 import pandas as pd
 import numpy as np
+import matplotlib.pyplot as plt
 from datetime import datetime, timezone
 
 
@@ -54,7 +61,7 @@ from datetime import datetime, timezone
 # CONFIG
 # ============================================================
 
-VERSION = "5.9.8"
+VERSION = "6.0.0"
 
 REAL_TRADING = False
 
@@ -78,6 +85,41 @@ MAX_ENTRY_AGE_MINUTES = 10
 PERIODIC_REPORT_SECONDS = 900
 
 HTTP_RETRIES = 3
+
+
+# ============================================================
+# MODERATE PATTERN QUALITY FILTERS
+# ============================================================
+#
+# These are intentionally moderate.
+#
+# Goal:
+# - reduce obvious noise
+# - preserve reasonable signal frequency
+# - avoid extremely strict filtering
+#
+# The actual target of approximately one new signal per
+# 5-minute scan is achieved mainly by selecting ONE best
+# candidate per scan, rather than destroying the strategy
+# with very strict pattern filters.
+# ============================================================
+
+DOUBLE_LEVEL_TOLERANCE = 0.0075
+# 0.75% maximum difference between the two tops/bottoms
+
+MIN_PATTERN_DEPTH_PCT = 0.004
+# 0.40% minimum move from peaks to valley
+# or valley to neckline area
+
+MIN_PATTERN_SEPARATION_BARS = 2
+
+HS_SHOULDER_TOLERANCE = 0.015
+# 1.5% maximum difference between shoulders
+
+HS_MIN_HEAD_ADVANTAGE_PCT = 0.003
+# head must exceed shoulders by at least 0.30%
+
+MIN_HS_DEPTH_PCT = 0.004
 
 
 # ============================================================
@@ -322,7 +364,7 @@ def http_get(
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM TEXT
 # ============================================================
 
 def telegram_send(message):
@@ -370,6 +412,78 @@ def telegram_send(message):
 
         print(
             f"Telegram send failed: {exc}"
+        )
+
+        return False
+
+
+# ============================================================
+# TELEGRAM PHOTO
+# ============================================================
+
+def telegram_send_photo(
+    image_path,
+    caption
+):
+
+    if (
+        not TELEGRAM_BOT_TOKEN
+        or not TELEGRAM_CHAT_ID
+    ):
+
+        print(
+            "Telegram credentials are missing."
+        )
+
+        return False
+
+    url = (
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    )
+
+    try:
+
+        with open(
+            image_path,
+            "rb"
+        ) as image_file:
+
+            files = {
+                "photo": image_file
+            }
+
+            data = {
+                "chat_id":
+                    TELEGRAM_CHAT_ID,
+
+                "caption":
+                    caption,
+
+                "parse_mode":
+                    "HTML",
+            }
+
+            response = SESSION.post(
+                url,
+                data=data,
+                files=files,
+                timeout=30
+            )
+
+            response.raise_for_status()
+
+        print(
+            "Telegram chart sent."
+        )
+
+        return True
+
+    except Exception as exc:
+
+        print(
+            f"Telegram chart send failed: "
+            f"{exc}"
         )
 
         return False
@@ -472,156 +586,37 @@ def init_db(conn):
 
     conn.commit()
 
-    # --------------------------------------------------------
-    # Existing DB columns
-    # --------------------------------------------------------
+    columns_to_ensure = [
+        ("symbol", "TEXT"),
+        ("asset", "TEXT"),
+        ("direction", "TEXT"),
+        ("pattern", "TEXT"),
+        ("signal_key", "TEXT"),
+        ("pattern_time", "INTEGER"),
+        ("breakout_time", "INTEGER"),
+        ("retest_time", "INTEGER"),
+        ("confirmation_time", "INTEGER"),
+        ("entry_time", "INTEGER"),
+        ("entry_price", "REAL"),
+        ("sl_price", "REAL"),
+        ("tp_price", "REAL"),
+        ("current_price", "REAL"),
+        ("status", "TEXT"),
+        ("exit_time", "INTEGER"),
+        ("exit_price", "REAL"),
+        ("exit_reason", "TEXT"),
+        ("created_at", "INTEGER"),
+        ("updated_at", "INTEGER"),
+    ]
 
-    ensure_column(
-        conn,
-        "trades",
-        "symbol",
-        "TEXT"
-    )
+    for column, definition in columns_to_ensure:
 
-    ensure_column(
-        conn,
-        "trades",
-        "asset",
-        "TEXT"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "direction",
-        "TEXT"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "pattern",
-        "TEXT"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "signal_key",
-        "TEXT"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "pattern_time",
-        "INTEGER"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "breakout_time",
-        "INTEGER"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "retest_time",
-        "INTEGER"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "confirmation_time",
-        "INTEGER"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "entry_time",
-        "INTEGER"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "entry_price",
-        "REAL"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "sl_price",
-        "REAL"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "tp_price",
-        "REAL"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "current_price",
-        "REAL"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "status",
-        "TEXT"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "exit_time",
-        "INTEGER"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "exit_price",
-        "REAL"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "exit_reason",
-        "TEXT"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "created_at",
-        "INTEGER"
-    )
-
-    ensure_column(
-        conn,
-        "trades",
-        "updated_at",
-        "INTEGER"
-    )
-
-    # --------------------------------------------------------
-    # IMPORTANT FIX:
-    # Backfill symbol from asset.
-    #
-    # This does NOT delete or rebuild the DB.
-    # --------------------------------------------------------
+        ensure_column(
+            conn,
+            "trades",
+            column,
+            definition
+        )
 
     columns = get_table_columns(
         conn,
@@ -657,10 +652,6 @@ def init_db(conn):
                 f"Symbol backfill warning: "
                 f"{exc}"
             )
-
-    # --------------------------------------------------------
-    # Backfill timestamps
-    # --------------------------------------------------------
 
     conn.execute(
         """
@@ -1084,10 +1075,6 @@ def get_candles(
         )
     )
 
-    # --------------------------------------------------------
-    # CLOSED CANDLES ONLY
-    # --------------------------------------------------------
-
     interval_seconds = (
         3600
         if interval == "1h"
@@ -1107,6 +1094,44 @@ def get_candles(
     return df.reset_index(
         drop=True
     )
+
+
+# ============================================================
+# HELPERS FOR PATTERN DETECTION
+# ============================================================
+
+def pct_distance(a, b):
+
+    denominator = max(
+        abs(float(a)),
+        1e-12
+    )
+
+    return abs(
+        float(a) - float(b)
+    ) / denominator
+
+
+def find_max_index(
+    df,
+    column
+):
+
+    if df.empty:
+        return None
+
+    return df[column].idxmax()
+
+
+def find_min_index(
+    df,
+    column
+):
+
+    if df.empty:
+        return None
+
+    return df[column].idxmin()
 
 
 # ============================================================
@@ -1135,124 +1160,344 @@ def detect_patterns(df):
             i + 1:i + 4
         ]
 
-        left_high = left[
-            "high"
-        ].max()
+        left_high = float(
+            left["high"].max()
+        )
 
-        right_high = right[
-            "high"
-        ].max()
+        right_high = float(
+            right["high"].max()
+        )
 
-        left_low = left[
-            "low"
-        ].min()
+        left_low = float(
+            left["low"].min()
+        )
 
-        right_low = right[
-            "low"
-        ].min()
+        right_low = float(
+            right["low"].min()
+        )
 
-        # ----------------------------------------------------
+        current_high = float(
+            current["high"]
+        )
+
+        current_low = float(
+            current["low"]
+        )
+
+        current_close = float(
+            current["close"]
+        )
+
+        # ====================================================
         # DOUBLE TOP
-        # ----------------------------------------------------
+        # ====================================================
 
-        if (
-            abs(
-                left_high - right_high
-            )
-            / max(
-                left_high,
-                1e-12
-            )
-            <= 0.01
-        ):
+        top_similarity = pct_distance(
+            left_high,
+            right_high
+        )
 
-            neckline = min(
-                left["low"].min(),
-                right["low"].min()
-            )
+        if top_similarity <= DOUBLE_LEVEL_TOLERANCE:
 
-            patterns.append(
-                {
-                    "pattern":
-                        "Double Top",
-
-                    "direction":
-                        "SHORT",
-
-                    "pattern_time":
-                        int(
-                            current[
-                                "timestamp"
-                            ]
-                        ),
-
-                    "level":
-                        float(
-                            neckline
-                        ),
-
-                    "index":
-                        i,
-                }
-            )
-
-        # ----------------------------------------------------
-        # DOUBLE BOTTOM
-        # ----------------------------------------------------
-
-        if (
-            abs(
-                left_low - right_low
-            )
-            / max(
+            valley_low = min(
                 left_low,
+                current_low,
+                right_low
+            )
+
+            average_top = (
+                left_high
+                + right_high
+            ) / 2.0
+
+            depth = (
+                average_top
+                - valley_low
+            ) / max(
+                average_top,
                 1e-12
             )
-            <= 0.01
-        ):
 
-            neckline = max(
-                left["high"].max(),
-                right["high"].max()
+            # Current candle should participate in the valley.
+            valley_position_ok = (
+                current_low
+                <= average_top
+                * (
+                    1
+                    - MIN_PATTERN_DEPTH_PCT
+                )
             )
 
-            patterns.append(
-                {
-                    "pattern":
-                        "Double Bottom",
-
-                    "direction":
-                        "LONG",
-
-                    "pattern_time":
-                        int(
-                            current[
-                                "timestamp"
-                            ]
-                        ),
-
-                    "level":
-                        float(
-                            neckline
-                        ),
-
-                    "index":
-                        i,
-                }
+            # Require meaningful depth.
+            depth_ok = (
+                depth
+                >= MIN_PATTERN_DEPTH_PCT
             )
 
-        # ----------------------------------------------------
+            # Avoid the two sides being adjacent.
+            separation_ok = (
+                (
+                    i - 3
+                )
+                >=
+                MIN_PATTERN_SEPARATION_BARS
+            )
+
+            if (
+                valley_position_ok
+                and depth_ok
+                and separation_ok
+            ):
+
+                left_peak_idx = (
+                    i - 3
+                    + int(
+                        left[
+                            "high"
+                        ].values.argmax()
+                    )
+                )
+
+                right_peak_idx = (
+                    i + 1
+                    + int(
+                        right[
+                            "high"
+                        ].values.argmax()
+                    )
+                )
+
+                neckline = valley_low
+
+                patterns.append(
+                    {
+                        "pattern":
+                            "Double Top",
+
+                        "direction":
+                            "SHORT",
+
+                        "pattern_time":
+                            int(
+                                current[
+                                    "timestamp"
+                                ]
+                            ),
+
+                        "level":
+                            float(
+                                neckline
+                            ),
+
+                        "index":
+                            i,
+
+                        "left_peak_index":
+                            left_peak_idx,
+
+                        "right_peak_index":
+                            right_peak_idx,
+
+                        "left_peak_price":
+                            left_high,
+
+                        "right_peak_price":
+                            right_high,
+
+                        "quality":
+                            float(
+                                depth
+                                * 100
+                            ),
+                    }
+                )
+
+        # ====================================================
+        # DOUBLE BOTTOM
+        # ====================================================
+
+        bottom_similarity = pct_distance(
+            left_low,
+            right_low
+        )
+
+        if bottom_similarity <= DOUBLE_LEVEL_TOLERANCE:
+
+            rally_high = max(
+                left_high,
+                current_high,
+                right_high
+            )
+
+            average_bottom = (
+                left_low
+                + right_low
+            ) / 2.0
+
+            depth = (
+                rally_high
+                - average_bottom
+            ) / max(
+                average_bottom,
+                1e-12
+            )
+
+            valley_position_ok = (
+                current_high
+                >= average_bottom
+                * (
+                    1
+                    + MIN_PATTERN_DEPTH_PCT
+                )
+            )
+
+            depth_ok = (
+                depth
+                >= MIN_PATTERN_DEPTH_PCT
+            )
+
+            separation_ok = (
+                (
+                    i - 3
+                )
+                >=
+                MIN_PATTERN_SEPARATION_BARS
+            )
+
+            if (
+                valley_position_ok
+                and depth_ok
+                and separation_ok
+            ):
+
+                left_bottom_idx = (
+                    i - 3
+                    + int(
+                        left[
+                            "low"
+                        ].values.argmin()
+                    )
+                )
+
+                right_bottom_idx = (
+                    i + 1
+                    + int(
+                        right[
+                            "low"
+                        ].values.argmin()
+                    )
+                )
+
+                neckline = rally_high
+
+                patterns.append(
+                    {
+                        "pattern":
+                            "Double Bottom",
+
+                        "direction":
+                            "LONG",
+
+                        "pattern_time":
+                            int(
+                                current[
+                                    "timestamp"
+                                ]
+                            ),
+
+                        "level":
+                            float(
+                                neckline
+                            ),
+
+                        "index":
+                            i,
+
+                        "left_peak_index":
+                            left_bottom_idx,
+
+                        "right_peak_index":
+                            right_bottom_idx,
+
+                        "left_peak_price":
+                            left_low,
+
+                        "right_peak_price":
+                            right_low,
+
+                        "quality":
+                            float(
+                                depth
+                                * 100
+                            ),
+                    }
+                )
+
+        # ====================================================
         # HEAD & SHOULDERS
-        # ----------------------------------------------------
+        # ====================================================
+
+        left_shoulder = left_high
+        right_shoulder = right_high
+        head = current_high
+
+        shoulder_similarity = pct_distance(
+            left_shoulder,
+            right_shoulder
+        )
+
+        head_advantage = (
+            head
+            - max(
+                left_shoulder,
+                right_shoulder
+            )
+        ) / max(
+            max(
+                left_shoulder,
+                right_shoulder
+            ),
+            1e-12
+        )
+
+        neckline = min(
+            left_low,
+            right_low
+        )
+
+        hs_depth = (
+            head
+            - neckline
+        ) / max(
+            head,
+            1e-12
+        )
 
         if (
-            current["high"] > left_high
-            and current["high"] > right_high
+            shoulder_similarity
+            <= HS_SHOULDER_TOLERANCE
+            and head_advantage
+            >= HS_MIN_HEAD_ADVANTAGE_PCT
+            and hs_depth
+            >= MIN_HS_DEPTH_PCT
         ):
 
-            neckline = min(
-                left["low"].min(),
-                right["low"].min()
+            left_shoulder_idx = (
+                i - 3
+                + int(
+                    left[
+                        "high"
+                    ].values.argmax()
+                )
+            )
+
+            right_shoulder_idx = (
+                i + 1
+                + int(
+                    right[
+                        "high"
+                    ].values.argmax()
+                )
             )
 
             patterns.append(
@@ -1277,21 +1522,98 @@ def detect_patterns(df):
 
                     "index":
                         i,
+
+                    "left_peak_index":
+                        left_shoulder_idx,
+
+                    "right_peak_index":
+                        right_shoulder_idx,
+
+                    "left_peak_price":
+                        left_shoulder,
+
+                    "right_peak_price":
+                        right_shoulder,
+
+                    "head_price":
+                        head,
+
+                    "quality":
+                        float(
+                            (
+                                head_advantage
+                                + hs_depth
+                            )
+                            * 100
+                        ),
                 }
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # INVERSE HEAD & SHOULDERS
-        # ----------------------------------------------------
+        # ====================================================
+
+        left_shoulder_low = left_low
+        right_shoulder_low = right_low
+        head_low = current_low
+
+        shoulder_similarity_low = pct_distance(
+            left_shoulder_low,
+            right_shoulder_low
+        )
+
+        head_advantage_low = (
+            min(
+                left_shoulder_low,
+                right_shoulder_low
+            )
+            - head_low
+        ) / max(
+            min(
+                left_shoulder_low,
+                right_shoulder_low
+            ),
+            1e-12
+        )
+
+        neckline_low = max(
+            left_high,
+            right_high
+        )
+
+        ihs_depth = (
+            neckline_low
+            - head_low
+        ) / max(
+            head_low,
+            1e-12
+        )
 
         if (
-            current["low"] < left_low
-            and current["low"] < right_low
+            shoulder_similarity_low
+            <= HS_SHOULDER_TOLERANCE
+            and head_advantage_low
+            >= HS_MIN_HEAD_ADVANTAGE_PCT
+            and ihs_depth
+            >= MIN_HS_DEPTH_PCT
         ):
 
-            neckline = max(
-                left["high"].max(),
-                right["high"].max()
+            left_bottom_idx = (
+                i - 3
+                + int(
+                    left[
+                        "low"
+                    ].values.argmin()
+                )
+            )
+
+            right_bottom_idx = (
+                i + 1
+                + int(
+                    right[
+                        "low"
+                    ].values.argmin()
+                )
             )
 
             patterns.append(
@@ -1311,11 +1633,35 @@ def detect_patterns(df):
 
                     "level":
                         float(
-                            neckline
+                            neckline_low
                         ),
 
                     "index":
                         i,
+
+                    "left_peak_index":
+                        left_bottom_idx,
+
+                    "right_peak_index":
+                        right_bottom_idx,
+
+                    "left_peak_price":
+                        left_shoulder_low,
+
+                    "right_peak_price":
+                        right_shoulder_low,
+
+                    "head_price":
+                        head_low,
+
+                    "quality":
+                        float(
+                            (
+                                head_advantage_low
+                                + ihs_depth
+                            )
+                            * 100
+                        ),
                 }
             )
 
@@ -1357,12 +1703,13 @@ def find_breakout(
 
     for _, candle in future.iterrows():
 
+        close_price = float(
+            candle["close"]
+        )
+
         if direction == "LONG":
 
-            if (
-                float(candle["close"])
-                > level
-            ):
+            if close_price > level:
 
                 return {
                     "breakout_time":
@@ -1373,11 +1720,7 @@ def find_breakout(
                         ),
 
                     "breakout_price":
-                        float(
-                            candle[
-                                "close"
-                            ]
-                        ),
+                        close_price,
 
                     "level":
                         level,
@@ -1385,10 +1728,7 @@ def find_breakout(
 
         else:
 
-            if (
-                float(candle["close"])
-                < level
-            ):
+            if close_price < level:
 
                 return {
                     "breakout_time":
@@ -1399,11 +1739,7 @@ def find_breakout(
                         ),
 
                     "breakout_price":
-                        float(
-                            candle[
-                                "close"
-                            ]
-                        ),
+                        close_price,
 
                     "level":
                         level,
@@ -1452,37 +1788,23 @@ def find_retest(
             candle["low"]
         )
 
-        if direction == "LONG":
+        if (
+            low
+            <= level
+            <= high
+        ):
 
-            if low <= level <= high:
+            return {
+                "retest_time":
+                    int(
+                        candle[
+                            "timestamp"
+                        ]
+                    ),
 
-                return {
-                    "retest_time":
-                        int(
-                            candle[
-                                "timestamp"
-                            ]
-                        ),
-
-                    "retest_price":
-                        level,
-                }
-
-        else:
-
-            if low <= level <= high:
-
-                return {
-                    "retest_time":
-                        int(
-                            candle[
-                                "timestamp"
-                            ]
-                        ),
-
-                    "retest_price":
-                        level,
-                }
+                "retest_price":
+                    level,
+            }
 
     return None
 
@@ -1676,12 +1998,12 @@ def build_signal(
 
     current_time = now_ts()
 
-    recent_patterns = []
-
     recent_seconds = (
         RECENT_PATTERN_HOURS
         * 3600
     )
+
+    recent_patterns = []
 
     for pattern in patterns:
 
@@ -1708,7 +2030,9 @@ def build_signal(
     )
 
     if not recent_patterns:
-        return None, None
+        return []
+
+    candidates = []
 
     for pattern in recent_patterns:
 
@@ -1745,9 +2069,7 @@ def build_signal(
         retest = find_retest(
             df5,
             breakout,
-            pattern[
-                "direction"
-            ]
+            pattern["direction"]
         )
 
         if retest is None:
@@ -1755,14 +2077,10 @@ def build_signal(
 
         STATS["retests"] += 1
 
-        confirmation = (
-            find_confirmation(
-                df5,
-                retest,
-                pattern[
-                    "direction"
-                ]
-            )
+        confirmation = find_confirmation(
+            df5,
+            retest,
+            pattern["direction"]
         )
 
         if confirmation is None:
@@ -1773,9 +2091,7 @@ def build_signal(
         entry = find_entry(
             df5,
             confirmation,
-            pattern[
-                "direction"
-            ]
+            pattern["direction"]
         )
 
         if entry is None:
@@ -1903,9 +2219,70 @@ def build_signal(
                 confirmation,
         }
 
-        return signal, chain
+        # ----------------------------------------------------
+        # Candidate quality.
+        #
+        # Newer entries get priority.
+        # Stronger pattern quality gets priority.
+        # ----------------------------------------------------
 
-    return None, None
+        pattern_age_hours = (
+            current_time
+            - int(
+                pattern[
+                    "pattern_time"
+                ]
+            )
+        ) / 3600.0
+
+        breakout_age_hours = (
+            current_time
+            - int(
+                breakout[
+                    "breakout_time"
+                ]
+            )
+        ) / 3600.0
+
+        quality = float(
+            pattern.get(
+                "quality",
+                0
+            )
+        )
+
+        freshness_score = max(
+            0,
+            48
+            - pattern_age_hours
+        )
+
+        breakout_freshness = max(
+            0,
+            24
+            - breakout_age_hours
+        )
+
+        candidate_score = (
+            quality * 10
+            + freshness_score
+            + breakout_freshness * 2
+        )
+
+        candidates.append(
+            {
+                "signal":
+                    signal,
+
+                "chain":
+                    chain,
+
+                "score":
+                    candidate_score,
+            }
+        )
+
+    return candidates
 
 
 # ============================================================
@@ -1969,33 +2346,14 @@ def insert_trade(
     signal
 ):
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # Read actual existing DB schema.
-    #
-    # This allows the scanner to preserve older DB versions
-    # without rebuilding them.
-    # --------------------------------------------------------
-
     columns = get_table_columns(
         conn,
         "trades"
     )
 
-    # --------------------------------------------------------
-    # Required values.
-    #
-    # Legacy DB expects symbol.
-    # symbol = asset is intentional.
-    # --------------------------------------------------------
-
     signal["symbol"] = (
-        signal.get(
-            "symbol"
-        )
-        or signal.get(
-            "asset"
-        )
+        signal.get("symbol")
+        or signal.get("asset")
     )
 
     base_fields = [
@@ -2020,13 +2378,10 @@ def insert_trade(
         "updated_at",
     ]
 
-    # --------------------------------------------------------
-    # Add symbol when it exists in the actual DB.
-    # --------------------------------------------------------
-
     insert_fields = []
 
     if "symbol" in columns:
+
         insert_fields.append(
             "symbol"
         )
@@ -2034,6 +2389,7 @@ def insert_trade(
     for field in base_fields:
 
         if field in columns:
+
             insert_fields.append(
                 field
             )
@@ -2103,13 +2459,6 @@ def insert_trade(
                 f"key={signal['signal_key']}"
             )
 
-        else:
-
-            print(
-                "DB INSERT returned "
-                "zero rowcount."
-            )
-
         return rowcount
 
     except sqlite3.IntegrityError as exc:
@@ -2122,87 +2471,28 @@ def insert_trade(
         )
 
         print(
-            f"Asset: "
-            f"{signal['asset']}"
+            f"Asset: {signal['asset']}"
         )
 
         print(
-            f"Symbol: "
-            f"{signal['symbol']}"
+            f"Symbol: {signal['symbol']}"
         )
 
         print(
-            f"Direction: "
-            f"{signal['direction']}"
+            f"Direction: {signal['direction']}"
         )
 
         print(
-            f"Pattern: "
-            f"{signal['pattern']}"
+            f"Pattern: {signal['pattern']}"
         )
 
         print(
-            f"Signal key: "
-            f"{signal['signal_key']}"
+            f"Signal key: {signal['signal_key']}"
         )
 
         print(
-            f"SQLite IntegrityError: "
-            f"{exc}"
+            f"SQLite IntegrityError: {exc}"
         )
-
-        # ----------------------------------------------------
-        # Check exact signal key.
-        # ----------------------------------------------------
-
-        existing = conn.execute(
-            """
-            SELECT id,
-                   signal_key,
-                   status,
-                   asset,
-                   direction,
-                   entry_time
-            FROM trades
-            WHERE signal_key = ?
-            LIMIT 1
-            """,
-            (
-                signal[
-                    "signal_key"
-                ],
-            )
-        ).fetchone()
-
-        if existing:
-
-            print(
-                "Reason appears to be "
-                "existing signal_key."
-            )
-
-            print(
-                f"Existing trade ID: "
-                f"{existing['id']}"
-            )
-
-            print(
-                f"Existing status: "
-                f"{existing['status']}"
-            )
-
-        else:
-
-            print(
-                "Signal key does NOT exist "
-                "in DB after failed insert."
-            )
-
-            print(
-                "The exact SQLite constraint "
-                "error above is the primary "
-                "diagnostic."
-            )
 
         print(
             "!!! END DB INSERT DIAGNOSTIC !!!"
@@ -2225,10 +2515,10 @@ def insert_trade(
 
 
 # ============================================================
-# NEW SIGNAL MESSAGE
+# NEW SIGNAL CAPTION
 # ============================================================
 
-def new_signal_message(
+def new_signal_caption(
     signal
 ):
 
@@ -2236,10 +2526,11 @@ def new_signal_message(
         "direction"
     ]
 
-    if direction == "LONG":
-        emoji = "🟢"
-    else:
-        emoji = "🔴"
+    emoji = (
+        "🟢"
+        if direction == "LONG"
+        else "🔴"
+    )
 
     entry = float(
         signal["entry_price"]
@@ -2272,6 +2563,709 @@ def new_signal_message(
         f"🕐 Entry Time: "
         f"{format_time(signal['entry_time'])}"
     )
+
+
+# ============================================================
+# CHART GENERATION
+# ============================================================
+
+def generate_pattern_chart(
+    signal,
+    chain,
+    df1h
+):
+
+    pattern = chain[
+        "pattern"
+    ]
+
+    breakout = chain[
+        "breakout"
+    ]
+
+    retest = chain[
+        "retest"
+    ]
+
+    confirmation = chain[
+        "confirmation"
+    ]
+
+    pattern_time = int(
+        pattern["pattern_time"]
+    )
+
+    entry_time = int(
+        signal["entry_time"]
+    )
+
+    # --------------------------------------------------------
+    # Display approximately 36 candles around the setup.
+    # --------------------------------------------------------
+
+    df = df1h.copy()
+
+    if df.empty:
+        return None
+
+    entry_idx_candidates = df.index[
+        df["timestamp"]
+        <= entry_time
+    ]
+
+    if len(entry_idx_candidates) > 0:
+
+        entry_idx = int(
+            entry_idx_candidates[-1]
+        )
+
+    else:
+
+        entry_idx = len(df) - 1
+
+    start_idx = max(
+        0,
+        entry_idx - 36
+    )
+
+    end_idx = min(
+        len(df),
+        entry_idx + 4
+    )
+
+    chart_df = df.iloc[
+        start_idx:end_idx
+    ].copy()
+
+    if chart_df.empty:
+        return None
+
+    # --------------------------------------------------------
+    # Matplotlib
+    # --------------------------------------------------------
+
+    fig, ax = plt.subplots(
+        figsize=(13, 7)
+    )
+
+    x = np.arange(
+        len(chart_df)
+    )
+
+    # --------------------------------------------------------
+    # Candles
+    # --------------------------------------------------------
+
+    candle_width = 0.65
+
+    for pos, (_, row) in enumerate(
+        chart_df.iterrows()
+    ):
+
+        open_price = float(
+            row["open"]
+        )
+
+        high = float(
+            row["high"]
+        )
+
+        low = float(
+            row["low"]
+        )
+
+        close = float(
+            row["close"]
+        )
+
+        if close >= open_price:
+            candle_color = "green"
+
+        else:
+            candle_color = "red"
+
+        ax.vlines(
+            pos,
+            low,
+            high,
+            linewidth=1
+        )
+
+        body_bottom = min(
+            open_price,
+            close
+        )
+
+        body_height = abs(
+            close
+            - open_price
+        )
+
+        if body_height <= 0:
+            body_height = (
+                max(
+                    high - low,
+                    1e-12
+                )
+                * 0.01
+            )
+
+        ax.bar(
+            pos,
+            body_height,
+            bottom=body_bottom,
+            width=candle_width,
+            color=candle_color,
+            alpha=0.75
+        )
+
+    # --------------------------------------------------------
+    # Helpers
+    # --------------------------------------------------------
+
+    def chart_pos(timestamp):
+
+        values = chart_df[
+            "timestamp"
+        ].values
+
+        if len(values) == 0:
+            return None
+
+        distances = np.abs(
+            values.astype(np.int64)
+            - int(timestamp)
+        )
+
+        idx = int(
+            distances.argmin()
+        )
+
+        return idx
+
+    # --------------------------------------------------------
+    # Pattern markers
+    # --------------------------------------------------------
+
+    left_idx = pattern.get(
+        "left_peak_index"
+    )
+
+    right_idx = pattern.get(
+        "right_peak_index"
+    )
+
+    if left_idx is not None:
+
+        left_timestamp = int(
+            df.iloc[
+                int(left_idx)
+            ]["timestamp"]
+        )
+
+        left_pos = chart_pos(
+            left_timestamp
+        )
+
+    else:
+
+        left_pos = None
+
+    if right_idx is not None:
+
+        right_timestamp = int(
+            df.iloc[
+                int(right_idx)
+            ]["timestamp"]
+        )
+
+        right_pos = chart_pos(
+            right_timestamp
+        )
+
+    else:
+
+        right_pos = None
+
+    pattern_pos = chart_pos(
+        pattern_time
+    )
+
+    breakout_pos = chart_pos(
+        breakout[
+            "breakout_time"
+        ]
+    )
+
+    retest_pos = chart_pos(
+        retest[
+            "retest_time"
+        ]
+    )
+
+    confirmation_pos = chart_pos(
+        confirmation[
+            "confirmation_time"
+        ]
+    )
+
+    entry_pos = chart_pos(
+        signal[
+            "entry_time"
+        ]
+    )
+
+    # --------------------------------------------------------
+    # Pattern points
+    # --------------------------------------------------------
+
+    if left_pos is not None:
+
+        left_price = float(
+            pattern[
+                "left_peak_price"
+            ]
+        )
+
+        ax.scatter(
+            left_pos,
+            left_price,
+            s=90,
+            marker="^"
+            if pattern[
+                "direction"
+            ] == "SHORT"
+            else "v"
+        )
+
+        ax.annotate(
+            "Left",
+            (
+                left_pos,
+                left_price
+            ),
+            xytext=(0, 12),
+            textcoords="offset points",
+            ha="center",
+            fontsize=9
+        )
+
+    if right_pos is not None:
+
+        right_price = float(
+            pattern[
+                "right_peak_price"
+            ]
+        )
+
+        ax.scatter(
+            right_pos,
+            right_price,
+            s=90,
+            marker="^"
+            if pattern[
+                "direction"
+            ] == "SHORT"
+            else "v"
+        )
+
+        ax.annotate(
+            "Right",
+            (
+                right_pos,
+                right_price
+            ),
+            xytext=(0, 12),
+            textcoords="offset points",
+            ha="center",
+            fontsize=9
+        )
+
+    # --------------------------------------------------------
+    # Head
+    # --------------------------------------------------------
+
+    if (
+        pattern["pattern"]
+        in (
+            "Head & Shoulders",
+            "Inverse Head & Shoulders"
+        )
+    ):
+
+        head_price = float(
+            pattern[
+                "head_price"
+            ]
+        )
+
+        ax.scatter(
+            pattern_pos,
+            head_price,
+            s=110,
+            marker="^"
+            if pattern[
+                "direction"
+            ] == "SHORT"
+            else "v"
+        )
+
+        ax.annotate(
+            "HEAD",
+            (
+                pattern_pos,
+                head_price
+            ),
+            xytext=(0, 15),
+            textcoords="offset points",
+            ha="center",
+            fontsize=10,
+            fontweight="bold"
+        )
+
+    # --------------------------------------------------------
+    # Pattern time
+    # --------------------------------------------------------
+
+    if pattern_pos is not None:
+
+        ax.axvline(
+            pattern_pos,
+            linestyle=":",
+            linewidth=1
+        )
+
+    # --------------------------------------------------------
+    # Neckline
+    # --------------------------------------------------------
+
+    neckline = float(
+        pattern["level"]
+    )
+
+    ax.axhline(
+        neckline,
+        linestyle="--",
+        linewidth=1.5,
+        label="Neckline"
+    )
+
+    # --------------------------------------------------------
+    # Breakout
+    # --------------------------------------------------------
+
+    if breakout_pos is not None:
+
+        ax.scatter(
+            breakout_pos,
+            float(
+                breakout[
+                    "breakout_price"
+                ]
+            ),
+            s=100,
+            marker="*"
+        )
+
+        ax.annotate(
+            "BREAKOUT",
+            (
+                breakout_pos,
+                float(
+                    breakout[
+                        "breakout_price"
+                    ]
+                )
+            ),
+            xytext=(0, 18),
+            textcoords="offset points",
+            ha="center",
+            fontsize=9,
+            fontweight="bold"
+        )
+
+    # --------------------------------------------------------
+    # Retest
+    # --------------------------------------------------------
+
+    if retest_pos is not None:
+
+        ax.scatter(
+            retest_pos,
+            neckline,
+            s=80,
+            marker="o"
+        )
+
+        ax.annotate(
+            "RETEST",
+            (
+                retest_pos,
+                neckline
+            ),
+            xytext=(0, -20),
+            textcoords="offset points",
+            ha="center",
+            fontsize=9,
+            fontweight="bold"
+        )
+
+    # --------------------------------------------------------
+    # Confirmation
+    # --------------------------------------------------------
+
+    if confirmation_pos is not None:
+
+        confirmation_price = float(
+            confirmation[
+                "entry_price"
+            ]
+        )
+
+        ax.scatter(
+            confirmation_pos,
+            confirmation_price,
+            s=80,
+            marker="D"
+        )
+
+        ax.annotate(
+            "CONFIRM",
+            (
+                confirmation_pos,
+                confirmation_price
+            ),
+            xytext=(0, 18),
+            textcoords="offset points",
+            ha="center",
+            fontsize=9
+        )
+
+    # --------------------------------------------------------
+    # Entry
+    # --------------------------------------------------------
+
+    entry_price = float(
+        signal["entry_price"]
+    )
+
+    if entry_pos is not None:
+
+        ax.scatter(
+            entry_pos,
+            entry_price,
+            s=120,
+            marker="X"
+        )
+
+        ax.annotate(
+            "ENTRY",
+            (
+                entry_pos,
+                entry_price
+            ),
+            xytext=(8, 8),
+            textcoords="offset points",
+            fontsize=10,
+            fontweight="bold"
+        )
+
+    # --------------------------------------------------------
+    # TP / SL
+    # --------------------------------------------------------
+
+    tp = float(
+        signal["tp_price"]
+    )
+
+    sl = float(
+        signal["sl_price"]
+    )
+
+    ax.axhline(
+        tp,
+        linestyle=":",
+        linewidth=1.2,
+        label="TP"
+    )
+
+    ax.axhline(
+        sl,
+        linestyle=":",
+        linewidth=1.2,
+        label="SL"
+    )
+
+    # --------------------------------------------------------
+    # Title
+    # --------------------------------------------------------
+
+    ax.set_title(
+        f"{signal['asset']} "
+        f"{signal['direction']} | "
+        f"{signal['pattern']} | "
+        f"1H Pattern"
+    )
+
+    ax.set_ylabel(
+        "Price"
+    )
+
+    ax.set_xlabel(
+        "Candles"
+    )
+
+    ax.grid(
+        alpha=0.20
+    )
+
+    # --------------------------------------------------------
+    # X labels
+    # --------------------------------------------------------
+
+    label_positions = list(
+        range(
+            0,
+            len(chart_df),
+            max(
+                1,
+                len(chart_df) // 8
+            )
+        )
+    )
+
+    labels = []
+
+    for pos in label_positions:
+
+        ts = int(
+            chart_df.iloc[
+                pos
+            ]["timestamp"]
+        )
+
+        labels.append(
+            datetime.fromtimestamp(
+                ts,
+                tz=timezone.utc
+            ).strftime(
+                "%m-%d %H:%M"
+            )
+        )
+
+    ax.set_xticks(
+        label_positions
+    )
+
+    ax.set_xticklabels(
+        labels,
+        rotation=45,
+        ha="right"
+    )
+
+    ax.legend(
+        loc="best"
+    )
+
+    fig.tight_layout()
+
+    # --------------------------------------------------------
+    # Temporary PNG
+    # --------------------------------------------------------
+
+    fd, path = tempfile.mkstemp(
+        suffix=".png"
+    )
+
+    os.close(
+        fd
+    )
+
+    fig.savefig(
+        path,
+        dpi=150,
+        bbox_inches="tight"
+    )
+
+    plt.close(
+        fig
+    )
+
+    return path
+
+
+# ============================================================
+# SEND NEW SIGNAL + CHART
+# ============================================================
+
+def send_new_signal(
+    signal,
+    chain,
+    df1h
+):
+
+    caption = new_signal_caption(
+        signal
+    )
+
+    chart_path = None
+
+    try:
+
+        chart_path = generate_pattern_chart(
+            signal,
+            chain,
+            df1h
+        )
+
+        if chart_path:
+
+            sent = telegram_send_photo(
+                chart_path,
+                caption
+            )
+
+            if sent:
+                return True
+
+            # Fallback:
+            # If image failed, still send the signal text.
+            return telegram_send(
+                caption
+            )
+
+        return telegram_send(
+            caption
+        )
+
+    except Exception as exc:
+
+        print(
+            f"Chart generation/send error: "
+            f"{exc}"
+        )
+
+        return telegram_send(
+            caption
+        )
+
+    finally:
+
+        if (
+            chart_path
+            and os.path.exists(
+                chart_path
+            )
+        ):
+
+            try:
+
+                os.remove(
+                    chart_path
+                )
+
+            except Exception:
+                pass
 
 
 # ============================================================
@@ -2356,10 +3350,11 @@ def close_message(
             * 100
         )
 
-    if pct >= 0:
-        result_emoji = "🟢"
-    else:
-        result_emoji = "🔴"
+    result_emoji = (
+        "🟢"
+        if pct >= 0
+        else "🔴"
+    )
 
     duration = duration_text(
         trade["entry_time"],
@@ -2589,7 +3584,7 @@ def scan_asset(
     )
 
     if not contract:
-        return
+        return None
 
     try:
 
@@ -2612,7 +3607,7 @@ def scan_asset(
             f"{exc}"
         )
 
-        return
+        return None
 
     if (
         df1h.empty
@@ -2624,7 +3619,7 @@ def scan_asset(
             f"no candle data"
         )
 
-        return
+        return None
 
     before_patterns = STATS[
         "patterns"
@@ -2654,7 +3649,7 @@ def scan_asset(
         "valid_entries"
     ]
 
-    signal, chain = build_signal(
+    candidates = build_signal(
         asset,
         df1h,
         df5
@@ -2706,101 +3701,16 @@ def scan_asset(
         f"valid={asset_valid}"
     )
 
-    if signal is None:
-        return
+    return {
+        "asset":
+            asset,
 
-    # --------------------------------------------------------
-    # EXISTING SIGNAL
-    # --------------------------------------------------------
+        "candidates":
+            candidates,
 
-    if signal_exists(
-        conn,
-        signal[
-            "signal_key"
-        ]
-    ):
-
-        STATS[
-            "skipped_existing"
-        ] += 1
-
-        print(
-            f"SKIP EXISTING: "
-            f"{signal['asset']} "
-            f"{signal['direction']} "
-            f"{signal['signal_key']}"
-        )
-
-        return
-
-    STATS[
-        "unique_entries"
-    ] += 1
-
-    # --------------------------------------------------------
-    # OPEN TRADE
-    # --------------------------------------------------------
-
-    if open_trade_exists(
-        conn,
-        signal["asset"],
-        signal["direction"]
-    ):
-
-        STATS[
-            "skipped_open"
-        ] += 1
-
-        print(
-            f"SKIP OPEN TRADE: "
-            f"{signal['asset']} "
-            f"{signal['direction']}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # INSERT
-    # --------------------------------------------------------
-
-    inserted = insert_trade(
-        conn,
-        signal
-    )
-
-    if inserted <= 0:
-
-        STATS[
-            "insert_ignored"
-        ] += 1
-
-        print(
-            f"INSERT FAILED/IGNORED: "
-            f"{signal['asset']} "
-            f"{signal['direction']}"
-        )
-
-        return
-
-    # --------------------------------------------------------
-    # SUCCESS
-    # --------------------------------------------------------
-
-    STATS[
-        "new_signals"
-    ] += 1
-
-    print(
-        f"NEW SIGNAL INSERTED: "
-        f"{signal['asset']} "
-        f"{signal['direction']}"
-    )
-
-    telegram_send(
-        new_signal_message(
-            signal
-        )
-    )
+        "df1h":
+            df1h,
+    }
 
 
 # ============================================================
@@ -3058,10 +3968,11 @@ def periodic_report(
                     * 100
                 )
 
-            if direction == "LONG":
-                emoji = "🟢"
-            else:
-                emoji = "🔴"
+            emoji = (
+                "🟢"
+                if direction == "LONG"
+                else "🔴"
+            )
 
             duration = duration_text(
                 trade[
@@ -3133,10 +4044,6 @@ def periodic_report(
 
         conn.commit()
 
-    # ========================================================
-    # PERFORMANCE
-    # ========================================================
-
     stats = performance_stats(
         conn
     )
@@ -3174,10 +4081,6 @@ def periodic_report(
         f"Total P&L: "
         f"{stats['total_pnl']:+.2f}%"
     )
-
-    # ========================================================
-    # LAST SCAN
-    # ========================================================
 
     lines.append("")
 
@@ -3384,9 +4287,18 @@ def main():
     )
 
     print(
-        "PERIODIC REPORT = "
-        "EVERY 15 MINUTES INCLUDING "
-        "ZERO OPEN TRADES"
+        "PATTERN FILTER = "
+        "MODERATE"
+    )
+
+    print(
+        "NEW SIGNAL LIMIT = "
+        "MAX 1 PER SCAN"
+    )
+
+    print(
+        "CHART = "
+        "ENABLED"
     )
 
     print(
@@ -3496,18 +4408,51 @@ def main():
             f"error: {exc}"
         )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SCAN ALL ASSETS
-    # --------------------------------------------------------
+    # ========================================================
+    #
+    # IMPORTANT:
+    # We collect candidates first.
+    #
+    # We DO NOT insert a signal immediately for every asset.
+    #
+    # After all 40 assets are scanned, we choose the best
+    # eligible candidate and insert MAXIMUM ONE new signal.
+    #
+    # This is what keeps a 5-minute workflow from producing
+    # a flood of simultaneous signals.
+    # ========================================================
+
+    all_candidates = []
 
     for asset in available_assets:
 
         try:
 
-            scan_asset(
+            result = scan_asset(
                 conn,
                 asset
             )
+
+            if not result:
+                continue
+
+            candidates = result[
+                "candidates"
+            ]
+
+            df1h = result[
+                "df1h"
+            ]
+
+            for candidate in candidates:
+
+                candidate["df1h"] = df1h
+
+                all_candidates.append(
+                    candidate
+                )
 
         except Exception as exc:
 
@@ -3515,6 +4460,138 @@ def main():
                 f"{asset} scan error: "
                 f"{exc}"
             )
+
+    # --------------------------------------------------------
+    # Sort strongest candidate first.
+    # --------------------------------------------------------
+
+    all_candidates.sort(
+        key=lambda item:
+            item["score"],
+        reverse=True
+    )
+
+    print(
+        f"Total valid candidates: "
+        f"{len(all_candidates)}"
+    )
+
+    # --------------------------------------------------------
+    # Select ONE eligible signal.
+    # --------------------------------------------------------
+
+    selected = None
+
+    for candidate in all_candidates:
+
+        signal = candidate[
+            "signal"
+        ]
+
+        if signal_exists(
+            conn,
+            signal["signal_key"]
+        ):
+
+            STATS[
+                "skipped_existing"
+            ] += 1
+
+            print(
+                f"SKIP EXISTING: "
+                f"{signal['asset']} "
+                f"{signal['direction']} "
+                f"{signal['signal_key']}"
+            )
+
+            continue
+
+        if open_trade_exists(
+            conn,
+            signal["asset"],
+            signal["direction"]
+        ):
+
+            STATS[
+                "skipped_open"
+            ] += 1
+
+            print(
+                f"SKIP OPEN TRADE: "
+                f"{signal['asset']} "
+                f"{signal['direction']}"
+            )
+
+            continue
+
+        selected = candidate
+
+        break
+
+    # --------------------------------------------------------
+    # INSERT ONLY ONE
+    # --------------------------------------------------------
+
+    if selected is not None:
+
+        signal = selected[
+            "signal"
+        ]
+
+        chain = selected[
+            "chain"
+        ]
+
+        df1h = selected[
+            "df1h"
+        ]
+
+        STATS[
+            "unique_entries"
+        ] += 1
+
+        inserted = insert_trade(
+            conn,
+            signal
+        )
+
+        if inserted > 0:
+
+            STATS[
+                "new_signals"
+            ] += 1
+
+            print(
+                f"NEW SIGNAL INSERTED: "
+                f"{signal['asset']} "
+                f"{signal['direction']} "
+                f"{signal['pattern']}"
+            )
+
+            send_new_signal(
+                signal,
+                chain,
+                df1h
+            )
+
+        else:
+
+            STATS[
+                "insert_ignored"
+            ] += 1
+
+            print(
+                f"INSERT FAILED/IGNORED: "
+                f"{signal['asset']} "
+                f"{signal['direction']}"
+            )
+
+    else:
+
+        print(
+            "No eligible new signal "
+            "selected this scan."
+        )
 
     # --------------------------------------------------------
     # PERIODIC REPORT
