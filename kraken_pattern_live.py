@@ -3,49 +3,39 @@
 # VERSION 5.9.3
 # ============================================================
 #
-# FIXES IN 5.9.3:
+# FIXES:
 #
-# 1) Kraken Charts API:
-#       /api/charts/v1/trade/{symbol}/{resolution}
-#
-#    Correct resolutions:
+# 1) Kraken Charts API resolution:
 #       1h
 #       5m
 #
-#    Uses:
-#       count=
+# 2) Uses count instead of limit.
 #
-# 2) CONTRACT MAPPING:
-#       EXACT symbol matching only.
-#
-#    Example:
+# 3) EXACT contract mapping:
 #       XBT -> PF_XBTUSD
 #       TRX -> PF_TRXUSD
 #
 #    No substring matching.
-#    This prevents:
-#       XBT -> PF_AIXBTUSD
-#       TRX -> PF_MSTRXUSD
 #
-# 3) Existing SQLite DB is preserved.
+# 4) Existing DB is preserved.
 #
-# 4) updated_at is always supplied on INSERT.
+# 5) updated_at is supplied on INSERT.
 #
-# 5) Existing DB columns are migrated safely.
+# 6) Existing DB columns are migrated safely.
 #
-# 6) REAL_TRADING remains disabled.
+# 7) REAL_TRADING remains False.
 #
 # STRATEGY:
 #
-#       1H Pattern
-#            ↓
-#       1H Closed Candle Breakout
-#            ↓
-#       First 5M Retest
-#            ↓
-#       5M Confirmation
-#            ↓
-#       Entry
+# 1H Pattern
+#      ↓
+# 1H Closed Candle Breakout
+#      ↓
+# First 5M Retest
+#      ↓
+# 5M Confirmation
+#      ↓
+# Entry
 #
 # ============================================================
 
@@ -212,10 +202,8 @@ def fmt_tehran(ts):
     )
 
 
-def duration_text(
-    start_ts,
-    end_ts=None
-):
+def duration_text(start_ts, end_ts=None):
+
     if start_ts is None:
         return "-"
 
@@ -304,10 +292,7 @@ def send_telegram(text):
 # KRAKEN REQUEST
 # ============================================================
 
-def kraken_get(
-    path,
-    params=None
-):
+def kraken_get(path, params=None):
 
     url = BASE_URL + path
 
@@ -356,15 +341,10 @@ def build_contract_map():
         if not symbol:
             continue
 
-        # ----------------------------------------------------
         # EXACT MATCH ONLY
-        # ----------------------------------------------------
-
         for asset in ASSETS:
 
-            expected = (
-                f"PF_{asset}USD"
-            )
+            expected = f"PF_{asset}USD"
 
             if symbol == expected:
 
@@ -472,10 +452,7 @@ def fetch_candles(
 
         try:
 
-            if isinstance(
-                candle,
-                dict
-            ):
+            if isinstance(candle, dict):
 
                 ts = (
                     candle.get("time")
@@ -506,12 +483,8 @@ def fetch_candles(
                     else 0
                 )
 
-            ts = int(
-                float(ts)
-            )
+            ts = int(float(ts))
 
-            # Kraken Charts API:
-            # milliseconds
             if ts > 10_000_000_000:
                 ts //= 1000
 
@@ -525,7 +498,6 @@ def fetch_candles(
             ])
 
         except Exception:
-
             continue
 
     if not rows:
@@ -551,14 +523,8 @@ def fetch_candles(
         .sort_values(
             "timestamp"
         )
-        .reset_index(
-            drop=True
-        )
+        .reset_index(drop=True)
     )
-
-    # --------------------------------------------------------
-    # CLOSED CANDLES ONLY
-    # --------------------------------------------------------
 
     current = now_ts()
 
@@ -571,9 +537,7 @@ def fetch_candles(
 
     return df.tail(
         lookback
-    ).reset_index(
-        drop=True
-    )
+    ).reset_index(drop=True)
 
 
 # ============================================================
@@ -650,9 +614,7 @@ def detect_double_top(df):
 
     highs = pivot_highs(df)
 
-    for a in range(
-        len(highs)
-    ):
+    for a in range(len(highs)):
 
         for b in range(
             a + 1,
@@ -664,16 +626,10 @@ def detect_double_top(df):
 
             separation = j - i
 
-            if (
-                separation
-                < DOUBLE_MIN_SEPARATION
-            ):
+            if separation < DOUBLE_MIN_SEPARATION:
                 continue
 
-            if (
-                separation
-                > DOUBLE_MAX_SEPARATION
-            ):
+            if separation > DOUBLE_MAX_SEPARATION:
                 break
 
             p1 = float(
@@ -724,9 +680,7 @@ def detect_double_bottom(df):
 
     lows = pivot_lows(df)
 
-    for a in range(
-        len(lows)
-    ):
+    for a in range(len(lows)):
 
         for b in range(
             a + 1,
@@ -738,16 +692,10 @@ def detect_double_bottom(df):
 
             separation = j - i
 
-            if (
-                separation
-                < DOUBLE_MIN_SEPARATION
-            ):
+            if separation < DOUBLE_MIN_SEPARATION:
                 continue
 
-            if (
-                separation
-                > DOUBLE_MAX_SEPARATION
-            ):
+            if separation > DOUBLE_MAX_SEPARATION:
                 break
 
             p1 = float(
@@ -792,7 +740,7 @@ def detect_double_bottom(df):
 
 
 # ============================================================
-# HEAD & SHOULDERS
+# HEAD AND SHOULDERS
 # ============================================================
 
 def detect_head_shoulders(df):
@@ -849,10 +797,7 @@ def detect_head_shoulders(df):
                 / max(lh, rh)
             )
 
-            if (
-                shoulder_diff
-                > DOUBLE_TOLERANCE
-            ):
+            if shoulder_diff > DOUBLE_TOLERANCE:
                 continue
 
             middle = df.iloc[
@@ -864,28 +809,21 @@ def detect_head_shoulders(df):
             )
 
             patterns.append({
-                "pattern":
-                    "HEAD_AND_SHOULDERS",
-                "direction":
-                    "SHORT",
-                "pattern_time":
-                    int(
-                        df.iloc[right]
-                        ["timestamp"]
-                    ),
-                "level":
-                    neckline,
-                "left_index":
-                    left,
-                "right_index":
-                    right
+                "pattern": "HEAD_AND_SHOULDERS",
+                "direction": "SHORT",
+                "pattern_time": int(
+                    df.iloc[right]["timestamp"]
+                ),
+                "level": neckline,
+                "left_index": left,
+                "right_index": right
             })
 
     return patterns
 
 
 # ============================================================
-# INVERSE HEAD & SHOULDERS
+# INVERSE HEAD AND SHOULDERS
 # ============================================================
 
 def detect_inverse_head_shoulders(df):
@@ -945,10 +883,7 @@ def detect_inverse_head_shoulders(df):
                 )
             )
 
-            if (
-                shoulder_diff
-                > DOUBLE_TOLERANCE
-            ):
+            if shoulder_diff > DOUBLE_TOLERANCE:
                 continue
 
             middle = df.iloc[
@@ -960,21 +895,14 @@ def detect_inverse_head_shoulders(df):
             )
 
             patterns.append({
-                "pattern":
-                    "INVERSE_HEAD_AND_SHOULDERS",
-                "direction":
-                    "LONG",
-                "pattern_time":
-                    int(
-                        df.iloc[right]
-                        ["timestamp"]
-                    ),
-                "level":
-                    neckline,
-                "left_index":
-                    left,
-                "right_index":
-                    right
+                "pattern": "INVERSE_HEAD_AND_SHOULDERS",
+                "direction": "LONG",
+                "pattern_time": int(
+                    df.iloc[right]["timestamp"]
+                ),
+                "level": neckline,
+                "left_index": left,
+                "right_index": right
             })
 
     return patterns
@@ -1035,23 +963,16 @@ def detect_flags(df):
             ):
 
                 patterns.append({
-                    "pattern":
-                        "BULL_FLAG",
-                    "direction":
-                        "LONG",
-                    "pattern_time":
-                        int(
-                            df.iloc[i]
-                            ["timestamp"]
-                        ),
-                    "level":
-                        float(
-                            recent["high"].max()
-                        ),
-                    "left_index":
-                        i - 20,
-                    "right_index":
-                        i
+                    "pattern": "BULL_FLAG",
+                    "direction": "LONG",
+                    "pattern_time": int(
+                        df.iloc[i]["timestamp"]
+                    ),
+                    "level": float(
+                        recent["high"].max()
+                    ),
+                    "left_index": i - 20,
+                    "right_index": i
                 })
 
         elif move <= -0.025:
@@ -1063,23 +984,16 @@ def detect_flags(df):
             ):
 
                 patterns.append({
-                    "pattern":
-                        "BEAR_FLAG",
-                    "direction":
-                        "SHORT",
-                    "pattern_time":
-                        int(
-                            df.iloc[i]
-                            ["timestamp"]
-                        ),
-                    "level":
-                        float(
-                            recent["low"].min()
-                        ),
-                    "left_index":
-                        i - 20,
-                    "right_index":
-                        i
+                    "pattern": "BEAR_FLAG",
+                    "direction": "SHORT",
+                    "pattern_time": int(
+                        df.iloc[i]["timestamp"]
+                    ),
+                    "level": float(
+                        recent["low"].min()
+                    ),
+                    "left_index": i - 20,
+                    "right_index": i
                 })
 
     return patterns
@@ -1136,24 +1050,19 @@ def breakout_signal(
     if df.empty:
         return None
 
-    level = pattern.get(
-        "level"
-    )
+    level = pattern.get("level")
 
     if level is None:
         return None
 
-    direction = pattern[
-        "direction"
-    ]
+    direction = pattern["direction"]
 
     pattern_time = int(
         pattern["pattern_time"]
     )
 
     candidates = df[
-        df["timestamp"]
-        > pattern_time
+        df["timestamp"] > pattern_time
     ].copy()
 
     if candidates.empty:
@@ -1174,14 +1083,11 @@ def breakout_signal(
             if close > level:
 
                 return {
-                    "breakout_time":
-                        int(
-                            row["timestamp"]
-                        ),
-                    "breakout_price":
-                        close,
-                    "level":
-                        float(level)
+                    "breakout_time": int(
+                        row["timestamp"]
+                    ),
+                    "breakout_price": close,
+                    "level": float(level)
                 }
 
         else:
@@ -1189,14 +1095,11 @@ def breakout_signal(
             if close < level:
 
                 return {
-                    "breakout_time":
-                        int(
-                            row["timestamp"]
-                        ),
-                    "breakout_price":
-                        close,
-                    "level":
-                        float(level)
+                    "breakout_time": int(
+                        row["timestamp"]
+                    ),
+                    "breakout_price": close,
+                    "level": float(level)
                 }
 
     return None
@@ -1224,8 +1127,7 @@ def find_first_retest(
     )
 
     candidates = df5[
-        df5["timestamp"]
-        > breakout_time
+        df5["timestamp"] > breakout_time
     ].copy()
 
     if candidates.empty:
@@ -1252,12 +1154,10 @@ def find_first_retest(
         if touched:
 
             return {
-                "retest_time":
-                    int(
-                        row["timestamp"]
-                    ),
-                "retest_price":
-                    level
+                "retest_time": int(
+                    row["timestamp"]
+                ),
+                "retest_price": level
             }
 
     return None
@@ -1281,8 +1181,7 @@ def find_confirmation(
     )
 
     candidates = df5[
-        df5["timestamp"]
-        > retest_time
+        df5["timestamp"] > retest_time
     ].copy()
 
     if candidates.empty:
@@ -1307,12 +1206,10 @@ def find_confirmation(
             if cl > op:
 
                 return {
-                    "confirm_time":
-                        int(
-                            row["timestamp"]
-                        ),
-                    "confirm_price":
-                        cl
+                    "confirm_time": int(
+                        row["timestamp"]
+                    ),
+                    "confirm_price": cl
                 }
 
         else:
@@ -1320,12 +1217,10 @@ def find_confirmation(
             if cl < op:
 
                 return {
-                    "confirm_time":
-                        int(
-                            row["timestamp"]
-                        ),
-                    "confirm_price":
-                        cl
+                    "confirm_time": int(
+                        row["timestamp"]
+                    ),
+                    "confirm_price": cl
                 }
 
     return None
@@ -1349,8 +1244,7 @@ def find_entry(
     )
 
     candidates = df5[
-        df5["timestamp"]
-        > confirm_time
+        df5["timestamp"] > confirm_time
     ].copy()
 
     if candidates.empty:
@@ -1370,10 +1264,6 @@ def find_entry(
         now_ts() - entry_time
     ) / 60
 
-    # --------------------------------------------------------
-    # EXACT FRESHNESS LIMIT
-    # --------------------------------------------------------
-
     max_age = min(
         MAX_ENTRY_AGE_CANDLES * 5,
         MAX_ENTRY_AGE_MINUTES
@@ -1384,37 +1274,29 @@ def find_entry(
 
     if direction == "LONG":
 
-        sl = (
-            entry_price
-            * (1 - SL_PCT)
+        sl = entry_price * (
+            1 - SL_PCT
         )
 
-        tp = (
-            entry_price
-            * (1 + TP_PCT)
+        tp = entry_price * (
+            1 + TP_PCT
         )
 
     else:
 
-        sl = (
-            entry_price
-            * (1 + SL_PCT)
+        sl = entry_price * (
+            1 + SL_PCT
         )
 
-        tp = (
-            entry_price
-            * (1 - TP_PCT)
+        tp = entry_price * (
+            1 - TP_PCT
         )
 
     return {
-        "entry_time":
-            entry_time,
-        "entry_price":
-            entry_price,
-        "sl_price":
-            sl,
-        "tp_price":
-            tp
+        "entry_time": entry_time,
+        "entry_price": entry_price,
+        "sl_price": sl,
+        "tp_price": tp
     }
 
 
@@ -1464,10 +1346,7 @@ def generate_live_entries(
 
     for pattern in patterns:
 
-        if (
-            pattern["pattern_time"]
-            < cutoff
-        ):
+        if pattern["pattern_time"] < cutoff:
             continue
 
         recent_patterns.append(
@@ -1511,9 +1390,7 @@ def generate_live_entries(
 
         if breakout_age > 48:
 
-            stats[
-                "old_breakouts"
-            ] += 1
+            stats["old_breakouts"] += 1
 
             continue
 
@@ -1537,9 +1414,7 @@ def generate_live_entries(
         if not confirmation:
             continue
 
-        stats[
-            "confirmations"
-        ] += 1
+        stats["confirmations"] += 1
 
         entry = find_entry(
             df5,
@@ -1556,43 +1431,18 @@ def generate_live_entries(
         stats["valid"] += 1
 
         entries.append({
-            "asset":
-                asset,
-
-            "symbol":
-                contract,
-
-            "contract":
-                contract,
-
-            "pattern":
-                pattern["pattern"],
-
-            "direction":
-                pattern["direction"],
-
-            "breakout_time":
-                breakout["breakout_time"],
-
-            "retest_time":
-                retest["retest_time"],
-
-            "confirm_time":
-                confirmation[
-                    "confirm_time"
-                ],
-
-            "entry_time":
-                entry["entry_time"],
-
-            "entry_price":
-                entry["entry_price"],
-
-            "sl_price":
-                entry["sl_price"],
-
-            "tp_price":
-                entry["tp_price"]
+            "asset": asset,
+            "symbol": contract,
+            "contract": contract,
+            "pattern": pattern["pattern"],
+            "direction": pattern["direction"],
+            "breakout_time": breakout["breakout_time"],
+            "retest_time": retest["retest_time"],
+            "confirm_time": confirmation["confirm_time"],
+            "entry_time": entry["entry_time"],
+            "entry_price": entry["entry_price"],
+            "sl_price": entry["sl_price"],
+            "tp_price": entry["tp_price"]
         })
 
     return entries, stats
@@ -1714,10 +1564,6 @@ def init_db():
                     f"{column}: {e}"
                 )
 
-    # --------------------------------------------------------
-    # BACKFILL
-    # --------------------------------------------------------
-
     cur.execute("""
         UPDATE trades
         SET created_at =
@@ -1791,10 +1637,7 @@ def init_db():
         "notified_close"
     }
 
-    missing = (
-        required
-        - final_columns
-    )
+    missing = required - final_columns
 
     if missing:
 
@@ -2033,9 +1876,7 @@ def close_trade(
 # NOTIFICATION FLAGS
 # ============================================================
 
-def mark_new_notified(
-    trade_id
-):
+def mark_new_notified(trade_id):
 
     conn = get_db()
     cur = conn.cursor()
@@ -2052,9 +1893,7 @@ def mark_new_notified(
     conn.close()
 
 
-def mark_close_notified(
-    trade_id
-):
+def mark_close_notified(trade_id):
 
     conn = get_db()
     cur = conn.cursor()
@@ -2095,18 +1934,14 @@ def get_live_prices():
             )
         )
 
-        last = ticker.get(
-            "last"
-        )
+        last = ticker.get("last")
 
         if last is None:
             continue
 
         try:
 
-            prices[symbol] = float(
-                last
-            )
+            prices[symbol] = float(last)
 
         except Exception:
             pass
@@ -2156,16 +1991,12 @@ def calc_pct(
     if direction == "LONG":
 
         return (
-            (
-                current - entry
-            )
+            (current - entry)
             / entry
         ) * 100
 
     return (
-        (
-            entry - current
-        )
+        (entry - current)
         / entry
     ) * 100
 
@@ -2179,9 +2010,7 @@ def new_signal_message(
     current_price=None
 ):
 
-    direction = trade[
-        "direction"
-    ]
+    direction = trade["direction"]
 
     emoji = (
         "🟢"
@@ -2244,9 +2073,7 @@ def close_message(
     exit_price
 ):
 
-    direction = trade[
-        "direction"
-    ]
+    direction = trade["direction"]
 
     emoji = (
         "🟢"
@@ -2266,6 +2093,15 @@ def close_message(
         direction,
         entry,
         exit_price
+    )
+
+    # IMPORTANT:
+    # Calculate duration separately.
+    # This avoids nested f-string syntax errors.
+
+    trade_duration = duration_text(
+        trade["entry_time"],
+        trade["exit_time"]
     )
 
     return (
@@ -2288,10 +2124,7 @@ def close_message(
         f"🕐 Exit: "
         f"{fmt_tehran(trade['exit_time'])}\n"
         f"⏱ Duration: "
-        f"{duration_text("
-        f"trade['entry_time'],"
-        f"trade['exit_time']"
-        f")}"
+        f"{trade_duration}"
     )
 
 
@@ -2326,9 +2159,7 @@ def process_new_signals(
 
             continue
 
-        seen_keys.add(
-            signal_key
-        )
+        seen_keys.add(signal_key)
 
         ts = now_ts()
 
@@ -2370,16 +2201,12 @@ def process_new_signals(
 
             trade = dict(row)
 
-            message = (
-                new_signal_message(
-                    trade,
-                    current
-                )
+            message = new_signal_message(
+                trade,
+                current
             )
 
-            if send_telegram(
-                message
-            ):
+            if send_telegram(message):
 
                 mark_new_notified(
                     trade["id"]
@@ -2396,9 +2223,7 @@ def process_open_trades(
     live_prices
 ):
 
-    open_trades = (
-        get_open_trades()
-    )
+    open_trades = get_open_trades()
 
     closed_count = 0
 
@@ -2416,9 +2241,7 @@ def process_open_trades(
         if current is None:
             continue
 
-        direction = trade[
-            "direction"
-        ]
+        direction = trade["direction"]
 
         sl = float(
             trade["sl_price"]
@@ -2431,11 +2254,7 @@ def process_open_trades(
         exit_reason = None
         exit_price = None
 
-        # ----------------------------------------------------
-        # SAME CANDLE / SAME UPDATE:
         # SL FIRST
-        # ----------------------------------------------------
-
         if direction == "LONG":
 
             if current <= sl:
@@ -2460,10 +2279,7 @@ def process_open_trades(
                 exit_price = tp
                 exit_reason = "TP"
 
-        # ----------------------------------------------------
         # TIME EXIT
-        # ----------------------------------------------------
-
         if exit_reason is None:
 
             age_hours = (
@@ -2473,10 +2289,7 @@ def process_open_trades(
                 )
             ) / 3600
 
-            if (
-                age_hours
-                >= MAX_HOLD_HOURS
-            ):
+            if age_hours >= MAX_HOLD_HOURS:
 
                 exit_price = current
                 exit_reason = "TIME"
@@ -2504,9 +2317,7 @@ def process_open_trades(
             exit_price
         )
 
-        if send_telegram(
-            message
-        ):
+        if send_telegram(message):
 
             mark_close_notified(
                 trade["id"]
@@ -2521,9 +2332,7 @@ def process_open_trades(
 
 def reconcile_open_trades():
 
-    open_trades = (
-        get_open_trades()
-    )
+    open_trades = get_open_trades()
 
     if not open_trades:
         return 0
@@ -2554,16 +2363,13 @@ def reconcile_open_trades():
         )
 
         future = df5[
-            df5["timestamp"]
-            > entry_time
+            df5["timestamp"] > entry_time
         ]
 
         if future.empty:
             continue
 
-        direction = trade[
-            "direction"
-        ]
+        direction = trade["direction"]
 
         sl = float(
             trade["sl_price"]
@@ -2577,9 +2383,7 @@ def reconcile_open_trades():
         exit_price = None
         exit_reason = None
 
-        for _, candle in (
-            future.iterrows()
-        ):
+        for _, candle in future.iterrows():
 
             high = float(
                 candle["high"]
@@ -2595,28 +2399,15 @@ def reconcile_open_trades():
 
             if direction == "LONG":
 
-                hit_sl = (
-                    low <= sl
-                )
-
-                hit_tp = (
-                    high >= tp
-                )
+                hit_sl = low <= sl
+                hit_tp = high >= tp
 
             else:
 
-                hit_sl = (
-                    high >= sl
-                )
+                hit_sl = high >= sl
+                hit_tp = low <= tp
 
-                hit_tp = (
-                    low <= tp
-                )
-
-            # ------------------------------------------------
             # SL FIRST
-            # ------------------------------------------------
-
             if hit_sl:
 
                 exit_time = ts
@@ -2783,9 +2574,7 @@ def periodic_report(
     live_prices
 ):
 
-    open_trades = (
-        get_open_trades()
-    )
+    open_trades = get_open_trades()
 
     perf = performance()
 
@@ -2804,9 +2593,7 @@ def periodic_report(
 
     for trade in open_trades:
 
-        direction = trade[
-            "direction"
-        ]
+        direction = trade["direction"]
 
         emoji = (
             "🟢"
@@ -2868,25 +2655,41 @@ def periodic_report(
             f"({pct:+.2f}%)"
         )
 
+        sl_pct = calc_pct(
+            direction,
+            entry,
+            sl
+        )
+
+        tp_pct = calc_pct(
+            direction,
+            entry,
+            tp
+        )
+
         lines.append(
             f"🛑 SL: "
             f"{price_text(sl)} "
-            f"({calc_pct(direction, entry, sl):+.2f}%)"
+            f"({sl_pct:+.2f}%)"
         )
 
         lines.append(
             f"🎯 TP: "
             f"{price_text(tp)} "
-            f"({calc_pct(direction, entry, tp):+.2f}%)"
+            f"({tp_pct:+.2f}%)"
         )
 
         lines.append(
             f"⚙️ RR: {RR:.2f}"
         )
 
+        trade_duration = duration_text(
+            trade["entry_time"]
+        )
+
         lines.append(
             f"⏱ Duration: "
-            f"{duration_text(trade['entry_time'])}"
+            f"{trade_duration}"
         )
 
     lines.append("")
@@ -3056,9 +2859,7 @@ def scan():
     # CONTRACT MAP
     # --------------------------------------------------------
 
-    contract_map = (
-        build_contract_map()
-    )
+    contract_map = build_contract_map()
 
     all_entries = []
 
@@ -3221,19 +3022,15 @@ def scan():
     # LIVE PRICES
     # --------------------------------------------------------
 
-    live_prices = (
-        get_live_prices()
-    )
+    live_prices = get_live_prices()
 
     # --------------------------------------------------------
     # NEW SIGNALS
     # --------------------------------------------------------
 
-    inserted_count = (
-        process_new_signals(
-            unique_entries,
-            live_prices
-        )
+    inserted_count = process_new_signals(
+        unique_entries,
+        live_prices
     )
 
     print(
@@ -3245,10 +3042,8 @@ def scan():
     # LIVE EXITS
     # --------------------------------------------------------
 
-    closed_count = (
-        process_open_trades(
-            live_prices
-        )
+    closed_count = process_open_trades(
+        live_prices
     )
 
     print(
@@ -3260,9 +3055,7 @@ def scan():
     # HISTORICAL RECONCILIATION
     # --------------------------------------------------------
 
-    reconciled = (
-        reconcile_open_trades()
-    )
+    reconciled = reconcile_open_trades()
 
     print(
         f"Historical reconciled closes: "
@@ -3320,5 +3113,4 @@ def main():
 
 
 if __name__ == "__main__":
-
     main()
