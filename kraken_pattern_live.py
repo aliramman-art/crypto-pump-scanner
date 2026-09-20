@@ -1,17 +1,20 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.6
+# VERSION 5.7
 # ============================================================
 #
-# V5.6 FIXES:
+# V5.7 FIXES:
 #
 # - MAX ENTRY AGE = 2 x 5M CANDLES = 10 MINUTES
 # - 1H BREAKOUT TIME USES CLOSED-CANDLE TIME
 # - RETEST SEARCH STARTS AFTER 1H CANDLE CLOSE
 # - BREAKOUTS CHECKED FROM NEWEST TO OLDEST
-# - IF A BREAKOUT HAS NO VALID ENTRY, LATER/OTHER
-#   BREAKOUT CANDIDATES ARE ALSO CHECKED
-# - RETEST / CONFIRMATION DIAGNOSTICS IMPROVED
+# - IF A BREAKOUT HAS NO VALID ENTRY, OTHER BREAKOUT
+#   CANDIDATES ARE ALSO CHECKED
+# - RETEST / CONFIRMATION DIAGNOSTICS PRESERVED
+# - STALE ENTRY CANDIDATES ARE FILTERED EARLIER
+# - OLD BREAKOUTS OUTSIDE THE MAXIMUM ENTRY WINDOW
+#   ARE SKIPPED BEFORE RETEST SEARCH
 # - ORIGINAL STRATEGY FILTERS PRESERVED
 # - ORIGINAL DATABASE PRESERVED
 # - REAL TRADING DISABLED
@@ -1226,6 +1229,7 @@ def find_entry(
     direction,
     level,
     diagnostics=None,
+    latest_5m_ts=None,
 ):
 
     indices = df.index[
@@ -1304,12 +1308,66 @@ def find_entry(
         len(df),
     )
 
+    # --------------------------------------------------------
+    # FRESHNESS WINDOW
+    #
+    # Confirmation/entry must be within the allowed
+    # freshness window relative to the latest closed 5M.
+    #
+    # This prevents historical entries such as:
+    # Entry 10:30
+    # Latest 5M 11:05
+    # Age 35m
+    #
+    # from being processed as a possible live entry.
+    # --------------------------------------------------------
+
+    max_entry_age_seconds = (
+        MAX_ENTRY_AGE_CANDLES
+        * 300
+    )
+
+    minimum_fresh_entry_ts = None
+
+    if latest_5m_ts is not None:
+
+        minimum_fresh_entry_ts = (
+            int(latest_5m_ts)
+            - max_entry_age_seconds
+        )
+
     for i in range(
         retest_index + 1,
         confirm_end,
     ):
 
         row = df.iloc[i]
+
+        entry_timestamp = int(
+            row["timestamp"]
+        )
+
+        # ----------------------------------------------------
+        # ENTRY FRESHNESS FILTER
+        # ----------------------------------------------------
+
+        if (
+            minimum_fresh_entry_ts is not None
+            and entry_timestamp
+            < minimum_fresh_entry_ts
+        ):
+
+            continue
+
+        # Do not accept an entry candle that is newer
+        # than the latest closed 5M candle.
+        if (
+            latest_5m_ts is not None
+            and entry_timestamp
+            > int(latest_5m_ts)
+        ):
+
+            continue
 
         o = float(
             row["open"]
@@ -1377,25 +1435,32 @@ def find_entry(
                 continue
 
         if diagnostics is not None:
-            diagnostics["confirmations_found"] += 1
+            diagnostics[
+                "confirmations_found"
+            ] += 1
 
         return {
-            "entry_time": int(
-                row["timestamp"]
-            ),
-            "entry_price": c,
-            "retest_time": int(
-                df.iloc[
-                    retest_index
-                ]["timestamp"]
-            ),
-            "confirm_time": int(
-                row["timestamp"]
-            ),
+            "entry_time":
+                entry_timestamp,
+
+            "entry_price":
+                c,
+
+            "retest_time":
+                int(
+                    df.iloc[
+                        retest_index
+                    ]["timestamp"]
+                ),
+
+            "confirm_time":
+                entry_timestamp,
         }
 
     if diagnostics is not None:
-        diagnostics["no_confirmation"] += 1
+        diagnostics[
+            "no_confirmation"
+        ] += 1
 
     return None
 
@@ -1454,13 +1519,40 @@ def generate_live_entries(
         ]
     )
 
-    max_retest_seconds = (
+    # ========================================================
+    # MAXIMUM AGE OF A BREAKOUT THAT CAN STILL PRODUCE
+    # A FRESH ENTRY
+    #
+    # Retest window:
+    #   RETEST_MAX_BARS
+    #
+    # Confirmation window:
+    #   CONFIRM_MAX_BARS
+    #
+    # Entry freshness:
+    #   MAX_ENTRY_AGE_CANDLES
+    #
+    # Anything older than this cannot possibly produce
+    # a currently fresh entry.
+    # ========================================================
+
+    max_entry_age_seconds = (
+        MAX_ENTRY_AGE_CANDLES
+        * 300
+    )
+
+    maximum_entry_search_seconds = (
         (
             RETEST_MAX_BARS
             + CONFIRM_MAX_BARS
-            + 5
+            + MAX_ENTRY_AGE_CANDLES
         )
         * 300
+    )
+
+    earliest_possible_breakout_time = (
+        latest_5m_ts
+        - maximum_entry_search_seconds
     )
 
     for p in patterns:
@@ -1535,6 +1627,8 @@ def generate_live_entries(
                 ]
             )
 
+            # 1H candle timestamp is OPEN time.
+            # Breakout becomes valid only after candle CLOSE.
             breakout_close_time = (
                 breakout_open_time
                 + 3600
@@ -1555,7 +1649,7 @@ def generate_live_entries(
         )
 
         # ====================================================
-        # V5.6:
+        # V5.7:
         # NEWEST BREAKOUT FIRST
         # ====================================================
 
@@ -1568,13 +1662,15 @@ def generate_live_entries(
         ) in breakout_candidates:
 
             # ------------------------------------------------
-            # OLD BREAKOUT
+            # EARLY OLD-BREAKOUT FILTER
+            #
+            # If this breakout is too old to possibly create
+            # a fresh entry, do not call find_entry().
             # ------------------------------------------------
 
             if (
                 breakout_close_time
-                < latest_5m_ts
-                - max_retest_seconds
+                < earliest_possible_breakout_time
             ):
 
                 diagnostics[
@@ -1593,6 +1689,7 @@ def generate_live_entries(
                 p["direction"],
                 level,
                 diagnostics,
+                latest_5m_ts,
             )
 
             if entry is None:
@@ -1610,11 +1707,6 @@ def generate_live_entries(
                         "entry_time"
                     ]
                 )
-            )
-
-            max_entry_age_seconds = (
-                MAX_ENTRY_AGE_CANDLES
-                * 300
             )
 
             if (
@@ -1640,7 +1732,7 @@ def generate_live_entries(
                     f"{max_entry_age_seconds // 60}m"
                 )
 
-                # Continue to another breakout
+                # Continue to another breakout.
                 continue
 
             # =================================================
@@ -3440,7 +3532,7 @@ def main():
     )
 
     print(
-        "VERSION 5.6"
+        "VERSION 5.7"
     )
 
     print(
