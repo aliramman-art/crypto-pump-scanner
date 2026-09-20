@@ -1,16 +1,19 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.5
+# VERSION 5.6
 # ============================================================
 #
-# V5.5 FIXES:
+# V5.6 FIXES:
 #
-# - 1H BREAKOUT TIME NOW USES CLOSED-CANDLE TIME
+# - MAX ENTRY AGE = 2 x 5M CANDLES = 10 MINUTES
+# - 1H BREAKOUT TIME USES CLOSED-CANDLE TIME
 # - RETEST SEARCH STARTS AFTER 1H CANDLE CLOSE
-# - IF FIRST BREAKOUT HAS NO VALID ENTRY, LATER BREAKOUTS
-#   OF THE SAME PATTERN ARE ALSO CHECKED
-# - DIAGNOSTIC FUNNEL ADDED
+# - BREAKOUTS CHECKED FROM NEWEST TO OLDEST
+# - IF A BREAKOUT HAS NO VALID ENTRY, LATER/OTHER
+#   BREAKOUT CANDIDATES ARE ALSO CHECKED
+# - RETEST / CONFIRMATION DIAGNOSTICS IMPROVED
 # - ORIGINAL STRATEGY FILTERS PRESERVED
+# - ORIGINAL DATABASE PRESERVED
 # - REAL TRADING DISABLED
 #
 # STRATEGY:
@@ -66,6 +69,7 @@ CANDLE_CHUNK = 1900
 
 PERIODIC_REPORT_SECONDS = 15 * 60
 
+# KEEP ORIGINAL DATABASE
 DB_FILE = "kraken_pattern_live_v52.db"
 
 
@@ -73,7 +77,8 @@ DB_FILE = "kraken_pattern_live_v52.db"
 # SIGNAL FRESHNESS
 # ============================================================
 
-MAX_ENTRY_AGE_CANDLES = 1
+# 2 x 5-minute candles = maximum 10 minutes old
+MAX_ENTRY_AGE_CANDLES = 2
 
 
 # ============================================================
@@ -1220,6 +1225,7 @@ def find_entry(
     breakout_time,
     direction,
     level,
+    diagnostics=None,
 ):
 
     indices = df.index[
@@ -1228,6 +1234,10 @@ def find_entry(
     ].tolist()
 
     if not indices:
+
+        if diagnostics is not None:
+            diagnostics["no_retest"] += 1
+
         return None
 
     first_index = indices[0]
@@ -1239,6 +1249,10 @@ def find_entry(
     )
 
     retest_index = None
+
+    # --------------------------------------------------------
+    # FIRST RETEST ONLY
+    # --------------------------------------------------------
 
     for i in range(
         first_index,
@@ -1270,7 +1284,18 @@ def find_entry(
                 break
 
     if retest_index is None:
+
+        if diagnostics is not None:
+            diagnostics["no_retest"] += 1
+
         return None
+
+    if diagnostics is not None:
+        diagnostics["retests_found"] += 1
+
+    # --------------------------------------------------------
+    # CONFIRMATION AFTER RETEST
+    # --------------------------------------------------------
 
     confirm_end = min(
         retest_index
@@ -1351,6 +1376,9 @@ def find_entry(
             if c >= level:
                 continue
 
+        if diagnostics is not None:
+            diagnostics["confirmations_found"] += 1
+
         return {
             "entry_time": int(
                 row["timestamp"]
@@ -1365,6 +1393,9 @@ def find_entry(
                 row["timestamp"]
             ),
         }
+
+    if diagnostics is not None:
+        diagnostics["no_confirmation"] += 1
 
     return None
 
@@ -1389,7 +1420,9 @@ def generate_live_entries(
         "recent_patterns": 0,
         "breakouts_found": 0,
         "old_breakouts": 0,
+        "retests_found": 0,
         "no_retest": 0,
+        "confirmations_found": 0,
         "no_confirmation": 0,
         "stale_entries": 0,
         "valid_entries": 0,
@@ -1479,10 +1512,10 @@ def generate_live_entries(
         )
 
         # ====================================================
-        # V5.5:
-        # CHECK EVERY VALID BREAKOUT UNTIL A VALID ENTRY
-        # IS FOUND.
+        # COLLECT BREAKOUT CANDIDATES
         # ====================================================
+
+        breakout_candidates = []
 
         for i in range(
             p["end"] + 1,
@@ -1496,21 +1529,6 @@ def generate_live_entries(
             ):
                 continue
 
-            diagnostics[
-                "breakouts_found"
-            ] += 1
-
-            # =================================================
-            # IMPORTANT:
-            #
-            # The timestamp of an OHLC candle is its OPEN time.
-            #
-            # A 1H candle at 10:00 closes at 11:00.
-            #
-            # Therefore the breakout becomes confirmed only
-            # at 11:00, not at 10:00.
-            # =================================================
-
             breakout_open_time = int(
                 df_1h.iloc[i][
                     "timestamp"
@@ -1521,6 +1539,33 @@ def generate_live_entries(
                 breakout_open_time
                 + 3600
             )
+
+            breakout_candidates.append(
+                (
+                    i,
+                    breakout_open_time,
+                    breakout_close_time,
+                )
+            )
+
+        diagnostics[
+            "breakouts_found"
+        ] += len(
+            breakout_candidates
+        )
+
+        # ====================================================
+        # V5.6:
+        # NEWEST BREAKOUT FIRST
+        # ====================================================
+
+        breakout_candidates.reverse()
+
+        for (
+            i,
+            breakout_open_time,
+            breakout_close_time,
+        ) in breakout_candidates:
 
             # ------------------------------------------------
             # OLD BREAKOUT
@@ -1547,20 +1592,10 @@ def generate_live_entries(
                 breakout_close_time,
                 p["direction"],
                 level,
+                diagnostics,
             )
 
             if entry is None:
-
-                # We don't know whether the failure was
-                # specifically retest or confirmation without
-                # changing find_entry's return contract.
-                #
-                # Count it as no valid setup and continue to
-                # the next possible breakout.
-
-                diagnostics[
-                    "no_retest"
-                ] += 1
 
                 continue
 
@@ -1605,8 +1640,7 @@ def generate_live_entries(
                     f"{max_entry_age_seconds // 60}m"
                 )
 
-                # Continue to look for another breakout
-                # of the same pattern.
+                # Continue to another breakout
                 continue
 
             # =================================================
@@ -1722,13 +1756,20 @@ def generate_live_entries(
     # DIAGNOSTICS
     # ========================================================
 
+    no_entry_total = (
+        diagnostics["no_retest"]
+        + diagnostics["no_confirmation"]
+    )
+
     print(
         f"[DIAG] {asset} | "
         f"Patterns={diagnostics['patterns_total']} | "
         f"Recent={diagnostics['recent_patterns']} | "
         f"Breakouts={diagnostics['breakouts_found']} | "
         f"OldBreakouts={diagnostics['old_breakouts']} | "
-        f"NoEntry={diagnostics['no_retest']} | "
+        f"Retests={diagnostics['retests_found']} | "
+        f"Confirmations={diagnostics['confirmations_found']} | "
+        f"NoEntry={no_entry_total} | "
         f"Stale={diagnostics['stale_entries']} | "
         f"Valid={diagnostics['valid_entries']}"
     )
@@ -3222,7 +3263,9 @@ def scan_new_signals(
         "recent_patterns": 0,
         "breakouts_found": 0,
         "old_breakouts": 0,
+        "retests_found": 0,
         "no_retest": 0,
+        "confirmations_found": 0,
         "no_confirmation": 0,
         "stale_entries": 0,
         "valid_entries": 0,
@@ -3317,6 +3360,11 @@ def scan_new_signals(
     # GLOBAL DIAGNOSTIC REPORT
     # ========================================================
 
+    no_entry_total = (
+        total_diag["no_retest"]
+        + total_diag["no_confirmation"]
+    )
+
     print(
         "=================================================="
     )
@@ -3346,8 +3394,18 @@ def scan_new_signals(
     )
 
     print(
+        f"Retests found: "
+        f"{total_diag['retests_found']}"
+    )
+
+    print(
+        f"Confirmations found: "
+        f"{total_diag['confirmations_found']}"
+    )
+
+    print(
         f"No valid Retest/Confirmation: "
-        f"{total_diag['no_retest']}"
+        f"{no_entry_total}"
     )
 
     print(
@@ -3382,7 +3440,7 @@ def main():
     )
 
     print(
-        "VERSION 5.5"
+        "VERSION 5.6"
     )
 
     print(
@@ -3397,6 +3455,11 @@ def main():
     print(
         f"MAX_ENTRY_AGE_CANDLES = "
         f"{MAX_ENTRY_AGE_CANDLES}"
+    )
+
+    print(
+        f"MAX ENTRY AGE = "
+        f"{MAX_ENTRY_AGE_CANDLES * 5} MINUTES"
     )
 
     print(
