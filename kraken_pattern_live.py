@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 6.4.1
+# VERSION 6.5.0
 # ============================================================
 #
 # PAPER ONLY
@@ -37,12 +37,18 @@
 # - Maximum confirmation age = 30 minutes AFTER
 #   the confirmation candle has CLOSED.
 #
-# FIXES:
-# - get_meta() added
-# - set_meta() added
-# - periodic Telegram report fixed
-# - Telegram report timestamp saved only after successful send
-# - chart pattern points fixed
+# PERFORMANCE UPDATE:
+# - Performance starts from zero for this strategy version.
+# - Existing historical closed trades are preserved in DB
+#   but excluded from current Performance.
+# - Existing OPEN trades from previous strategy are cleared
+#   ONCE on first run of this version.
+# - New trades are counted from strategy_performance_start.
+# - PNL is stored in trades.pnl_pct.
+# - LONG and SHORT PNL are calculated correctly.
+# - TP / SL / TIME are reported separately.
+# - Total PNL and Average PNL are included.
+# - OPEN TRADES section has been removed.
 #
 # EXISTING DB PRESERVED:
 #   kraken_pattern_live_v52.db
@@ -67,7 +73,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "6.4.1"
+VERSION = "6.5.0"
 
 REAL_TRADING = False
 
@@ -126,6 +132,19 @@ SWING_LEFT_RIGHT = 3
 CHART_CANDLES = 100
 
 PERIODIC_REPORT_SECONDS = 900
+
+
+# ============================================================
+# PERFORMANCE META KEYS
+# ============================================================
+
+PERFORMANCE_START_META_KEY = (
+    "strategy_performance_start"
+)
+
+LEGACY_OPEN_CLEARED_META_KEY = (
+    "legacy_open_trades_cleared_v650"
+)
 
 
 # ============================================================
@@ -529,6 +548,7 @@ def init_db():
             exit_time TEXT,
             exit_price REAL,
             exit_reason TEXT,
+            pnl_pct REAL,
             created_at INTEGER,
             updated_at INTEGER
         )
@@ -574,6 +594,7 @@ def init_db():
         "exit_time": "TEXT",
         "exit_price": "REAL",
         "exit_reason": "TEXT",
+        "pnl_pct": "REAL",
         "created_at": "INTEGER",
         "updated_at": "INTEGER",
     }
@@ -676,6 +697,120 @@ def set_meta(key, value):
 
 
 # ============================================================
+# PERFORMANCE INITIALIZATION
+# ============================================================
+
+def initialize_new_strategy():
+
+    """
+    Creates a clean Performance starting point exactly once.
+
+    On the first run of VERSION 6.5.0:
+    1. Save current timestamp as strategy start.
+    2. Delete all currently OPEN trades because they belong
+       to the previous strategy.
+    3. Mark the cleanup as completed.
+
+    Historical CLOSED trades remain in the database.
+    They are simply excluded from Performance by created_at.
+    """
+
+    performance_start = get_meta(
+        PERFORMANCE_START_META_KEY
+    )
+
+    if performance_start is None:
+
+        start = now_ts()
+
+        set_meta(
+            PERFORMANCE_START_META_KEY,
+            start,
+        )
+
+        print(
+            "New strategy Performance start:",
+            format_time(start),
+        )
+
+    else:
+
+        try:
+            start = int(
+                performance_start
+            )
+        except Exception:
+
+            start = now_ts()
+
+            set_meta(
+                PERFORMANCE_START_META_KEY,
+                start,
+            )
+
+    cleanup_done = get_meta(
+        LEGACY_OPEN_CLEARED_META_KEY
+    )
+
+    if cleanup_done != "1":
+
+        conn = db_connect()
+
+        try:
+
+            cur = conn.execute(
+                """
+                DELETE FROM trades
+                WHERE status = 'OPEN'
+                """
+            )
+
+            deleted = cur.rowcount
+
+            conn.commit()
+
+        finally:
+            conn.close()
+
+        set_meta(
+            LEGACY_OPEN_CLEARED_META_KEY,
+            "1",
+        )
+
+        print(
+            "Legacy OPEN trades removed:",
+            deleted,
+        )
+
+    return start
+
+
+def get_performance_start():
+
+    value = get_meta(
+        PERFORMANCE_START_META_KEY
+    )
+
+    if value is None:
+
+        value = initialize_new_strategy()
+
+    try:
+        return int(value)
+
+    except Exception:
+
+        start = now_ts()
+
+        set_meta(
+            PERFORMANCE_START_META_KEY,
+            start,
+        )
+
+        return start
+
+
+# ============================================================
 # DATABASE HELPERS
 # ============================================================
 
@@ -751,6 +886,8 @@ def insert_trade(trade):
 
     try:
 
+        current_ts = now_ts()
+
         cur = conn.execute(
             """
             INSERT OR IGNORE INTO trades (
@@ -769,12 +906,13 @@ def insert_trade(trade):
                 tp_price,
                 current_price,
                 status,
+                pnl_pct,
                 created_at,
                 updated_at
             )
             VALUES (
                 ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, ?, ?
             )
             """,
             (
@@ -793,8 +931,9 @@ def insert_trade(trade):
                 trade["tp_price"],
                 trade["entry_price"],
                 "OPEN",
-                now_ts(),
-                now_ts(),
+                None,
+                current_ts,
+                current_ts,
             ),
         )
 
@@ -3005,110 +3144,41 @@ def build_signal_message(trade):
 
 
 # ============================================================
-# OPEN TRADES
+# PNL CALCULATION
 # ============================================================
 
-def build_open_trades_message():
+def calculate_pnl_pct(
+    direction,
+    entry_price,
+    exit_price,
+):
 
-    rows = get_open_trades()
+    entry = float(
+        entry_price
+    )
 
-    if not rows:
+    exit_value = float(
+        exit_price
+    )
+
+    if entry == 0:
+        return 0.0
+
+    if direction == "LONG":
+
         return (
-            "🟢 <b>OPEN TRADES: 0</b>"
+            (
+                exit_value - entry
+            )
+            / entry
+        ) * 100.0
+
+    return (
+        (
+            entry - exit_value
         )
-
-    prices = get_all_current_prices()
-
-    lines = [
-        f"🟢 <b>OPEN TRADES: {len(rows)}</b>",
-        "",
-    ]
-
-    for row in rows:
-
-        asset = row["asset"]
-        direction = row["direction"]
-
-        entry = float(
-            row["entry_price"]
-        )
-
-        tp = float(
-            row["tp_price"]
-        )
-
-        sl = float(
-            row["sl_price"]
-        )
-
-        current = prices.get(
-            row["symbol"]
-        )
-
-        if current is None:
-            current = entry
-
-        if direction == "LONG":
-
-            pnl = (
-                (
-                    current - entry
-                )
-                / entry
-            ) * 100
-
-        else:
-
-            pnl = (
-                (
-                    entry - current
-                )
-                / entry
-            ) * 100
-
-        emoji = (
-            "🟢"
-            if direction == "LONG"
-            else "🔴"
-        )
-
-        lines.extend(
-            [
-                (
-                    f"{emoji} "
-                    f"<b>{asset} "
-                    f"{direction}</b>"
-                ),
-                (
-                    f"📌 Pattern: "
-                    f"{row['pattern']}"
-                ),
-                (
-                    f"💰 Entry: "
-                    f"{entry:.10g}"
-                ),
-                (
-                    f"💵 Current: "
-                    f"{current:.10g} "
-                    f"({pnl:+.2f}%)"
-                ),
-                (
-                    f"🛑 SL: "
-                    f"{sl:.10g}"
-                ),
-                (
-                    f"🎯 TP: "
-                    f"{tp:.10g}"
-                ),
-                (
-                    f"⏱ Duration: "
-                    f"{duration_text(row['entry_time'])}"
-                ),
-                "",
-            ]
-        )
-
-    return "\n".join(lines)
+        / entry
+    ) * 100.0
 
 
 # ============================================================
@@ -3116,6 +3186,10 @@ def build_open_trades_message():
 # ============================================================
 
 def build_performance_message():
+
+    performance_start = (
+        get_performance_start()
+    )
 
     conn = db_connect()
 
@@ -3150,10 +3224,49 @@ def build_performance_message():
                         THEN 1
                         ELSE 0
                     END
-                ) AS losses
+                ) AS losses,
+
+                SUM(
+                    CASE
+                        WHEN status='CLOSED'
+                         AND exit_reason='TIME'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS time_exits,
+
+                COALESCE(
+                    SUM(
+                        CASE
+                            WHEN status='CLOSED'
+                            THEN COALESCE(
+                                pnl_pct,
+                                0
+                            )
+                            ELSE 0
+                        END
+                    ),
+                    0
+                ) AS total_pnl,
+
+                COALESCE(
+                    AVG(
+                        CASE
+                            WHEN status='CLOSED'
+                            THEN pnl_pct
+                            ELSE NULL
+                        END
+                    ),
+                    0
+                ) AS avg_pnl
 
             FROM trades
-            """
+
+            WHERE created_at >= ?
+            """,
+            (
+                performance_start,
+            ),
         ).fetchone()
 
     finally:
@@ -3175,6 +3288,18 @@ def build_performance_message():
         row["losses"] or 0
     )
 
+    time_exits = int(
+        row["time_exits"] or 0
+    )
+
+    total_pnl = float(
+        row["total_pnl"] or 0
+    )
+
+    avg_pnl = float(
+        row["avg_pnl"] or 0
+    )
+
     win_rate = (
         (wins / closed) * 100
         if closed
@@ -3183,11 +3308,16 @@ def build_performance_message():
 
     return (
         "📈 <b>PERFORMANCE</b>\n\n"
+        f"Start: "
+        f"{format_time(performance_start)}\n"
         f"Trades: {total}\n"
         f"Closed: {closed}\n"
         f"TP: {wins}\n"
         f"SL: {losses}\n"
-        f"Win Rate: {win_rate:.2f}%"
+        f"TIME: {time_exits}\n"
+        f"Win Rate: {win_rate:.2f}%\n"
+        f"Total PnL: {total_pnl:+.2f}%\n"
+        f"Avg PnL: {avg_pnl:+.2f}%"
     )
 
 
@@ -3315,11 +3445,9 @@ def build_scan_summary():
             ]
         )
 
-    lines.append(
-        build_open_trades_message()
-    )
-
-    lines.append("")
+    # --------------------------------------------------------
+    # NO OPEN TRADES SECTION
+    # --------------------------------------------------------
 
     lines.append(
         build_performance_message()
@@ -3334,9 +3462,17 @@ def build_scan_summary():
 
 def close_trade(
     trade_id,
+    direction,
+    entry_price,
     exit_price,
     reason,
 ):
+
+    pnl = calculate_pnl_pct(
+        direction,
+        entry_price,
+        exit_price,
+    )
 
     conn = db_connect()
 
@@ -3351,6 +3487,7 @@ def close_trade(
                 exit_price=?,
                 exit_reason=?,
                 current_price=?,
+                pnl_pct=?,
                 updated_at=?
             WHERE id=?
               AND status='OPEN'
@@ -3360,6 +3497,7 @@ def close_trade(
                 exit_price,
                 reason,
                 exit_price,
+                pnl,
                 now_ts(),
                 trade_id,
             ),
@@ -3369,6 +3507,8 @@ def close_trade(
 
     finally:
         conn.close()
+
+    return pnl
 
 
 # ============================================================
@@ -3456,8 +3596,10 @@ def reconcile_open_trades():
             >= MAX_HOLD_HOURS * 3600
         ):
 
-            close_trade(
+            pnl = close_trade(
                 row["id"],
+                direction,
+                entry,
                 current,
                 "TIME",
             )
@@ -3474,9 +3616,11 @@ def reconcile_open_trades():
 💰 Entry: {entry:.10g}
 💵 Exit: {current:.10g}
 
+📊 PnL: {pnl:+.2f}%
+
 ⏱ Duration: {duration_text(row['entry_time'])}
 
-⚠️ Reason: TIME
+<b>Reason:</b> TIME
 """
 
             send_telegram(
@@ -3510,8 +3654,10 @@ def reconcile_open_trades():
         if not reason:
             continue
 
-        close_trade(
+        pnl = close_trade(
             row["id"],
+            direction,
+            entry,
             current,
             reason,
         )
@@ -3519,24 +3665,6 @@ def reconcile_open_trades():
         STATS[
             "closed_trades"
         ] += 1
-
-        if direction == "LONG":
-
-            pnl = (
-                (
-                    current - entry
-                )
-                / entry
-            ) * 100
-
-        else:
-
-            pnl = (
-                (
-                    entry - current
-                )
-                / entry
-            ) * 100
 
         emoji = (
             "🎯"
@@ -3883,6 +4011,10 @@ def main():
     )
 
     print(
+        "Performance: NEW STRATEGY START"
+    )
+
+    print(
         "=" * 60
     )
 
@@ -3898,6 +4030,34 @@ def main():
 
         print(
             "Database initialization error:",
+            exc,
+        )
+
+        traceback.print_exc()
+
+        return
+
+    # --------------------------------------------------------
+    # INITIALIZE NEW STRATEGY
+    # --------------------------------------------------------
+
+    try:
+
+        performance_start = (
+            initialize_new_strategy()
+        )
+
+        print(
+            "Performance start:",
+            format_time(
+                performance_start
+            ),
+        )
+
+    except Exception as exc:
+
+        print(
+            "Strategy initialization error:",
             exc,
         )
 
@@ -3978,6 +4138,11 @@ def main():
     print(
         f"Signals sent: "
         f"{STATS['signals_sent']}"
+    )
+
+    print(
+        f"Closed this scan: "
+        f"{STATS['closed_trades']}"
     )
 
     print(
