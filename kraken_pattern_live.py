@@ -3,40 +3,37 @@
 # VERSION 5.9.3
 # ============================================================
 #
+# BASED ON V5.9.2
+#
 # FIXES:
-#
-# 1) Kraken Charts API resolution:
-#       1h
-#       5m
-#
-# 2) Uses count instead of limit.
-#
-# 3) EXACT contract mapping:
-#       XBT -> PF_XBTUSD
-#       TRX -> PF_TRXUSD
-#
-#    No substring matching.
-#
-# 4) Existing DB is preserved.
-#
-# 5) updated_at is supplied on INSERT.
-#
-# 6) Existing DB columns are migrated safely.
-#
-# 7) REAL_TRADING remains False.
+# - FIXED ENTRY LOGIC
+# - CONFIRMATION CANDLE IS THE ENTRY CANDLE
+# - NO LOOKAHEAD
+# - CLOSED CANDLES ONLY
+# - FIXED KRAKEN CANDLE INTERVALS
+# - FIXED EXACT CONTRACT MAPPING
+# - PRESERVES EXISTING DATABASE
+# - SAFE DATABASE MIGRATION
+# - updated_at ALWAYS PROVIDED
 #
 # STRATEGY:
-#
 # 1H Pattern
-#      ↓
-# 1H Closed Candle Breakout
-#      ↓
-# First 5M Retest
-#      ↓
-# 5M Confirmation
-#      ↓
-# Entry
+# -> 1H CLOSED-CANDLE BREAKOUT
+# -> FIRST 5M RETEST
+# -> 5M CONFIRMATION
+# -> ENTRY AT CONFIRMATION CLOSE
 #
+# RULES:
+# - CLOSED CANDLES ONLY
+# - NO LOOKAHEAD
+# - FIRST RETEST ONLY
+# - CONFIRMATION AFTER RETEST
+# - CONFIRMATION CANDLE = ENTRY CANDLE
+# - ENTRY CANDLE NOT USED FOR TP/SL
+# - SAME CANDLE TP+SL => SL FIRST
+#
+# PAPER ONLY
+# REAL_TRADING MUST REMAIN FALSE
 # ============================================================
 
 import os
@@ -51,18 +48,19 @@ from zoneinfo import ZoneInfo
 
 
 # ============================================================
-# VERSION
+# CONFIG
 # ============================================================
 
 VERSION = "5.9.3"
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
 BASE_URL = "https://futures.kraken.com"
 
+DB_FILE = "kraken_pattern_live_v52.db"
+
+REAL_TRADING = False
+
+# IMPORTANT:
+# Kraken charts endpoint expects interval strings.
 INTERVAL_1H = "1h"
 INTERVAL_5M = "5m"
 
@@ -70,27 +68,17 @@ SL_PCT = 0.01
 TP_PCT = 0.01
 RR = 1.0
 
-REAL_TRADING = False
-
 MAX_HOLD_HOURS = 48
-
-MAIN_LOOKBACK = 500
-ENTRY_LOOKBACK = 1500
-
-REQUEST_TIMEOUT = 30
-REQUEST_SLEEP = 0.10
-
-PERIODIC_REPORT_SECONDS = 15 * 60
-
-DB_FILE = "kraken_pattern_live_v52.db"
-
-
-# ============================================================
-# SIGNAL FRESHNESS
-# ============================================================
 
 MAX_ENTRY_AGE_CANDLES = 2
 MAX_ENTRY_AGE_MINUTES = 10
+
+REQUEST_TIMEOUT = 20
+REQUEST_SLEEP = 0.10
+
+PERIODIC_REPORT_SECONDS = 900
+
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 
 # ============================================================
@@ -108,7 +96,6 @@ ASSETS = [
     "LINK",
     "AVAX",
     "DOT",
-
     "BNB",
     "TRX",
     "UNI",
@@ -119,7 +106,6 @@ ASSETS = [
     "FIL",
     "ARB",
     "OP",
-
     "BCH",
     "ETC",
     "XMR",
@@ -130,7 +116,6 @@ ASSETS = [
     "TIA",
     "SEI",
     "RUNE",
-
     "CRV",
     "HBAR",
     "HYPE",
@@ -145,66 +130,60 @@ ASSETS = [
 
 
 # ============================================================
-# PATTERN PARAMETERS
+# PATTERN CONFIG
 # ============================================================
+
+PATTERN_LOOKBACK = 220
 
 PIVOT_LEFT = 3
 PIVOT_RIGHT = 3
 
-DOUBLE_TOLERANCE = 0.015
+PATTERN_TOLERANCE = 0.012
 
-DOUBLE_MIN_SEPARATION = 5
-DOUBLE_MAX_SEPARATION = 60
+MIN_PATTERN_DISTANCE = 3
+MAX_PATTERN_DISTANCE = 80
 
-HS_MIN_SEPARATION = 5
-HS_MAX_SEPARATION = 80
-
-PATTERN_LOOKBACK = 250
-
-BREAKOUT_LOOKAHEAD = 24
+BREAKOUT_LOOKAHEAD = 20
 RETEST_LOOKAHEAD = 12
 CONFIRMATION_LOOKAHEAD = 6
 
-MIN_PATTERN_DISTANCE = 5
-MAX_PATTERN_DISTANCE = 80
-
-PATTERN_TOLERANCE = 0.015
-
 
 # ============================================================
-# TIME
+# TIME HELPERS
 # ============================================================
-
-TEHRAN_TZ = ZoneInfo("Asia/Tehran")
-
-
-def now_ts():
-    return int(time.time())
-
 
 def utc_now():
     return datetime.now(timezone.utc)
 
 
-def fmt_tehran(ts):
-    if ts is None:
+def now_ts():
+    return int(utc_now().timestamp())
+
+
+def fmt_utc(ts):
+    if not ts:
         return "-"
 
-    dt = datetime.fromtimestamp(
+    return datetime.fromtimestamp(
         int(ts),
         tz=timezone.utc
-    )
+    ).strftime("%Y-%m-%d %H:%M UTC")
 
-    return dt.astimezone(
-        TEHRAN_TZ
-    ).strftime(
-        "%Y-%m-%d %H:%M:%S"
+
+def fmt_tehran(ts):
+    if not ts:
+        return "-"
+
+    return datetime.fromtimestamp(
+        int(ts),
+        tz=timezone.utc
+    ).astimezone(TEHRAN_TZ).strftime(
+        "%Y-%m-%d %H:%M"
     )
 
 
 def duration_text(start_ts, end_ts=None):
-
-    if start_ts is None:
+    if not start_ts:
         return "-"
 
     if end_ts is None:
@@ -215,9 +194,8 @@ def duration_text(start_ts, end_ts=None):
         int(end_ts) - int(start_ts)
     )
 
-    minutes = seconds // 60
-    hours = minutes // 60
-    minutes = minutes % 60
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
 
     if hours > 0:
         return f"{hours}h {minutes}m"
@@ -230,22 +208,25 @@ def duration_text(start_ts, end_ts=None):
 # ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN"
-)
+    "TELEGRAM_BOT_TOKEN",
+    ""
+).strip()
 
 TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID"
-)
+    "TELEGRAM_CHAT_ID",
+    ""
+).strip()
 
 
-def send_telegram(text):
+def send_telegram(message):
 
-    if not TELEGRAM_BOT_TOKEN:
-        print("Telegram token missing")
-        return False
-
-    if not TELEGRAM_CHAT_ID:
-        print("Telegram chat id missing")
+    if (
+        not TELEGRAM_BOT_TOKEN
+        or not TELEGRAM_CHAT_ID
+    ):
+        print(
+            "[TELEGRAM] Token/chat ID not configured."
+        )
         return False
 
     url = (
@@ -255,7 +236,7 @@ def send_telegram(text):
 
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
+        "text": message,
         "parse_mode": "HTML",
         "disable_web_page_preview": True,
     }
@@ -268,15 +249,14 @@ def send_telegram(text):
             timeout=REQUEST_TIMEOUT
         )
 
-        if not r.ok:
-            print(
-                "[TELEGRAM ERROR]",
-                r.status_code,
-                r.text
-            )
-            return False
+        if r.ok:
+            return True
 
-        return True
+        print(
+            "[TELEGRAM ERROR]",
+            r.status_code,
+            r.text
+        )
 
     except Exception as e:
 
@@ -285,7 +265,7 @@ def send_telegram(text):
             e
         )
 
-        return False
+    return False
 
 
 # ============================================================
@@ -296,22 +276,29 @@ def kraken_get(path, params=None):
 
     url = BASE_URL + path
 
-    r = requests.get(
-        url,
-        params=params,
-        timeout=REQUEST_TIMEOUT,
-        headers={
-            "Accept": "application/json"
-        }
-    )
+    try:
 
-    r.raise_for_status()
+        r = requests.get(
+            url,
+            params=params,
+            timeout=REQUEST_TIMEOUT
+        )
 
-    return r.json()
+        r.raise_for_status()
+
+        return r.json()
+
+    except Exception as e:
+
+        print(
+            f"[KRAKEN ERROR] {path}: {e}"
+        )
+
+        return None
 
 
 # ============================================================
-# CONTRACTS
+# CONTRACT DISCOVERY
 # ============================================================
 
 def get_contracts():
@@ -319,6 +306,9 @@ def get_contracts():
     data = kraken_get(
         "/derivatives/api/v3/instruments"
     )
+
+    if not data:
+        return []
 
     return data.get(
         "instruments",
@@ -328,216 +318,255 @@ def get_contracts():
 
 def build_contract_map():
 
-    contracts = get_contracts()
-
-    result = {}
-
-    for c in contracts:
-
-        symbol = str(
-            c.get("symbol", "")
-        ).upper()
-
-        if not symbol:
-            continue
-
-        # EXACT MATCH ONLY
-        for asset in ASSETS:
-
-            expected = f"PF_{asset}USD"
-
-            if symbol == expected:
-
-                result[asset] = symbol
-
-                break
+    instruments = get_contracts()
 
     print(
-        f"[CONTRACT MAP] "
-        f"{len(result)}/{len(ASSETS)} assets mapped"
+        f"Kraken contracts loaded: "
+        f"{len(instruments)}"
+    )
+
+    instrument_symbols = set()
+
+    for item in instruments:
+
+        symbol = str(
+            item.get(
+                "symbol",
+                ""
+            )
+        ).upper()
+
+        if symbol:
+            instrument_symbols.add(
+                symbol
+            )
+
+    contract_map = {}
+
+    for asset in ASSETS:
+
+        wanted = (
+            f"PF_{asset}USD"
+        ).upper()
+
+        if wanted in instrument_symbols:
+
+            contract_map[asset] = wanted
+
+    print(
+        f"Available assets: "
+        f"{len(contract_map)}/{len(ASSETS)}"
     )
 
     for asset in ASSETS:
 
-        if asset in result:
+        if asset in contract_map:
 
             print(
-                f"[MAP] {asset} -> "
-                f"{result[asset]}"
+                f"  {asset:<6} -> "
+                f"{contract_map[asset]}"
             )
 
         else:
 
             print(
-                f"[MAP MISSING] {asset}"
+                f"  {asset:<6} -> NOT FOUND"
             )
 
-    return result
+    return contract_map
 
 
 # ============================================================
-# CANDLES
+# CANDLE FETCH
 # ============================================================
 
 def fetch_candles(
     contract,
-    interval,
-    lookback
+    resolution,
+    limit=300
 ):
 
-    if not contract:
-        return pd.DataFrame()
-
-    interval_seconds = {
-        "1m": 60,
-        "5m": 300,
-        "15m": 900,
-        "30m": 1800,
-        "1h": 3600,
-        "4h": 14400,
-        "12h": 43200,
-        "1d": 86400,
-        "1w": 604800,
-    }
-
-    if interval not in interval_seconds:
-
-        raise ValueError(
-            f"Unsupported interval: {interval}"
-        )
-
     path = (
-        "/api/charts/v1/trade/"
-        f"{contract}/"
-        f"{interval}"
+        f"/api/charts/v1/trade/"
+        f"{contract}/{resolution}"
     )
 
-    params = {
-        "count": int(lookback)
-    }
-
-    try:
-
-        data = kraken_get(
-            path,
-            params=params
-        )
-
-    except Exception as e:
-
-        print(
-            f"[KRAKEN CANDLE ERROR] "
-            f"{contract} {interval}: {e}"
-        )
-
-        return pd.DataFrame()
-
-    candles = data.get(
-        "candles",
-        []
+    data = kraken_get(
+        path,
+        params={
+            "count": limit
+        }
     )
 
-    if not candles:
-
-        print(
-            f"[KRAKEN NO CANDLES] "
-            f"{contract} {interval}"
-        )
-
+    if not data:
         return pd.DataFrame()
 
-    rows = []
+    rows = None
 
-    for candle in candles:
+    if isinstance(data, dict):
 
-        try:
+        for key in [
+            "candles",
+            "data",
+            "results",
+            "ohlc"
+        ]:
 
-            if isinstance(candle, dict):
+            value = data.get(key)
 
-                ts = (
-                    candle.get("time")
-                    or candle.get("timestamp")
-                )
+            if isinstance(value, list):
 
-                o = candle.get("open")
-                h = candle.get("high")
-                l = candle.get("low")
-                c = candle.get("close")
+                rows = value
+                break
 
-                volume = candle.get(
-                    "volume",
-                    0
-                )
+    elif isinstance(data, list):
 
-            else:
-
-                ts = candle[0]
-                o = candle[1]
-                h = candle[2]
-                l = candle[3]
-                c = candle[4]
-
-                volume = (
-                    candle[5]
-                    if len(candle) > 5
-                    else 0
-                )
-
-            ts = int(float(ts))
-
-            if ts > 10_000_000_000:
-                ts //= 1000
-
-            rows.append([
-                ts,
-                float(o),
-                float(h),
-                float(l),
-                float(c),
-                float(volume)
-            ])
-
-        except Exception:
-            continue
+        rows = data
 
     if not rows:
         return pd.DataFrame()
 
+    parsed = []
+
+    for row in rows:
+
+        if isinstance(row, dict):
+
+            ts = (
+                row.get("time")
+                or row.get("timestamp")
+                or row.get("t")
+            )
+
+            op = (
+                row.get("open")
+                or row.get("o")
+            )
+
+            hi = (
+                row.get("high")
+                or row.get("h")
+            )
+
+            lo = (
+                row.get("low")
+                or row.get("l")
+            )
+
+            cl = (
+                row.get("close")
+                or row.get("c")
+            )
+
+            vol = (
+                row.get("volume")
+                or row.get("v")
+                or 0
+            )
+
+            if (
+                ts is not None
+                and op is not None
+                and hi is not None
+                and lo is not None
+                and cl is not None
+            ):
+
+                parsed.append([
+                    float(ts),
+                    float(op),
+                    float(hi),
+                    float(lo),
+                    float(cl),
+                    float(vol),
+                ])
+
+        elif isinstance(
+            row,
+            (list, tuple)
+        ):
+
+            if len(row) >= 5:
+
+                parsed.append([
+                    float(row[0]),
+                    float(row[1]),
+                    float(row[2]),
+                    float(row[3]),
+                    float(row[4]),
+                    float(row[5])
+                    if len(row) > 5
+                    else 0,
+                ])
+
+    if not parsed:
+        return pd.DataFrame()
+
     df = pd.DataFrame(
-        rows,
+        parsed,
         columns=[
             "timestamp",
             "open",
             "high",
             "low",
             "close",
-            "volume"
+            "volume",
         ]
     )
 
-    df = (
-        df
-        .drop_duplicates(
-            subset=["timestamp"]
+    if (
+        df["timestamp"].max()
+        > 10_000_000_000
+    ):
+
+        df["timestamp"] = (
+            df["timestamp"] / 1000
         )
-        .sort_values(
+
+    df["timestamp"] = (
+        df["timestamp"]
+        .astype(int)
+    )
+
+    df = (
+        df.sort_values("timestamp")
+        .drop_duplicates(
             "timestamp"
         )
         .reset_index(drop=True)
     )
 
+    return df
+
+
+# ============================================================
+# CLOSED CANDLES ONLY
+# ============================================================
+
+def closed_candles(
+    df,
+    interval_minutes
+):
+
+    if df.empty:
+        return df
+
     current = now_ts()
 
-    df = df[
-        (
-            df["timestamp"]
-            + interval_seconds[interval]
-        ) <= current
-    ]
+    candle_seconds = (
+        interval_minutes * 60
+    )
 
-    return df.tail(
-        lookback
-    ).reset_index(drop=True)
+    mask = (
+        df["timestamp"]
+        + candle_seconds
+        <= current
+    )
+
+    return (
+        df.loc[mask]
+        .reset_index(drop=True)
+    )
 
 
 # ============================================================
@@ -546,62 +575,62 @@ def fetch_candles(
 
 def pivot_highs(df):
 
-    highs = df["high"].values
+    highs = []
 
-    result = []
+    h = df["high"].values
 
     for i in range(
         PIVOT_LEFT,
         len(df) - PIVOT_RIGHT
     ):
 
-        left = highs[
+        left = h[
             i - PIVOT_LEFT:i
         ]
 
-        right = highs[
+        right = h[
             i + 1:
             i + 1 + PIVOT_RIGHT
         ]
 
         if (
-            highs[i] > left.max()
-            and highs[i] >= right.max()
+            h[i] >= max(left)
+            and h[i] >= max(right)
         ):
 
-            result.append(i)
+            highs.append(i)
 
-    return result
+    return highs
 
 
 def pivot_lows(df):
 
-    lows = df["low"].values
+    lows = []
 
-    result = []
+    l = df["low"].values
 
     for i in range(
         PIVOT_LEFT,
         len(df) - PIVOT_RIGHT
     ):
 
-        left = lows[
+        left = l[
             i - PIVOT_LEFT:i
         ]
 
-        right = lows[
+        right = l[
             i + 1:
             i + 1 + PIVOT_RIGHT
         ]
 
         if (
-            lows[i] < left.min()
-            and lows[i] <= right.min()
+            l[i] <= min(left)
+            and l[i] <= min(right)
         ):
 
-            result.append(i)
+            lows.append(i)
 
-    return result
+    return lows
 
 
 # ============================================================
@@ -614,42 +643,57 @@ def detect_double_top(df):
 
     highs = pivot_highs(df)
 
-    for a in range(len(highs)):
+    if len(highs) < 2:
+        return patterns
+
+    for a in range(
+        len(highs) - 2,
+        -1,
+        -1
+    ):
+
+        i1 = highs[a]
 
         for b in range(
             a + 1,
             len(highs)
         ):
 
-            i = highs[a]
-            j = highs[b]
+            i2 = highs[b]
 
-            separation = j - i
+            distance = i2 - i1
 
-            if separation < DOUBLE_MIN_SEPARATION:
+            if (
+                distance
+                < MIN_PATTERN_DISTANCE
+            ):
                 continue
 
-            if separation > DOUBLE_MAX_SEPARATION:
-                break
+            if (
+                distance
+                > MAX_PATTERN_DISTANCE
+            ):
+                continue
 
             p1 = float(
-                df.iloc[i]["high"]
+                df.iloc[i1]["high"]
             )
 
             p2 = float(
-                df.iloc[j]["high"]
+                df.iloc[i2]["high"]
             )
 
-            diff = (
-                abs(p1 - p2)
-                / max(p1, p2)
-            )
+            if p1 == 0:
+                continue
 
-            if diff > DOUBLE_TOLERANCE:
+            if (
+                abs(p1 - p2) / p1
+                > PATTERN_TOLERANCE
+            ):
                 continue
 
             between = df.iloc[
-                i:j + 1
+                i1:i2 + 1
             ]
 
             neckline = float(
@@ -659,12 +703,14 @@ def detect_double_top(df):
             patterns.append({
                 "pattern": "DOUBLE_TOP",
                 "direction": "SHORT",
+                "left_index": i1,
+                "right_index": i2,
                 "pattern_time": int(
-                    df.iloc[j]["timestamp"]
+                    df.iloc[i2]["timestamp"]
                 ),
                 "level": neckline,
-                "left_index": i,
-                "right_index": j
+                "high1": p1,
+                "high2": p2,
             })
 
     return patterns
@@ -680,45 +726,57 @@ def detect_double_bottom(df):
 
     lows = pivot_lows(df)
 
-    for a in range(len(lows)):
+    if len(lows) < 2:
+        return patterns
+
+    for a in range(
+        len(lows) - 2,
+        -1,
+        -1
+    ):
+
+        i1 = lows[a]
 
         for b in range(
             a + 1,
             len(lows)
         ):
 
-            i = lows[a]
-            j = lows[b]
+            i2 = lows[b]
 
-            separation = j - i
+            distance = i2 - i1
 
-            if separation < DOUBLE_MIN_SEPARATION:
+            if (
+                distance
+                < MIN_PATTERN_DISTANCE
+            ):
                 continue
 
-            if separation > DOUBLE_MAX_SEPARATION:
-                break
+            if (
+                distance
+                > MAX_PATTERN_DISTANCE
+            ):
+                continue
 
             p1 = float(
-                df.iloc[i]["low"]
+                df.iloc[i1]["low"]
             )
 
             p2 = float(
-                df.iloc[j]["low"]
+                df.iloc[i2]["low"]
             )
 
-            diff = (
-                abs(p1 - p2)
-                / max(
-                    min(p1, p2),
-                    1e-12
-                )
-            )
+            if p1 == 0:
+                continue
 
-            if diff > DOUBLE_TOLERANCE:
+            if (
+                abs(p1 - p2) / p1
+                > PATTERN_TOLERANCE
+            ):
                 continue
 
             between = df.iloc[
-                i:j + 1
+                i1:i2 + 1
             ]
 
             neckline = float(
@@ -728,12 +786,14 @@ def detect_double_bottom(df):
             patterns.append({
                 "pattern": "DOUBLE_BOTTOM",
                 "direction": "LONG",
+                "left_index": i1,
+                "right_index": i2,
                 "pattern_time": int(
-                    df.iloc[j]["timestamp"]
+                    df.iloc[i2]["timestamp"]
                 ),
                 "level": neckline,
-                "left_index": i,
-                "right_index": j
+                "low1": p1,
+                "low2": p2,
             })
 
     return patterns
@@ -749,75 +809,85 @@ def detect_head_shoulders(df):
 
     highs = pivot_highs(df)
 
-    if len(highs) >= 3:
+    if len(highs) < 3:
+        return patterns
 
-        for k in range(
-            len(highs) - 2
+    for x in range(
+        len(highs) - 3,
+        -1,
+        -1
+    ):
+
+        i1 = highs[x]
+        i2 = highs[x + 1]
+        i3 = highs[x + 2]
+
+        if not (
+            MIN_PATTERN_DISTANCE
+            <= i2 - i1
+            <= MAX_PATTERN_DISTANCE
         ):
+            continue
 
-            left = highs[k]
-            head = highs[k + 1]
-            right = highs[k + 2]
+        if not (
+            MIN_PATTERN_DISTANCE
+            <= i3 - i2
+            <= MAX_PATTERN_DISTANCE
+        ):
+            continue
 
-            sep1 = head - left
-            sep2 = right - head
+        left = float(
+            df.iloc[i1]["high"]
+        )
 
-            if (
-                sep1 < HS_MIN_SEPARATION
-                or sep2 < HS_MIN_SEPARATION
-            ):
-                continue
+        head = float(
+            df.iloc[i2]["high"]
+        )
 
-            if (
-                sep1 > HS_MAX_SEPARATION
-                or sep2 > HS_MAX_SEPARATION
-            ):
-                continue
+        right = float(
+            df.iloc[i3]["high"]
+        )
 
-            lh = float(
-                df.iloc[left]["high"]
-            )
+        if (
+            head <= left
+            or head <= right
+        ):
+            continue
 
-            hh = float(
-                df.iloc[head]["high"]
-            )
+        if left == 0:
+            continue
 
-            rh = float(
-                df.iloc[right]["high"]
-            )
+        if (
+            abs(left - right) / left
+            > PATTERN_TOLERANCE * 1.5
+        ):
+            continue
 
-            if not (
-                hh > lh
-                and hh > rh
-            ):
-                continue
+        section1 = df.iloc[
+            i1:i2 + 1
+        ]
 
-            shoulder_diff = (
-                abs(lh - rh)
-                / max(lh, rh)
-            )
+        section2 = df.iloc[
+            i2:i3 + 1
+        ]
 
-            if shoulder_diff > DOUBLE_TOLERANCE:
-                continue
+        neckline = (
+            float(section1["low"].min())
+            + float(section2["low"].min())
+        ) / 2
 
-            middle = df.iloc[
-                left:right + 1
-            ]
-
-            neckline = float(
-                middle["low"].min()
-            )
-
-            patterns.append({
-                "pattern": "HEAD_AND_SHOULDERS",
-                "direction": "SHORT",
-                "pattern_time": int(
-                    df.iloc[right]["timestamp"]
-                ),
-                "level": neckline,
-                "left_index": left,
-                "right_index": right
-            })
+        patterns.append({
+            "pattern":
+                "HEAD_AND_SHOULDERS",
+            "direction": "SHORT",
+            "left_index": i1,
+            "head_index": i2,
+            "right_index": i3,
+            "pattern_time": int(
+                df.iloc[i3]["timestamp"]
+            ),
+            "level": neckline,
+        })
 
     return patterns
 
@@ -826,90 +896,99 @@ def detect_head_shoulders(df):
 # INVERSE HEAD AND SHOULDERS
 # ============================================================
 
-def detect_inverse_head_shoulders(df):
+def detect_inverse_head_shoulders(
+    df
+):
 
     patterns = []
 
     lows = pivot_lows(df)
 
-    if len(lows) >= 3:
+    if len(lows) < 3:
+        return patterns
 
-        for k in range(
-            len(lows) - 2
+    for x in range(
+        len(lows) - 3,
+        -1,
+        -1
+    ):
+
+        i1 = lows[x]
+        i2 = lows[x + 1]
+        i3 = lows[x + 2]
+
+        if not (
+            MIN_PATTERN_DISTANCE
+            <= i2 - i1
+            <= MAX_PATTERN_DISTANCE
         ):
+            continue
 
-            left = lows[k]
-            head = lows[k + 1]
-            right = lows[k + 2]
+        if not (
+            MIN_PATTERN_DISTANCE
+            <= i3 - i2
+            <= MAX_PATTERN_DISTANCE
+        ):
+            continue
 
-            sep1 = head - left
-            sep2 = right - head
+        left = float(
+            df.iloc[i1]["low"]
+        )
 
-            if (
-                sep1 < HS_MIN_SEPARATION
-                or sep2 < HS_MIN_SEPARATION
-            ):
-                continue
+        head = float(
+            df.iloc[i2]["low"]
+        )
 
-            if (
-                sep1 > HS_MAX_SEPARATION
-                or sep2 > HS_MAX_SEPARATION
-            ):
-                continue
+        right = float(
+            df.iloc[i3]["low"]
+        )
 
-            ll = float(
-                df.iloc[left]["low"]
-            )
+        if (
+            head >= left
+            or head >= right
+        ):
+            continue
 
-            hh = float(
-                df.iloc[head]["low"]
-            )
+        if left == 0:
+            continue
 
-            rl = float(
-                df.iloc[right]["low"]
-            )
+        if (
+            abs(left - right) / left
+            > PATTERN_TOLERANCE * 1.5
+        ):
+            continue
 
-            if not (
-                hh < ll
-                and hh < rl
-            ):
-                continue
+        section1 = df.iloc[
+            i1:i2 + 1
+        ]
 
-            shoulder_diff = (
-                abs(ll - rl)
-                / max(
-                    min(ll, rl),
-                    1e-12
-                )
-            )
+        section2 = df.iloc[
+            i2:i3 + 1
+        ]
 
-            if shoulder_diff > DOUBLE_TOLERANCE:
-                continue
+        neckline = (
+            float(section1["high"].max())
+            + float(section2["high"].max())
+        ) / 2
 
-            middle = df.iloc[
-                left:right + 1
-            ]
-
-            neckline = float(
-                middle["high"].max()
-            )
-
-            patterns.append({
-                "pattern": "INVERSE_HEAD_AND_SHOULDERS",
-                "direction": "LONG",
-                "pattern_time": int(
-                    df.iloc[right]["timestamp"]
-                ),
-                "level": neckline,
-                "left_index": left,
-                "right_index": right
-            })
+        patterns.append({
+            "pattern":
+                "INVERSE_HEAD_AND_SHOULDERS",
+            "direction": "LONG",
+            "left_index": i1,
+            "head_index": i2,
+            "right_index": i3,
+            "pattern_time": int(
+                df.iloc[i3]["timestamp"]
+            ),
+            "level": neckline,
+        })
 
     return patterns
 
 
 # ============================================================
-# FLAGS
+# FLAG DETECTION
 # ============================================================
 
 def detect_flags(df):
@@ -945,22 +1024,14 @@ def detect_flags(df):
             i - 5:i + 1
         ]
 
-        recent_range = (
+        range_pct = (
             float(recent["high"].max())
-            -
-            float(recent["low"].min())
-        )
-
-        if current == 0:
-            continue
+            - float(recent["low"].min())
+        ) / current
 
         if move >= 0.025:
 
-            if (
-                recent_range
-                / current
-                < 0.03
-            ):
+            if range_pct < 0.03:
 
                 patterns.append({
                     "pattern": "BULL_FLAG",
@@ -972,16 +1043,12 @@ def detect_flags(df):
                         recent["high"].max()
                     ),
                     "left_index": i - 20,
-                    "right_index": i
+                    "right_index": i,
                 })
 
         elif move <= -0.025:
 
-            if (
-                recent_range
-                / abs(current)
-                < 0.03
-            ):
+            if range_pct < 0.03:
 
                 patterns.append({
                     "pattern": "BEAR_FLAG",
@@ -993,7 +1060,7 @@ def detect_flags(df):
                         recent["low"].min()
                     ),
                     "left_index": i - 20,
-                    "right_index": i
+                    "right_index": i,
                 })
 
     return patterns
@@ -1050,16 +1117,20 @@ def breakout_signal(
     if df.empty:
         return None
 
-    level = pattern.get("level")
+    level = pattern.get(
+        "level"
+    )
 
     if level is None:
         return None
 
-    direction = pattern["direction"]
+    direction = pattern[
+        "direction"
+    ]
 
-    pattern_time = int(
-        pattern["pattern_time"]
-    )
+    pattern_time = pattern[
+        "pattern_time"
+    ]
 
     candidates = df[
         df["timestamp"] > pattern_time
@@ -1087,7 +1158,7 @@ def breakout_signal(
                         row["timestamp"]
                     ),
                     "breakout_price": close,
-                    "level": float(level)
+                    "level": level,
                 }
 
         else:
@@ -1099,7 +1170,7 @@ def breakout_signal(
                         row["timestamp"]
                     ),
                     "breakout_price": close,
-                    "level": float(level)
+                    "level": level,
                 }
 
     return None
@@ -1157,7 +1228,7 @@ def find_first_retest(
                 "retest_time": int(
                     row["timestamp"]
                 ),
-                "retest_price": level
+                "retest_price": level,
             }
 
     return None
@@ -1209,7 +1280,7 @@ def find_confirmation(
                     "confirm_time": int(
                         row["timestamp"]
                     ),
-                    "confirm_price": cl
+                    "confirm_price": cl,
                 }
 
         else:
@@ -1220,7 +1291,7 @@ def find_confirmation(
                     "confirm_time": int(
                         row["timestamp"]
                     ),
-                    "confirm_price": cl
+                    "confirm_price": cl,
                 }
 
     return None
@@ -1228,6 +1299,23 @@ def find_confirmation(
 
 # ============================================================
 # ENTRY
+# ============================================================
+#
+# IMPORTANT FIX:
+#
+# The confirmation candle itself is the entry candle.
+#
+# Previous version:
+# confirmation -> NEXT 5M candle -> entry
+#
+# That caused many valid confirmations to produce no entry,
+# especially when confirmation was the latest closed candle.
+#
+# New version:
+# retest -> confirmation candle closes -> ENTRY
+#
+# No lookahead.
+# TP/SL are calculated from entry price only.
 # ============================================================
 
 def find_entry(
@@ -1243,14 +1331,19 @@ def find_entry(
         confirmation["confirm_time"]
     )
 
-    candidates = df5[
-        df5["timestamp"] > confirm_time
-    ].copy()
+    confirm_price = float(
+        confirmation["confirm_price"]
+    )
 
-    if candidates.empty:
+    # Find the exact confirmation candle.
+    rows = df5[
+        df5["timestamp"] == confirm_time
+    ]
+
+    if rows.empty:
         return None
 
-    row = candidates.iloc[0]
+    row = rows.iloc[0]
 
     entry_time = int(
         row["timestamp"]
@@ -1260,16 +1353,35 @@ def find_entry(
         row["close"]
     )
 
+    # Safety check:
+    # confirmation and entry must be the same
+    # closed candle.
+    if entry_time != confirm_time:
+        return None
+
+    # Use BOTH configured limits.
+    candle_age_limit = (
+        MAX_ENTRY_AGE_CANDLES * 5
+    )
+
+    max_age = min(
+        candle_age_limit,
+        MAX_ENTRY_AGE_MINUTES
+    )
+
     age_minutes = (
         now_ts() - entry_time
     ) / 60
 
-    max_age = min(
-        MAX_ENTRY_AGE_CANDLES * 5,
-        MAX_ENTRY_AGE_MINUTES
-    )
+    if age_minutes < 0:
+        return None
 
     if age_minutes > max_age:
+        return None
+
+    # Sanity check against confirmation price.
+    # This does not alter the strategy.
+    if entry_price <= 0:
         return None
 
     if direction == "LONG":
@@ -1296,7 +1408,7 @@ def find_entry(
         "entry_time": entry_time,
         "entry_price": entry_price,
         "sl_price": sl,
-        "tp_price": tp
+        "tp_price": tp,
     }
 
 
@@ -1309,32 +1421,45 @@ def generate_live_entries(
     contract
 ):
 
-    stats = {
-        "patterns": 0,
-        "recent": 0,
-        "breakouts": 0,
-        "old_breakouts": 0,
-        "retests": 0,
-        "confirmations": 0,
-        "valid": 0,
-        "stale": 0
-    }
-
     df1h = fetch_candles(
         contract,
         INTERVAL_1H,
-        MAIN_LOOKBACK
+        350
     )
 
     if df1h.empty:
-        return [], stats
+
+        return [], {
+            "patterns": 0,
+            "recent": 0,
+            "breakouts": 0,
+            "old_breakouts": 0,
+            "retests": 0,
+            "confirmations": 0,
+            "valid": 0,
+            "stale": 0,
+        }
+
+    df1h = closed_candles(
+        df1h,
+        60
+    )
+
+    if len(df1h) < 50:
+
+        return [], {
+            "patterns": 0,
+            "recent": 0,
+            "breakouts": 0,
+            "old_breakouts": 0,
+            "retests": 0,
+            "confirmations": 0,
+            "valid": 0,
+            "stale": 0,
+        }
 
     patterns = detect_patterns(
         df1h
-    )
-
-    stats["patterns"] = len(
-        patterns
     )
 
     recent_patterns = []
@@ -1346,30 +1471,52 @@ def generate_live_entries(
 
     for pattern in patterns:
 
-        if pattern["pattern_time"] < cutoff:
+        if (
+            pattern["pattern_time"]
+            < cutoff
+        ):
             continue
 
         recent_patterns.append(
             pattern
         )
 
-    stats["recent"] = len(
-        recent_patterns
-    )
-
-    if not recent_patterns:
-        return [], stats
-
     df5 = fetch_candles(
         contract,
         INTERVAL_5M,
-        ENTRY_LOOKBACK
+        500
     )
 
     if df5.empty:
-        return [], stats
+
+        return [], {
+            "patterns": len(patterns),
+            "recent": len(recent_patterns),
+            "breakouts": 0,
+            "old_breakouts": 0,
+            "retests": 0,
+            "confirmations": 0,
+            "valid": 0,
+            "stale": 0,
+        }
+
+    df5 = closed_candles(
+        df5,
+        5
+    )
 
     entries = []
+
+    stats = {
+        "patterns": len(patterns),
+        "recent": len(recent_patterns),
+        "breakouts": 0,
+        "old_breakouts": 0,
+        "retests": 0,
+        "confirmations": 0,
+        "valid": 0,
+        "stale": 0,
+    }
 
     for pattern in recent_patterns:
 
@@ -1390,7 +1537,9 @@ def generate_live_entries(
 
         if breakout_age > 48:
 
-            stats["old_breakouts"] += 1
+            stats[
+                "old_breakouts"
+            ] += 1
 
             continue
 
@@ -1414,7 +1563,9 @@ def generate_live_entries(
         if not confirmation:
             continue
 
-        stats["confirmations"] += 1
+        stats[
+            "confirmations"
+        ] += 1
 
         entry = find_entry(
             df5,
@@ -1434,15 +1585,24 @@ def generate_live_entries(
             "asset": asset,
             "symbol": contract,
             "contract": contract,
-            "pattern": pattern["pattern"],
-            "direction": pattern["direction"],
-            "breakout_time": breakout["breakout_time"],
-            "retest_time": retest["retest_time"],
-            "confirm_time": confirmation["confirm_time"],
-            "entry_time": entry["entry_time"],
-            "entry_price": entry["entry_price"],
-            "sl_price": entry["sl_price"],
-            "tp_price": entry["tp_price"]
+            "pattern":
+                pattern["pattern"],
+            "direction":
+                pattern["direction"],
+            "breakout_time":
+                breakout["breakout_time"],
+            "retest_time":
+                retest["retest_time"],
+            "confirm_time":
+                confirmation["confirm_time"],
+            "entry_time":
+                entry["entry_time"],
+            "entry_price":
+                entry["entry_price"],
+            "sl_price":
+                entry["sl_price"],
+            "tp_price":
+                entry["tp_price"],
         })
 
     return entries, stats
@@ -1503,7 +1663,7 @@ def init_db():
         "PRAGMA table_info(trades)"
     )
 
-    existing = {
+    existing_columns = {
         row[1]
         for row in cur.fetchall()
     }
@@ -1540,16 +1700,16 @@ def init_db():
             ALTER TABLE trades
             ADD COLUMN notified_close INTEGER
             DEFAULT 0
-        """
+        """,
     }
 
     for column, sql in migrations.items():
 
-        if column not in existing:
+        if column not in existing_columns:
 
             print(
-                f"[DB MIGRATION] "
-                f"Adding {column}"
+                f"Migrating old DB: "
+                f"adding '{column}'..."
             )
 
             try:
@@ -1560,49 +1720,11 @@ def init_db():
             except sqlite3.OperationalError as e:
 
                 print(
-                    f"[DB MIGRATION ERROR] "
+                    f"[MIGRATION ERROR] "
                     f"{column}: {e}"
                 )
 
-    cur.execute("""
-        UPDATE trades
-        SET created_at =
-            COALESCE(
-                created_at,
-                detected_at,
-                CAST(
-                    strftime(
-                        '%s',
-                        'now'
-                    ) AS INTEGER
-                )
-            )
-        WHERE created_at IS NULL
-    """)
-
-    cur.execute("""
-        UPDATE trades
-        SET updated_at =
-            COALESCE(
-                updated_at,
-                created_at,
-                detected_at,
-                CAST(
-                    strftime(
-                        '%s',
-                        'now'
-                    ) AS INTEGER
-                )
-            )
-        WHERE updated_at IS NULL
-    """)
-
-    cur.execute("""
-        UPDATE trades
-        SET contract = symbol
-        WHERE contract IS NULL
-    """)
-
+    # Re-read schema
     cur.execute(
         "PRAGMA table_info(trades)"
     )
@@ -1612,7 +1734,55 @@ def init_db():
         for row in cur.fetchall()
     }
 
-    required = {
+    # Backfill created_at
+    if "created_at" in final_columns:
+
+        cur.execute("""
+            UPDATE trades
+            SET created_at =
+                COALESCE(
+                    created_at,
+                    detected_at,
+                    CAST(
+                        strftime(
+                            '%s',
+                            'now'
+                        ) AS INTEGER
+                    )
+                )
+            WHERE created_at IS NULL
+        """)
+
+    # Backfill updated_at
+    if "updated_at" in final_columns:
+
+        cur.execute("""
+            UPDATE trades
+            SET updated_at =
+                COALESCE(
+                    updated_at,
+                    created_at,
+                    detected_at,
+                    CAST(
+                        strftime(
+                            '%s',
+                            'now'
+                        ) AS INTEGER
+                    )
+                )
+            WHERE updated_at IS NULL
+        """)
+
+    # Backfill contract
+    if "contract" in final_columns:
+
+        cur.execute("""
+            UPDATE trades
+            SET contract = symbol
+            WHERE contract IS NULL
+        """)
+
+    required_columns = {
         "signal_key",
         "asset",
         "symbol",
@@ -1634,17 +1804,21 @@ def init_db():
         "created_at",
         "updated_at",
         "notified_new",
-        "notified_close"
+        "notified_close",
     }
 
-    missing = required - final_columns
+    missing = (
+        required_columns
+        - final_columns
+    )
 
     if missing:
 
         conn.close()
 
         raise RuntimeError(
-            "Database schema missing: "
+            "Database schema is missing "
+            f"required columns: "
             f"{sorted(missing)}"
         )
 
@@ -1672,13 +1846,13 @@ def insert_trade(trade):
         now_value
     )
 
+    if created_at is None:
+        created_at = now_value
+
     updated_at = trade.get(
         "updated_at",
         created_at
     )
-
-    if created_at is None:
-        created_at = now_value
 
     if updated_at is None:
         updated_at = created_at
@@ -1765,7 +1939,7 @@ def insert_trade(trade):
                 now_value
             ),
             created_at,
-            updated_at
+            updated_at,
         ))
 
         conn.commit()
@@ -1783,6 +1957,24 @@ def insert_trade(trade):
 
         return inserted
 
+    except sqlite3.IntegrityError as e:
+
+        conn.rollback()
+
+        print(
+            "[INSERT INTEGRITY ERROR]"
+        )
+
+        print(
+            f"Signal: {signal_key}"
+        )
+
+        print(
+            f"Error: {e}"
+        )
+
+        return False
+
     except Exception as e:
 
         conn.rollback()
@@ -1797,6 +1989,101 @@ def insert_trade(trade):
     finally:
 
         conn.close()
+
+
+# ============================================================
+# LIVE PRICES
+# ============================================================
+
+def get_live_prices():
+
+    data = kraken_get(
+        "/derivatives/api/v3/tickers"
+    )
+
+    prices = {}
+
+    if not data:
+        return prices
+
+    tickers = data.get(
+        "tickers",
+        []
+    )
+
+    for ticker in tickers:
+
+        symbol = str(
+            ticker.get(
+                "symbol",
+                ""
+            )
+        )
+
+        last = ticker.get(
+            "last"
+        )
+
+        if last is None:
+            continue
+
+        try:
+
+            prices[symbol] = float(
+                last
+            )
+
+        except Exception:
+            pass
+
+    return prices
+
+
+# ============================================================
+# ROW -> DICT
+# ============================================================
+
+def row_to_trade(row):
+
+    if isinstance(
+        row,
+        sqlite3.Row
+    ):
+
+        data = dict(row)
+
+        data.setdefault(
+            "contract",
+            data.get("symbol")
+        )
+
+        data.setdefault(
+            "created_at",
+            data.get("detected_at")
+        )
+
+        data.setdefault(
+            "updated_at",
+            data.get("created_at")
+        )
+
+        data.setdefault(
+            "notified_new",
+            0
+        )
+
+        data.setdefault(
+            "notified_close",
+            0
+        )
+
+        return data
+
+    try:
+        return dict(row)
+
+    except Exception:
+        return {}
 
 
 # ============================================================
@@ -1820,7 +2107,7 @@ def get_open_trades():
     conn.close()
 
     return [
-        dict(row)
+        row_to_trade(row)
         for row in rows
     ]
 
@@ -1858,7 +2145,7 @@ def close_trade(
         exit_price,
         exit_reason,
         exit_time,
-        trade_id
+        trade_id,
     ))
 
     conn.commit()
@@ -1876,7 +2163,9 @@ def close_trade(
 # NOTIFICATION FLAGS
 # ============================================================
 
-def mark_new_notified(trade_id):
+def mark_new_notified(
+    trade_id
+):
 
     conn = get_db()
     cur = conn.cursor()
@@ -1893,7 +2182,9 @@ def mark_new_notified(trade_id):
     conn.close()
 
 
-def mark_close_notified(trade_id):
+def mark_close_notified(
+    trade_id
+):
 
     conn = get_db()
     cur = conn.cursor()
@@ -1908,45 +2199,6 @@ def mark_close_notified(trade_id):
 
     conn.commit()
     conn.close()
-
-
-# ============================================================
-# LIVE PRICES
-# ============================================================
-
-def get_live_prices():
-
-    data = kraken_get(
-        "/derivatives/api/v3/tickers"
-    )
-
-    prices = {}
-
-    for ticker in data.get(
-        "tickers",
-        []
-    ):
-
-        symbol = str(
-            ticker.get(
-                "symbol",
-                ""
-            )
-        )
-
-        last = ticker.get("last")
-
-        if last is None:
-            continue
-
-        try:
-
-            prices[symbol] = float(last)
-
-        except Exception:
-            pass
-
-    return prices
 
 
 # ============================================================
@@ -1976,7 +2228,7 @@ def price_text(value):
 
 
 # ============================================================
-# PERCENT
+# PERCENT PNL
 # ============================================================
 
 def calc_pct(
@@ -2010,7 +2262,9 @@ def new_signal_message(
     current_price=None
 ):
 
-    direction = trade["direction"]
+    direction = trade[
+        "direction"
+    ]
 
     emoji = (
         "🟢"
@@ -2070,10 +2324,12 @@ def new_signal_message(
 
 def close_message(
     trade,
-    exit_price
+    current_price
 ):
 
-    direction = trade["direction"]
+    direction = trade[
+        "direction"
+    ]
 
     emoji = (
         "🟢"
@@ -2086,22 +2342,13 @@ def close_message(
     )
 
     exit_price = float(
-        exit_price
+        current_price
     )
 
     pct = calc_pct(
         direction,
         entry,
         exit_price
-    )
-
-    # IMPORTANT:
-    # Calculate duration separately.
-    # This avoids nested f-string syntax errors.
-
-    trade_duration = duration_text(
-        trade["entry_time"],
-        trade["exit_time"]
     )
 
     return (
@@ -2124,7 +2371,10 @@ def close_message(
         f"🕐 Exit: "
         f"{fmt_tehran(trade['exit_time'])}\n"
         f"⏱ Duration: "
-        f"{trade_duration}"
+        f"{duration_text("
+        f"trade['entry_time'], "
+        f"trade['exit_time']"
+        f")}"
     )
 
 
@@ -2138,6 +2388,7 @@ def process_new_signals(
 ):
 
     inserted_count = 0
+
     seen_keys = set()
 
     for entry in entries:
@@ -2153,13 +2404,15 @@ def process_new_signals(
         if signal_key in seen_keys:
 
             print(
-                "[DUPLICATE IN SAME SCAN]",
-                signal_key
+                "[DUPLICATE IN SAME SCAN] "
+                f"{signal_key}"
             )
 
             continue
 
-        seen_keys.add(signal_key)
+        seen_keys.add(
+            signal_key
+        )
 
         ts = now_ts()
 
@@ -2199,14 +2452,20 @@ def process_new_signals(
 
         if row:
 
-            trade = dict(row)
-
-            message = new_signal_message(
-                trade,
-                current
+            trade = row_to_trade(
+                row
             )
 
-            if send_telegram(message):
+            message = (
+                new_signal_message(
+                    trade,
+                    current
+                )
+            )
+
+            if send_telegram(
+                message
+            ):
 
                 mark_new_notified(
                     trade["id"]
@@ -2223,7 +2482,9 @@ def process_open_trades(
     live_prices
 ):
 
-    open_trades = get_open_trades()
+    open_trades = (
+        get_open_trades()
+    )
 
     closed_count = 0
 
@@ -2241,7 +2502,13 @@ def process_open_trades(
         if current is None:
             continue
 
-        direction = trade["direction"]
+        direction = trade[
+            "direction"
+        ]
+
+        entry_time = int(
+            trade["entry_time"]
+        )
 
         sl = float(
             trade["sl_price"]
@@ -2254,7 +2521,10 @@ def process_open_trades(
         exit_reason = None
         exit_price = None
 
-        # SL FIRST
+        # ----------------------------------------------------
+        # SAME CANDLE TP + SL => SL FIRST
+        # ----------------------------------------------------
+
         if direction == "LONG":
 
             if current <= sl:
@@ -2279,17 +2549,21 @@ def process_open_trades(
                 exit_price = tp
                 exit_reason = "TP"
 
+        # ----------------------------------------------------
         # TIME EXIT
+        # ----------------------------------------------------
+
         if exit_reason is None:
 
             age_hours = (
                 now_ts()
-                - int(
-                    trade["entry_time"]
-                )
+                - entry_time
             ) / 3600
 
-            if age_hours >= MAX_HOLD_HOURS:
+            if (
+                age_hours
+                >= MAX_HOLD_HOURS
+            ):
 
                 exit_price = current
                 exit_reason = "TIME"
@@ -2297,10 +2571,13 @@ def process_open_trades(
         if exit_reason is None:
             continue
 
+        exit_time = now_ts()
+
         closed = close_trade(
             trade["id"],
             exit_price,
-            exit_reason
+            exit_reason,
+            exit_time
         )
 
         if not closed:
@@ -2308,16 +2585,28 @@ def process_open_trades(
 
         closed_count += 1
 
-        trade["exit_time"] = now_ts()
-        trade["exit_price"] = exit_price
-        trade["exit_reason"] = exit_reason
+        trade["exit_time"] = (
+            exit_time
+        )
+
+        trade["exit_price"] = (
+            exit_price
+        )
+
+        trade["exit_reason"] = (
+            exit_reason
+        )
+
+        trade["status"] = "CLOSED"
 
         message = close_message(
             trade,
             exit_price
         )
 
-        if send_telegram(message):
+        if send_telegram(
+            message
+        ):
 
             mark_close_notified(
                 trade["id"]
@@ -2330,9 +2619,13 @@ def process_open_trades(
 # HISTORICAL CLOSE RECONCILIATION
 # ============================================================
 
-def reconcile_open_trades():
+def reconcile_open_trades(
+    contract_map
+):
 
-    open_trades = get_open_trades()
+    open_trades = (
+        get_open_trades()
+    )
 
     if not open_trades:
         return 0
@@ -2358,18 +2651,29 @@ def reconcile_open_trades():
         if df5.empty:
             continue
 
+        df5 = closed_candles(
+            df5,
+            5
+        )
+
+        if df5.empty:
+            continue
+
         entry_time = int(
             trade["entry_time"]
         )
 
         future = df5[
-            df5["timestamp"] > entry_time
+            df5["timestamp"]
+            > entry_time
         ]
 
         if future.empty:
             continue
 
-        direction = trade["direction"]
+        direction = trade[
+            "direction"
+        ]
 
         sl = float(
             trade["sl_price"]
@@ -2383,7 +2687,9 @@ def reconcile_open_trades():
         exit_price = None
         exit_reason = None
 
-        for _, candle in future.iterrows():
+        for _, candle in (
+            future.iterrows()
+        ):
 
             high = float(
                 candle["high"]
@@ -2399,21 +2705,30 @@ def reconcile_open_trades():
 
             if direction == "LONG":
 
-                hit_sl = low <= sl
-                hit_tp = high >= tp
+                hit_sl = (
+                    low <= sl
+                )
+
+                hit_tp = (
+                    high >= tp
+                )
 
             else:
 
-                hit_sl = high >= sl
-                hit_tp = low <= tp
+                hit_sl = (
+                    high >= sl
+                )
 
-            # SL FIRST
+                hit_tp = (
+                    low <= tp
+                )
+
+            # Same candle => SL first
             if hit_sl:
 
                 exit_time = ts
                 exit_price = sl
                 exit_reason = "SL"
-
                 break
 
             if hit_tp:
@@ -2421,7 +2736,6 @@ def reconcile_open_trades():
                 exit_time = ts
                 exit_price = tp
                 exit_reason = "TP"
-
                 break
 
             if (
@@ -2430,9 +2744,11 @@ def reconcile_open_trades():
             ):
 
                 exit_time = ts
+
                 exit_price = float(
                     candle["close"]
                 )
+
                 exit_reason = "TIME"
 
                 break
@@ -2452,9 +2768,19 @@ def reconcile_open_trades():
 
         closed_count += 1
 
-        trade["exit_time"] = exit_time
-        trade["exit_price"] = exit_price
-        trade["exit_reason"] = exit_reason
+        trade["exit_time"] = (
+            exit_time
+        )
+
+        trade["exit_price"] = (
+            exit_price
+        )
+
+        trade["exit_reason"] = (
+            exit_reason
+        )
+
+        trade["status"] = "CLOSED"
 
         if int(
             trade.get(
@@ -2463,11 +2789,13 @@ def reconcile_open_trades():
             ) or 0
         ) == 0:
 
+            message = close_message(
+                trade,
+                exit_price
+            )
+
             if send_telegram(
-                close_message(
-                    trade,
-                    exit_price
-                )
+                message
             ):
 
                 mark_close_notified(
@@ -2512,6 +2840,7 @@ def performance():
     cur.execute("""
         SELECT
             direction,
+            exit_reason,
             entry_price,
             exit_price
         FROM trades
@@ -2536,8 +2865,12 @@ def performance():
             row["exit_price"]
         )
 
+        direction = row[
+            "direction"
+        ]
+
         pct = calc_pct(
-            row["direction"],
+            direction,
             entry,
             exit_price
         )
@@ -2562,7 +2895,7 @@ def performance():
         "wins": wins,
         "losses": losses,
         "winrate": winrate,
-        "total_pct": total_pct
+        "total_pct": total_pct,
     }
 
 
@@ -2574,14 +2907,17 @@ def periodic_report(
     live_prices
 ):
 
-    open_trades = get_open_trades()
+    open_trades = (
+        get_open_trades()
+    )
 
     perf = performance()
 
     lines = []
 
     lines.append(
-        "📊 <b>KRAKEN PATTERN SCANNER</b>"
+        "📊 <b>KRAKEN PATTERN "
+        "SCANNER</b>"
     )
 
     lines.append("")
@@ -2591,106 +2927,96 @@ def periodic_report(
         f"{len(open_trades)}</b>"
     )
 
-    for trade in open_trades:
+    if open_trades:
 
-        direction = trade["direction"]
+        for trade in open_trades:
 
-        emoji = (
-            "🟢"
-            if direction == "LONG"
-            else "🔴"
-        )
+            direction = (
+                trade["direction"]
+            )
 
-        contract = (
-            trade.get("contract")
-            or trade.get("symbol")
-        )
+            emoji = (
+                "🟢"
+                if direction == "LONG"
+                else "🔴"
+            )
 
-        current = live_prices.get(
-            contract,
-            float(
+            contract = (
+                trade.get("contract")
+                or trade.get("symbol")
+            )
+
+            current = live_prices.get(
+                contract,
+                float(
+                    trade["entry_price"]
+                )
+            )
+
+            entry = float(
                 trade["entry_price"]
             )
-        )
 
-        entry = float(
-            trade["entry_price"]
-        )
+            sl = float(
+                trade["sl_price"]
+            )
 
-        sl = float(
-            trade["sl_price"]
-        )
+            tp = float(
+                trade["tp_price"]
+            )
 
-        tp = float(
-            trade["tp_price"]
-        )
+            pct = calc_pct(
+                direction,
+                entry,
+                current
+            )
 
-        pct = calc_pct(
-            direction,
-            entry,
-            current
-        )
+            lines.append("")
 
-        lines.append("")
+            lines.append(
+                f"{emoji} <b>"
+                f"{trade['asset']} "
+                f"{direction}</b>"
+            )
 
-        lines.append(
-            f"{emoji} <b>"
-            f"{trade['asset']} "
-            f"{direction}</b>"
-        )
+            lines.append(
+                f"📌 Pattern: "
+                f"{trade['pattern']}"
+            )
 
-        lines.append(
-            f"📌 Pattern: "
-            f"{trade['pattern']}"
-        )
+            lines.append(
+                f"💰 Entry: "
+                f"{price_text(entry)}"
+            )
 
-        lines.append(
-            f"💰 Entry: "
-            f"{price_text(entry)}"
-        )
+            lines.append(
+                f"💵 Current: "
+                f"{price_text(current)} "
+                f"({pct:+.2f}%)"
+            )
 
-        lines.append(
-            f"💵 Current: "
-            f"{price_text(current)} "
-            f"({pct:+.2f}%)"
-        )
+            lines.append(
+                f"🛑 SL: "
+                f"{price_text(sl)} "
+                f"({calc_pct(direction, entry, sl):+.2f}%)"
+            )
 
-        sl_pct = calc_pct(
-            direction,
-            entry,
-            sl
-        )
+            lines.append(
+                f"🎯 TP: "
+                f"{price_text(tp)} "
+                f"({calc_pct(direction, entry, tp):+.2f}%)"
+            )
 
-        tp_pct = calc_pct(
-            direction,
-            entry,
-            tp
-        )
+            lines.append(
+                f"⚙️ RR: {RR:.2f}"
+            )
 
-        lines.append(
-            f"🛑 SL: "
-            f"{price_text(sl)} "
-            f"({sl_pct:+.2f}%)"
-        )
-
-        lines.append(
-            f"🎯 TP: "
-            f"{price_text(tp)} "
-            f"({tp_pct:+.2f}%)"
-        )
-
-        lines.append(
-            f"⚙️ RR: {RR:.2f}"
-        )
-
-        trade_duration = duration_text(
-            trade["entry_time"]
-        )
-
-        lines.append(
-            f"⏱ Duration: "
-            f"{trade_duration}"
-        )
+            lines.append(
+                f"⏱ Duration: "
+                f"{duration_text("
+                f"trade['entry_time']"
+                f")}"
+            )
 
     lines.append("")
 
@@ -2730,74 +3056,6 @@ def periodic_report(
 
 
 # ============================================================
-# REPORT TIMER
-# ============================================================
-
-def should_send_periodic_report():
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS scanner_meta (
-            key TEXT PRIMARY KEY,
-            value TEXT
-        )
-    """)
-
-    cur.execute("""
-        SELECT value
-        FROM scanner_meta
-        WHERE key = 'last_periodic_report'
-    """)
-
-    row = cur.fetchone()
-
-    conn.close()
-
-    if not row:
-        return True
-
-    try:
-
-        last = int(
-            row["value"]
-        )
-
-    except Exception:
-
-        return True
-
-    return (
-        now_ts() - last
-        >= PERIODIC_REPORT_SECONDS
-    )
-
-
-def mark_periodic_report():
-
-    conn = get_db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        INSERT OR REPLACE INTO
-        scanner_meta (
-            key,
-            value
-        )
-        VALUES (
-            'last_periodic_report',
-            ?
-        )
-    """, (
-        str(now_ts()),
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
 # SCAN
 # ============================================================
 
@@ -2808,8 +3066,8 @@ def scan():
     print("=" * 70)
 
     print(
-        "KRAKEN FUTURES PATTERN LIVE "
-        "SIGNAL SCANNER"
+        "KRAKEN FUTURES PATTERN "
+        "LIVE SIGNAL SCANNER"
     )
 
     print(
@@ -2824,8 +3082,7 @@ def scan():
     )
 
     print(
-        f"ASSETS = "
-        f"{len(ASSETS)}"
+        f"ASSETS = {len(ASSETS)}"
     )
 
     print(
@@ -2835,12 +3092,18 @@ def scan():
 
     print(
         f"MAX ENTRY AGE = "
-        f"{MAX_ENTRY_AGE_MINUTES} MINUTES"
+        f"{MAX_ENTRY_AGE_MINUTES} "
+        f"MINUTES"
     )
 
     print(
         f"PERIODIC_REPORT_SECONDS = "
         f"{PERIODIC_REPORT_SECONDS}"
+    )
+
+    print(
+        "ENTRY MODE = "
+        "CONFIRMATION CANDLE CLOSE"
     )
 
     if REAL_TRADING:
@@ -2849,17 +3112,11 @@ def scan():
             "REAL_TRADING must remain False."
         )
 
-    # --------------------------------------------------------
-    # DATABASE
-    # --------------------------------------------------------
-
     init_db()
 
-    # --------------------------------------------------------
-    # CONTRACT MAP
-    # --------------------------------------------------------
-
-    contract_map = build_contract_map()
+    contract_map = (
+        build_contract_map()
+    )
 
     all_entries = []
 
@@ -2871,7 +3128,7 @@ def scan():
         "retests": 0,
         "confirmations": 0,
         "valid": 0,
-        "stale": 0
+        "stale": 0,
     }
 
     # --------------------------------------------------------
@@ -2888,7 +3145,7 @@ def scan():
 
             print(
                 f"[SKIP] {asset}: "
-                f"contract not found"
+                "contract not found"
             )
 
             continue
@@ -2905,7 +3162,10 @@ def scan():
             for key in total_stats:
 
                 total_stats[key] += (
-                    stats.get(key, 0)
+                    stats.get(
+                        key,
+                        0
+                    )
                 )
 
             print(
@@ -2964,8 +3224,8 @@ def scan():
         if key in seen:
 
             print(
-                "[DUPLICATE IN SAME SCAN]",
-                key
+                "[DUPLICATE IN SAME SCAN] "
+                f"{key}"
             )
 
             continue
@@ -2975,6 +3235,10 @@ def scan():
         unique_entries.append(
             entry
         )
+
+    # --------------------------------------------------------
+    # STATS
+    # --------------------------------------------------------
 
     print("")
 
@@ -3022,15 +3286,19 @@ def scan():
     # LIVE PRICES
     # --------------------------------------------------------
 
-    live_prices = get_live_prices()
+    live_prices = (
+        get_live_prices()
+    )
 
     # --------------------------------------------------------
-    # NEW SIGNALS
+    # PROCESS NEW SIGNALS
     # --------------------------------------------------------
 
-    inserted_count = process_new_signals(
-        unique_entries,
-        live_prices
+    inserted_count = (
+        process_new_signals(
+            unique_entries,
+            live_prices
+        )
     )
 
     print(
@@ -3039,11 +3307,13 @@ def scan():
     )
 
     # --------------------------------------------------------
-    # LIVE EXITS
+    # CURRENT PRICE EXITS
     # --------------------------------------------------------
 
-    closed_count = process_open_trades(
-        live_prices
+    closed_count = (
+        process_open_trades(
+            live_prices
+        )
     )
 
     print(
@@ -3055,7 +3325,11 @@ def scan():
     # HISTORICAL RECONCILIATION
     # --------------------------------------------------------
 
-    reconciled = reconcile_open_trades()
+    reconciled = (
+        reconcile_open_trades(
+            contract_map
+        )
+    )
 
     print(
         f"Historical reconciled closes: "
@@ -3066,13 +3340,38 @@ def scan():
     # PERIODIC REPORT
     # --------------------------------------------------------
 
-    if should_send_periodic_report():
+    conn = get_db()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT MAX(updated_at)
+        FROM trades
+    """)
+
+    last_update = (
+        cur.fetchone()[0]
+    )
+
+    conn.close()
+
+    should_report = False
+
+    if last_update is None:
+
+        should_report = True
+
+    elif (
+        now_ts() - int(last_update)
+        >= PERIODIC_REPORT_SECONDS
+    ):
+
+        should_report = True
+
+    if should_report:
 
         periodic_report(
             live_prices
         )
-
-        mark_periodic_report()
 
     elapsed = (
         time.time()
@@ -3113,4 +3412,5 @@ def main():
 
 
 if __name__ == "__main__":
+
     main()
