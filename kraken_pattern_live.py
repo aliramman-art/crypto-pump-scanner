@@ -22,6 +22,7 @@
 # - TELEGRAM SEND SUCCESS IS VERIFIED
 # - PERIODIC REPORT TIMESTAMP IS UPDATED ONLY AFTER
 #   SUCCESSFUL TELEGRAM DELIVERY
+# - VALID BUT NOT INSERTED SIGNALS NOW SHOW EXACT DB REASON
 # - REAL TRADING DISABLED
 #
 # STRATEGY:
@@ -85,32 +86,16 @@ DB_FILE = "kraken_pattern_live_v52.db"
 # SIGNAL FRESHNESS
 # ============================================================
 
-# 2 x 5-minute candles = maximum 10 minutes old
 MAX_ENTRY_AGE_CANDLES = 2
 
 
 # ============================================================
 # ASSETS
 # ============================================================
-#
-# ORIGINAL 20:
-#
-# XBT ETH SOL XRP LTC DOGE ADA LINK AVAX DOT
-# BNB TRX UNI AAVE SUI NEAR ATOM FIL ARB OP
-#
-# ADDITIONAL 20:
-#
-# BCH ETC XMR XLM ALGO ICP INJ TIA SEI RUNE
-# CRV HBAR HYPE ENA FET KAS STX JUP PEPE WIF
-#
-# TOTAL = 40
-#
-# ============================================================
 
 ASSETS = [
-    # --------------------------------------------------------
+
     # ORIGINAL 20
-    # --------------------------------------------------------
 
     "XBT",
     "ETH",
@@ -133,9 +118,7 @@ ASSETS = [
     "ARB",
     "OP",
 
-    # --------------------------------------------------------
     # NEW 20
-    # --------------------------------------------------------
 
     "BCH",
     "ETC",
@@ -203,6 +186,7 @@ TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 
 def utc_now():
+
     return datetime.now(timezone.utc)
 
 
@@ -239,11 +223,19 @@ TELEGRAM_CHAT_ID = os.getenv(
 def send_telegram(text):
 
     if not TELEGRAM_BOT_TOKEN:
-        print("Telegram token missing")
+
+        print(
+            "Telegram token missing"
+        )
+
         return False
 
     if not TELEGRAM_CHAT_ID:
-        print("Telegram chat id missing")
+
+        print(
+            "Telegram chat id missing"
+        )
+
         return False
 
     url = (
@@ -395,7 +387,10 @@ def find_contract_for_asset(
     for symbol in candidates:
 
         if symbol in contract_map:
-            return contract_map[symbol]
+
+            return contract_map[
+                symbol
+            ]
 
     for symbol, contract in contract_map.items():
 
@@ -405,6 +400,7 @@ def find_contract_for_asset(
             )
             and symbol.endswith("USD")
         ):
+
             return contract
 
     return None
@@ -440,6 +436,7 @@ def fetch_recent_candles(
     }.get(interval)
 
     if interval_seconds is None:
+
         raise ValueError(
             f"Unsupported interval: {interval}"
         )
@@ -604,10 +601,6 @@ def fetch_recent_candles(
         .reset_index(drop=True)
     )
 
-    # ========================================================
-    # CLOSED CANDLES ONLY
-    # ========================================================
-
     df = df[
         df["timestamp"] <= now_ts
     ]
@@ -701,9 +694,7 @@ def detect_double_patterns(df):
     highs = pivot_highs(df)
     lows = pivot_lows(df)
 
-    # --------------------------------------------------------
     # DOUBLE TOP
-    # --------------------------------------------------------
 
     for a in range(
         len(highs)
@@ -758,9 +749,7 @@ def detect_double_patterns(df):
                 }
             )
 
-    # --------------------------------------------------------
     # DOUBLE BOTTOM
-    # --------------------------------------------------------
 
     for a in range(
         len(lows)
@@ -983,6 +972,7 @@ def detect_flags(df):
         + FLAG_CONSOLIDATION_BARS
         + 5
     ):
+
         return patterns
 
     start_min = (
@@ -1083,9 +1073,7 @@ def detect_flags(df):
         ):
             continue
 
-        # ----------------------------------------------------
         # LONG FLAG
-        # ----------------------------------------------------
 
         if impulse_return > 0:
 
@@ -1156,9 +1144,7 @@ def detect_flags(df):
                 }
             )
 
-        # ----------------------------------------------------
         # SHORT FLAG
-        # ----------------------------------------------------
 
         else:
 
@@ -1337,9 +1323,7 @@ def find_entry(
 
     retest_index = None
 
-    # --------------------------------------------------------
     # FIRST RETEST ONLY
-    # --------------------------------------------------------
 
     for i in range(
         first_index,
@@ -1380,9 +1364,7 @@ def find_entry(
     if diagnostics is not None:
         diagnostics["retests_found"] += 1
 
-    # --------------------------------------------------------
     # CONFIRMATION AFTER RETEST
-    # --------------------------------------------------------
 
     confirm_end = min(
         retest_index
@@ -1391,9 +1373,7 @@ def find_entry(
         len(df),
     )
 
-    # --------------------------------------------------------
     # FRESHNESS WINDOW
-    # --------------------------------------------------------
 
     max_entry_age_seconds = (
         MAX_ENTRY_AGE_CANDLES
@@ -1420,10 +1400,6 @@ def find_entry(
             row["timestamp"]
         )
 
-        # ----------------------------------------------------
-        # ENTRY FRESHNESS FILTER
-        # ----------------------------------------------------
-
         if (
             minimum_fresh_entry_ts is not None
             and entry_timestamp
@@ -1431,10 +1407,6 @@ def find_entry(
         ):
 
             continue
-
-        # ----------------------------------------------------
-        # DO NOT USE A FUTURE CANDLE
-        # ----------------------------------------------------
 
         if (
             latest_5m_ts is not None
@@ -1510,6 +1482,7 @@ def find_entry(
                 continue
 
         if diagnostics is not None:
+
             diagnostics[
                 "confirmations_found"
             ] += 1
@@ -1533,6 +1506,7 @@ def find_entry(
         }
 
     if diagnostics is not None:
+
         diagnostics[
             "no_confirmation"
         ] += 1
@@ -1593,11 +1567,6 @@ def generate_live_entries(
             "timestamp"
         ]
     )
-
-    # ========================================================
-    # MAXIMUM AGE OF A BREAKOUT THAT CAN STILL PRODUCE
-    # A FRESH ENTRY
-    # ========================================================
 
     max_entry_age_seconds = (
         MAX_ENTRY_AGE_CANDLES
@@ -1666,10 +1635,6 @@ def generate_live_entries(
             p["end"] + 200,
         )
 
-        # ====================================================
-        # COLLECT BREAKOUT CANDIDATES
-        # ====================================================
-
         breakout_candidates = []
 
         for i in range(
@@ -1690,8 +1655,6 @@ def generate_live_entries(
                 ]
             )
 
-            # 1H candle timestamp is OPEN time.
-            # Breakout becomes valid only after candle CLOSE.
             breakout_close_time = (
                 breakout_open_time
                 + 3600
@@ -1711,10 +1674,6 @@ def generate_live_entries(
             breakout_candidates
         )
 
-        # ====================================================
-        # NEWEST BREAKOUT FIRST
-        # ====================================================
-
         breakout_candidates.reverse()
 
         for (
@@ -1722,10 +1681,6 @@ def generate_live_entries(
             breakout_open_time,
             breakout_close_time,
         ) in breakout_candidates:
-
-            # ------------------------------------------------
-            # EARLY OLD-BREAKOUT FILTER
-            # ------------------------------------------------
 
             if (
                 breakout_close_time
@@ -1738,10 +1693,6 @@ def generate_live_entries(
 
                 continue
 
-            # ------------------------------------------------
-            # FIND RETEST + CONFIRMATION
-            # ------------------------------------------------
-
             entry = find_entry(
                 df_5m,
                 breakout_close_time,
@@ -1752,12 +1703,7 @@ def generate_live_entries(
             )
 
             if entry is None:
-
                 continue
-
-            # =================================================
-            # FRESHNESS FILTER
-            # =================================================
 
             entry_age_seconds = (
                 latest_5m_ts
@@ -1792,10 +1738,6 @@ def generate_live_entries(
                 )
 
                 continue
-
-            # =================================================
-            # SIGNAL KEY
-            # =================================================
 
             signal_key = (
                 f"{asset}|"
@@ -1896,15 +1838,7 @@ def generate_live_entries(
                 }
             )
 
-            # ------------------------------------------------
-            # FIRST VALID ENTRY FOR THIS PATTERN
-            # ------------------------------------------------
-
             break
-
-    # ========================================================
-    # DIAGNOSTICS
-    # ========================================================
 
     no_entry_total = (
         diagnostics["no_retest"]
@@ -1983,10 +1917,6 @@ def init_db():
         )
         """
     )
-
-    # ========================================================
-    # SAFE DATABASE MIGRATION
-    # ========================================================
 
     cur.execute(
         "PRAGMA table_info(trades)"
@@ -2200,6 +2130,11 @@ def get_open_trades():
     return rows
 
 
+# ============================================================
+# INSERT TRADE
+# WITH EXACT SKIP DIAGNOSTICS
+# ============================================================
+
 def insert_trade(
     trade
 ):
@@ -2208,61 +2143,316 @@ def insert_trade(
 
     cur = conn.cursor()
 
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO trades (
-            signal_key,
-            asset,
-            contract,
-            pattern,
-            direction,
-            breakout_time,
-            retest_time,
-            confirm_time,
-            entry_time,
-            entry_price,
-            sl_price,
-            tp_price,
-            exit_time,
-            exit_price,
-            exit_reason,
-            status,
-            detected_at,
-            notified_new,
-            notified_close
+    try:
+
+        # ----------------------------------------------------
+        # CHECK EXACT SIGNAL KEY FIRST
+        # ----------------------------------------------------
+
+        cur.execute(
+            """
+            SELECT
+                id,
+                signal_key,
+                asset,
+                direction,
+                pattern,
+                status,
+                entry_time,
+                exit_time
+            FROM trades
+            WHERE signal_key = ?
+            """,
+            (
+                trade["signal_key"],
+            ),
         )
-        VALUES (
-            ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, NULL, NULL, NULL,
-            'OPEN', ?, 0, 0
+
+        existing = cur.fetchone()
+
+        if existing is not None:
+
+            print(
+                "=================================================="
+            )
+
+            print(
+                "[VALID BUT NOT INSERTED]"
+            )
+
+            print(
+                f"Asset: "
+                f"{trade['asset']}"
+            )
+
+            print(
+                f"Direction: "
+                f"{trade['direction']}"
+            )
+
+            print(
+                f"Pattern: "
+                f"{trade['pattern']}"
+            )
+
+            print(
+                f"Entry: "
+                f"{trade['entry_price']}"
+            )
+
+            print(
+                f"Entry time: "
+                f"{format_time(trade['entry_time'])}"
+            )
+
+            print(
+                f"Signal key: "
+                f"{trade['signal_key']}"
+            )
+
+            print(
+                "[SKIP REASON] "
+                "Duplicate signal_key already exists in DB"
+            )
+
+            print(
+                f"Existing DB ID: "
+                f"{existing['id']}"
+            )
+
+            print(
+                f"Existing asset: "
+                f"{existing['asset']}"
+            )
+
+            print(
+                f"Existing direction: "
+                f"{existing['direction']}"
+            )
+
+            print(
+                f"Existing pattern: "
+                f"{existing['pattern']}"
+            )
+
+            print(
+                f"Existing status: "
+                f"{existing['status']}"
+            )
+
+            print(
+                f"Existing entry time: "
+                f"{format_time(existing['entry_time'])}"
+            )
+
+            if existing["exit_time"]:
+
+                print(
+                    f"Existing exit time: "
+                    f"{format_time(existing['exit_time'])}"
+                )
+
+            else:
+
+                print(
+                    "Existing exit time: OPEN"
+                )
+
+            print(
+                "=================================================="
+            )
+
+            conn.close()
+
+            return False
+
+        # ----------------------------------------------------
+        # INSERT
+        # ----------------------------------------------------
+
+        cur.execute(
+            """
+            INSERT INTO trades (
+                signal_key,
+                asset,
+                contract,
+                pattern,
+                direction,
+                breakout_time,
+                retest_time,
+                confirm_time,
+                entry_time,
+                entry_price,
+                sl_price,
+                tp_price,
+                exit_time,
+                exit_price,
+                exit_reason,
+                status,
+                detected_at,
+                notified_new,
+                notified_close
+            )
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, NULL, NULL, NULL,
+                'OPEN', ?, 0, 0
+            )
+            """,
+            (
+                trade["signal_key"],
+                trade["asset"],
+                trade["contract"],
+                trade["pattern"],
+                trade["direction"],
+                trade["breakout_time"],
+                trade["retest_time"],
+                trade["confirm_time"],
+                trade["entry_time"],
+                trade["entry_price"],
+                trade["sl_price"],
+                trade["tp_price"],
+                trade["detected_at"],
+            ),
         )
-        """,
-        (
-            trade["signal_key"],
-            trade["asset"],
-            trade["contract"],
-            trade["pattern"],
-            trade["direction"],
-            trade["breakout_time"],
-            trade["retest_time"],
-            trade["confirm_time"],
-            trade["entry_time"],
-            trade["entry_price"],
-            trade["sl_price"],
-            trade["tp_price"],
-            trade["detected_at"],
-        ),
-    )
 
-    inserted = (
-        cur.rowcount == 1
-    )
+        conn.commit()
 
-    conn.commit()
+        print(
+            "=================================================="
+        )
 
-    conn.close()
+        print(
+            "[NEW SIGNAL INSERTED]"
+        )
 
-    return inserted
+        print(
+            f"Asset: "
+            f"{trade['asset']}"
+        )
+
+        print(
+            f"Direction: "
+            f"{trade['direction']}"
+        )
+
+        print(
+            f"Pattern: "
+            f"{trade['pattern']}"
+        )
+
+        print(
+            f"Entry: "
+            f"{trade['entry_price']}"
+        )
+
+        print(
+            f"Entry time: "
+            f"{format_time(trade['entry_time'])}"
+        )
+
+        print(
+            f"Signal key: "
+            f"{trade['signal_key']}"
+        )
+
+        print(
+            "=================================================="
+        )
+
+        conn.close()
+
+        return True
+
+    except sqlite3.IntegrityError as e:
+
+        conn.rollback()
+
+        print(
+            "=================================================="
+        )
+
+        print(
+            "[INSERT INTEGRITY ERROR]"
+        )
+
+        print(
+            f"Asset: "
+            f"{trade.get('asset')}"
+        )
+
+        print(
+            f"Direction: "
+            f"{trade.get('direction')}"
+        )
+
+        print(
+            f"Pattern: "
+            f"{trade.get('pattern')}"
+        )
+
+        print(
+            f"Signal key: "
+            f"{trade.get('signal_key')}"
+        )
+
+        print(
+            f"Error: {e}"
+        )
+
+        print(
+            "=================================================="
+        )
+
+        conn.close()
+
+        return False
+
+    except Exception as e:
+
+        conn.rollback()
+
+        print(
+            "=================================================="
+        )
+
+        print(
+            "[INSERT ERROR]"
+        )
+
+        print(
+            f"Asset: "
+            f"{trade.get('asset')}"
+        )
+
+        print(
+            f"Direction: "
+            f"{trade.get('direction')}"
+        )
+
+        print(
+            f"Pattern: "
+            f"{trade.get('pattern')}"
+        )
+
+        print(
+            f"Signal key: "
+            f"{trade.get('signal_key')}"
+        )
+
+        print(
+            f"Error: {e}"
+        )
+
+        traceback.print_exc()
+
+        print(
+            "=================================================="
+        )
+
+        conn.close()
+
+        return False
 
 
 # ============================================================
@@ -2885,7 +3075,6 @@ def resolve_open_trade_from_candles(
             hit_sl = high >= sl
             hit_tp = low <= tp
 
-        # Same candle TP + SL = SL first
         if hit_sl and hit_tp:
 
             return {
@@ -3301,10 +3490,6 @@ def send_periodic_report(
         "<b>📊 KRAKEN PATTERN SCANNER</b>\n\n"
     )
 
-    # --------------------------------------------------------
-    # OPEN TRADES
-    # --------------------------------------------------------
-
     if open_rows:
 
         text += (
@@ -3431,10 +3616,6 @@ def send_periodic_report(
             "<b>🟢 OPEN TRADES: 0</b>\n\n"
         )
 
-    # --------------------------------------------------------
-    # PERFORMANCE
-    # --------------------------------------------------------
-
     text += (
         f"📦 Total: "
         f"{stats['total']}\n"
@@ -3472,10 +3653,6 @@ def scan_new_signals(
 ):
 
     all_entries = []
-
-    # ========================================================
-    # GLOBAL DIAGNOSTICS
-    # ========================================================
 
     total_diag = {
         "patterns_total": 0,
@@ -3574,10 +3751,6 @@ def scan_new_signals(
             )
 
             traceback.print_exc()
-
-    # ========================================================
-    # GLOBAL DIAGNOSTIC REPORT
-    # ========================================================
 
     no_entry_total = (
         total_diag["no_retest"]
@@ -3696,15 +3869,11 @@ def main():
         f"{PERIODIC_REPORT_SECONDS}"
     )
 
-    # ========================================================
-    # DATABASE INITIALIZATION + SAFE MIGRATION
-    # ========================================================
+    # DATABASE
 
     init_db()
 
-    # --------------------------------------------------------
     # CONTRACTS
-    # --------------------------------------------------------
 
     print(
         "Building Kraken universe..."
@@ -3719,9 +3888,7 @@ def main():
         f"{len(contract_map)}"
     )
 
-    # --------------------------------------------------------
-    # CHECK REQUESTED UNIVERSE
-    # --------------------------------------------------------
+    # CHECK UNIVERSE
 
     print(
         "Checking requested 40-asset universe..."
@@ -3774,9 +3941,7 @@ def main():
             )
         )
 
-    # --------------------------------------------------------
-    # KRAKEN LIVE PRICES
-    # --------------------------------------------------------
+    # LIVE PRICES
 
     print(
         "Fetching Kraken live prices..."
@@ -3793,9 +3958,7 @@ def main():
         f"{len(kraken_prices)}"
     )
 
-    # --------------------------------------------------------
-    # HISTORICAL CLOSE RECONCILIATION
-    # --------------------------------------------------------
+    # HISTORICAL CLOSES
 
     print(
         "Reconciling historical closes..."
@@ -3805,9 +3968,7 @@ def main():
         contract_map
     )
 
-    # --------------------------------------------------------
     # NEW SIGNAL SCAN
-    # --------------------------------------------------------
 
     print(
         "Scanning new signals..."
@@ -3826,13 +3987,22 @@ def main():
         )
 
         if not inserted:
+
+            print(
+                f"[NO NEW INSERT] "
+                f"{trade['asset']} "
+                f"{trade['direction']} "
+                f"| {trade['pattern']} "
+                f"| Entry={trade['entry_price']} "
+                f"| EntryTime="
+                f"{format_time(trade['entry_time'])}"
+            )
+
             continue
 
         new_count += 1
 
-        # ----------------------------------------------------
         # NEW SIGNAL CURRENT PRICE
-        # ----------------------------------------------------
 
         display_price = (
             kraken_prices.get(
@@ -3859,9 +4029,7 @@ def main():
             ),
         )
 
-        # ----------------------------------------------------
-        # IMMEDIATE NEW SIGNAL ALERT
-        # ----------------------------------------------------
+        # IMMEDIATE TELEGRAM
 
         sent = send_new_signal_alert(
             trade,
@@ -3899,9 +4067,7 @@ def main():
         f"{new_count}"
     )
 
-    # --------------------------------------------------------
-    # CURRENT KRAKEN PRICE EXITS
-    # --------------------------------------------------------
+    # CURRENT PRICE EXITS
 
     print(
         "Processing Kraken current-price exits..."
@@ -3911,9 +4077,7 @@ def main():
         kraken_prices
     )
 
-    # --------------------------------------------------------
     # PERIODIC REPORT
-    # --------------------------------------------------------
 
     report_file = (
         "last_report_timestamp.txt"
