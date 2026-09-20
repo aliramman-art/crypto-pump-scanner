@@ -1,10 +1,12 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.7
+# VERSION 5.8
 # ============================================================
 #
-# V5.7 FIXES:
+# V5.8:
 #
+# - UNIVERSE EXPANDED FROM 20 TO 40 ASSETS
+# - ORIGINAL STRATEGY FILTERS PRESERVED
 # - MAX ENTRY AGE = 2 x 5M CANDLES = 10 MINUTES
 # - 1H BREAKOUT TIME USES CLOSED-CANDLE TIME
 # - RETEST SEARCH STARTS AFTER 1H CANDLE CLOSE
@@ -15,9 +17,11 @@
 # - STALE ENTRY CANDIDATES ARE FILTERED EARLIER
 # - OLD BREAKOUTS OUTSIDE THE MAXIMUM ENTRY WINDOW
 #   ARE SKIPPED BEFORE RETEST SEARCH
-# - ORIGINAL STRATEGY FILTERS PRESERVED
 # - ORIGINAL DATABASE PRESERVED
-# - DATABASE MIGRATION FOR confirm_time ADDED
+# - DATABASE MIGRATION FOR confirm_time
+# - TELEGRAM SEND SUCCESS IS VERIFIED
+# - PERIODIC REPORT TIMESTAMP IS UPDATED ONLY AFTER
+#   SUCCESSFUL TELEGRAM DELIVERY
 # - REAL TRADING DISABLED
 #
 # STRATEGY:
@@ -88,8 +92,26 @@ MAX_ENTRY_AGE_CANDLES = 2
 # ============================================================
 # ASSETS
 # ============================================================
+#
+# ORIGINAL 20:
+#
+# XBT ETH SOL XRP LTC DOGE ADA LINK AVAX DOT
+# BNB TRX UNI AAVE SUI NEAR ATOM FIL ARB OP
+#
+# ADDITIONAL 20:
+#
+# BCH ETC XMR XLM ALGO ICP INJ TIA SEI RUNE
+# CRV HBAR HYPE ENA FET KAS STX JUP PEPE WIF
+#
+# TOTAL = 40
+#
+# ============================================================
 
 ASSETS = [
+    # --------------------------------------------------------
+    # ORIGINAL 20
+    # --------------------------------------------------------
+
     "XBT",
     "ETH",
     "SOL",
@@ -110,6 +132,31 @@ ASSETS = [
     "FIL",
     "ARB",
     "OP",
+
+    # --------------------------------------------------------
+    # NEW 20
+    # --------------------------------------------------------
+
+    "BCH",
+    "ETC",
+    "XMR",
+    "XLM",
+    "ALGO",
+    "ICP",
+    "INJ",
+    "TIA",
+    "SEI",
+    "RUNE",
+    "CRV",
+    "HBAR",
+    "HYPE",
+    "ENA",
+    "FET",
+    "KAS",
+    "STX",
+    "JUP",
+    "PEPE",
+    "WIF",
 ]
 
 
@@ -193,11 +240,11 @@ def send_telegram(text):
 
     if not TELEGRAM_BOT_TOKEN:
         print("Telegram token missing")
-        return
+        return False
 
     if not TELEGRAM_CHAT_ID:
         print("Telegram chat id missing")
-        return
+        return False
 
     url = (
         "https://api.telegram.org/bot"
@@ -222,10 +269,43 @@ def send_telegram(text):
         if not r.ok:
 
             print(
-                "Telegram error:",
+                "Telegram HTTP error:",
                 r.status_code,
                 r.text,
             )
+
+            return False
+
+        try:
+
+            result = r.json()
+
+        except ValueError:
+
+            print(
+                "Telegram invalid JSON response:",
+                r.text,
+            )
+
+            return False
+
+        if not result.get(
+            "ok",
+            False,
+        ):
+
+            print(
+                "Telegram API error:",
+                result,
+            )
+
+            return False
+
+        print(
+            "Telegram message sent successfully."
+        )
+
+        return True
 
     except Exception as e:
 
@@ -233,6 +313,8 @@ def send_telegram(text):
             "Telegram exception:",
             e,
         )
+
+        return False
 
 
 # ============================================================
@@ -1866,13 +1948,6 @@ def init_db():
 
     cur = conn.cursor()
 
-    # ========================================================
-    # CREATE TABLE
-    #
-    # This is the complete/current schema for new databases.
-    # Existing databases are NOT deleted or reset.
-    # ========================================================
-
     cur.execute(
         """
         CREATE TABLE IF NOT EXISTS trades (
@@ -1911,12 +1986,6 @@ def init_db():
 
     # ========================================================
     # SAFE DATABASE MIGRATION
-    #
-    # IMPORTANT:
-    # Existing kraken_pattern_live_v52.db is preserved.
-    #
-    # V5.7 introduced confirm_time, but the old DB did not
-    # contain that column. This migration adds it safely.
     # ========================================================
 
     cur.execute(
@@ -1927,10 +1996,6 @@ def init_db():
         row["name"]
         for row in cur.fetchall()
     }
-
-    # --------------------------------------------------------
-    # CONTRACT
-    # --------------------------------------------------------
 
     if "contract" not in existing_columns:
 
@@ -1946,10 +2011,6 @@ def init_db():
             """
         )
 
-    # --------------------------------------------------------
-    # EXIT REASON
-    # --------------------------------------------------------
-
     if "exit_reason" not in existing_columns:
 
         print(
@@ -1963,15 +2024,6 @@ def init_db():
             ADD COLUMN exit_reason TEXT
             """
         )
-
-    # --------------------------------------------------------
-    # CONFIRM TIME
-    #
-    # THIS IS THE FIX FOR THE CURRENT ERROR:
-    #
-    # sqlite3.OperationalError:
-    # table trades has no column named confirm_time
-    # --------------------------------------------------------
 
     if "confirm_time" not in existing_columns:
 
@@ -1987,10 +2039,6 @@ def init_db():
             """
         )
 
-    # --------------------------------------------------------
-    # NEW NOTIFICATION FLAG
-    # --------------------------------------------------------
-
     if "notified_new" not in existing_columns:
 
         print(
@@ -2004,10 +2052,6 @@ def init_db():
             ADD COLUMN notified_new INTEGER DEFAULT 0
             """
         )
-
-    # --------------------------------------------------------
-    # CLOSE NOTIFICATION FLAG
-    # --------------------------------------------------------
 
     if "notified_close" not in existing_columns:
 
@@ -2024,10 +2068,6 @@ def init_db():
         )
 
     conn.commit()
-
-    # ========================================================
-    # VERIFY REQUIRED COLUMNS AFTER MIGRATION
-    # ========================================================
 
     cur.execute(
         "PRAGMA table_info(trades)"
@@ -2451,7 +2491,7 @@ def send_new_signal_alert(
         f"{signal_text}"
     )
 
-    send_telegram(
+    return send_telegram(
         text
     )
 
@@ -2516,7 +2556,7 @@ def send_close_alert(
         f"{format_time(trade['exit_time'])}"
     )
 
-    send_telegram(
+    return send_telegram(
         text
     )
 
@@ -2989,13 +3029,15 @@ def update_open_trades_from_history(
                 "notified_close"
             ]:
 
-                send_close_alert(
+                sent = send_close_alert(
                     updated_trade
                 )
 
-                mark_close_notified(
-                    updated_trade["id"]
-                )
+                if sent:
+
+                    mark_close_notified(
+                        updated_trade["id"]
+                    )
 
 
 # ============================================================
@@ -3120,13 +3162,15 @@ def process_current_price_exits(
                 "notified_close"
             ]:
 
-                send_close_alert(
+                sent = send_close_alert(
                     updated_trade
                 )
 
-                mark_close_notified(
-                    updated_trade["id"]
-                )
+                if sent:
+
+                    mark_close_notified(
+                        updated_trade["id"]
+                    )
 
 
 # ============================================================
@@ -3414,7 +3458,7 @@ def send_periodic_report(
         f"{'ENABLED' if REAL_TRADING else 'DISABLED'}"
     )
 
-    send_telegram(
+    return send_telegram(
         text
     )
 
@@ -3549,6 +3593,11 @@ def scan_new_signals(
     )
 
     print(
+        f"Assets scanned: "
+        f"{len(ASSETS)}"
+    )
+
+    print(
         f"Patterns detected: "
         f"{total_diag['patterns_total']}"
     )
@@ -3615,7 +3664,7 @@ def main():
     )
 
     print(
-        "VERSION 5.7"
+        "VERSION 5.8"
     )
 
     print(
@@ -3625,6 +3674,11 @@ def main():
     print(
         f"REAL_TRADING = "
         f"{REAL_TRADING}"
+    )
+
+    print(
+        f"ASSETS = "
+        f"{len(ASSETS)}"
     )
 
     print(
@@ -3664,6 +3718,61 @@ def main():
         f"Kraken contracts loaded: "
         f"{len(contract_map)}"
     )
+
+    # --------------------------------------------------------
+    # CHECK REQUESTED UNIVERSE
+    # --------------------------------------------------------
+
+    print(
+        "Checking requested 40-asset universe..."
+    )
+
+    available_assets = []
+
+    missing_assets = []
+
+    for asset in ASSETS:
+
+        contract = (
+            find_contract_for_asset(
+                asset,
+                contract_map,
+            )
+        )
+
+        if contract is None:
+
+            missing_assets.append(
+                asset
+            )
+
+        else:
+
+            available_assets.append(
+                asset
+            )
+
+    print(
+        f"Requested assets: "
+        f"{len(ASSETS)}"
+    )
+
+    print(
+        f"Available contracts: "
+        f"{len(available_assets)}"
+    )
+
+    if missing_assets:
+
+        print(
+            "WARNING - Missing contracts:"
+        )
+
+        print(
+            ", ".join(
+                missing_assets
+            )
+        )
 
     # --------------------------------------------------------
     # KRAKEN LIVE PRICES
@@ -3754,7 +3863,7 @@ def main():
         # IMMEDIATE NEW SIGNAL ALERT
         # ----------------------------------------------------
 
-        send_new_signal_alert(
+        sent = send_new_signal_alert(
             trade,
             display_price,
         )
@@ -3765,7 +3874,7 @@ def main():
             )
         )
 
-        if inserted_row:
+        if inserted_row and sent:
 
             inserted_trade = (
                 row_to_trade(
@@ -3775,6 +3884,14 @@ def main():
 
             mark_new_notified(
                 inserted_trade["id"]
+            )
+
+        elif inserted_row and not sent:
+
+            print(
+                "NEW SIGNAL Telegram alert "
+                "failed. Notification flag "
+                "was NOT updated."
             )
 
     print(
@@ -3838,28 +3955,61 @@ def main():
             "Sending periodic report..."
         )
 
-        send_periodic_report(
-            kraken_prices
+        report_sent = (
+            send_periodic_report(
+                kraken_prices
+            )
         )
 
-        try:
+        if report_sent:
 
-            with open(
-                report_file,
-                "w",
-                encoding="utf-8",
-            ) as f:
+            try:
 
-                f.write(
-                    str(now_ts)
+                with open(
+                    report_file,
+                    "w",
+                    encoding="utf-8",
+                ) as f:
+
+                    f.write(
+                        str(now_ts)
+                    )
+
+                print(
+                    "Periodic report sent "
+                    "and timestamp updated."
                 )
 
-        except Exception as e:
+            except Exception as e:
+
+                print(
+                    "Report timestamp error:",
+                    e,
+                )
+
+        else:
 
             print(
-                "Report timestamp error:",
-                e,
+                "Periodic report was NOT sent. "
+                "Timestamp was NOT updated; "
+                "it will be retried on the next run."
             )
+
+    else:
+
+        remaining = (
+            PERIODIC_REPORT_SECONDS
+            - (
+                now_ts
+                - last_report
+            )
+        )
+
+        print(
+            f"Periodic report not due yet. "
+            f"Remaining: "
+            f"{max(0, remaining)} seconds."
+        )
 
     print(
         "Scan completed."
