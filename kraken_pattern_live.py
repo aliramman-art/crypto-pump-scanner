@@ -1,56 +1,29 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.4
+# VERSION 5.5
 # ============================================================
 #
-# FIXED:
+# V5.5 FIXES:
 #
-# - Kraken Futures OHLC endpoint updated to Charts API
-# - Uses:
-#     /api/charts/v1/trade/{symbol}/{resolution}
-#
-# - Old /derivatives/api/v3/ohlc endpoint removed
-#
-# - SQLite safe migration added for:
-#     contract
-#     exit_reason
-#
-# - Existing database/trades are preserved
-#
-# FRESHNESS:
-#
-# - SCANNER CAN RUN EVERY 1 MINUTE
-# - NEW SIGNAL TELEGRAM IS SENT IMMEDIATELY
-# - CLOSE TELEGRAM IS SENT IMMEDIATELY
-# - NO REPEATED NEW SIGNAL ALERTS
-# - NO REPEATED CLOSE ALERTS
-# - PERIODIC REPORT EVERY 15 MINUTES
-# - PERIODIC REPORT INCLUDES OPEN TRADES
-# - SQLITE ROWS ARE READ BY COLUMN NAME
-# - COMPATIBLE WITH OLDER SQLITE DATABASE SCHEMAS
-#
-# CURRENT PRICE:
-#
-# - CURRENT PRICE COMES DIRECTLY FROM KRAKEN FUTURES
-# - SOURCE = /derivatives/api/v3/tickers
-# - PRICE FIELD = "last"
-# - NO LBANK
-# - NO CANDLE CLOSE
-# - NO ENTRY PRICE AS CURRENT PRICE
+# - 1H BREAKOUT TIME NOW USES CLOSED-CANDLE TIME
+# - RETEST SEARCH STARTS AFTER 1H CANDLE CLOSE
+# - IF FIRST BREAKOUT HAS NO VALID ENTRY, LATER BREAKOUTS
+#   OF THE SAME PATTERN ARE ALSO CHECKED
+# - DIAGNOSTIC FUNNEL ADDED
+# - ORIGINAL STRATEGY FILTERS PRESERVED
+# - REAL TRADING DISABLED
 #
 # STRATEGY:
 #
-#   1H Pattern
-#       ↓
-#   1H Closed Candle Breakout
-#       ↓
-#   First 5M Retest
-#       ↓
-#   5M Confirmation
-#       ↓
-#   Entry
-#
-# REAL TRADING = DISABLED
+# 1H Pattern
+# ↓
+# 1H Closed Candle Breakout
+# ↓
+# First 5M Retest
+# ↓
+# 5M Confirmation
+# ↓
+# Entry
 #
 # ============================================================
 
@@ -89,10 +62,8 @@ ENTRY_LOOKBACK = 1500
 REQUEST_TIMEOUT = 30
 REQUEST_SLEEP = 0.10
 
-# Number of candles requested per chart API request.
 CANDLE_CHUNK = 1900
 
-# PERIODIC REPORT EVERY 15 MINUTES
 PERIODIC_REPORT_SECONDS = 15 * 60
 
 DB_FILE = "kraken_pattern_live_v52.db"
@@ -351,20 +322,6 @@ def find_contract_for_asset(
 # ============================================================
 # CANDLES
 # ============================================================
-#
-# CURRENT KRAKEN FUTURES CHARTS API:
-#
-#   GET
-#   /api/charts/v1/{tick_type}/{symbol}/{resolution}
-#
-# Example:
-#
-#   /api/charts/v1/trade/PF_XBTUSD/5m
-#
-# The API returns candle "time" in milliseconds.
-# Internally this scanner uses seconds.
-#
-# ============================================================
 
 def fetch_recent_candles(
     contract,
@@ -458,7 +415,6 @@ def fetch_recent_candles(
         )
 
         if candles:
-
             rows.extend(candles)
 
         current_start = (
@@ -490,6 +446,7 @@ def fetch_recent_candles(
                 h = c.get("high")
                 l = c.get("low")
                 close = c.get("close")
+
                 volume = c.get(
                     "volume",
                     0,
@@ -509,17 +466,11 @@ def fetch_recent_candles(
                     else 0
                 )
 
-            # ------------------------------------------------
-            # Kraken Charts API returns milliseconds.
-            # Convert to seconds.
-            # ------------------------------------------------
-
             ts = int(
                 float(ts)
             )
 
             if ts > 10_000_000_000:
-
                 ts //= 1000
 
             parsed.append(
@@ -534,7 +485,6 @@ def fetch_recent_candles(
             )
 
         except Exception:
-
             continue
 
     if not parsed:
@@ -942,7 +892,6 @@ def detect_flags(df):
         + FLAG_CONSOLIDATION_BARS
         + 5
     ):
-
         return patterns
 
     start_min = (
@@ -1435,12 +1384,27 @@ def generate_live_entries(
         df_1h
     )
 
+    diagnostics = {
+        "patterns_total": len(patterns),
+        "recent_patterns": 0,
+        "breakouts_found": 0,
+        "old_breakouts": 0,
+        "no_retest": 0,
+        "no_confirmation": 0,
+        "stale_entries": 0,
+        "valid_entries": 0,
+    }
+
     if not patterns:
-        return []
+
+        print(
+            f"[DIAG] {asset} | "
+            f"Patterns=0"
+        )
+
+        return [], diagnostics
 
     entries = []
-
-    consumed_events = set()
 
     recent_start_ts = int(
         df_1h.iloc[
@@ -1449,6 +1413,21 @@ def generate_live_entries(
                 len(df_1h) - 180,
             )
         ]["timestamp"]
+    )
+
+    latest_5m_ts = int(
+        df_5m.iloc[-1][
+            "timestamp"
+        ]
+    )
+
+    max_retest_seconds = (
+        (
+            RETEST_MAX_BARS
+            + CONFIRM_MAX_BARS
+            + 5
+        )
+        * 300
     )
 
     for p in patterns:
@@ -1465,82 +1444,9 @@ def generate_live_entries(
         ):
             continue
 
-        breakout_i = None
-
-        search_end = min(
-            len(df_1h),
-            p["end"] + 200,
-        )
-
-        for i in range(
-            p["end"] + 1,
-            search_end,
-        ):
-
-            if not breakout_signal(
-                df_1h,
-                p,
-                i,
-            ):
-                continue
-
-            breakout_time = int(
-                df_1h.iloc[
-                    i
-                ]["timestamp"]
-            )
-
-            latest_5m_ts = int(
-                df_5m.iloc[-1][
-                    "timestamp"
-                ]
-            )
-
-            max_retest_seconds = (
-                (
-                    RETEST_MAX_BARS
-                    + CONFIRM_MAX_BARS
-                    + 5
-                )
-                * 300
-            )
-
-            if (
-                breakout_time
-                <
-                latest_5m_ts
-                - max_retest_seconds
-            ):
-                continue
-
-            event_key = (
-                asset,
-                i,
-                p["direction"],
-            )
-
-            if (
-                event_key
-                in consumed_events
-            ):
-                continue
-
-            consumed_events.add(
-                event_key
-            )
-
-            breakout_i = i
-
-            break
-
-        if breakout_i is None:
-            continue
-
-        breakout_time = int(
-            df_1h.iloc[
-                breakout_i
-            ]["timestamp"]
-        )
+        diagnostics[
+            "recent_patterns"
+        ] += 1
 
         if (
             p["direction"]
@@ -1567,161 +1473,267 @@ def generate_live_entries(
                 ]
             )
 
-        entry = find_entry(
-            df_5m,
-            breakout_time,
-            p["direction"],
-            level,
+        search_end = min(
+            len(df_1h),
+            p["end"] + 200,
         )
-
-        if entry is None:
-            continue
 
         # ====================================================
-        # FRESHNESS FILTER
+        # V5.5:
+        # CHECK EVERY VALID BREAKOUT UNTIL A VALID ENTRY
+        # IS FOUND.
         # ====================================================
 
-        latest_5m_ts = int(
-            df_5m.iloc[-1][
-                "timestamp"
-            ]
-        )
-
-        entry_age_seconds = (
-            latest_5m_ts
-            - int(
-                entry[
-                    "entry_time"
-                ]
-            )
-        )
-
-        max_entry_age_seconds = (
-            MAX_ENTRY_AGE_CANDLES
-            * 300
-        )
-
-        if (
-            entry_age_seconds
-            > max_entry_age_seconds
+        for i in range(
+            p["end"] + 1,
+            search_end,
         ):
 
-            print(
-                f"STALE SIGNAL SKIPPED: "
-                f"{asset} "
-                f"{p['direction']} "
-                f"Entry="
-                f"{format_time(entry['entry_time'])} "
-                f"| Latest 5M="
-                f"{format_time(latest_5m_ts)} "
-                f"| Age="
-                f"{entry_age_seconds // 60}m "
-                f"| Max="
-                f"{max_entry_age_seconds // 60}m"
+            if not breakout_signal(
+                df_1h,
+                p,
+                i,
+            ):
+                continue
+
+            diagnostics[
+                "breakouts_found"
+            ] += 1
+
+            # =================================================
+            # IMPORTANT:
+            #
+            # The timestamp of an OHLC candle is its OPEN time.
+            #
+            # A 1H candle at 10:00 closes at 11:00.
+            #
+            # Therefore the breakout becomes confirmed only
+            # at 11:00, not at 10:00.
+            # =================================================
+
+            breakout_open_time = int(
+                df_1h.iloc[i][
+                    "timestamp"
+                ]
             )
 
-            continue
+            breakout_close_time = (
+                breakout_open_time
+                + 3600
+            )
 
-        # ====================================================
-        # SIGNAL KEY
-        # ====================================================
+            # ------------------------------------------------
+            # OLD BREAKOUT
+            # ------------------------------------------------
 
-        signal_key = (
-            f"{asset}|"
-            f"{p['pattern']}|"
-            f"{p['direction']}|"
-            f"{breakout_time}|"
-            f"{entry['entry_time']}"
-        )
+            if (
+                breakout_close_time
+                < latest_5m_ts
+                - max_retest_seconds
+            ):
 
-        entries.append(
-            {
-                "signal_key":
-                    signal_key,
+                diagnostics[
+                    "old_breakouts"
+                ] += 1
 
-                "asset":
-                    asset,
+                continue
 
-                "contract":
-                    contract.get(
-                        "symbol"
-                    ),
+            # ------------------------------------------------
+            # FIND RETEST + CONFIRMATION
+            # ------------------------------------------------
 
-                "pattern":
-                    p["pattern"],
+            entry = find_entry(
+                df_5m,
+                breakout_close_time,
+                p["direction"],
+                level,
+            )
 
-                "direction":
-                    p["direction"],
+            if entry is None:
 
-                "breakout_time":
-                    breakout_time,
+                # We don't know whether the failure was
+                # specifically retest or confirmation without
+                # changing find_entry's return contract.
+                #
+                # Count it as no valid setup and continue to
+                # the next possible breakout.
 
-                "retest_time":
-                    entry[
-                        "retest_time"
-                    ],
+                diagnostics[
+                    "no_retest"
+                ] += 1
 
-                "confirm_time":
-                    entry[
-                        "confirm_time"
-                    ],
+                continue
 
-                "entry_time":
+            # =================================================
+            # FRESHNESS FILTER
+            # =================================================
+
+            entry_age_seconds = (
+                latest_5m_ts
+                - int(
                     entry[
                         "entry_time"
-                    ],
-
-                "entry_price":
-                    entry[
-                        "entry_price"
-                    ],
-
-                "sl_price": (
-                    entry[
-                        "entry_price"
                     ]
-                    * (
-                        1 - SL_PCT
-                    )
-                    if p[
-                        "direction"
-                    ] == "LONG"
-                    else
-                    entry[
-                        "entry_price"
-                    ]
-                    * (
-                        1 + SL_PCT
-                    )
-                ),
+                )
+            )
 
-                "tp_price": (
-                    entry[
-                        "entry_price"
-                    ]
-                    * (
-                        1 + TP_PCT
-                    )
-                    if p[
-                        "direction"
-                    ] == "LONG"
-                    else
-                    entry[
-                        "entry_price"
-                    ]
-                    * (
-                        1 - TP_PCT
-                    )
-                ),
+            max_entry_age_seconds = (
+                MAX_ENTRY_AGE_CANDLES
+                * 300
+            )
 
-                "detected_at":
-                    int(
-                        utc_now().timestamp()
+            if (
+                entry_age_seconds
+                > max_entry_age_seconds
+            ):
+
+                diagnostics[
+                    "stale_entries"
+                ] += 1
+
+                print(
+                    f"STALE SIGNAL SKIPPED: "
+                    f"{asset} "
+                    f"{p['direction']} "
+                    f"Entry="
+                    f"{format_time(entry['entry_time'])} "
+                    f"| Latest 5M="
+                    f"{format_time(latest_5m_ts)} "
+                    f"| Age="
+                    f"{entry_age_seconds // 60}m "
+                    f"| Max="
+                    f"{max_entry_age_seconds // 60}m"
+                )
+
+                # Continue to look for another breakout
+                # of the same pattern.
+                continue
+
+            # =================================================
+            # SIGNAL KEY
+            # =================================================
+
+            signal_key = (
+                f"{asset}|"
+                f"{p['pattern']}|"
+                f"{p['direction']}|"
+                f"{breakout_close_time}|"
+                f"{entry['entry_time']}"
+            )
+
+            diagnostics[
+                "valid_entries"
+            ] += 1
+
+            entries.append(
+                {
+                    "signal_key":
+                        signal_key,
+
+                    "asset":
+                        asset,
+
+                    "contract":
+                        contract.get(
+                            "symbol"
+                        ),
+
+                    "pattern":
+                        p["pattern"],
+
+                    "direction":
+                        p["direction"],
+
+                    "breakout_time":
+                        breakout_close_time,
+
+                    "retest_time":
+                        entry[
+                            "retest_time"
+                        ],
+
+                    "confirm_time":
+                        entry[
+                            "confirm_time"
+                        ],
+
+                    "entry_time":
+                        entry[
+                            "entry_time"
+                        ],
+
+                    "entry_price":
+                        entry[
+                            "entry_price"
+                        ],
+
+                    "sl_price": (
+                        entry[
+                            "entry_price"
+                        ]
+                        * (
+                            1 - SL_PCT
+                        )
+                        if p[
+                            "direction"
+                        ] == "LONG"
+                        else
+                        entry[
+                            "entry_price"
+                        ]
+                        * (
+                            1 + SL_PCT
+                        )
                     ),
-            }
-        )
 
-    return entries
+                    "tp_price": (
+                        entry[
+                            "entry_price"
+                        ]
+                        * (
+                            1 + TP_PCT
+                        )
+                        if p[
+                            "direction"
+                        ] == "LONG"
+                        else
+                        entry[
+                            "entry_price"
+                        ]
+                        * (
+                            1 - TP_PCT
+                        )
+                    ),
+
+                    "detected_at":
+                        int(
+                            utc_now().timestamp()
+                        ),
+                }
+            )
+
+            # ------------------------------------------------
+            # FIRST VALID ENTRY FOR THIS PATTERN
+            # ------------------------------------------------
+
+            break
+
+    # ========================================================
+    # DIAGNOSTICS
+    # ========================================================
+
+    print(
+        f"[DIAG] {asset} | "
+        f"Patterns={diagnostics['patterns_total']} | "
+        f"Recent={diagnostics['recent_patterns']} | "
+        f"Breakouts={diagnostics['breakouts_found']} | "
+        f"OldBreakouts={diagnostics['old_breakouts']} | "
+        f"NoEntry={diagnostics['no_retest']} | "
+        f"Stale={diagnostics['stale_entries']} | "
+        f"Valid={diagnostics['valid_entries']}"
+    )
+
+    return entries, diagnostics
 
 
 # ============================================================
@@ -1782,7 +1794,7 @@ def init_db():
     )
 
     # ========================================================
-    # SAFE MIGRATION FOR OLD DATABASES
+    # SAFE MIGRATION
     # ========================================================
 
     cur.execute(
@@ -1793,10 +1805,6 @@ def init_db():
         row["name"]
         for row in cur.fetchall()
     }
-
-    # --------------------------------------------------------
-    # contract
-    # --------------------------------------------------------
 
     if "contract" not in existing_columns:
 
@@ -1812,17 +1820,6 @@ def init_db():
             """
         )
 
-    # --------------------------------------------------------
-    # exit_reason
-    # --------------------------------------------------------
-    #
-    # THIS FIXES:
-    #
-    # sqlite3.OperationalError:
-    # no such column: exit_reason
-    #
-    # --------------------------------------------------------
-
     if "exit_reason" not in existing_columns:
 
         print(
@@ -1836,10 +1833,6 @@ def init_db():
             ADD COLUMN exit_reason TEXT
             """
         )
-
-    # --------------------------------------------------------
-    # Defensive migration for notification flags
-    # --------------------------------------------------------
 
     if "notified_new" not in existing_columns:
 
@@ -3220,6 +3213,21 @@ def scan_new_signals(
 
     all_entries = []
 
+    # ========================================================
+    # GLOBAL DIAGNOSTICS
+    # ========================================================
+
+    total_diag = {
+        "patterns_total": 0,
+        "recent_patterns": 0,
+        "breakouts_found": 0,
+        "old_breakouts": 0,
+        "no_retest": 0,
+        "no_confirmation": 0,
+        "stale_entries": 0,
+        "valid_entries": 0,
+    }
+
     for asset in ASSETS:
 
         contract = (
@@ -3274,7 +3282,7 @@ def scan_new_signals(
                 f"5M={len(df_5m)}"
             )
 
-            entries = (
+            entries, diagnostics = (
                 generate_live_entries(
                     asset,
                     contract,
@@ -3287,6 +3295,15 @@ def scan_new_signals(
                 entries
             )
 
+            for key in total_diag:
+
+                total_diag[key] += (
+                    diagnostics.get(
+                        key,
+                        0
+                    )
+                )
+
         except Exception as e:
 
             print(
@@ -3295,6 +3312,57 @@ def scan_new_signals(
             )
 
             traceback.print_exc()
+
+    # ========================================================
+    # GLOBAL DIAGNOSTIC REPORT
+    # ========================================================
+
+    print(
+        "=================================================="
+    )
+
+    print(
+        "[GLOBAL DIAGNOSTICS]"
+    )
+
+    print(
+        f"Patterns detected: "
+        f"{total_diag['patterns_total']}"
+    )
+
+    print(
+        f"Recent patterns: "
+        f"{total_diag['recent_patterns']}"
+    )
+
+    print(
+        f"Breakouts found: "
+        f"{total_diag['breakouts_found']}"
+    )
+
+    print(
+        f"Old breakouts: "
+        f"{total_diag['old_breakouts']}"
+    )
+
+    print(
+        f"No valid Retest/Confirmation: "
+        f"{total_diag['no_retest']}"
+    )
+
+    print(
+        f"Stale entries: "
+        f"{total_diag['stale_entries']}"
+    )
+
+    print(
+        f"Valid entries: "
+        f"{total_diag['valid_entries']}"
+    )
+
+    print(
+        "=================================================="
+    )
 
     return all_entries
 
@@ -3314,7 +3382,7 @@ def main():
     )
 
     print(
-        "VERSION 5.4"
+        "VERSION 5.5"
     )
 
     print(
