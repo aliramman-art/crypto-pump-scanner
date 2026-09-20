@@ -1,58 +1,58 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 6.3.0
+# VERSION 6.4.0
 # ============================================================
 #
 # PAPER ONLY
+# REAL_TRADING = False
 #
 # STRATEGY
-# ------------------------------------------------------------
-# 1H REAL SWING PATTERN
-#       ↓
-# 1H CLOSED-CANDLE BREAKOUT
-#       ↓
-# 15M REAL SWING PATTERN
-#       ↓
-# 15M CLOSED-CANDLE BREAKOUT
-#       ↓
-# FIRST 15M RETEST
-#       ↓
-# FIRST VALID 15M CONFIRMATION
-#       ↓
-# ENTRY
 #
-# IMPORTANT
-# ------------------------------------------------------------
-# - 1H and 15M patterns DO NOT need to be the same type
-# - Direction must remain the same
-# - 15M pattern determines TP / SL
-# - Closed candles only
-# - No lookahead
-# - First retest only
-# - First valid confirmation only
-# - Existing DB is preserved
-# - PAPER ONLY
-# - REAL_TRADING = False
+# 1H:
+#   Pattern
+#      ↓
+#   1H Breakout
+#      ↓
 #
-# DATA
-# ------------------------------------------------------------
-# Kraken Futures Charts API:
-# /api/charts/v1/trade/{symbol}/{resolution}
+# 15M:
+#   Pattern
+#      ↓
+#   15M Breakout
+#      ↓
+#   First Retest
+#      ↓
+#   First Confirmation
+#      ↓
+#   ENTRY
 #
-# Example:
-# /api/charts/v1/trade/PF_XBTUSD/1h
-# /api/charts/v1/trade/PF_XBTUSD/15m
+# IMPORTANT:
+# - 1H and 15M pattern names do NOT need to match.
+# - Their direction MUST match.
+# - TP / SL come from the 15M pattern.
+# - Only closed candles are used.
+# - No lookahead.
+# - First retest only.
+# - First confirmation only.
+# - Confirmation must be fresh.
+# - Maximum confirmation age = 30 minutes AFTER
+#   the confirmation candle has CLOSED.
 #
+# EXISTING DB PRESERVED:
+#   kraken_pattern_live_v52.db
 # ============================================================
 
 import os
-import time
 import sqlite3
+import time
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 import pandas as pd
+import numpy as np
+
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 
@@ -60,20 +60,42 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "6.3.0"
+VERSION = "6.4.0"
 
 REAL_TRADING = False
 
 DB_FILE = "kraken_pattern_live_v52.db"
 
-KRAKEN_BASE = "https://futures.kraken.com"
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    "",
+)
 
-TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    "",
+)
+
+KRAKEN_TICKERS_URL = (
+    "https://futures.kraken.com/derivatives/api/v3/tickers"
+)
+
+KRAKEN_CHART_URL = (
+    "https://futures.kraken.com/api/charts/v1/trade"
+)
+
+HTTP_RETRIES = 3
+HTTP_TIMEOUT = 20
+
+# ------------------------------------------------------------
+# TRADE MANAGEMENT
+# ------------------------------------------------------------
 
 MAX_HOLD_HOURS = 48
 
-# Data
-MIN_CANDLES_REQUIRED = 60
+# ------------------------------------------------------------
+# DATA
+# ------------------------------------------------------------
 
 PATTERN_LOOKBACK_1H = 240
 PATTERN_LOOKBACK_15M = 240
@@ -87,43 +109,62 @@ BREAKOUT_LOOKAHEAD_15M = 32
 RETEST_LOOKAHEAD_15M = 16
 CONFIRMATION_LOOKAHEAD_15M = 4
 
-PERIODIC_REPORT_SECONDS = 900
+# ------------------------------------------------------------
+# SIGNAL FRESHNESS
+# ------------------------------------------------------------
+#
+# Scanner runs every 5 minutes.
+#
+# A confirmation remains eligible for 30 minutes AFTER
+# the confirmation candle has closed.
+#
+# Example:
+# Confirmation candle starts: 23:00
+# 15M candle closes:          23:15
+# Last valid signal time:     23:45
+#
+# This prevents old signals from being discovered later.
+# ------------------------------------------------------------
+
+MAX_CONFIRMATION_AGE_MINUTES = 30
+
+# ------------------------------------------------------------
+# SIGNAL LIMIT
+# ------------------------------------------------------------
 
 MAX_SIGNALS_PER_SCAN = 1
 
-CHART_CANDLES = 80
-
 # ------------------------------------------------------------
-# REALISTIC PATTERN PARAMETERS
+# PATTERN QUALITY
 # ------------------------------------------------------------
 
-# Swing detection
-SWING_LEFT_RIGHT = 3
+DOUBLE_LEVEL_TOLERANCE = 0.012
 
-# Minimum bars between important swing points
+MIN_PATTERN_DEPTH_PCT = 0.004
+
 MIN_PATTERN_SEPARATION_BARS = 3
 
-# Maximum bars allowed between first and second peak/trough
 MAX_DOUBLE_PATTERN_BARS = 48
 
-# Maximum bars allowed for complete H&S structure
 MAX_HS_PATTERN_BARS = 72
 
-# Double Top / Bottom
-DOUBLE_LEVEL_TOLERANCE = 0.012
-MIN_PATTERN_DEPTH_PCT = 0.004
-MIN_DOUBLE_VALLEY_DEPTH_PCT = 0.004
-
-# Head & Shoulders
 HS_SHOULDER_TOLERANCE = 0.025
+
 HS_MIN_HEAD_ADVANTAGE_PCT = 0.003
+
 MIN_HS_DEPTH_PCT = 0.004
 
-# Pattern invalidation
 INVALIDATION_BUFFER = 0.001
 
-# Minimum score
-MIN_PATTERN_SCORE = 2.0
+SWING_LEFT_RIGHT = 3
+
+# ------------------------------------------------------------
+# TELEGRAM / CHART
+# ------------------------------------------------------------
+
+CHART_CANDLES = 100
+
+PERIODIC_REPORT_SECONDS = 900
 
 
 # ============================================================
@@ -173,6 +214,7 @@ ASSETS = [
     "WIF",
 ]
 
+
 CONTRACTS = {
     asset: f"PF_{asset}USD"
     for asset in ASSETS
@@ -180,220 +222,291 @@ CONTRACTS = {
 
 
 # ============================================================
-# SESSION
+# GLOBALS
 # ============================================================
 
-SESSION = requests.Session()
+LIVE_PRICES = {}
 
-SESSION.headers.update(
-    {
-        "User-Agent": (
-            "Mozilla/5.0 "
-            "Kraken-Pattern-Scanner/"
-            + VERSION
-        )
-    }
-)
+BEST_CANDIDATE = None
 
-
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-
-
-def telegram_enabled():
-    return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
-
-
-def telegram_url(method="sendMessage"):
-    return (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/{method}"
-    )
-
-
-def send_telegram(text):
-    if not telegram_enabled():
-        return False
-
-    try:
-        response = SESSION.post(
-            telegram_url("sendMessage"),
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            },
-            timeout=20,
-        )
-
-        response.raise_for_status()
-        return True
-
-    except Exception as exc:
-        print(f"[TELEGRAM ERROR] {exc}")
-        return False
-
-
-def send_telegram_photo(photo_path, caption):
-    if not telegram_enabled():
-        return False
-
-    if not photo_path or not os.path.exists(photo_path):
-        return False
-
-    try:
-        with open(photo_path, "rb") as photo:
-            response = SESSION.post(
-                telegram_url("sendPhoto"),
-                data={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "caption": caption,
-                    "parse_mode": "HTML",
-                },
-                files={
-                    "photo": photo,
-                },
-                timeout=30,
-            )
-
-        response.raise_for_status()
-        return True
-
-    except Exception as exc:
-        print(f"[TELEGRAM PHOTO ERROR] {exc}")
-        return False
+STATS = {
+    "scans": 0,
+    "assets_scanned": 0,
+    "patterns_1h": 0,
+    "breakouts_1h": 0,
+    "patterns_15m": 0,
+    "breakouts_15m": 0,
+    "retests_15m": 0,
+    "confirmations_15m": 0,
+    "fresh_confirmations": 0,
+    "stale_confirmations": 0,
+    "candidates": 0,
+    "unique_entries": 0,
+    "signals_sent": 0,
+    "closed_trades": 0,
+    "errors": 0,
+}
 
 
 # ============================================================
 # TIME
 # ============================================================
 
+TEHRAN_TZ = timezone(
+    timedelta(
+        hours=3,
+        minutes=30,
+    )
+)
+
+
 def now_ts():
     return int(time.time())
 
 
-def format_time(ts):
-    if ts is None:
+def format_time(value):
+    if value is None:
         return "-"
 
     try:
-        dt = datetime.fromtimestamp(
-            float(ts),
-            tz=TEHRAN_TZ,
-        )
+        if isinstance(value, str):
+            try:
+                dt = datetime.fromisoformat(
+                    value.replace(
+                        "Z",
+                        "+00:00",
+                    )
+                )
+            except Exception:
+                dt = datetime.fromtimestamp(
+                    float(value),
+                    tz=timezone.utc,
+                )
+        else:
+            dt = datetime.fromtimestamp(
+                float(value),
+                tz=timezone.utc,
+            )
 
-        return dt.strftime("%Y-%m-%d %H:%M")
+        return dt.astimezone(
+            TEHRAN_TZ
+        ).strftime(
+            "%Y-%m-%d %H:%M"
+        )
 
     except Exception:
         return "-"
 
 
-def duration_text(start_ts):
-    if not start_ts:
+def duration_text(
+    start_value,
+    end_value=None,
+):
+    if start_value is None:
         return "-"
 
-    seconds = max(0, now_ts() - int(start_ts))
+    try:
+        def to_timestamp(value):
+            if isinstance(value, str):
+                return datetime.fromisoformat(
+                    value.replace(
+                        "Z",
+                        "+00:00",
+                    )
+                ).timestamp()
 
-    minutes = seconds // 60
-    hours = minutes // 60
-    minutes %= 60
+            return float(value)
 
-    if hours:
-        return f"{hours}h {minutes}m"
+        start = to_timestamp(
+            start_value
+        )
 
-    return f"{minutes}m"
+        end = (
+            now_ts()
+            if end_value is None
+            else to_timestamp(end_value)
+        )
 
+        seconds = max(
+            0,
+            int(end - start),
+        )
 
-# ============================================================
-# STATS
-# ============================================================
+        minutes = seconds // 60
 
-STATS = {}
+        hours = minutes // 60
+        minutes = minutes % 60
 
+        if hours:
+            return f"{hours}h {minutes}m"
 
-def reset_stats():
-    global STATS
+        return f"{minutes}m"
 
-    STATS = {
-        "scans": 0,
-        "assets_scanned": 0,
-        "patterns_1h": 0,
-        "breakouts_1h": 0,
-        "patterns_15m": 0,
-        "breakouts_15m": 0,
-        "retests_15m": 0,
-        "confirmations_15m": 0,
-        "candidates": 0,
-        "unique_entries": 0,
-        "signals_sent": 0,
-        "closed_trades": 0,
-        "errors": 0,
-    }
-
-
-reset_stats()
-
-
-# ============================================================
-# BEST CANDIDATE
-# ============================================================
-
-STAGE_RANK = {
-    "None": 0,
-    "1H Pattern": 1,
-    "1H Breakout": 2,
-    "15M Pattern": 3,
-    "15M Breakout": 4,
-    "15M Retest": 5,
-    "15M Confirmation": 6,
-    "Direction Check": 7,
-    "DB Check": 8,
-    "Signal Ready": 9,
-}
-
-BEST_CANDIDATE = None
+    except Exception:
+        return "-"
 
 
-def reset_best_candidate():
-    global BEST_CANDIDATE
-    BEST_CANDIDATE = None
+def confirmation_age_minutes(
+    confirmation_timestamp
+):
+    """
+    Confirmation timestamp is candle START time.
+    15M candle must close 15 minutes later.
+    """
 
-
-def consider_candidate(asset, stage, score, reason=""):
-    global BEST_CANDIDATE
-
-    if not asset:
-        return
-
-    candidate = {
-        "asset": asset,
-        "stage": stage,
-        "score": float(score or 0),
-        "reason": reason,
-    }
-
-    if BEST_CANDIDATE is None:
-        BEST_CANDIDATE = candidate
-        return
-
-    old_rank = STAGE_RANK.get(
-        BEST_CANDIDATE.get("stage"),
-        0,
+    confirmation_close = (
+        int(confirmation_timestamp)
+        + 15 * 60
     )
 
-    new_rank = STAGE_RANK.get(stage, 0)
+    age_seconds = (
+        now_ts()
+        - confirmation_close
+    )
 
-    if new_rank > old_rank:
-        BEST_CANDIDATE = candidate
+    return age_seconds / 60.0
 
-    elif new_rank == old_rank:
-        if candidate["score"] > BEST_CANDIDATE["score"]:
-            BEST_CANDIDATE = candidate
+
+# ============================================================
+# HTTP
+# ============================================================
+
+SESSION = requests.Session()
+
+
+def http_get(
+    url,
+    params=None,
+):
+    last_error = None
+
+    for attempt in range(
+        HTTP_RETRIES
+    ):
+        try:
+            response = SESSION.get(
+                url,
+                params=params,
+                timeout=HTTP_TIMEOUT,
+            )
+
+            response.raise_for_status()
+
+            return response.json()
+
+        except Exception as exc:
+            last_error = exc
+
+            if attempt < HTTP_RETRIES - 1:
+                time.sleep(
+                    1.5 * (
+                        attempt + 1
+                    )
+                )
+
+    raise last_error
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def telegram_send_text(text):
+    if not TELEGRAM_BOT_TOKEN:
+        return False
+
+    if not TELEGRAM_CHAT_ID:
+        return False
+
+    url = (
+        "https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }
+
+    try:
+        response = SESSION.post(
+            url,
+            json=payload,
+            timeout=20,
+        )
+
+        response.raise_for_status()
+
+        return True
+
+    except Exception as exc:
+        print(
+            "Telegram text error:",
+            exc,
+        )
+
+        return False
+
+
+def telegram_send_photo(
+    photo_path,
+    caption,
+):
+    if not TELEGRAM_BOT_TOKEN:
+        return False
+
+    if not TELEGRAM_CHAT_ID:
+        return False
+
+    url = (
+        "https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    )
+
+    try:
+        with open(
+            photo_path,
+            "rb",
+        ) as photo:
+
+            response = SESSION.post(
+                url,
+                data={
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
+                    "caption":
+                        caption,
+                    "parse_mode":
+                        "HTML",
+                },
+                files={
+                    "photo":
+                        photo,
+                },
+                timeout=30,
+            )
+
+        response.raise_for_status()
+
+        return True
+
+    except Exception as exc:
+        print(
+            "Telegram photo error:",
+            exc,
+        )
+
+        return False
+
+
+def send_telegram(
+    text,
+):
+    return telegram_send_text(
+        text
+    )
 
 
 # ============================================================
@@ -402,8 +515,7 @@ def consider_candidate(asset, stage, score, reason=""):
 
 def db_connect():
     conn = sqlite3.connect(
-        DB_FILE,
-        timeout=30,
+        DB_FILE
     )
 
     conn.row_factory = sqlite3.Row
@@ -412,141 +524,196 @@ def db_connect():
 
 
 def init_db():
-
     conn = db_connect()
 
-    try:
+    cur = conn.cursor()
 
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS trades (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT,
-                asset TEXT,
-                direction TEXT,
-                pattern TEXT,
-                signal_key TEXT UNIQUE,
-                pattern_time INTEGER,
-                breakout_time INTEGER,
-                retest_time INTEGER,
-                confirmation_time INTEGER,
-                entry_time INTEGER,
-                entry_price REAL,
-                sl_price REAL,
-                tp_price REAL,
-                current_price REAL,
-                status TEXT,
-                exit_time INTEGER,
-                exit_price REAL,
-                exit_reason TEXT,
-                created_at INTEGER,
-                updated_at INTEGER
-            )
-            """
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT,
+            asset TEXT,
+            direction TEXT,
+            pattern TEXT,
+            signal_key TEXT UNIQUE,
+            pattern_time TEXT,
+            breakout_time TEXT,
+            retest_time TEXT,
+            confirmation_time TEXT,
+            entry_time TEXT,
+            entry_price REAL,
+            sl_price REAL,
+            tp_price REAL,
+            current_price REAL,
+            status TEXT,
+            exit_time TEXT,
+            exit_price REAL,
+            exit_reason TEXT,
+            created_at INTEGER,
+            updated_at INTEGER
         )
+        """
+    )
 
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS scanner_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-            """
+    cur.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scanner_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )
+        """
+    )
 
-        columns = {
-            row["name"]
-            for row in conn.execute(
-                "PRAGMA table_info(trades)"
-            ).fetchall()
-        }
+    conn.commit()
 
-        migrations = {
-            "exit_reason": "TEXT",
-            "breakout_time": "INTEGER",
-            "retest_time": "INTEGER",
-            "confirmation_time": "INTEGER",
-        }
+    cur.execute(
+        "PRAGMA table_info(trades)"
+    )
 
-        for name, dtype in migrations.items():
+    existing_columns = {
+        row["name"]
+        for row in cur.fetchall()
+    }
 
-            if name not in columns:
+    required_columns = {
+        "symbol": "TEXT",
+        "asset": "TEXT",
+        "direction": "TEXT",
+        "pattern": "TEXT",
+        "signal_key": "TEXT",
+        "pattern_time": "TEXT",
+        "breakout_time": "TEXT",
+        "retest_time": "TEXT",
+        "confirmation_time": "TEXT",
+        "entry_time": "TEXT",
+        "entry_price": "REAL",
+        "sl_price": "REAL",
+        "tp_price": "REAL",
+        "current_price": "REAL",
+        "status": "TEXT",
+        "exit_time": "TEXT",
+        "exit_price": "REAL",
+        "exit_reason": "TEXT",
+        "created_at": "INTEGER",
+        "updated_at": "INTEGER",
+    }
 
-                conn.execute(
-                    f"""
-                    ALTER TABLE trades
-                    ADD COLUMN {name} {dtype}
-                    """
+    for name, dtype in required_columns.items():
+
+        if name not in existing_columns:
+
+            try:
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN "
+                    f"{name} {dtype}"
                 )
 
-        conn.execute(
+            except Exception as exc:
+                print(
+                    "DB migration error:",
+                    name,
+                    exc,
+                )
+
+    try:
+        cur.execute(
+            """
+            UPDATE trades
+            SET symbol = asset
+            WHERE symbol IS NULL
+            """
+        )
+    except Exception:
+        pass
+
+    try:
+        cur.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS
-            idx_signal_key
+            idx_trades_signal_key
             ON trades(signal_key)
             """
         )
+    except Exception:
+        pass
 
-        conn.commit()
-
-    finally:
-        conn.close()
+    conn.commit()
+    conn.close()
 
 
 # ============================================================
 # DATABASE HELPERS
 # ============================================================
 
-def has_signal(signal_key):
+def has_signal(
+    signal_key,
+):
     conn = db_connect()
 
-    try:
+    row = conn.execute(
+        """
+        SELECT id
+        FROM trades
+        WHERE signal_key = ?
+        LIMIT 1
+        """,
+        (
+            signal_key,
+        ),
+    ).fetchone()
 
-        row = conn.execute(
-            """
-            SELECT id
-            FROM trades
-            WHERE signal_key = ?
-            LIMIT 1
-            """,
-            (signal_key,),
-        ).fetchone()
+    conn.close()
 
-        return row is not None
-
-    finally:
-        conn.close()
+    return row is not None
 
 
-def has_open_same_direction(asset, direction):
-
+def has_open_trade(
+    asset,
+    direction,
+):
     conn = db_connect()
 
-    try:
+    row = conn.execute(
+        """
+        SELECT id
+        FROM trades
+        WHERE asset = ?
+          AND direction = ?
+          AND status = 'OPEN'
+        LIMIT 1
+        """,
+        (
+            asset,
+            direction,
+        ),
+    ).fetchone()
 
-        row = conn.execute(
-            """
-            SELECT id
-            FROM trades
-            WHERE asset = ?
-              AND direction = ?
-              AND status = 'OPEN'
-            LIMIT 1
-            """,
-            (
-                asset,
-                direction,
-            ),
-        ).fetchone()
+    conn.close()
 
-        return row is not None
-
-    finally:
-        conn.close()
+    return row is not None
 
 
-def insert_trade(trade):
+def get_open_trades():
+    conn = db_connect()
 
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM trades
+        WHERE status = 'OPEN'
+        ORDER BY entry_time ASC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def insert_trade(
+    trade,
+):
     conn = db_connect()
 
     try:
@@ -569,13 +736,10 @@ def insert_trade(trade):
                 tp_price,
                 current_price,
                 status,
-                exit_time,
-                exit_price,
-                exit_reason,
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 trade["symbol"],
@@ -583,19 +747,24 @@ def insert_trade(trade):
                 trade["direction"],
                 trade["pattern"],
                 trade["signal_key"],
-                trade["pattern_time"],
-                trade["breakout_time"],
-                trade["retest_time"],
-                trade["confirmation_time"],
+                trade["pattern15m"][
+                    "pattern_time"
+                ],
+                trade["breakout15m"][
+                    "timestamp"
+                ],
+                trade["retest15m"][
+                    "timestamp"
+                ],
+                trade["confirmation15m"][
+                    "timestamp"
+                ],
                 trade["entry_time"],
                 trade["entry_price"],
                 trade["sl_price"],
                 trade["tp_price"],
-                trade["current_price"],
+                trade["entry_price"],
                 "OPEN",
-                None,
-                None,
-                None,
                 now_ts(),
                 now_ts(),
             ),
@@ -603,496 +772,533 @@ def insert_trade(trade):
 
         conn.commit()
 
-        return cur.rowcount == 1
+        inserted = (
+            cur.rowcount == 1
+        )
 
-    finally:
-        conn.close()
-
-
-def get_open_trades():
-
-    conn = db_connect()
-
-    try:
-
-        return conn.execute(
-            """
-            SELECT *
-            FROM trades
-            WHERE status = 'OPEN'
-            ORDER BY entry_time ASC
-            """
-        ).fetchall()
+        return inserted
 
     finally:
         conn.close()
 
 
 # ============================================================
-# KRAKEN CANDLES
+# KRAKEN
 # ============================================================
 
-def get_candles(symbol, resolution, limit):
-
-    """
-    Correct Kraken Futures Charts endpoint:
-
-    /api/charts/v1/trade/{symbol}/{resolution}
-
-    Example:
-    /api/charts/v1/trade/PF_XBTUSD/1h
-    /api/charts/v1/trade/PF_XBTUSD/15m
-    """
-
-    endpoint = (
-        f"/api/charts/v1/trade/"
-        f"{symbol}/{resolution}"
+def get_contract(
+    asset,
+):
+    return CONTRACTS.get(
+        asset,
+        f"PF_{asset}USD",
     )
 
-    url = KRAKEN_BASE + endpoint
 
-    try:
+def load_prices():
+    global LIVE_PRICES
 
-        response = SESSION.get(
-            url,
-            timeout=20,
+    data = http_get(
+        KRAKEN_TICKERS_URL
+    )
+
+    tickers = data.get(
+        "tickers",
+        [],
+    )
+
+    prices = {}
+
+    for ticker in tickers:
+
+        symbol = ticker.get(
+            "symbol"
         )
 
-        response.raise_for_status()
+        if not symbol:
+            continue
 
-        data = response.json()
-
-        rows = data.get("candles", [])
-
-        if not isinstance(rows, list):
-            return pd.DataFrame()
-
-        if not rows:
-            return pd.DataFrame()
-
-        parsed = []
-
-        for row in rows:
-
-            try:
-
-                if isinstance(row, dict):
-
-                    ts = row.get("time")
-
-                    if ts is None:
-                        continue
-
-                    parsed.append(
-                        {
-                            "timestamp": int(ts) / 1000,
-                            "open": float(row["open"]),
-                            "high": float(row["high"]),
-                            "low": float(row["low"]),
-                            "close": float(row["close"]),
-                            "volume": float(
-                                row.get(
-                                    "volume",
-                                    0,
-                                )
-                            ),
-                        }
-                    )
-
-                elif isinstance(row, list):
-
-                    if len(row) < 6:
-                        continue
-
-                    parsed.append(
-                        {
-                            "timestamp": int(row[0]) / 1000,
-                            "open": float(row[1]),
-                            "high": float(row[2]),
-                            "low": float(row[3]),
-                            "close": float(row[4]),
-                            "volume": float(row[5]),
-                        }
-                    )
-
-            except Exception:
-                continue
-
-        if not parsed:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(parsed)
-
-        df = df.drop_duplicates(
-            subset=["timestamp"]
+        value = (
+            ticker.get("last")
+            or ticker.get("lastPrice")
+            or ticker.get("markPrice")
         )
 
-        df = df.sort_values(
-            "timestamp"
-        ).reset_index(drop=True)
+        if value is None:
+            continue
 
-        candle_seconds = {
-            "1m": 60,
-            "5m": 300,
-            "15m": 900,
-            "30m": 1800,
-            "1h": 3600,
-            "4h": 14400,
-            "12h": 43200,
-            "1d": 86400,
-            "1w": 604800,
-        }.get(
-            resolution,
-            900,
-        )
-
-        current = time.time()
-
-        # Closed candles only.
-        df = df[
-            (
-                df["timestamp"]
-                + candle_seconds
-                <= current
+        try:
+            prices[symbol] = float(
+                value
             )
-        ].copy()
+        except Exception:
+            continue
 
-        if limit:
-            df = df.tail(limit)
-
-        return df.reset_index(drop=True)
-
-    except Exception as exc:
-
-        STATS["errors"] += 1
-
-        print(
-            f"[DATA ERROR] "
-            f"{symbol} {resolution}: {exc}"
-        )
-
-        return pd.DataFrame()
+    LIVE_PRICES = prices
 
 
-# ============================================================
-# CURRENT PRICE
-# ============================================================
-
-_TICKER_CACHE = {
-    "time": 0,
-    "prices": {},
-}
+def get_live_price(
+    asset,
+):
+    return LIVE_PRICES.get(
+        get_contract(asset)
+    )
 
 
 def get_all_current_prices():
+    load_prices()
 
-    global _TICKER_CACHE
+    result = {}
 
-    if (
-        time.time()
-        - _TICKER_CACHE["time"]
-        < 10
-        and _TICKER_CACHE["prices"]
+    for asset in ASSETS:
+
+        price = get_live_price(
+            asset
+        )
+
+        if price is not None:
+            result[
+                get_contract(asset)
+            ] = price
+
+    return result
+
+
+# ============================================================
+# CANDLES
+# ============================================================
+
+def get_candles(
+    asset,
+    interval,
+    limit=300,
+):
+    contract = get_contract(
+        asset
+    )
+
+    url = (
+        f"{KRAKEN_CHART_URL}/"
+        f"{contract}/{interval}"
+    )
+
+    data = http_get(url)
+
+    candles = data.get(
+        "candles",
+        data,
+    )
+
+    if not isinstance(
+        candles,
+        list,
     ):
-        return _TICKER_CACHE["prices"]
+        return pd.DataFrame()
 
-    try:
+    rows = []
 
-        response = SESSION.get(
-            KRAKEN_BASE
-            + "/derivatives/api/v3/tickers",
-            timeout=20,
-        )
+    for candle in candles:
 
-        response.raise_for_status()
+        try:
 
-        data = response.json()
+            if isinstance(
+                candle,
+                dict,
+            ):
 
-        tickers = data.get(
-            "tickers",
-            [],
-        )
-
-        prices = {}
-
-        for ticker in tickers:
-
-            symbol = str(
-                ticker.get(
-                    "symbol",
-                    ""
+                timestamp = (
+                    candle.get("time")
+                    or candle.get(
+                        "timestamp"
+                    )
+                    or candle.get("t")
                 )
-            ).upper()
 
-            value = (
-                ticker.get("markPrice")
-                or ticker.get("last")
-                or ticker.get("lastPrice")
+                open_price = (
+                    candle.get("open")
+                    if candle.get("open")
+                    is not None
+                    else candle.get("o")
+                )
+
+                high_price = (
+                    candle.get("high")
+                    if candle.get("high")
+                    is not None
+                    else candle.get("h")
+                )
+
+                low_price = (
+                    candle.get("low")
+                    if candle.get("low")
+                    is not None
+                    else candle.get("l")
+                )
+
+                close_price = (
+                    candle.get("close")
+                    if candle.get("close")
+                    is not None
+                    else candle.get("c")
+                )
+
+            else:
+
+                if len(candle) < 5:
+                    continue
+
+                timestamp = candle[0]
+                open_price = candle[1]
+                high_price = candle[2]
+                low_price = candle[3]
+                close_price = candle[4]
+
+            timestamp = int(
+                float(timestamp)
             )
 
-            if not symbol or value is None:
-                continue
+            # Some APIs return milliseconds.
+            if timestamp > 10_000_000_000:
+                timestamp //= 1000
 
-            try:
-                prices[symbol] = float(value)
-            except Exception:
-                continue
+            rows.append(
+                {
+                    "timestamp":
+                        timestamp,
+                    "open":
+                        float(open_price),
+                    "high":
+                        float(high_price),
+                    "low":
+                        float(low_price),
+                    "close":
+                        float(close_price),
+                }
+            )
 
-        _TICKER_CACHE = {
-            "time": time.time(),
-            "prices": prices,
-        }
+        except Exception:
+            continue
 
-        return prices
+    if not rows:
+        return pd.DataFrame()
 
-    except Exception as exc:
+    df = pd.DataFrame(
+        rows
+    )
 
-        print(
-            f"[TICKER ERROR] {exc}"
+    df = df.drop_duplicates(
+        subset=[
+            "timestamp"
+        ]
+    )
+
+    df = df.sort_values(
+        "timestamp"
+    )
+
+    interval_seconds = {
+        "1h": 3600,
+        "15m": 900,
+        "5m": 300,
+    }.get(
+        interval,
+        900,
+    )
+
+    # --------------------------------------------------------
+    # CLOSED CANDLES ONLY
+    # --------------------------------------------------------
+
+    current_time = now_ts()
+
+    df = df[
+        (
+            df["timestamp"]
+            + interval_seconds
+        ) <= current_time
+    ]
+
+    if limit:
+        df = df.tail(
+            limit
         )
 
-        return _TICKER_CACHE.get(
-            "prices",
-            {},
-        )
-
-
-def get_current_price(symbol):
-
-    prices = get_all_current_prices()
-
-    return prices.get(
-        symbol.upper()
+    return df.reset_index(
+        drop=True
     )
 
 
 # ============================================================
-# SWING DETECTION
+# PIVOTS
 # ============================================================
 
-def find_swing_highs(
+def is_local_high(
     df,
+    index,
     left=SWING_LEFT_RIGHT,
     right=SWING_LEFT_RIGHT,
 ):
+    if index < left:
+        return False
 
-    highs = df["high"].tolist()
+    if index + right >= len(df):
+        return False
 
-    result = []
-
-    for i in range(
-        left,
-        len(df) - right,
-    ):
-
-        value = highs[i]
-
-        left_values = highs[
-            i - left:i
-        ]
-
-        right_values = highs[
-            i + 1:i + right + 1
-        ]
-
-        if (
-            value >= max(left_values)
-            and value >= max(right_values)
-            and (
-                value > max(left_values)
-                or value > max(right_values)
-            )
-        ):
-            result.append(i)
-
-    return result
-
-
-def find_swing_lows(
-    df,
-    left=SWING_LEFT_RIGHT,
-    right=SWING_LEFT_RIGHT,
-):
-
-    lows = df["low"].tolist()
-
-    result = []
-
-    for i in range(
-        left,
-        len(df) - right,
-    ):
-
-        value = lows[i]
-
-        left_values = lows[
-            i - left:i
-        ]
-
-        right_values = lows[
-            i + 1:i + right + 1
-        ]
-
-        if (
-            value <= min(left_values)
-            and value <= min(right_values)
-            and (
-                value < min(left_values)
-                or value < min(right_values)
-            )
-        ):
-            result.append(i)
-
-    return result
-
-
-# ============================================================
-# PATTERN SCORE
-# ============================================================
-
-def pattern_quality_base(depth_pct):
-    return max(
-        0.0,
-        min(
-            10.0,
-            depth_pct * 1000,
-        ),
+    value = float(
+        df.iloc[index]["high"]
     )
+
+    left_values = df.iloc[
+        index - left:index
+    ]["high"]
+
+    right_values = df.iloc[
+        index + 1:
+        index + right + 1
+    ]["high"]
+
+    return (
+        value >= left_values.max()
+        and value >= right_values.max()
+    )
+
+
+def is_local_low(
+    df,
+    index,
+    left=SWING_LEFT_RIGHT,
+    right=SWING_LEFT_RIGHT,
+):
+    if index < left:
+        return False
+
+    if index + right >= len(df):
+        return False
+
+    value = float(
+        df.iloc[index]["low"]
+    )
+
+    left_values = df.iloc[
+        index - left:index
+    ]["low"]
+
+    right_values = df.iloc[
+        index + 1:
+        index + right + 1
+    ]["low"]
+
+    return (
+        value <= left_values.min()
+        and value <= right_values.min()
+    )
+
+
+def pivot_highs(df):
+    return [
+        i
+        for i in range(len(df))
+        if is_local_high(
+            df,
+            i,
+        )
+    ]
+
+
+def pivot_lows(df):
+    return [
+        i
+        for i in range(len(df))
+        if is_local_low(
+            df,
+            i,
+        )
+    ]
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def pct_diff(
+    a,
+    b,
+):
+    if a == 0:
+        return 999.0
+
+    return abs(a - b) / abs(a)
+
+
+def make_pattern(
+    name,
+    direction,
+    points,
+    neckline,
+    neckline_idx,
+    target,
+    stop,
+    pattern_time,
+    score,
+):
+    return {
+        "pattern":
+            name,
+        "direction":
+            direction,
+        "points":
+            points,
+        "neckline":
+            float(neckline),
+        "neckline_idx":
+            neckline_idx,
+        "target":
+            float(target),
+        "stop":
+            float(stop),
+        "pattern_time":
+            int(pattern_time),
+        "score":
+            float(score),
+    }
 
 
 # ============================================================
 # DOUBLE TOP
 # ============================================================
 
-def detect_double_tops(df):
-
-    swings = find_swing_highs(df)
-
-    lows = find_swing_lows(df)
+def detect_double_top(
+    df,
+):
+    highs = pivot_highs(df)
+    lows = pivot_lows(df)
 
     patterns = []
 
-    for a in range(len(swings)):
+    for a in range(
+        len(highs)
+    ):
 
-        i = swings[a]
+        left = highs[a]
 
         for b in range(
             a + 1,
-            len(swings),
+            len(highs),
         ):
 
-            j = swings[b]
+            right = highs[b]
 
-            separation = j - i
-
-            if separation < MIN_PATTERN_SEPARATION_BARS:
-                continue
-
-            if separation > MAX_DOUBLE_PATTERN_BARS:
-                break
-
-            p1 = float(df.iloc[i]["high"])
-            p2 = float(df.iloc[j]["high"])
-
-            avg_peak = (p1 + p2) / 2
-
-            level_difference = (
-                abs(p1 - p2)
-                / avg_peak
+            distance = (
+                right - left
             )
 
-            if (
-                level_difference
-                > DOUBLE_LEVEL_TOLERANCE
-            ):
+            if distance < MIN_PATTERN_SEPARATION_BARS:
+                continue
+
+            if distance > MAX_DOUBLE_PATTERN_BARS:
+                break
+
+            left_high = float(
+                df.iloc[left]["high"]
+            )
+
+            right_high = float(
+                df.iloc[right]["high"]
+            )
+
+            similarity = pct_diff(
+                left_high,
+                right_high,
+            )
+
+            if similarity > DOUBLE_LEVEL_TOLERANCE:
                 continue
 
             between_lows = [
                 x
                 for x in lows
-                if i < x < j
+                if left < x < right
             ]
 
             if not between_lows:
                 continue
 
-            valley_idx = min(
+            valley = min(
                 between_lows,
-                key=lambda x: float(
-                    df.iloc[x]["low"]
-                ),
-            )
-
-            valley = float(
-                df.iloc[valley_idx]["low"]
-            )
-
-            depth_pct = (
-                avg_peak - valley
-            ) / avg_peak
-
-            if (
-                depth_pct
-                < MIN_DOUBLE_VALLEY_DEPTH_PCT
-            ):
-                continue
-
-            # The second peak should not be
-            # simply a tiny continuation move.
-            if p2 <= valley:
-                continue
-
-            score = (
-                pattern_quality_base(
-                    depth_pct
-                )
-                + max(
-                    0,
-                    5
-                    * (
-                        1
-                        - (
-                            level_difference
-                            / DOUBLE_LEVEL_TOLERANCE
-                        )
+                key=lambda x:
+                    float(
+                        df.iloc[x]["low"]
                     ),
-                )
             )
 
-            pattern_time = int(
-                df.iloc[j]["timestamp"]
+            valley_price = float(
+                df.iloc[valley]["low"]
+            )
+
+            peak = max(
+                left_high,
+                right_high,
+            )
+
+            depth = (
+                peak - valley_price
+            ) / peak
+
+            if depth < MIN_PATTERN_DEPTH_PCT:
+                continue
+
+            neckline = valley_price
+
+            height = (
+                peak
+                - neckline
             )
 
             target = (
-                valley
-                - (
-                    avg_peak
-                    - valley
-                )
+                neckline
+                - height
             )
 
             stop = (
-                max(p1, p2)
+                peak
                 * (
                     1
                     + INVALIDATION_BUFFER
                 )
             )
 
+            score = (
+                min(
+                    10.0,
+                    depth * 1000,
+                )
+                + (
+                    1
+                    - similarity
+                ) * 5
+            )
+
             patterns.append(
-                {
-                    "pattern": "Double Top",
-                    "direction": "SHORT",
-                    "left_idx": i,
-                    "right_idx": j,
-                    "neckline_idx": valley_idx,
-                    "pattern_time": pattern_time,
-                    "neckline": valley,
-                    "target": target,
-                    "stop": stop,
-                    "depth_pct": depth_pct,
-                    "score": score,
-                }
+                make_pattern(
+                    "Double Top",
+                    "SHORT",
+                    {
+                        "left_idx":
+                            left,
+                        "valley_idx":
+                            valley,
+                        "right_idx":
+                            right,
+                    },
+                    neckline,
+                    valley,
+                    target,
+                    stop,
+                    df.iloc[
+                        right
+                    ]["timestamp"],
+                    score,
+                )
             )
 
     return patterns
@@ -1102,135 +1308,139 @@ def detect_double_tops(df):
 # DOUBLE BOTTOM
 # ============================================================
 
-def detect_double_bottoms(df):
-
-    swings = find_swing_lows(df)
-
-    highs = find_swing_highs(df)
+def detect_double_bottom(
+    df,
+):
+    lows = pivot_lows(df)
+    highs = pivot_highs(df)
 
     patterns = []
 
-    for a in range(len(swings)):
+    for a in range(
+        len(lows)
+    ):
 
-        i = swings[a]
+        left = lows[a]
 
         for b in range(
             a + 1,
-            len(swings),
+            len(lows),
         ):
 
-            j = swings[b]
+            right = lows[b]
 
-            separation = j - i
-
-            if separation < MIN_PATTERN_SEPARATION_BARS:
-                continue
-
-            if separation > MAX_DOUBLE_PATTERN_BARS:
-                break
-
-            p1 = float(df.iloc[i]["low"])
-            p2 = float(df.iloc[j]["low"])
-
-            avg_bottom = (
-                p1 + p2
-            ) / 2
-
-            level_difference = (
-                abs(p1 - p2)
-                / avg_bottom
+            distance = (
+                right - left
             )
 
-            if (
-                level_difference
-                > DOUBLE_LEVEL_TOLERANCE
-            ):
+            if distance < MIN_PATTERN_SEPARATION_BARS:
+                continue
+
+            if distance > MAX_DOUBLE_PATTERN_BARS:
+                break
+
+            left_low = float(
+                df.iloc[left]["low"]
+            )
+
+            right_low = float(
+                df.iloc[right]["low"]
+            )
+
+            similarity = pct_diff(
+                left_low,
+                right_low,
+            )
+
+            if similarity > DOUBLE_LEVEL_TOLERANCE:
                 continue
 
             between_highs = [
                 x
                 for x in highs
-                if i < x < j
+                if left < x < right
             ]
 
             if not between_highs:
                 continue
 
-            peak_idx = max(
+            peak = max(
                 between_highs,
-                key=lambda x: float(
-                    df.iloc[x]["high"]
-                ),
-            )
-
-            peak = float(
-                df.iloc[peak_idx]["high"]
-            )
-
-            depth_pct = (
-                peak - avg_bottom
-            ) / avg_bottom
-
-            if (
-                depth_pct
-                < MIN_DOUBLE_VALLEY_DEPTH_PCT
-            ):
-                continue
-
-            if peak <= avg_bottom:
-                continue
-
-            score = (
-                pattern_quality_base(
-                    depth_pct
-                )
-                + max(
-                    0,
-                    5
-                    * (
-                        1
-                        - (
-                            level_difference
-                            / DOUBLE_LEVEL_TOLERANCE
-                        )
+                key=lambda x:
+                    float(
+                        df.iloc[x]["high"]
                     ),
-                )
             )
 
-            pattern_time = int(
-                df.iloc[j]["timestamp"]
+            peak_price = float(
+                df.iloc[peak]["high"]
+            )
+
+            bottom = min(
+                left_low,
+                right_low,
+            )
+
+            depth = (
+                peak_price
+                - bottom
+            ) / peak_price
+
+            if depth < MIN_PATTERN_DEPTH_PCT:
+                continue
+
+            neckline = peak_price
+
+            height = (
+                neckline
+                - bottom
             )
 
             target = (
-                peak
-                + (
-                    peak
-                    - avg_bottom
-                )
+                neckline
+                + height
             )
 
             stop = (
-                min(p1, p2)
+                bottom
                 * (
                     1
                     - INVALIDATION_BUFFER
                 )
             )
 
+            score = (
+                min(
+                    10.0,
+                    depth * 1000,
+                )
+                + (
+                    1
+                    - similarity
+                ) * 5
+            )
+
             patterns.append(
-                {
-                    "pattern": "Double Bottom",
-                    "direction": "LONG",
-                    "left_idx": i,
-                    "right_idx": j,
-                    "neckline_idx": peak_idx,
-                    "pattern_time": pattern_time,
-                    "neckline": peak,
-                    "target": target,
-                    "stop": stop,
-                    "depth_pct": depth_pct,
-                    "score": score,
-                }
+                make_pattern(
+                    "Double Bottom",
+                    "LONG",
+                    {
+                        "left_idx":
+                            left,
+                        "peak_idx":
+                            peak,
+                        "right_idx":
+                            right,
+                    },
+                    neckline,
+                    peak,
+                    target,
+                    stop,
+                    df.iloc[
+                        right
+                    ]["timestamp"],
+                    score,
+                )
             )
 
     return patterns
@@ -1240,112 +1450,67 @@ def detect_double_bottoms(df):
 # HEAD & SHOULDERS
 # ============================================================
 
-def detect_head_shoulders(df):
-
-    highs = find_swing_highs(df)
-    lows = find_swing_lows(df)
+def detect_head_shoulders(
+    df,
+):
+    highs = pivot_highs(df)
+    lows = pivot_lows(df)
 
     patterns = []
 
-    for a in range(len(highs)):
+    for a in range(
+        len(highs)
+    ):
 
-        left_idx = highs[a]
+        left = highs[a]
 
         for b in range(
             a + 1,
             len(highs),
         ):
 
-            head_idx = highs[b]
+            head = highs[b]
 
-            if (
-                head_idx - left_idx
-                < MIN_PATTERN_SEPARATION_BARS
-            ):
+            if head - left < MIN_PATTERN_SEPARATION_BARS:
                 continue
 
-            if (
-                head_idx - left_idx
-                > MAX_HS_PATTERN_BARS
-            ):
+            if head - left > MAX_HS_PATTERN_BARS:
                 break
-
-            left = float(
-                df.iloc[left_idx]["high"]
-            )
-
-            head = float(
-                df.iloc[head_idx]["high"]
-            )
-
-            # Head must clearly exceed left shoulder
-            if (
-                head
-                < left
-                * (
-                    1
-                    + HS_MIN_HEAD_ADVANTAGE_PCT
-                )
-            ):
-                continue
-
-            middle_lows = [
-                x
-                for x in lows
-                if left_idx < x < head_idx
-            ]
-
-            if not middle_lows:
-                continue
-
-            valley1_idx = min(
-                middle_lows,
-                key=lambda x: float(
-                    df.iloc[x]["low"]
-                ),
-            )
-
-            valley1 = float(
-                df.iloc[valley1_idx]["low"]
-            )
 
             for c in range(
                 b + 1,
                 len(highs),
             ):
 
-                right_idx = highs[c]
-
-                total_bars = (
-                    right_idx
-                    - left_idx
-                )
+                right = highs[c]
 
                 if (
-                    total_bars
-                    < (
-                        2
-                        * MIN_PATTERN_SEPARATION_BARS
-                    )
+                    right - head
+                    < MIN_PATTERN_SEPARATION_BARS
                 ):
                     continue
 
                 if (
-                    total_bars
+                    right - left
                     > MAX_HS_PATTERN_BARS
                 ):
                     break
 
-                right = float(
-                    df.iloc[right_idx]["high"]
+                left_price = float(
+                    df.iloc[left]["high"]
                 )
 
-                shoulder_diff = (
-                    abs(left - right)
-                    / (
-                        (left + right)
-                        / 2
-                    )
+                head_price = float(
+                    df.iloc[head]["high"]
+                )
+
+                right_price = float(
+                    df.iloc[right]["high"]
+                )
+
+                shoulder_diff = pct_diff(
+                    left_price,
+                    right_price,
                 )
 
                 if (
@@ -1354,45 +1519,12 @@ def detect_head_shoulders(df):
                 ):
                     continue
 
-                second_lows = [
-                    x
-                    for x in lows
-                    if head_idx < x < right_idx
-                ]
-
-                if not second_lows:
-                    continue
-
-                valley2_idx = min(
-                    second_lows,
-                    key=lambda x: float(
-                        df.iloc[x]["low"]
-                    ),
-                )
-
-                valley2 = float(
-                    df.iloc[valley2_idx]["low"]
-                )
-
-                neckline = (
-                    valley1
-                    + valley2
-                ) / 2
-
-                depth_pct = (
-                    head - neckline
-                ) / neckline
-
                 if (
-                    depth_pct
-                    < MIN_HS_DEPTH_PCT
-                ):
-                    continue
-
-                # Head must exceed right shoulder too.
-                if (
-                    head
-                    < right
+                    head_price
+                    <= max(
+                        left_price,
+                        right_price,
+                    )
                     * (
                         1
                         + HS_MIN_HEAD_ADVANTAGE_PCT
@@ -1400,62 +1532,110 @@ def detect_head_shoulders(df):
                 ):
                     continue
 
-                symmetry_score = max(
-                    0,
-                    5
-                    * (
-                        1
-                        - (
-                            shoulder_diff
-                            / HS_SHOULDER_TOLERANCE
-                        )
-                    ),
+                between_1 = [
+                    x
+                    for x in lows
+                    if left < x < head
+                ]
+
+                between_2 = [
+                    x
+                    for x in lows
+                    if head < x < right
+                ]
+
+                if not between_1 or not between_2:
+                    continue
+
+                low1 = min(
+                    between_1,
+                    key=lambda x:
+                        float(
+                            df.iloc[x]["low"]
+                        ),
                 )
 
-                depth_score = pattern_quality_base(
-                    depth_pct
+                low2 = min(
+                    between_2,
+                    key=lambda x:
+                        float(
+                            df.iloc[x]["low"]
+                        ),
                 )
 
-                score = (
-                    symmetry_score
-                    + depth_score
-                )
+                neckline = (
+                    float(
+                        df.iloc[
+                            low1
+                        ]["low"]
+                    )
+                    + float(
+                        df.iloc[
+                            low2
+                        ]["low"]
+                    )
+                ) / 2.0
+
+                depth = (
+                    head_price
+                    - neckline
+                ) / head_price
+
+                if depth < MIN_HS_DEPTH_PCT:
+                    continue
 
                 target = (
                     neckline
                     - (
-                        head
+                        head_price
                         - neckline
                     )
                 )
 
                 stop = (
-                    head
+                    head_price
                     * (
                         1
                         + INVALIDATION_BUFFER
                     )
                 )
 
+                score = (
+                    min(
+                        10.0,
+                        depth * 1000,
+                    )
+                    + (
+                        1
+                        - shoulder_diff
+                    ) * 5
+                )
+
                 patterns.append(
-                    {
-                        "pattern": "Head & Shoulders",
-                        "direction": "SHORT",
-                        "left_idx": left_idx,
-                        "head_idx": head_idx,
-                        "right_idx": right_idx,
-                        "neckline_idx": valley2_idx,
-                        "valley1_idx": valley1_idx,
-                        "valley2_idx": valley2_idx,
-                        "pattern_time": int(
-                            df.iloc[right_idx]["timestamp"]
-                        ),
-                        "neckline": neckline,
-                        "target": target,
-                        "stop": stop,
-                        "depth_pct": depth_pct,
-                        "score": score,
-                    }
+                    make_pattern(
+                        "Head & Shoulders",
+                        "SHORT",
+                        {
+                            "left_idx":
+                                left,
+                            "head_idx":
+                                head,
+                            "right_idx":
+                                right,
+                            "neck_left_idx":
+                                low1,
+                            "neck_right_idx":
+                                low2,
+                        },
+                        neckline,
+                        low2,
+                        target,
+                        stop,
+                        df.iloc[
+                            right
+                        ]["timestamp"],
+                        score,
+                    )
                 )
 
     return patterns
@@ -1465,111 +1645,67 @@ def detect_head_shoulders(df):
 # INVERSE HEAD & SHOULDERS
 # ============================================================
 
-def detect_inverse_head_shoulders(df):
-
-    lows = find_swing_lows(df)
-    highs = find_swing_highs(df)
+def detect_inverse_head_shoulders(
+    df,
+):
+    lows = pivot_lows(df)
+    highs = pivot_highs(df)
 
     patterns = []
 
-    for a in range(len(lows)):
+    for a in range(
+        len(lows)
+    ):
 
-        left_idx = lows[a]
+        left = lows[a]
 
         for b in range(
             a + 1,
             len(lows),
         ):
 
-            head_idx = lows[b]
+            head = lows[b]
 
-            if (
-                head_idx - left_idx
-                < MIN_PATTERN_SEPARATION_BARS
-            ):
+            if head - left < MIN_PATTERN_SEPARATION_BARS:
                 continue
 
-            if (
-                head_idx - left_idx
-                > MAX_HS_PATTERN_BARS
-            ):
+            if head - left > MAX_HS_PATTERN_BARS:
                 break
-
-            left = float(
-                df.iloc[left_idx]["low"]
-            )
-
-            head = float(
-                df.iloc[head_idx]["low"]
-            )
-
-            if (
-                head
-                > left
-                * (
-                    1
-                    - HS_MIN_HEAD_ADVANTAGE_PCT
-                )
-            ):
-                continue
-
-            middle_highs = [
-                x
-                for x in highs
-                if left_idx < x < head_idx
-            ]
-
-            if not middle_highs:
-                continue
-
-            valley1_idx = max(
-                middle_highs,
-                key=lambda x: float(
-                    df.iloc[x]["high"]
-                ),
-            )
-
-            valley1 = float(
-                df.iloc[valley1_idx]["high"]
-            )
 
             for c in range(
                 b + 1,
                 len(lows),
             ):
 
-                right_idx = lows[c]
-
-                total_bars = (
-                    right_idx
-                    - left_idx
-                )
+                right = lows[c]
 
                 if (
-                    total_bars
-                    < (
-                        2
-                        * MIN_PATTERN_SEPARATION_BARS
-                    )
+                    right - head
+                    < MIN_PATTERN_SEPARATION_BARS
                 ):
                     continue
 
                 if (
-                    total_bars
+                    right - left
                     > MAX_HS_PATTERN_BARS
                 ):
                     break
 
-                right = float(
-                    df.iloc[right_idx]["low"]
+                left_price = float(
+                    df.iloc[left]["low"]
                 )
 
-                shoulder_diff = (
-                    abs(left - right)
-                    / (
-                        (left + right)
-                        / 2
-                    )
+                head_price = float(
+                    df.iloc[head]["low"]
+                )
+
+                right_price = float(
+                    df.iloc[right]["low"]
+                )
+
+                shoulder_diff = pct_diff(
+                    left_price,
+                    right_price,
                 )
 
                 if (
@@ -1578,44 +1714,12 @@ def detect_inverse_head_shoulders(df):
                 ):
                     continue
 
-                second_highs = [
-                    x
-                    for x in highs
-                    if head_idx < x < right_idx
-                ]
-
-                if not second_highs:
-                    continue
-
-                valley2_idx = max(
-                    second_highs,
-                    key=lambda x: float(
-                        df.iloc[x]["high"]
-                    ),
-                )
-
-                valley2 = float(
-                    df.iloc[valley2_idx]["high"]
-                )
-
-                neckline = (
-                    valley1
-                    + valley2
-                ) / 2
-
-                depth_pct = (
-                    neckline - head
-                ) / neckline
-
                 if (
-                    depth_pct
-                    < MIN_HS_DEPTH_PCT
-                ):
-                    continue
-
-                if (
-                    head
-                    > right
+                    head_price
+                    >= min(
+                        left_price,
+                        right_price,
+                    )
                     * (
                         1
                         - HS_MIN_HEAD_ADVANTAGE_PCT
@@ -1623,62 +1727,110 @@ def detect_inverse_head_shoulders(df):
                 ):
                     continue
 
-                symmetry_score = max(
-                    0,
-                    5
-                    * (
-                        1
-                        - (
-                            shoulder_diff
-                            / HS_SHOULDER_TOLERANCE
-                        )
-                    ),
+                between_1 = [
+                    x
+                    for x in highs
+                    if left < x < head
+                ]
+
+                between_2 = [
+                    x
+                    for x in highs
+                    if head < x < right
+                ]
+
+                if not between_1 or not between_2:
+                    continue
+
+                high1 = max(
+                    between_1,
+                    key=lambda x:
+                        float(
+                            df.iloc[x]["high"]
+                        ),
                 )
 
-                depth_score = pattern_quality_base(
-                    depth_pct
+                high2 = max(
+                    between_2,
+                    key=lambda x:
+                        float(
+                            df.iloc[x]["high"]
+                        ),
                 )
 
-                score = (
-                    symmetry_score
-                    + depth_score
-                )
+                neckline = (
+                    float(
+                        df.iloc[
+                            high1
+                        ]["high"]
+                    )
+                    + float(
+                        df.iloc[
+                            high2
+                        ]["high"]
+                    )
+                ) / 2.0
+
+                depth = (
+                    neckline
+                    - head_price
+                ) / neckline
+
+                if depth < MIN_HS_DEPTH_PCT:
+                    continue
 
                 target = (
                     neckline
                     + (
                         neckline
-                        - head
+                        - head_price
                     )
                 )
 
                 stop = (
-                    head
+                    head_price
                     * (
                         1
                         - INVALIDATION_BUFFER
                     )
                 )
 
+                score = (
+                    min(
+                        10.0,
+                        depth * 1000,
+                    )
+                    + (
+                        1
+                        - shoulder_diff
+                    ) * 5
+                )
+
                 patterns.append(
-                    {
-                        "pattern": "Inverse Head & Shoulders",
-                        "direction": "LONG",
-                        "left_idx": left_idx,
-                        "head_idx": head_idx,
-                        "right_idx": right_idx,
-                        "neckline_idx": valley2_idx,
-                        "valley1_idx": valley1_idx,
-                        "valley2_idx": valley2_idx,
-                        "pattern_time": int(
-                            df.iloc[right_idx]["timestamp"]
-                        ),
-                        "neckline": neckline,
-                        "target": target,
-                        "stop": stop,
-                        "depth_pct": depth_pct,
-                        "score": score,
-                    }
+                    make_pattern(
+                        "Inverse Head & Shoulders",
+                        "LONG",
+                        {
+                            "left_idx":
+                                left,
+                            "head_idx":
+                                head,
+                            "right_idx":
+                                right,
+                            "neck_left_idx":
+                                high1,
+                            "neck_right_idx":
+                                high2,
+                        },
+                        neckline,
+                        high2,
+                        target,
+                        stop,
+                        df.iloc[
+                            right
+                        ]["timestamp"],
+                        score,
+                    )
                 )
 
     return patterns
@@ -1688,39 +1840,47 @@ def detect_inverse_head_shoulders(df):
 # ALL PATTERNS
 # ============================================================
 
-def detect_patterns(df):
-
+def detect_patterns(
+    df,
+):
     patterns = []
 
     patterns.extend(
-        detect_double_tops(df)
+        detect_double_top(
+            df
+        )
     )
 
     patterns.extend(
-        detect_double_bottoms(df)
+        detect_double_bottom(
+            df
+        )
     )
 
     patterns.extend(
-        detect_head_shoulders(df)
+        detect_head_shoulders(
+            df
+        )
     )
 
     patterns.extend(
-        detect_inverse_head_shoulders(df)
+        detect_inverse_head_shoulders(
+            df
+        )
     )
 
-    # Remove duplicate patterns with same
-    # type / direction / timestamp.
+    # Remove duplicates.
     unique = {}
 
-    for pattern in patterns:
+    for p in patterns:
 
         key = (
-            pattern["pattern"],
-            pattern["direction"],
-            pattern["pattern_time"],
+            p["pattern"],
+            p["direction"],
+            p["pattern_time"],
             round(
-                float(pattern["neckline"]),
-                12,
+                p["neckline"],
+                10,
             ),
         )
 
@@ -1728,43 +1888,55 @@ def detect_patterns(df):
 
         if (
             old is None
-            or pattern["score"]
+            or p["score"]
             > old["score"]
         ):
-            unique[key] = pattern
+            unique[key] = p
 
-    result = list(unique.values())
+    return list(
+        unique.values()
+    )
 
-    result.sort(
-        key=lambda x: (
-            x["pattern_time"],
-            x["score"],
+
+# ============================================================
+# 1H PATTERN
+# ============================================================
+
+def find_1h_pattern(
+    df1h,
+):
+    patterns = detect_patterns(
+        df1h
+    )
+
+    if not patterns:
+        return None
+
+    cutoff = (
+        now_ts()
+        - RECENT_PATTERN_HOURS_1H
+        * 3600
+    )
+
+    candidates = [
+        p
+        for p in patterns
+        if p["pattern_time"]
+        >= cutoff
+    ]
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda p: (
+            p["pattern_time"],
+            p["score"],
         ),
         reverse=True,
     )
 
-    return result
-
-
-# ============================================================
-# RECENT PATTERNS
-# ============================================================
-
-def recent_patterns(
-    patterns,
-    hours,
-):
-
-    cutoff = (
-        now_ts()
-        - hours * 3600
-    )
-
-    return [
-        p
-        for p in patterns
-        if p["pattern_time"] >= cutoff
-    ]
+    return candidates[0]
 
 
 # ============================================================
@@ -1772,28 +1944,32 @@ def recent_patterns(
 # ============================================================
 
 def find_1h_breakout(
-    df,
+    df1h,
     pattern,
 ):
-
-    pattern_time = pattern[
-        "pattern_time"
-    ]
+    pattern_time = (
+        pattern["pattern_time"]
+    )
 
     end_time = (
         pattern_time
-        + BREAKOUT_LOOKAHEAD_1H * 3600
+        + BREAKOUT_LOOKAHEAD_1H
+        * 3600
     )
 
-    direction = pattern[
-        "direction"
-    ]
+    direction = (
+        pattern["direction"]
+    )
 
-    for i in range(len(df)):
+    for i in range(
+        len(df1h)
+    ):
 
-        row = df.iloc[i]
+        row = df1h.iloc[i]
 
-        ts = int(row["timestamp"])
+        ts = int(
+            row["timestamp"]
+        )
 
         if ts <= pattern_time:
             continue
@@ -1801,30 +1977,36 @@ def find_1h_breakout(
         if ts > end_time:
             break
 
+        close = float(
+            row["close"]
+        )
+
+        neckline = float(
+            pattern["neckline"]
+        )
+
         if direction == "LONG":
 
-            if (
-                float(row["close"])
-                > float(pattern["neckline"])
-            ):
-
+            if close > neckline:
                 return {
-                    "index": i,
-                    "timestamp": ts,
-                    "price": float(row["close"]),
+                    "index":
+                        i,
+                    "timestamp":
+                        ts,
+                    "price":
+                        close,
                 }
 
         else:
 
-            if (
-                float(row["close"])
-                < float(pattern["neckline"])
-            ):
-
+            if close < neckline:
                 return {
-                    "index": i,
-                    "timestamp": ts,
-                    "price": float(row["close"]),
+                    "index":
+                        i,
+                    "timestamp":
+                        ts,
+                    "price":
+                        close,
                 }
 
     return None
@@ -1837,22 +2019,33 @@ def find_1h_breakout(
 def find_15m_pattern(
     df15,
     breakout_1h,
+    required_direction,
 ):
+    patterns = detect_patterns(
+        df15
+    )
 
-    patterns = detect_patterns(df15)
-
-    cutoff_start = breakout_1h[
-        "timestamp"
-    ]
+    cutoff_start = (
+        breakout_1h["timestamp"]
+    )
 
     cutoff_end = (
         cutoff_start
-        + RECENT_PATTERN_HOURS_15M * 3600
+        + RECENT_PATTERN_HOURS_15M
+        * 3600
     )
 
     candidates = []
 
     for pattern in patterns:
+
+        # Pattern name may differ.
+        # Direction MUST match 1H.
+        if (
+            pattern["direction"]
+            != required_direction
+        ):
+            continue
 
         pt = pattern[
             "pattern_time"
@@ -1864,15 +2057,13 @@ def find_15m_pattern(
         if pt > cutoff_end:
             continue
 
-        # IMPORTANT:
-        # Pattern type does NOT need to match 1H.
-        candidates.append(pattern)
+        candidates.append(
+            pattern
+        )
 
     if not candidates:
         return None
 
-    # Prefer the most recent valid structure,
-    # then quality.
     candidates.sort(
         key=lambda p: (
             p["pattern_time"],
@@ -1892,25 +2083,29 @@ def find_15m_breakout(
     df15,
     pattern15,
 ):
-
-    pattern_time = pattern15[
-        "pattern_time"
-    ]
+    pattern_time = (
+        pattern15["pattern_time"]
+    )
 
     end_time = (
         pattern_time
-        + BREAKOUT_LOOKAHEAD_15M * 900
+        + BREAKOUT_LOOKAHEAD_15M
+        * 900
     )
 
-    direction = pattern15[
-        "direction"
-    ]
+    direction = (
+        pattern15["direction"]
+    )
 
-    for i in range(len(df15)):
+    for i in range(
+        len(df15)
+    ):
 
         row = df15.iloc[i]
 
-        ts = int(row["timestamp"])
+        ts = int(
+            row["timestamp"]
+        )
 
         if ts <= pattern_time:
             continue
@@ -1929,21 +2124,25 @@ def find_15m_breakout(
         if direction == "LONG":
 
             if close > neckline:
-
                 return {
-                    "index": i,
-                    "timestamp": ts,
-                    "price": close,
+                    "index":
+                        i,
+                    "timestamp":
+                        ts,
+                    "price":
+                        close,
                 }
 
         else:
 
             if close < neckline:
-
                 return {
-                    "index": i,
-                    "timestamp": ts,
-                    "price": close,
+                    "index":
+                        i,
+                    "timestamp":
+                        ts,
+                    "price":
+                        close,
                 }
 
     return None
@@ -1958,14 +2157,13 @@ def find_first_retest(
     pattern15,
     breakout15,
 ):
-
     neckline = float(
         pattern15["neckline"]
     )
 
-    direction = pattern15[
-        "direction"
-    ]
+    direction = (
+        pattern15["direction"]
+    )
 
     start_index = (
         breakout15["index"]
@@ -1999,7 +2197,9 @@ def find_first_retest(
         )
 
         touched = (
-            low <= neckline <= high
+            low
+            <= neckline
+            <= high
         )
 
         if not touched:
@@ -2010,11 +2210,16 @@ def find_first_retest(
             if close >= neckline:
 
                 return {
-                    "index": i,
-                    "timestamp": int(
-                        row["timestamp"]
-                    ),
-                    "price": close,
+                    "index":
+                        i,
+                    "timestamp":
+                        int(
+                            row[
+                                "timestamp"
+                            ]
+                        ),
+                    "price":
+                        close,
                 }
 
         else:
@@ -2022,11 +2227,16 @@ def find_first_retest(
             if close <= neckline:
 
                 return {
-                    "index": i,
-                    "timestamp": int(
-                        row["timestamp"]
-                    ),
-                    "price": close,
+                    "index":
+                        i,
+                    "timestamp":
+                        int(
+                            row[
+                                "timestamp"
+                            ]
+                        ),
+                    "price":
+                        close,
                 }
 
     return None
@@ -2041,10 +2251,9 @@ def find_confirmation(
     pattern15,
     retest15,
 ):
-
-    direction = pattern15[
-        "direction"
-    ]
+    direction = (
+        pattern15["direction"]
+    )
 
     neckline = float(
         pattern15["neckline"]
@@ -2077,49 +2286,75 @@ def find_confirmation(
             row["close"]
         )
 
+        high = float(
+            row["high"]
+        )
+
+        low = float(
+            row["low"]
+        )
+
+        ts = int(
+            row["timestamp"]
+        )
+
         if direction == "LONG":
 
             bullish = (
-                close > open_price
+                close
+                > open_price
             )
 
             if (
                 bullish
-                and close > neckline
+                and close
+                > neckline
             ):
 
                 return {
-                    "index": i,
-                    "timestamp": int(
-                        row["timestamp"]
-                    ),
-                    "price": close,
+                    "index":
+                        i,
+                    "timestamp":
+                        ts,
+                    "price":
+                        close,
+                    "high":
+                        high,
+                    "low":
+                        low,
                 }
 
         else:
 
             bearish = (
-                close < open_price
+                close
+                < open_price
             )
 
             if (
                 bearish
-                and close < neckline
+                and close
+                < neckline
             ):
 
                 return {
-                    "index": i,
-                    "timestamp": int(
-                        row["timestamp"]
-                    ),
-                    "price": close,
+                    "index":
+                        i,
+                    "timestamp":
+                        ts,
+                    "price":
+                        close,
+                    "high":
+                        high,
+                    "low":
+                        low,
                 }
 
     return None
 
 
 # ============================================================
-# DIRECTION / TARGET VALIDATION
+# TRADE LEVEL VALIDATION
 # ============================================================
 
 def validate_trade_levels(
@@ -2128,7 +2363,6 @@ def validate_trade_levels(
     tp,
     sl,
 ):
-
     if direction == "LONG":
 
         return (
@@ -2150,330 +2384,419 @@ def analyze_asset(
     asset,
     symbol,
 ):
+    global BEST_CANDIDATE
 
     # --------------------------------------------------------
-    # 1H
+    # 1H DATA
     # --------------------------------------------------------
 
     df1h = get_candles(
-        symbol,
+        asset,
         "1h",
         PATTERN_LOOKBACK_1H,
     )
 
-    if len(df1h) < MIN_CANDLES_REQUIRED:
-
-        consider_candidate(
-            asset,
-            "None",
-            0,
-            "Insufficient 1H data",
-        )
-
+    if (
+        df1h.empty
+        or len(df1h) < 60
+    ):
         return None
 
     # --------------------------------------------------------
-    # 15M
+    # 15M DATA
     # --------------------------------------------------------
 
     df15 = get_candles(
-        symbol,
+        asset,
         "15m",
         PATTERN_LOOKBACK_15M,
     )
 
-    if len(df15) < MIN_CANDLES_REQUIRED:
-
-        consider_candidate(
-            asset,
-            "1H Pattern",
-            0,
-            "Insufficient 15M data",
-        )
-
+    if (
+        df15.empty
+        or len(df15) < 60
+    ):
         return None
 
-    # Only count an asset as scanned
-    # after BOTH timeframes are valid.
-    STATS["assets_scanned"] += 1
-
     # --------------------------------------------------------
-    # 1H PATTERNS
+    # 1H PATTERN
     # --------------------------------------------------------
 
-    patterns1h = detect_patterns(
+    pattern1h = find_1h_pattern(
         df1h
     )
 
-    patterns1h = recent_patterns(
-        patterns1h,
-        RECENT_PATTERN_HOURS_1H,
+    if not pattern1h:
+        return None
+
+    STATS[
+        "patterns_1h"
+    ] += 1
+
+    # --------------------------------------------------------
+    # 1H BREAKOUT
+    # --------------------------------------------------------
+
+    breakout1h = find_1h_breakout(
+        df1h,
+        pattern1h,
     )
 
-    STATS["patterns_1h"] += len(
-        patterns1h
+    if not breakout1h:
+        return None
+
+    STATS[
+        "breakouts_1h"
+    ] += 1
+
+    direction = (
+        pattern1h["direction"]
     )
 
-    if not patterns1h:
+    # --------------------------------------------------------
+    # 15M PATTERN
+    # --------------------------------------------------------
 
-        consider_candidate(
-            asset,
-            "None",
-            0,
-            "No valid recent 1H pattern",
+    pattern15 = find_15m_pattern(
+        df15,
+        breakout1h,
+        direction,
+    )
+
+    if not pattern15:
+        return None
+
+    STATS[
+        "patterns_15m"
+    ] += 1
+
+    # --------------------------------------------------------
+    # 15M BREAKOUT
+    # --------------------------------------------------------
+
+    breakout15 = find_15m_breakout(
+        df15,
+        pattern15,
+    )
+
+    if not breakout15:
+        return None
+
+    STATS[
+        "breakouts_15m"
+    ] += 1
+
+    # --------------------------------------------------------
+    # FIRST RETEST
+    # --------------------------------------------------------
+
+    retest15 = find_first_retest(
+        df15,
+        pattern15,
+        breakout15,
+    )
+
+    if not retest15:
+        return None
+
+    STATS[
+        "retests_15m"
+    ] += 1
+
+    # --------------------------------------------------------
+    # FIRST CONFIRMATION
+    # --------------------------------------------------------
+
+    confirmation15 = find_confirmation(
+        df15,
+        pattern15,
+        retest15,
+    )
+
+    if not confirmation15:
+        return None
+
+    STATS[
+        "confirmations_15m"
+    ] += 1
+
+    # --------------------------------------------------------
+    # FRESHNESS FILTER
+    # --------------------------------------------------------
+    #
+    # IMPORTANT:
+    #
+    # confirmation timestamp = candle START
+    #
+    # Therefore we calculate age AFTER the 15M candle
+    # has actually closed.
+    # --------------------------------------------------------
+
+    age_minutes = (
+        confirmation_age_minutes(
+            confirmation15[
+                "timestamp"
+            ]
         )
+    )
+
+    if age_minutes < 0:
+        return None
+
+    if (
+        age_minutes
+        > MAX_CONFIRMATION_AGE_MINUTES
+    ):
+
+        STATS[
+            "stale_confirmations"
+        ] += 1
 
         return None
 
-    # Strongest / newest first
-    patterns1h.sort(
-        key=lambda p: (
-            p["pattern_time"],
-            p["score"],
-        ),
-        reverse=True,
+    STATS[
+        "fresh_confirmations"
+    ] += 1
+
+    # --------------------------------------------------------
+    # ENTRY
+    # --------------------------------------------------------
+
+    entry = float(
+        confirmation15["price"]
+    )
+
+    tp = float(
+        pattern15["target"]
+    )
+
+    sl = float(
+        pattern15["stop"]
     )
 
     # --------------------------------------------------------
-    # TRY 1H PATTERNS
+    # LEVEL VALIDATION
     # --------------------------------------------------------
 
-    for pattern1h in patterns1h:
+    if not validate_trade_levels(
+        direction,
+        entry,
+        tp,
+        sl,
+    ):
+        return None
 
-        consider_candidate(
+    # --------------------------------------------------------
+    # SIGNAL KEY
+    # --------------------------------------------------------
+
+    signal_key = (
+        f"{asset}|"
+        f"{direction}|"
+        f"{int(confirmation15['timestamp'])}"
+    )
+
+    # --------------------------------------------------------
+    # DATABASE DUPLICATE CHECK
+    # --------------------------------------------------------
+
+    if has_signal(
+        signal_key
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # ONE OPEN TRADE PER ASSET + DIRECTION
+    # --------------------------------------------------------
+
+    if has_open_trade(
+        asset,
+        direction,
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # BUILD TRADE
+    # --------------------------------------------------------
+
+    trade = {
+        "symbol":
+            symbol,
+
+        "asset":
             asset,
-            "1H Pattern",
-            pattern1h["score"],
-            pattern1h["pattern"],
-        )
 
-        breakout1h = find_1h_breakout(
-            df1h,
+        "direction":
+            direction,
+
+        "pattern":
+            pattern15["pattern"],
+
+        "signal_key":
+            signal_key,
+
+        "pattern1h":
             pattern1h,
-        )
 
-        if not breakout1h:
-            continue
-
-        STATS["breakouts_1h"] += 1
-
-        consider_candidate(
-            asset,
-            "1H Breakout",
-            pattern1h["score"],
-            pattern1h["pattern"],
-        )
-
-        # ----------------------------------------------------
-        # 15M PATTERN
-        # ----------------------------------------------------
-
-        pattern15 = find_15m_pattern(
-            df15,
+        "breakout1h":
             breakout1h,
-        )
 
-        if not pattern15:
-            continue
-
-        STATS["patterns_15m"] += 1
-
-        # IMPORTANT:
-        # Only direction must match.
-        if (
-            pattern15["direction"]
-            != pattern1h["direction"]
-        ):
-            continue
-
-        consider_candidate(
-            asset,
-            "15M Pattern",
-            pattern15["score"],
-            (
-                f"1H={pattern1h['pattern']} "
-                f"15M={pattern15['pattern']}"
-            ),
-        )
-
-        # ----------------------------------------------------
-        # 15M BREAKOUT
-        # ----------------------------------------------------
-
-        breakout15 = find_15m_breakout(
-            df15,
+        "pattern15m":
             pattern15,
-        )
 
-        if not breakout15:
-            continue
-
-        STATS["breakouts_15m"] += 1
-
-        consider_candidate(
-            asset,
-            "15M Breakout",
-            pattern15["score"],
-            pattern15["pattern"],
-        )
-
-        # ----------------------------------------------------
-        # RETEST
-        # ----------------------------------------------------
-
-        retest15 = find_first_retest(
-            df15,
-            pattern15,
+        "breakout15m":
             breakout15,
-        )
 
-        if not retest15:
-            continue
-
-        STATS["retests_15m"] += 1
-
-        consider_candidate(
-            asset,
-            "15M Retest",
-            pattern15["score"],
-            pattern15["pattern"],
-        )
-
-        # ----------------------------------------------------
-        # CONFIRMATION
-        # ----------------------------------------------------
-
-        confirmation15 = find_confirmation(
-            df15,
-            pattern15,
+        "retest15m":
             retest15,
-        )
 
-        if not confirmation15:
-            continue
+        "confirmation15m":
+            confirmation15,
 
-        STATS["confirmations_15m"] += 1
+        "entry_time":
+            int(
+                confirmation15[
+                    "timestamp"
+                ]
+            ),
 
-        consider_candidate(
-            asset,
-            "15M Confirmation",
-            pattern15["score"],
-            pattern15["pattern"],
-        )
-
-        # ----------------------------------------------------
-        # ENTRY
-        # ----------------------------------------------------
-
-        entry = float(
-            confirmation15["price"]
-        )
-
-        tp = float(
-            pattern15["target"]
-        )
-
-        sl = float(
-            pattern15["stop"]
-        )
-
-        direction = pattern15[
-            "direction"
-        ]
-
-        if not validate_trade_levels(
-            direction,
+        "entry_price":
             entry,
+
+        "tp_price":
             tp,
+
+        "sl_price":
             sl,
-        ):
 
-            continue
+        "confirmation_age":
+            age_minutes,
 
-        consider_candidate(
+        "df15":
+            df15.copy(),
+    }
+
+    STATS[
+        "candidates"
+    ] += 1
+
+    # --------------------------------------------------------
+    # BEST CANDIDATE
+    # --------------------------------------------------------
+
+    BEST_CANDIDATE = {
+        "asset":
             asset,
-            "Direction Check",
-            pattern15["score"],
-            pattern15["pattern"],
-        )
-
-        # ----------------------------------------------------
-        # SIGNAL KEY
-        # ----------------------------------------------------
-
-        signal_key = (
-            f"{asset}|"
-            f"{direction}|"
-            f"{pattern15['pattern']}|"
-            f"{pattern15['pattern_time']}|"
-            f"{confirmation15['timestamp']}"
-        )
-
-        if has_signal(signal_key):
-
-            continue
-
-        if has_open_same_direction(
-            asset,
-            direction,
-        ):
-
-            continue
-
-        consider_candidate(
-            asset,
-            "DB Check",
-            pattern15["score"],
-            pattern15["pattern"],
-        )
-
-        trade = {
-            "symbol": symbol,
-            "asset": asset,
-            "direction": direction,
-            "pattern": pattern15["pattern"],
-            "signal_key": signal_key,
-            "pattern_time": pattern15["pattern_time"],
-            "breakout_time": breakout15["timestamp"],
-            "retest_time": retest15["timestamp"],
-            "confirmation_time": confirmation15["timestamp"],
-            "entry_time": confirmation15["timestamp"],
-            "entry_price": entry,
-            "sl_price": sl,
-            "tp_price": tp,
-            "current_price": entry,
-            "pattern1h": pattern1h,
-            "pattern15m": pattern15,
-            "breakout1h": breakout1h,
-            "breakout15m": breakout15,
-            "retest15m": retest15,
-            "confirmation15m": confirmation15,
-            "df15": df15,
-        }
-
-        STATS["candidates"] += 1
-
-        consider_candidate(
-            asset,
+        "stage":
             "Signal Ready",
+        "score":
             pattern15["score"],
-            pattern15["pattern"],
+        "reason":
+            (
+                f"{pattern15['pattern']} | "
+                f"Confirmation age "
+                f"{age_minutes:.1f}m"
+            ),
+    }
+
+    return trade
+
+
+# ============================================================
+# CHART HELPERS
+# ============================================================
+
+def draw_annotation(
+    ax,
+    x,
+    y,
+    text,
+    offset_y=10,
+):
+    ax.annotate(
+        text,
+        (
+            x,
+            y,
+        ),
+        xytext=(
+            0,
+            offset_y,
+        ),
+        textcoords="offset points",
+        ha="center",
+        va="center",
+        fontsize=9,
+        fontweight="bold",
+        bbox={
+            "boxstyle":
+                "round,pad=0.25",
+            "alpha":
+                0.85,
+        },
+    )
+
+
+def mark_chart_point(
+    ax,
+    chart_df,
+    original_df,
+    idx,
+    label,
+    prefer_high=True,
+):
+    if idx is None:
+        return
+
+    if idx not in chart_df.index:
+        return
+
+    start_index = chart_df.index[0]
+
+    x = (
+        idx
+        - start_index
+    )
+
+    row = original_df.iloc[
+        idx
+    ]
+
+    if prefer_high:
+        y = float(
+            row["high"]
         )
+        offset = 12
+    else:
+        y = float(
+            row["low"]
+        )
+        offset = -16
 
-        return trade
-
-    return None
+    draw_annotation(
+        ax,
+        x,
+        y,
+        label,
+        offset,
+    )
 
 
 # ============================================================
 # CHART
 # ============================================================
 
-def make_chart(trade):
+def make_chart(
+    trade,
+):
+    df = trade.get(
+        "df15"
+    )
 
-    df = trade.get("df15")
-
-    if df is None or df.empty:
+    if (
+        df is None
+        or df.empty
+    ):
         return None
 
     chart_df = df.tail(
@@ -2483,13 +2806,25 @@ def make_chart(trade):
     if chart_df.empty:
         return None
 
-    plt.figure(
-        figsize=(14, 7)
+    fig, ax = plt.subplots(
+        figsize=(
+            16,
+            9,
+        )
     )
 
-    for i, row in chart_df.iterrows():
+    # --------------------------------------------------------
+    # CANDLES
+    # --------------------------------------------------------
 
-        x = i
+    start_index = chart_df.index[0]
+
+    for idx, row in chart_df.iterrows():
+
+        x = (
+            idx
+            - start_index
+        )
 
         open_price = float(
             row["open"]
@@ -2507,7 +2842,7 @@ def make_chart(trade):
             row["low"]
         )
 
-        plt.vlines(
+        ax.vlines(
             x,
             low,
             high,
@@ -2526,146 +2861,171 @@ def make_chart(trade):
 
         if height == 0:
             height = max(
-                close * 0.00005,
+                close
+                * 0.00005,
                 1e-12,
             )
 
-        plt.bar(
+        ax.bar(
             x,
             height,
             bottom=bottom,
             width=0.65,
         )
 
-    # --------------------------------------------------------
-    # Important levels
-    # --------------------------------------------------------
-
-    pattern15 = trade[
+    pattern = trade[
         "pattern15m"
     ]
 
-    plt.axhline(
-        pattern15["neckline"],
+    # --------------------------------------------------------
+    # IMPORTANT LEVELS
+    # --------------------------------------------------------
+
+    ax.axhline(
+        pattern[
+            "neckline"
+        ],
         linestyle="--",
-        linewidth=1,
-        label="15M Neckline",
+        linewidth=1.3,
+        label="NECKLINE",
     )
 
-    plt.axhline(
-        trade["entry_price"],
+    ax.axhline(
+        trade[
+            "entry_price"
+        ],
         linestyle="-",
-        linewidth=1,
+        linewidth=1.5,
         label="ENTRY",
     )
 
-    plt.axhline(
-        trade["tp_price"],
+    ax.axhline(
+        trade[
+            "tp_price"
+        ],
         linestyle="--",
-        linewidth=1,
+        linewidth=1.3,
         label="TP",
     )
 
-    plt.axhline(
-        trade["sl_price"],
+    ax.axhline(
+        trade[
+            "sl_price"
+        ],
         linestyle="--",
-        linewidth=1,
+        linewidth=1.3,
         label="SL",
     )
 
     # --------------------------------------------------------
-    # Pattern points
+    # PATTERN POINTS
     # --------------------------------------------------------
 
-    start_index = chart_df.index[0]
-
-    def mark(idx, label):
-
-        if idx not in chart_df.index:
-            return
-
-        local_x = (
-            idx - start_index
-        )
-
-        row = df.iloc[idx]
-
-        if label in ("P1", "P2", "H", "R"):
-            y = float(
-                row["high"]
-            )
-        else:
-            y = float(
-                row["low"]
-            )
-
-        plt.annotate(
-            label,
-            (
-                local_x,
-                y,
-            ),
-            xytext=(
-                0,
-                10 if label in ("P1", "P2", "H", "R") else -18,
-            ),
-            textcoords="offset points",
-            ha="center",
-            fontsize=9,
-            fontweight="bold",
-        )
-
-    p = pattern15
+    p = pattern
 
     if p["pattern"] == "Double Top":
 
-        mark(
-            p["left_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("left_idx"),
             "P1",
+            True,
         )
 
-        mark(
-            p["right_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("right_idx"),
             "P2",
+            True,
         )
 
-        mark(
-            p["neckline_idx"],
-            "N",
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("valley_idx"),
+            "NL",
+            False,
         )
 
     elif p["pattern"] == "Double Bottom":
 
-        mark(
-            p["left_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("left_idx"),
             "P1",
+            False,
         )
 
-        mark(
-            p["right_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("right_idx"),
             "P2",
+            False,
         )
 
-        mark(
-            p["neckline_idx"],
-            "N",
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("peak_idx"),
+            "NL",
+            True,
         )
 
     elif p["pattern"] == "Head & Shoulders":
 
-        mark(
-            p["left_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("left_idx"),
             "LS",
+            True,
         )
 
-        mark(
-            p["head_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("head_idx"),
             "H",
+            True,
         )
 
-        mark(
-            p["right_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("right_idx"),
             "RS",
+            True,
+        )
+
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("neck_left_idx"),
+            "NL1",
+            False,
+        )
+
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("neck_right_idx"),
+            "NL2",
+            False,
         )
 
     elif (
@@ -2673,40 +3033,213 @@ def make_chart(trade):
         == "Inverse Head & Shoulders"
     ):
 
-        mark(
-            p["left_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("left_idx"),
             "LS",
+            False,
         )
 
-        mark(
-            p["head_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("head_idx"),
             "H",
+            False,
         )
 
-        mark(
-            p["right_idx"],
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("right_idx"),
             "RS",
+            False,
         )
 
-    plt.title(
-        f"{trade['asset']} "
-        f"{trade['direction']} | "
-        f"15M {trade['pattern15m']}"
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("neck_left_idx"),
+            "NL1",
+            True,
+        )
+
+        mark_chart_point(
+            ax,
+            chart_df,
+            df,
+            p.get("neck_right_idx"),
+            "NL2",
+            True,
+        )
+
+    # --------------------------------------------------------
+    # BREAKOUT / RETEST / CONFIRMATION / ENTRY
+    # --------------------------------------------------------
+
+    def stage_point(
+        stage,
+        label,
+        prefer_high=True,
+    ):
+        item = trade.get(
+            stage
+        )
+
+        if not item:
+            return
+
+        idx = item.get(
+            "index"
+        )
+
+        if idx is None:
+            return
+
+        if idx not in chart_df.index:
+            return
+
+        x = (
+            idx
+            - start_index
+        )
+
+        row = df.iloc[
+            idx
+        ]
+
+        if prefer_high:
+            y = float(
+                row["high"]
+            )
+            offset = 24
+        else:
+            y = float(
+                row["low"]
+            )
+            offset = -28
+
+        draw_annotation(
+            ax,
+            x,
+            y,
+            label,
+            offset,
+        )
+
+    direction = trade[
+        "direction"
+    ]
+
+    if direction == "LONG":
+
+        stage_point(
+            "breakout15m",
+            "BO",
+            True,
+        )
+
+        stage_point(
+            "retest15m",
+            "RT",
+            False,
+        )
+
+        stage_point(
+            "confirmation15m",
+            "CONF",
+            True,
+        )
+
+    else:
+
+        stage_point(
+            "breakout15m",
+            "BO",
+            False,
+        )
+
+        stage_point(
+            "retest15m",
+            "RT",
+            True,
+        )
+
+        stage_point(
+            "confirmation15m",
+            "CONF",
+            False,
+        )
+
+    # Entry marker
+    confirmation = trade[
+        "confirmation15m"
+    ]
+
+    if (
+        confirmation
+        and confirmation["index"]
+        in chart_df.index
+    ):
+
+        x = (
+            confirmation["index"]
+            - start_index
+        )
+
+        ax.scatter(
+            [x],
+            [trade["entry_price"]],
+            marker="o",
+            s=50,
+            zorder=5,
+            label="ENTRY POINT",
+        )
+
+        draw_annotation(
+            ax,
+            x,
+            trade["entry_price"],
+            "ENTRY",
+            34,
+        )
+
+    # --------------------------------------------------------
+    # TITLE
+    # --------------------------------------------------------
+
+    ax.set_title(
+        (
+            f"{trade['asset']} "
+            f"{trade['direction']} | "
+            f"15M "
+            f"{trade['pattern15m']['pattern']}"
+        ),
+        fontsize=14,
+        fontweight="bold",
     )
 
-    plt.xlabel(
+    ax.set_xlabel(
         "15M Closed Candles"
     )
 
-    plt.ylabel(
+    ax.set_ylabel(
         "Price"
     )
 
-    plt.grid(
-        alpha=0.2
+    ax.grid(
+        alpha=0.20
     )
 
-    plt.legend()
+    ax.legend(
+        loc="best",
+        fontsize=8,
+    )
 
     plt.tight_layout()
 
@@ -2719,9 +3252,10 @@ def make_chart(trade):
     plt.savefig(
         filename,
         dpi=150,
+        bbox_inches="tight",
     )
 
-    plt.close()
+    plt.close(fig)
 
     return filename
 
@@ -2730,8 +3264,9 @@ def make_chart(trade):
 # SIGNAL MESSAGE
 # ============================================================
 
-def build_signal_message(trade):
-
+def build_signal_message(
+    trade,
+):
     direction = trade[
         "direction"
     ]
@@ -2748,6 +3283,10 @@ def build_signal_message(trade):
 
     p15 = trade[
         "pattern15m"
+    ]
+
+    age = trade[
+        "confirmation_age"
     ]
 
     return f"""
@@ -2772,6 +3311,7 @@ def build_signal_message(trade):
 🕐 <b>15M Retest:</b> {format_time(trade['retest15m']['timestamp'])}
 🕐 <b>15M Confirmation:</b> {format_time(trade['confirmation15m']['timestamp'])}
 
+⏱ <b>Confirmation Age:</b> {age:.1f} min
 ⏱ <b>Entry Time:</b> {format_time(trade['entry_time'])}
 
 ⚙️ <b>Mode:</b> PAPER ONLY
@@ -2779,45 +3319,56 @@ def build_signal_message(trade):
 
 
 # ============================================================
-# OPEN TRADES REPORT
+# OPEN TRADES MESSAGE
 # ============================================================
 
 def build_open_trades_message():
-
     rows = get_open_trades()
 
     if not rows:
-
-        return "🟢 <b>OPEN TRADES: 0</b>"
-
-    lines = [
-        f"🟢 <b>OPEN TRADES: {len(rows)}</b>"
-    ]
+        return (
+            "🟢 <b>OPEN TRADES: 0</b>"
+        )
 
     prices = get_all_current_prices()
 
+    lines = [
+        f"🟢 <b>OPEN TRADES: {len(rows)}</b>",
+        "",
+    ]
+
     for row in rows:
 
-        symbol = str(
-            row["symbol"]
-        ).upper()
-
-        current = prices.get(
-            symbol,
-            row["current_price"],
-        )
-
-        entry = float(
-            row["entry_price"]
-        )
+        asset = row[
+            "asset"
+        ]
 
         direction = row[
             "direction"
         ]
 
+        entry = float(
+            row["entry_price"]
+        )
+
+        tp = float(
+            row["tp_price"]
+        )
+
+        sl = float(
+            row["sl_price"]
+        )
+
+        current = prices.get(
+            row["symbol"]
+        )
+
+        if current is None:
+            current = entry
+
         if direction == "LONG":
 
-            pnl_pct = (
+            pnl = (
                 (
                     current
                     - entry
@@ -2825,11 +3376,9 @@ def build_open_trades_message():
                 / entry
             ) * 100
 
-            emoji = "🟢"
-
         else:
 
-            pnl_pct = (
+            pnl = (
                 (
                     entry
                     - current
@@ -2837,143 +3386,125 @@ def build_open_trades_message():
                 / entry
             ) * 100
 
-            emoji = "🔴"
-
-        lines.append(
-            f"""
-{emoji} <b>{row['asset']} {direction}</b>
-📌 Pattern: {row['pattern']}
-💰 Entry: {entry:.10g}
-💵 Current: {current:.10g} ({pnl_pct:+.2f}%)
-🛑 SL: {float(row['sl_price']):.10g}
-🎯 TP: {float(row['tp_price']):.10g}
-⏱ Duration: {duration_text(row['entry_time'])}
-"""
+        emoji = (
+            "🟢"
+            if direction == "LONG"
+            else "🔴"
         )
 
-    return "\n".join(lines)
+        lines.extend(
+            [
+                (
+                    f"{emoji} "
+                    f"<b>{asset} "
+                    f"{direction}</b>"
+                ),
+                (
+                    f"📌 Pattern: "
+                    f"{row['pattern']}"
+                ),
+                (
+                    f"💰 Entry: "
+                    f"{entry:.10g}"
+                ),
+                (
+                    f"💵 Current: "
+                    f"{current:.10g} "
+                    f"({pnl:+.2f}%)"
+                ),
+                (
+                    f"🛑 SL: "
+                    f"{sl:.10g}"
+                ),
+                (
+                    f"🎯 TP: "
+                    f"{tp:.10g}"
+                ),
+                (
+                    f"⏱ Duration: "
+                    f"{duration_text(row['entry_time'])}"
+                ),
+                "",
+            ]
+        )
+
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
 # PERFORMANCE
 # ============================================================
 
-def get_performance():
-
+def build_performance_message():
     conn = db_connect()
 
-    try:
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS total,
+            SUM(
+                CASE
+                    WHEN status='CLOSED'
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS closed,
+            SUM(
+                CASE
+                    WHEN status='CLOSED'
+                     AND exit_reason='TP'
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS wins,
+            SUM(
+                CASE
+                    WHEN status='CLOSED'
+                     AND exit_reason='SL'
+                    THEN 1
+                    ELSE 0
+                END
+            ) AS losses
+        FROM trades
+        """
+    ).fetchone()
 
-        total = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM trades
-            """
-        ).fetchone()[0]
+    conn.close()
 
-        closed = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM trades
-            WHERE status = 'CLOSED'
-            """
-        ).fetchone()[0]
+    total = int(
+        row["total"] or 0
+    )
 
-        open_count = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM trades
-            WHERE status = 'OPEN'
-            """
-        ).fetchone()[0]
+    closed = int(
+        row["closed"] or 0
+    )
 
-        wins = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM trades
-            WHERE status = 'CLOSED'
-              AND exit_reason = 'TP'
-            """
-        ).fetchone()[0]
+    wins = int(
+        row["wins"] or 0
+    )
 
-        losses = conn.execute(
-            """
-            SELECT COUNT(*)
-            FROM trades
-            WHERE status = 'CLOSED'
-              AND exit_reason = 'SL'
-            """
-        ).fetchone()[0]
+    losses = int(
+        row["losses"] or 0
+    )
 
-        pnl = conn.execute(
-            """
-            SELECT
-                COALESCE(
-                    SUM(
-                        CASE
-                            WHEN direction = 'LONG'
-                                THEN
-                                    (
-                                        exit_price
-                                        - entry_price
-                                    )
-                                    / entry_price
-                                    * 100
-                            WHEN direction = 'SHORT'
-                                THEN
-                                    (
-                                        entry_price
-                                        - exit_price
-                                    )
-                                    / entry_price
-                                    * 100
-                            ELSE 0
-                        END
-                    ),
-                    0
-                )
-            FROM trades
-            WHERE status = 'CLOSED'
-            """
-        ).fetchone()[0]
-
+    if closed:
         win_rate = (
-            wins / closed * 100
-            if closed
-            else 0
-        )
+            wins
+            / closed
+        ) * 100
+    else:
+        win_rate = 0.0
 
-        return {
-            "total": total,
-            "closed": closed,
-            "open": open_count,
-            "wins": wins,
-            "losses": losses,
-            "win_rate": win_rate,
-            "pnl": pnl,
-        }
-
-    finally:
-        conn.close()
-
-
-def build_performance_message():
-
-    p = get_performance()
-
-    return f"""
-📈 <b>PERFORMANCE</b>
-
-Total: {p['total']}
-Closed: {p['closed']}
-Open: {p['open']}
-
-Wins: {p['wins']}
-Losses: {p['losses']}
-
-Win Rate: {p['win_rate']:.2f}%
-Net PnL: {p['pnl']:+.2f}%
-"""
+    return (
+        "📈 <b>PERFORMANCE</b>\n\n"
+        f"Trades: {total}\n"
+        f"Closed: {closed}\n"
+        f"TP: {wins}\n"
+        f"SL: {losses}\n"
+        f"Win Rate: {win_rate:.2f}%"
+    )
 
 
 # ============================================================
@@ -2981,12 +3512,13 @@ Net PnL: {p['pnl']:+.2f}%
 # ============================================================
 
 def build_scan_summary():
-
     scanned = STATS[
         "assets_scanned"
     ]
 
-    total_assets = len(ASSETS)
+    total_assets = len(
+        ASSETS
+    )
 
     lines = [
         "📊 <b>KRAKEN PATTERN SCANNER</b>",
@@ -2997,79 +3529,122 @@ def build_scan_summary():
         "",
         "🔎 <b>SCAN SUMMARY</b>",
         "",
-        f"Assets Scanned: {scanned}/{total_assets}",
-        f"1H Patterns: {STATS['patterns_1h']}",
-        f"1H Breakouts: {STATS['breakouts_1h']}",
-        f"15M Patterns: {STATS['patterns_15m']}",
-        f"15M Breakouts: {STATS['breakouts_15m']}",
-        f"15M Retests: {STATS['retests_15m']}",
-        f"15M Confirmations: {STATS['confirmations_15m']}",
-        f"New Signals: {STATS['signals_sent']}",
-        f"Errors: {STATS['errors']}",
+        (
+            f"Assets Scanned: "
+            f"{scanned}/{total_assets}"
+        ),
+        (
+            f"1H Patterns: "
+            f"{STATS['patterns_1h']}"
+        ),
+        (
+            f"1H Breakouts: "
+            f"{STATS['breakouts_1h']}"
+        ),
+        (
+            f"15M Patterns: "
+            f"{STATS['patterns_15m']}"
+        ),
+        (
+            f"15M Breakouts: "
+            f"{STATS['breakouts_15m']}"
+        ),
+        (
+            f"15M Retests: "
+            f"{STATS['retests_15m']}"
+        ),
+        (
+            f"15M Confirmations: "
+            f"{STATS['confirmations_15m']}"
+        ),
+        (
+            f"Fresh Confirmations: "
+            f"{STATS['fresh_confirmations']}"
+        ),
+        (
+            f"Stale Confirmations: "
+            f"{STATS['stale_confirmations']}"
+        ),
+        (
+            f"New Signals: "
+            f"{STATS['signals_sent']}"
+        ),
+        (
+            f"Errors: "
+            f"{STATS['errors']}"
+        ),
         "",
     ]
 
-    # --------------------------------------------------------
-    # BEST CANDIDATE
-    # --------------------------------------------------------
-
-    lines.append(
-        "🏆 <b>BEST CANDIDATE</b>"
-    )
-
     if BEST_CANDIDATE:
 
-        lines.append(
-            f"Asset: {BEST_CANDIDATE['asset']}"
+        lines.extend(
+            [
+                "🏆 <b>BEST CANDIDATE</b>",
+                "",
+                (
+                    f"Asset: "
+                    f"{BEST_CANDIDATE['asset']}"
+                ),
+                (
+                    f"Stage: "
+                    f"{BEST_CANDIDATE['stage']}"
+                ),
+                (
+                    f"Score: "
+                    f"{BEST_CANDIDATE['score']:.2f}"
+                ),
+                (
+                    f"Info: "
+                    f"{BEST_CANDIDATE['reason']}"
+                ),
+                "",
+            ]
         )
-
-        lines.append(
-            f"Stage: {BEST_CANDIDATE['stage']}"
-        )
-
-        lines.append(
-            f"Score: {BEST_CANDIDATE['score']:.2f}"
-        )
-
-        if BEST_CANDIDATE["reason"]:
-
-            lines.append(
-                f"Info: {BEST_CANDIDATE['reason']}"
-            )
 
     else:
 
-        if scanned < total_assets:
+        if (
+            scanned
+            < total_assets
+        ):
 
-            lines.append(
-                "Status: Scan incomplete"
-            )
-
-            lines.append(
-                "Reason: Some assets failed during data retrieval."
+            lines.extend(
+                [
+                    "⚠️ <b>SCAN INCOMPLETE</b>",
+                    "",
+                    "Some assets failed during data retrieval.",
+                    "",
+                ]
             )
 
         else:
 
-            lines.append(
-                "Status: No viable candidate"
+            lines.extend(
+                [
+                    "ℹ️ <b>NO VIABLE CANDIDATE</b>",
+                    "",
+                    (
+                        "No fresh valid setup "
+                        "reached Entry."
+                    ),
+                    "",
+                ]
             )
-
-            lines.append(
-                "Reason: No valid pattern reached the required stage."
-            )
-
-    lines.append("")
 
     lines.append(
         build_open_trades_message()
     )
 
+    lines.append("")
+
     lines.append(
         build_performance_message()
     )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -3081,7 +3656,6 @@ def close_trade(
     exit_price,
     reason,
 ):
-
     conn = db_connect()
 
     try:
@@ -3090,14 +3664,14 @@ def close_trade(
             """
             UPDATE trades
             SET
-                status = 'CLOSED',
-                exit_time = ?,
-                exit_price = ?,
-                exit_reason = ?,
-                current_price = ?,
-                updated_at = ?
-            WHERE id = ?
-              AND status = 'OPEN'
+                status='CLOSED',
+                exit_time=?,
+                exit_price=?,
+                exit_reason=?,
+                current_price=?,
+                updated_at=?
+            WHERE id=?
+              AND status='OPEN'
             """,
             (
                 now_ts(),
@@ -3120,7 +3694,6 @@ def close_trade(
 # ============================================================
 
 def reconcile_open_trades():
-
     rows = get_open_trades()
 
     if not rows:
@@ -3158,6 +3731,33 @@ def reconcile_open_trades():
         ]
 
         # ----------------------------------------------------
+        # UPDATE CURRENT PRICE
+        # ----------------------------------------------------
+
+        conn = db_connect()
+
+        try:
+            conn.execute(
+                """
+                UPDATE trades
+                SET
+                    current_price=?,
+                    updated_at=?
+                WHERE id=?
+                """,
+                (
+                    current,
+                    now_ts(),
+                    row["id"],
+                ),
+            )
+
+            conn.commit()
+
+        finally:
+            conn.close()
+
+        # ----------------------------------------------------
         # MAX HOLD
         # ----------------------------------------------------
 
@@ -3165,9 +3765,12 @@ def reconcile_open_trades():
             row["entry_time"]
             and (
                 now_ts()
-                - int(row["entry_time"])
+                - int(
+                    row["entry_time"]
+                )
             )
-            >= MAX_HOLD_HOURS * 3600
+            >= MAX_HOLD_HOURS
+            * 3600
         ):
 
             close_trade(
@@ -3184,6 +3787,7 @@ def reconcile_open_trades():
 📕 <b>CLOSE {row['asset']} {direction}</b>
 
 📌 Pattern: {row['pattern']}
+
 💰 Entry: {entry:.10g}
 💵 Exit: {current:.10g}
 
@@ -3220,45 +3824,46 @@ def reconcile_open_trades():
             elif current >= sl:
                 reason = "SL"
 
-        if reason:
+        if not reason:
+            continue
 
-            close_trade(
-                row["id"],
-                current,
-                reason,
-            )
+        close_trade(
+            row["id"],
+            current,
+            reason,
+        )
 
-            STATS[
-                "closed_trades"
-            ] += 1
+        STATS[
+            "closed_trades"
+        ] += 1
 
-            if direction == "LONG":
+        if direction == "LONG":
 
-                pnl = (
-                    (
-                        current
-                        - entry
-                    )
-                    / entry
-                ) * 100
+            pnl = (
+                (
+                    current
+                    - entry
+                )
+                / entry
+            ) * 100
 
-            else:
+        else:
 
-                pnl = (
-                    (
-                        entry
-                        - current
-                    )
-                    / entry
-                ) * 100
+            pnl = (
+                (
+                    entry
+                    - current
+                )
+                / entry
+            ) * 100
 
-            emoji = (
-                "🎯"
-                if reason == "TP"
-                else "🛑"
-            )
+        emoji = (
+            "🎯"
+            if reason == "TP"
+            else "🛑"
+        )
 
-            message = f"""
+        message = f"""
 {emoji} <b>CLOSE {row['asset']} {direction}</b>
 
 📌 Pattern: {row['pattern']}
@@ -3273,9 +3878,9 @@ def reconcile_open_trades():
 <b>Reason:</b> {reason}
 """
 
-            send_telegram(
-                message
-            )
+        send_telegram(
+            message
+        )
 
 
 # ============================================================
@@ -3283,10 +3888,42 @@ def reconcile_open_trades():
 # ============================================================
 
 def scan():
+    global BEST_CANDIDATE
 
     STATS["scans"] += 1
 
+    STATS[
+        "assets_scanned"
+    ] = 0
+
+    for key in (
+        "patterns_1h",
+        "breakouts_1h",
+        "patterns_15m",
+        "breakouts_15m",
+        "retests_15m",
+        "confirmations_15m",
+        "fresh_confirmations",
+        "stale_confirmations",
+        "candidates",
+    ):
+        STATS[key] = 0
+
+    BEST_CANDIDATE = None
+
+    try:
+        load_prices()
+    except Exception as exc:
+        print(
+            "Price loading error:",
+            exc,
+        )
+
     candidates = []
+
+    # --------------------------------------------------------
+    # SCAN ALL 40 ASSETS
+    # --------------------------------------------------------
 
     for asset in ASSETS:
 
@@ -3301,6 +3938,10 @@ def scan():
                 symbol,
             )
 
+            STATS[
+                "assets_scanned"
+            ] += 1
+
             if trade:
                 candidates.append(
                     trade
@@ -3313,104 +3954,172 @@ def scan():
             ] += 1
 
             print(
-                f"[ASSET ERROR] "
-                f"{asset}: {exc}"
+                f"{asset} scan error:",
+                exc,
             )
 
             traceback.print_exc()
 
     # --------------------------------------------------------
-    # BEST SIGNAL
+    # SORT CANDIDATES
     # --------------------------------------------------------
 
-    if not candidates:
-
-        message = (
-            build_scan_summary()
-        )
-
-        send_telegram(
-            message
-        )
-
-        return None
-
-    # Strongest candidate first
     candidates.sort(
-        key=lambda x: (
-            x["pattern15m"]["score"],
-            x["pattern1h"]["score"],
-            x["confirmation15m"]["timestamp"],
+        key=lambda t: (
+            t["pattern15m"][
+                "score"
+            ],
+            t["confirmation_age"],
         ),
         reverse=True,
     )
 
-    inserted = 0
+    # --------------------------------------------------------
+    # SEND NEW SIGNAL
+    # --------------------------------------------------------
+
+    sent = 0
 
     for trade in candidates:
 
-        if inserted >= MAX_SIGNALS_PER_SCAN:
+        if sent >= MAX_SIGNALS_PER_SCAN:
             break
 
-        success = insert_trade(
+        inserted = insert_trade(
             trade
         )
 
-        if not success:
+        if not inserted:
             continue
 
         STATS[
             "unique_entries"
         ] += 1
 
-        STATS[
-            "signals_sent"
-        ] += 1
-
-        inserted += 1
-
         message = build_signal_message(
             trade
         )
 
-        send_telegram(
-            message
-        )
+        chart_path = None
 
-        chart_path = make_chart(
-            trade
-        )
+        try:
 
-        if chart_path:
-
-            send_telegram_photo(
-                chart_path,
-                (
-                    f"📊 "
-                    f"{trade['asset']} "
-                    f"{trade['direction']} | "
-                    f"15M {trade['pattern15m']['pattern']}"
-                ),
+            chart_path = make_chart(
+                trade
             )
 
-            try:
-                os.remove(
+            if chart_path:
+
+                caption = message
+
+                ok = telegram_send_photo(
+                    chart_path,
+                    caption,
+                )
+
+                if ok:
+                    sent += 1
+                    STATS[
+                        "signals_sent"
+                    ] += 1
+
+                else:
+
+                    # If photo fails, still try text.
+                    if send_telegram(
+                        message
+                    ):
+                        sent += 1
+                        STATS[
+                            "signals_sent"
+                        ] += 1
+
+            else:
+
+                if send_telegram(
+                    message
+                ):
+                    sent += 1
+                    STATS[
+                        "signals_sent"
+                    ] += 1
+
+        except Exception as exc:
+
+            print(
+                "Signal chart/send error:",
+                exc,
+            )
+
+            if send_telegram(
+                message
+            ):
+                sent += 1
+                STATS[
+                    "signals_sent"
+                ] += 1
+
+        finally:
+
+            if (
+                chart_path
+                and os.path.exists(
                     chart_path
                 )
-            except Exception:
-                pass
+            ):
+                try:
+                    os.remove(
+                        chart_path
+                    )
+                except Exception:
+                    pass
 
     # --------------------------------------------------------
-    # If DB rejected all candidates
+    # PERIODIC REPORT
     # --------------------------------------------------------
 
-    if inserted == 0:
+    last_report = get_meta(
+        "last_periodic_report"
+    )
 
-        send_telegram(
-            build_scan_summary()
-        )
+    should_report = False
 
-    return inserted
+    if last_report is None:
+        should_report = True
+
+    else:
+
+        try:
+
+            should_report = (
+                now_ts()
+                - int(last_report)
+                >= PERIODIC_REPORT_SECONDS
+            )
+
+        except Exception:
+            should_report = True
+
+    if should_report:
+
+        try:
+            report = build_scan_summary()
+
+            send_telegram(
+                report
+            )
+
+            set_meta(
+                "last_periodic_report",
+                now_ts(),
+            )
+
+        except Exception as exc:
+
+            print(
+                "Periodic report error:",
+                exc,
+            )
 
 
 # ============================================================
@@ -3418,11 +4127,12 @@ def scan():
 # ============================================================
 
 def main():
-
-    print("=" * 70)
+    print(
+        "=" * 60
+    )
 
     print(
-        f"KRAKEN FUTURES PATTERN LIVE SCANNER "
+        f"KRAKEN PATTERN SCANNER "
         f"VERSION {VERSION}"
     )
 
@@ -3431,71 +4141,91 @@ def main():
     )
 
     print(
-        f"REAL_TRADING: {REAL_TRADING}"
+        f"Assets: {len(ASSETS)}"
     )
 
-    print("=" * 70)
+    print(
+        "Confirmation freshness: "
+        f"{MAX_CONFIRMATION_AGE_MINUTES} minutes "
+        "after candle close"
+    )
+
+    print(
+        "=" * 60
+    )
 
     init_db()
 
-    reset_stats()
-
-    reset_best_candidate()
-
     # --------------------------------------------------------
-    # Existing open trades first
+    # FIRST: RECONCILE EXISTING TRADES
     # --------------------------------------------------------
 
-    reconcile_open_trades()
+    try:
+        reconcile_open_trades()
+
+    except Exception as exc:
+
+        STATS[
+            "errors"
+        ] += 1
+
+        print(
+            "Reconcile error:",
+            exc,
+        )
+
+        traceback.print_exc()
 
     # --------------------------------------------------------
-    # New scan
+    # SCAN
     # --------------------------------------------------------
 
-    scan()
+    try:
+        scan()
+
+    except Exception as exc:
+
+        STATS[
+            "errors"
+        ] += 1
+
+        print(
+            "Scan error:",
+            exc,
+        )
+
+        traceback.print_exc()
 
     # --------------------------------------------------------
-    # Console summary
+    # FINAL LOG
     # --------------------------------------------------------
 
-    print()
     print(
-        f"Assets Scanned: "
-        f"{STATS['assets_scanned']}/{len(ASSETS)}"
+        "=" * 60
     )
 
     print(
-        f"1H Patterns: "
-        f"{STATS['patterns_1h']}"
+        "SCAN COMPLETE"
     )
 
     print(
-        f"1H Breakouts: "
-        f"{STATS['breakouts_1h']}"
+        f"Assets: "
+        f"{STATS['assets_scanned']}/"
+        f"{len(ASSETS)}"
     )
 
     print(
-        f"15M Patterns: "
-        f"{STATS['patterns_15m']}"
+        f"Fresh confirmations: "
+        f"{STATS['fresh_confirmations']}"
     )
 
     print(
-        f"15M Breakouts: "
-        f"{STATS['breakouts_15m']}"
+        f"Stale confirmations: "
+        f"{STATS['stale_confirmations']}"
     )
 
     print(
-        f"15M Retests: "
-        f"{STATS['retests_15m']}"
-    )
-
-    print(
-        f"15M Confirmations: "
-        f"{STATS['confirmations_15m']}"
-    )
-
-    print(
-        f"New Signals: "
+        f"Signals sent: "
         f"{STATS['signals_sent']}"
     )
 
@@ -3504,7 +4234,9 @@ def main():
         f"{STATS['errors']}"
     )
 
-    print("=" * 70)
+    print(
+        "=" * 60
+    )
 
 
 if __name__ == "__main__":
