@@ -1,28 +1,17 @@
 # ============================================================
 # KRAKEN FUTURES PATTERN LIVE SIGNAL SCANNER
-# VERSION 5.8
+# VERSION 5.9
 # ============================================================
 #
-# V5.8:
+# V5.9:
 #
-# - UNIVERSE EXPANDED FROM 20 TO 40 ASSETS
-# - ORIGINAL STRATEGY FILTERS PRESERVED
-# - MAX ENTRY AGE = 2 x 5M CANDLES = 10 MINUTES
-# - 1H BREAKOUT TIME USES CLOSED-CANDLE TIME
-# - RETEST SEARCH STARTS AFTER 1H CANDLE CLOSE
-# - BREAKOUTS CHECKED FROM NEWEST TO OLDEST
-# - IF A BREAKOUT HAS NO VALID ENTRY, OTHER BREAKOUT
-#   CANDIDATES ARE ALSO CHECKED
-# - RETEST / CONFIRMATION DIAGNOSTICS PRESERVED
-# - STALE ENTRY CANDIDATES ARE FILTERED EARLIER
-# - OLD BREAKOUTS OUTSIDE THE MAXIMUM ENTRY WINDOW
-#   ARE SKIPPED BEFORE RETEST SEARCH
-# - ORIGINAL DATABASE PRESERVED
-# - DATABASE MIGRATION FOR confirm_time
-# - TELEGRAM SEND SUCCESS IS VERIFIED
-# - PERIODIC REPORT TIMESTAMP IS UPDATED ONLY AFTER
-#   SUCCESSFUL TELEGRAM DELIVERY
-# - VALID BUT NOT INSERTED SIGNALS NOW SHOW EXACT DB REASON
+# - V5.8 STRATEGY FULLY PRESERVED
+# - FIXED DATABASE INSERT FOR REQUIRED "symbol" COLUMN
+# - EXISTING DATABASE PRESERVED
+# - DATABASE MIGRATION CHECK FOR "symbol"
+# - DUPLICATE SIGNAL_KEYS WITHIN SAME SCAN ARE REMOVED
+# - SAME SIGNAL IS INSERTED/PROCESSED ONLY ONCE PER RUN
+# - TELEGRAM NEW SIGNAL LOGIC PRESERVED
 # - REAL TRADING DISABLED
 #
 # STRATEGY:
@@ -1764,6 +1753,11 @@ def generate_live_entries(
                             "symbol"
                         ),
 
+                    "symbol":
+                        contract.get(
+                            "symbol"
+                        ),
+
                     "pattern":
                         p["pattern"],
 
@@ -1890,6 +1884,7 @@ def init_db():
             signal_key TEXT UNIQUE,
 
             asset TEXT,
+            symbol TEXT,
             contract TEXT,
 
             pattern TEXT,
@@ -1926,6 +1921,24 @@ def init_db():
         row["name"]
         for row in cur.fetchall()
     }
+
+    # --------------------------------------------------------
+    # SYMBOL MIGRATION
+    # --------------------------------------------------------
+
+    if "symbol" not in existing_columns:
+
+        print(
+            "Migrating old DB: adding "
+            "'symbol' column..."
+        )
+
+        cur.execute(
+            """
+            ALTER TABLE trades
+            ADD COLUMN symbol TEXT
+            """
+        )
 
     if "contract" not in existing_columns:
 
@@ -1997,6 +2010,42 @@ def init_db():
             """
         )
 
+    # --------------------------------------------------------
+    # BACKFILL SYMBOL FROM CONTRACT WHERE POSSIBLE
+    # --------------------------------------------------------
+
+    try:
+
+        cur.execute(
+            """
+            UPDATE trades
+            SET symbol = contract
+            WHERE (
+                symbol IS NULL
+                OR symbol = ''
+            )
+            AND contract IS NOT NULL
+            """
+        )
+
+        updated_symbol_rows = (
+            cur.rowcount
+        )
+
+        if updated_symbol_rows:
+
+            print(
+                "Backfilled symbol from contract: "
+                f"{updated_symbol_rows} rows"
+            )
+
+    except Exception as e:
+
+        print(
+            "Symbol backfill warning:",
+            e,
+        )
+
     conn.commit()
 
     cur.execute(
@@ -2011,6 +2060,7 @@ def init_db():
     required_columns = {
         "signal_key",
         "asset",
+        "symbol",
         "contract",
         "pattern",
         "direction",
@@ -2155,6 +2205,8 @@ def insert_trade(
                 id,
                 signal_key,
                 asset,
+                symbol,
+                contract,
                 direction,
                 pattern,
                 status,
@@ -2221,18 +2273,13 @@ def insert_trade(
             )
 
             print(
-                f"Existing asset: "
-                f"{existing['asset']}"
+                f"Existing symbol: "
+                f"{existing['symbol']}"
             )
 
             print(
-                f"Existing direction: "
-                f"{existing['direction']}"
-            )
-
-            print(
-                f"Existing pattern: "
-                f"{existing['pattern']}"
+                f"Existing contract: "
+                f"{existing['contract']}"
             )
 
             print(
@@ -2267,6 +2314,42 @@ def insert_trade(
             return False
 
         # ----------------------------------------------------
+        # RESOLVE SYMBOL
+        # ----------------------------------------------------
+
+        symbol = (
+            trade.get("symbol")
+            or trade.get("contract")
+        )
+
+        if not symbol:
+
+            print(
+                "=================================================="
+            )
+
+            print(
+                "[INSERT ERROR] Missing symbol/contract"
+            )
+
+            print(
+                f"Asset: {trade.get('asset')}"
+            )
+
+            print(
+                f"Signal key: "
+                f"{trade.get('signal_key')}"
+            )
+
+            print(
+                "=================================================="
+            )
+
+            conn.close()
+
+            return False
+
+        # ----------------------------------------------------
         # INSERT
         # ----------------------------------------------------
 
@@ -2275,6 +2358,7 @@ def insert_trade(
             INSERT INTO trades (
                 signal_key,
                 asset,
+                symbol,
                 contract,
                 pattern,
                 direction,
@@ -2294,7 +2378,7 @@ def insert_trade(
                 notified_close
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, NULL, NULL, NULL,
                 'OPEN', ?, 0, 0
             )
@@ -2302,7 +2386,10 @@ def insert_trade(
             (
                 trade["signal_key"],
                 trade["asset"],
-                trade["contract"],
+                symbol,
+                trade.get(
+                    "contract"
+                ) or symbol,
                 trade["pattern"],
                 trade["direction"],
                 trade["breakout_time"],
@@ -2329,6 +2416,11 @@ def insert_trade(
         print(
             f"Asset: "
             f"{trade['asset']}"
+        )
+
+        print(
+            f"Symbol: "
+            f"{symbol}"
         )
 
         print(
@@ -2394,6 +2486,16 @@ def insert_trade(
         print(
             f"Signal key: "
             f"{trade.get('signal_key')}"
+        )
+
+        print(
+            f"Symbol: "
+            f"{trade.get('symbol')}"
+        )
+
+        print(
+            f"Contract: "
+            f"{trade.get('contract')}"
         )
 
         print(
@@ -2787,23 +2889,24 @@ def row_to_trade(
                 "id": row[0],
                 "signal_key": row[1],
                 "asset": row[2],
-                "contract": row[3],
-                "pattern": row[4],
-                "direction": row[5],
-                "breakout_time": row[6],
-                "retest_time": row[7],
-                "confirm_time": row[8],
-                "entry_time": row[9],
-                "entry_price": row[10],
-                "sl_price": row[11],
-                "tp_price": row[12],
-                "exit_time": row[13],
-                "exit_price": row[14],
-                "exit_reason": row[15],
-                "status": row[16],
-                "detected_at": row[17],
-                "notified_new": row[18],
-                "notified_close": row[19],
+                "symbol": row[3],
+                "contract": row[4],
+                "pattern": row[5],
+                "direction": row[6],
+                "breakout_time": row[7],
+                "retest_time": row[8],
+                "confirm_time": row[9],
+                "entry_time": row[10],
+                "entry_price": row[11],
+                "sl_price": row[12],
+                "tp_price": row[13],
+                "exit_time": row[14],
+                "exit_price": row[15],
+                "exit_reason": row[16],
+                "status": row[17],
+                "detected_at": row[18],
+                "notified_new": row[19],
+                "notified_close": row[20],
             }
 
     except Exception as e:
@@ -2829,6 +2932,11 @@ def row_to_trade(
             data.get(
                 "asset",
                 "",
+            ),
+
+        "symbol":
+            data.get(
+                "symbol"
             ),
 
         "contract":
@@ -3654,6 +3762,13 @@ def scan_new_signals(
 
     all_entries = []
 
+    # --------------------------------------------------------
+    # PREVENT SAME SIGNAL KEY FROM BEING ADDED MULTIPLE TIMES
+    # DURING THE SAME SCAN
+    # --------------------------------------------------------
+
+    seen_signal_keys = set()
+
     total_diag = {
         "patterns_total": 0,
         "recent_patterns": 0,
@@ -3730,9 +3845,35 @@ def scan_new_signals(
                 )
             )
 
-            all_entries.extend(
-                entries
-            )
+            # ------------------------------------------------
+            # DEDUPLICATE SIGNALS WITHIN THIS RUN
+            # ------------------------------------------------
+
+            for trade in entries:
+
+                signal_key = trade.get(
+                    "signal_key"
+                )
+
+                if not signal_key:
+                    continue
+
+                if signal_key in seen_signal_keys:
+
+                    print(
+                        "[DUPLICATE IN SAME SCAN] "
+                        f"{signal_key}"
+                    )
+
+                    continue
+
+                seen_signal_keys.add(
+                    signal_key
+                )
+
+                all_entries.append(
+                    trade
+                )
 
             for key in total_diag:
 
@@ -3816,6 +3957,11 @@ def scan_new_signals(
     )
 
     print(
+        f"Unique entries this scan: "
+        f"{len(all_entries)}"
+    )
+
+    print(
         "=================================================="
     )
 
@@ -3837,7 +3983,7 @@ def main():
     )
 
     print(
-        "VERSION 5.8"
+        "VERSION 5.9"
     )
 
     print(
