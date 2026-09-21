@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES TRENDLINE LIVE SIGNAL SCANNER
-# VERSION 7.0.2
+# VERSION 7.0.3
 # ============================================================
 #
 # PAPER ONLY
@@ -15,7 +15,6 @@
 #        ↓
 #   1H trendline breakout
 #        ↓
-#
 # 5M:
 #   Valid pivots
 #        ↓
@@ -33,6 +32,15 @@
 # SL:
 #   Slightly beyond previous confirmed swing
 #
+# CHART:
+#   5M candles
+#   5M trendline
+#   P1 / P2
+#   Breakout
+#   Entry
+#   TP
+#   SL
+#
 # IMPORTANT:
 # - Closed candles only
 # - No lookahead
@@ -43,8 +51,6 @@
 
 import os
 import sys
-import time
-import math
 import sqlite3
 import traceback
 from datetime import datetime, timezone, timedelta
@@ -65,25 +71,30 @@ except Exception:
 # CONFIG
 # ============================================================
 
-VERSION = "7.0.2"
+VERSION = "7.0.3"
 
 REAL_TRADING = False
 
 DB_FILE = "kraken_pattern_live_v52.db"
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+)
 
 KRAKEN_TICKER_URL = (
     "https://futures.kraken.com/derivatives/api/v3/tickers"
 )
 
-# IMPORTANT:
-# Kraken Futures Charts API:
-# https://futures.kraken.com/api/charts/v1/trade/{symbol}/{resolution}
 KRAKEN_CHART_URL = (
     "https://futures.kraken.com/api/charts/v1/trade"
 )
+
 
 # ============================================================
 # TIMEFRAMES
@@ -94,6 +105,7 @@ TF_5M = "5m"
 
 CANDLES_1H = 240
 CANDLES_5M = 300
+
 
 # ============================================================
 # ASSETS
@@ -147,6 +159,7 @@ CONTRACTS = {
     for asset in ASSETS
 }
 
+
 # ============================================================
 # STRATEGY PARAMETERS
 # ============================================================
@@ -188,11 +201,14 @@ MAX_HOLD_HOURS = 48
 
 PERIODIC_REPORT_SECONDS = 900
 
+# Number of 5M candles shown on Telegram chart.
 CHART_CANDLES = 120
 
 HTTP_TIMEOUT = 20
 
-TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+TEHRAN_TZ = timezone(
+    timedelta(hours=3, minutes=30)
+)
 
 
 # ============================================================
@@ -224,7 +240,7 @@ SESSION.headers.update(
     {
         "User-Agent": (
             "Mozilla/5.0 "
-            "Kraken-Trendline-Scanner/7.0.2"
+            "Kraken-Trendline-Scanner/7.0.3"
         ),
         "Accept": "application/json",
     }
@@ -236,11 +252,17 @@ SESSION.headers.update(
 # ============================================================
 
 def now_utc_ts():
-    return int(datetime.now(timezone.utc).timestamp())
+    return int(
+        datetime.now(
+            timezone.utc
+        ).timestamp()
+    )
 
 
 def now_tehran():
-    return datetime.now(TEHRAN_TZ)
+    return datetime.now(
+        TEHRAN_TZ
+    )
 
 
 def fmt_price(value):
@@ -280,19 +302,28 @@ def ts_to_tehran(ts):
         return datetime.fromtimestamp(
             int(ts),
             tz=timezone.utc
-        ).astimezone(TEHRAN_TZ)
+        ).astimezone(
+            TEHRAN_TZ
+        )
     except Exception:
-        return datetime.now(TEHRAN_TZ)
+        return datetime.now(
+            TEHRAN_TZ
+        )
 
 
 def format_duration(seconds):
     try:
-        seconds = max(0, int(seconds))
+        seconds = max(
+            0,
+            int(seconds)
+        )
     except Exception:
         return "0m"
 
     hours = seconds // 3600
-    minutes = (seconds % 3600) // 60
+    minutes = (
+        seconds % 3600
+    ) // 60
 
     if hours > 0:
         return f"{hours}h {minutes}m"
@@ -300,7 +331,10 @@ def format_duration(seconds):
     return f"{minutes}m"
 
 
-def safe_float(value, default=None):
+def safe_float(
+    value,
+    default=None
+):
     try:
         if value is None:
             return default
@@ -311,18 +345,27 @@ def safe_float(value, default=None):
         return default
 
 
-def safe_int(value, default=None):
+def safe_int(
+    value,
+    default=None
+):
     try:
         if value is None:
             return default
 
-        return int(float(value))
+        return int(
+            float(value)
+        )
 
     except Exception:
         return default
 
 
-def row_value(row, key, default=None):
+def row_value(
+    row,
+    key,
+    default=None
+):
     try:
         if key not in row.keys():
             return default
@@ -349,19 +392,29 @@ def telegram_configured():
     )
 
 
-def send_telegram(text, photo_path=None):
+def send_telegram(
+    text,
+    photo_path=None
+):
     if not telegram_configured():
         return False
 
     try:
-        if photo_path and os.path.exists(photo_path):
+
+        if (
+            photo_path
+            and os.path.exists(photo_path)
+        ):
 
             url = (
-                f"https://api.telegram.org/bot"
+                "https://api.telegram.org/bot"
                 f"{TELEGRAM_BOT_TOKEN}/sendPhoto"
             )
 
-            with open(photo_path, "rb") as photo:
+            with open(
+                photo_path,
+                "rb"
+            ) as photo:
 
                 response = SESSION.post(
                     url,
@@ -379,7 +432,7 @@ def send_telegram(text, photo_path=None):
         else:
 
             url = (
-                f"https://api.telegram.org/bot"
+                "https://api.telegram.org/bot"
                 f"{TELEGRAM_BOT_TOKEN}/sendMessage"
             )
 
@@ -404,7 +457,11 @@ def send_telegram(text, photo_path=None):
         )
 
     except Exception as e:
-        print("[TELEGRAM ERROR]", e)
+
+        print(
+            "[TELEGRAM ERROR]",
+            e
+        )
 
     return False
 
@@ -414,6 +471,7 @@ def send_telegram(text, photo_path=None):
 # ============================================================
 
 def db_connect():
+
     conn = sqlite3.connect(
         DB_FILE,
         timeout=30
@@ -424,8 +482,13 @@ def db_connect():
     return conn
 
 
-def table_columns(conn, table):
+def table_columns(
+    conn,
+    table
+):
+
     try:
+
         rows = conn.execute(
             f"PRAGMA table_info({table})"
         ).fetchall()
@@ -445,13 +508,18 @@ def ensure_column(
     column,
     definition
 ):
-    columns = table_columns(conn, table)
+
+    columns = table_columns(
+        conn,
+        table
+    )
 
     if column in columns:
         return False
 
     print(
-        f"[DB MIGRATION] Adding {table}.{column}"
+        f"[DB MIGRATION] "
+        f"Adding {table}.{column}"
     )
 
     conn.execute(
@@ -468,7 +536,11 @@ def copy_legacy_column(
     target,
     sources
 ):
-    columns = table_columns(conn, table)
+
+    columns = table_columns(
+        conn,
+        table
+    )
 
     if target not in columns:
         return
@@ -476,7 +548,9 @@ def copy_legacy_column(
     source = None
 
     for candidate in sources:
+
         if candidate in columns:
+
             source = candidate
             break
 
@@ -484,6 +558,7 @@ def copy_legacy_column(
         return
 
     try:
+
         conn.execute(
             f"""
             UPDATE {table}
@@ -496,21 +571,22 @@ def copy_legacy_column(
         )
 
     except Exception as e:
+
         print(
             f"[DB MIGRATION WARNING] "
-            f"{table}.{target} <- {source}: {e}"
+            f"{table}.{target} <- "
+            f"{source}: {e}"
         )
 
 
-def normalize_legacy_trades(conn):
+def normalize_legacy_trades(
+    conn
+):
+
     columns = table_columns(
         conn,
         "trades"
     )
-
-    # --------------------------------------------------------
-    # Asset
-    # --------------------------------------------------------
 
     copy_legacy_column(
         conn,
@@ -523,10 +599,6 @@ def normalize_legacy_trades(conn):
             "market",
         ]
     )
-
-    # --------------------------------------------------------
-    # Direction
-    # --------------------------------------------------------
 
     copy_legacy_column(
         conn,
@@ -556,10 +628,6 @@ def normalize_legacy_trades(conn):
             """
         )
 
-    # --------------------------------------------------------
-    # Entry
-    # --------------------------------------------------------
-
     copy_legacy_column(
         conn,
         "trades",
@@ -571,10 +639,6 @@ def normalize_legacy_trades(conn):
             "price",
         ]
     )
-
-    # --------------------------------------------------------
-    # TP
-    # --------------------------------------------------------
 
     copy_legacy_column(
         conn,
@@ -589,10 +653,6 @@ def normalize_legacy_trades(conn):
         ]
     )
 
-    # --------------------------------------------------------
-    # SL
-    # --------------------------------------------------------
-
     copy_legacy_column(
         conn,
         "trades",
@@ -606,10 +666,6 @@ def normalize_legacy_trades(conn):
         ]
     )
 
-    # --------------------------------------------------------
-    # Current price
-    # --------------------------------------------------------
-
     copy_legacy_column(
         conn,
         "trades",
@@ -621,10 +677,6 @@ def normalize_legacy_trades(conn):
         ]
     )
 
-    # --------------------------------------------------------
-    # RR
-    # --------------------------------------------------------
-
     copy_legacy_column(
         conn,
         "trades",
@@ -635,10 +687,6 @@ def normalize_legacy_trades(conn):
             "r_multiple",
         ]
     )
-
-    # --------------------------------------------------------
-    # Entry timestamp
-    # --------------------------------------------------------
 
     copy_legacy_column(
         conn,
@@ -653,10 +701,6 @@ def normalize_legacy_trades(conn):
         ]
     )
 
-    # --------------------------------------------------------
-    # Exit timestamp
-    # --------------------------------------------------------
-
     copy_legacy_column(
         conn,
         "trades",
@@ -666,10 +710,6 @@ def normalize_legacy_trades(conn):
             "closed_at",
         ]
     )
-
-    # --------------------------------------------------------
-    # Exit reason
-    # --------------------------------------------------------
 
     copy_legacy_column(
         conn,
@@ -681,10 +721,6 @@ def normalize_legacy_trades(conn):
         ]
     )
 
-    # --------------------------------------------------------
-    # PNL
-    # --------------------------------------------------------
-
     copy_legacy_column(
         conn,
         "trades",
@@ -695,10 +731,6 @@ def normalize_legacy_trades(conn):
             "return_pct",
         ]
     )
-
-    # --------------------------------------------------------
-    # Status
-    # --------------------------------------------------------
 
     copy_legacy_column(
         conn,
@@ -754,10 +786,6 @@ def init_db():
 
     conn = db_connect()
 
-    # --------------------------------------------------------
-    # Signals
-    # --------------------------------------------------------
-
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS signals (
@@ -778,10 +806,6 @@ def init_db():
         )
         """
     )
-
-    # --------------------------------------------------------
-    # Trades
-    # --------------------------------------------------------
 
     conn.execute(
         """
@@ -807,10 +831,6 @@ def init_db():
         """
     )
 
-    # --------------------------------------------------------
-    # Scanner metadata
-    # --------------------------------------------------------
-
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS scanner_meta (
@@ -820,49 +840,62 @@ def init_db():
         """
     )
 
-    # --------------------------------------------------------
-    # Robust migration
-    # --------------------------------------------------------
-
     required_columns = {
+
         "asset": "TEXT",
         "symbol": "TEXT",
         "pattern": "TEXT",
         "direction": "TEXT",
+
         "pattern_start": "INTEGER",
         "pattern_end": "INTEGER",
+
         "breakout_time": "INTEGER",
         "retest_time": "INTEGER",
         "entry_time": "INTEGER",
+
         "entry_price": "REAL",
         "tp_price": "REAL",
         "sl_price": "REAL",
         "current_price": "REAL",
+
         "status": "TEXT",
         "result": "TEXT",
+
         "exit_time": "INTEGER",
         "exit_price": "REAL",
+
         "r_multiple": "REAL",
+
         "created_at": "INTEGER",
         "updated_at": "INTEGER",
         "detected_at": "INTEGER",
+
         "contract": "TEXT",
         "exit_reason": "TEXT",
+
         "notified_new": "INTEGER DEFAULT 0",
         "notified_close": "INTEGER DEFAULT 0",
+
         "confirm_time": "INTEGER",
+
         "sl": "REAL",
         "tp": "REAL",
+
         "pattern_time": "INTEGER",
         "confirmation_time": "INTEGER",
+
         "pnl_pct": "REAL",
         "rr": "REAL",
+
         "entry_timestamp": "INTEGER",
         "exit_timestamp": "INTEGER",
+
         "entry": "REAL",
     }
 
     for column, definition in required_columns.items():
+
         ensure_column(
             conn,
             "trades",
@@ -870,28 +903,31 @@ def init_db():
             definition
         )
 
-    normalize_legacy_trades(conn)
-
-    # --------------------------------------------------------
-    # Signal migration
-    # --------------------------------------------------------
+    normalize_legacy_trades(
+        conn
+    )
 
     signal_columns = {
+
         "asset": "TEXT",
         "direction": "TEXT",
         "pattern": "TEXT",
+
         "entry": "REAL",
         "tp": "REAL",
         "sl": "REAL",
         "rr": "REAL",
         "rvol": "REAL",
+
         "trendline_type_1h": "TEXT",
         "trendline_type_5m": "TEXT",
+
         "signal_timestamp": "INTEGER",
         "created_at": "INTEGER",
     }
 
     for column, definition in signal_columns.items():
+
         ensure_column(
             conn,
             "signals",
@@ -903,12 +939,15 @@ def init_db():
 
     print(
         "[DB] trades columns:",
-        ", ".join(sorted(table_columns(conn, "trades")))
+        ", ".join(
+            sorted(
+                table_columns(
+                    conn,
+                    "trades"
+                )
+            )
+        )
     )
-
-    # --------------------------------------------------------
-    # Report malformed old trades
-    # --------------------------------------------------------
 
     try:
 
@@ -924,7 +963,10 @@ def init_db():
                 entry_timestamp,
                 status
             FROM trades
-            WHERE UPPER(COALESCE(status, 'OPEN')) = 'OPEN'
+            WHERE
+                UPPER(
+                    COALESCE(status, 'OPEN')
+                ) = 'OPEN'
             ORDER BY id
             """
         ).fetchall()
@@ -947,10 +989,15 @@ def init_db():
                 value = row[field]
 
                 if value is None:
+
                     incomplete = True
                     break
 
-                if isinstance(value, str) and not value.strip():
+                if (
+                    isinstance(value, str)
+                    and not value.strip()
+                ):
+
                     incomplete = True
                     break
 
@@ -958,7 +1005,8 @@ def init_db():
 
                 print(
                     "[DB WARNING] "
-                    f"Skipping incomplete legacy trade "
+                    f"Skipping incomplete "
+                    f"legacy trade "
                     f"id={row['id']}"
                 )
 
@@ -966,7 +1014,8 @@ def init_db():
 
         print(
             "[DB WARNING] "
-            f"Legacy trade inspection failed: {e}"
+            f"Legacy trade inspection "
+            f"failed: {e}"
         )
 
     conn.close()
@@ -980,9 +1029,16 @@ def get_open_trades():
         """
         SELECT *
         FROM trades
-        WHERE UPPER(COALESCE(status, 'OPEN')) = 'OPEN'
+        WHERE
+            UPPER(
+                COALESCE(status, 'OPEN')
+            ) = 'OPEN'
         ORDER BY
-            COALESCE(entry_timestamp, created_at, 0) ASC
+            COALESCE(
+                entry_timestamp,
+                created_at,
+                0
+            ) ASC
         """
     ).fetchall()
 
@@ -1003,12 +1059,11 @@ def fetch_klines(
     """
     Kraken Futures Charts API.
 
-    Correct format:
+    Correct:
         /api/charts/v1/trade/PF_XBTUSD/1h
         /api/charts/v1/trade/PF_XBTUSD/5m
 
-    NOT:
-        /api/charts/v1/trade/PF_XBTUSD/60
+    Only closed candles are returned to strategy.
     """
 
     url = (
@@ -1033,15 +1088,19 @@ def fetch_klines(
 
             print(
                 f"[KRAKEN] "
-                f"{contract} {resolution} "
-                f"HTTP {response.status_code}"
+                f"{contract} "
+                f"{resolution} "
+                f"HTTP "
+                f"{response.status_code}"
             )
 
             try:
+
                 print(
                     "[KRAKEN BODY]",
                     response.text[:250]
                 )
+
             except Exception:
                 pass
 
@@ -1053,13 +1112,22 @@ def fetch_klines(
 
         if isinstance(data, dict):
 
-            if isinstance(data.get("candles"), list):
+            if isinstance(
+                data.get("candles"),
+                list
+            ):
                 rows = data["candles"]
 
-            elif isinstance(data.get("data"), list):
+            elif isinstance(
+                data.get("data"),
+                list
+            ):
                 rows = data["data"]
 
-            elif isinstance(data.get("result"), list):
+            elif isinstance(
+                data.get("result"),
+                list
+            ):
                 rows = data["result"]
 
             elif isinstance(
@@ -1075,7 +1143,10 @@ def fetch_klines(
                 ):
                     rows = result["candles"]
 
-        elif isinstance(data, list):
+        elif isinstance(
+            data,
+            list
+        ):
 
             rows = data
 
@@ -1085,7 +1156,10 @@ def fetch_klines(
 
             try:
 
-                if isinstance(row, dict):
+                if isinstance(
+                    row,
+                    dict
+                ):
 
                     ts = (
                         row.get("time")
@@ -1119,7 +1193,10 @@ def fetch_klines(
                         or 0
                     )
 
-                elif isinstance(row, (list, tuple)):
+                elif isinstance(
+                    row,
+                    (list, tuple)
+                ):
 
                     if len(row) < 6:
                         continue
@@ -1134,9 +1211,10 @@ def fetch_klines(
                 else:
                     continue
 
-                ts = int(float(ts))
+                ts = int(
+                    float(ts)
+                )
 
-                # Kraken returns milliseconds.
                 if ts > 10_000_000_000:
                     ts = ts // 1000
 
@@ -1149,7 +1227,9 @@ def fetch_klines(
                     "volume": float(v),
                 }
 
-                candles.append(candle)
+                candles.append(
+                    candle
+                )
 
             except Exception:
                 continue
@@ -1158,16 +1238,17 @@ def fetch_klines(
             key=lambda x: x["time"]
         )
 
-        # ----------------------------------------------------
-        # Remove duplicate timestamps
-        # ----------------------------------------------------
-
         unique = {}
 
         for candle in candles:
-            unique[candle["time"]] = candle
 
-        candles = list(unique.values())
+            unique[
+                candle["time"]
+            ] = candle
+
+        candles = list(
+            unique.values()
+        )
 
         candles.sort(
             key=lambda x: x["time"]
@@ -1189,20 +1270,23 @@ def fetch_klines(
                 interval = 60
 
             current_bucket = (
-                now_utc_ts() // interval
+                now_utc_ts()
+                // interval
             ) * interval
 
             candles = [
                 candle
                 for candle in candles
-                if candle["time"] < current_bucket
+                if candle["time"]
+                < current_bucket
             ]
 
         if not candles:
 
             print(
                 f"[KRAKEN] "
-                f"{contract} {resolution}: "
+                f"{contract} "
+                f"{resolution}: "
                 f"0 closed candles"
             )
 
@@ -1210,7 +1294,8 @@ def fetch_klines(
 
         print(
             f"[KRAKEN] "
-            f"{contract} {resolution}: "
+            f"{contract} "
+            f"{resolution}: "
             f"{len(candles)} candles"
         )
 
@@ -1220,7 +1305,8 @@ def fetch_klines(
 
         print(
             f"[KRAKEN ERROR] "
-            f"{contract} {resolution}: {e}"
+            f"{contract} "
+            f"{resolution}: {e}"
         )
 
         return []
@@ -1254,30 +1340,37 @@ def fetch_tickers():
                 data.get("tickers"),
                 list
             ):
+
                 rows = data["tickers"]
 
             elif isinstance(
                 data.get("data"),
                 list
             ):
+
                 rows = data["data"]
 
             elif isinstance(
                 data.get("result"),
                 list
             ):
+
                 rows = data["result"]
 
             elif isinstance(
                 data.get("result"),
                 dict
             ):
+
                 rows = [
                     dict(
                         value,
                         symbol=key
                     )
-                    if isinstance(value, dict)
+                    if isinstance(
+                        value,
+                        dict
+                    )
                     else {
                         "symbol": key,
                         "price": value,
@@ -1290,7 +1383,10 @@ def fetch_tickers():
 
         for row in rows:
 
-            if not isinstance(row, dict):
+            if not isinstance(
+                row,
+                dict
+            ):
                 continue
 
             symbol = (
@@ -1302,7 +1398,9 @@ def fetch_tickers():
             if not symbol:
                 continue
 
-            symbol = str(symbol).upper()
+            symbol = str(
+                symbol
+            ).upper()
 
             price = (
                 row.get("last")
@@ -1310,7 +1408,9 @@ def fetch_tickers():
                 or row.get("price")
             )
 
-            price = safe_float(price)
+            price = safe_float(
+                price
+            )
 
             if price is None:
                 continue
@@ -1334,12 +1434,13 @@ def get_current_price(
     prices
 ):
 
-    contract = CONTRACTS.get(asset)
+    contract = CONTRACTS.get(
+        asset
+    )
 
     if contract in prices:
         return prices[contract]
 
-    # Fallback matching
     for key, value in prices.items():
 
         if key.endswith(
@@ -1414,15 +1515,19 @@ def detect_pivots(
         ]
 
         is_high = (
-            current_high >= max(left_highs)
+            current_high
+            >= max(left_highs)
             and
-            current_high >= max(right_highs)
+            current_high
+            >= max(right_highs)
         )
 
         is_low = (
-            current_low <= min(left_lows)
+            current_low
+            <= min(left_lows)
             and
-            current_low <= min(right_lows)
+            current_low
+            <= min(right_lows)
         )
 
         if is_high:
@@ -1432,7 +1537,8 @@ def detect_pivots(
                 previous = highs[-1]
 
                 separation = (
-                    i - previous["index"]
+                    i
+                    - previous["index"]
                 )
 
                 swing_pct = abs(
@@ -1440,14 +1546,13 @@ def detect_pivots(
                     - previous["price"]
                 ) / previous["price"]
 
-                if (
-                    separation
-                    < min_separation
-                ):
+                if separation < min_separation:
+
                     if (
                         current_high
                         > previous["price"]
                     ):
+
                         highs[-1] = {
                             "index": i,
                             "price": current_high,
@@ -1481,7 +1586,8 @@ def detect_pivots(
                 previous = lows[-1]
 
                 separation = (
-                    i - previous["index"]
+                    i
+                    - previous["index"]
                 )
 
                 swing_pct = abs(
@@ -1489,14 +1595,13 @@ def detect_pivots(
                     - previous["price"]
                 ) / previous["price"]
 
-                if (
-                    separation
-                    < min_separation
-                ):
+                if separation < min_separation:
+
                     if (
                         current_low
                         < previous["price"]
                     ):
+
                         lows[-1] = {
                             "index": i,
                             "price": current_low,
@@ -1551,8 +1656,10 @@ def line_value(
 
     return (
         p1["price"]
-        + slope * (
-            x - p1["index"]
+        + slope
+        * (
+            x
+            - p1["index"]
         )
     )
 
@@ -1574,7 +1681,8 @@ def trendline_slope_pct(
         p1["price"]
     ) / max(
         1,
-        p2["index"] - p1["index"]
+        p2["index"]
+        - p1["index"]
     )
 
 
@@ -1605,12 +1713,12 @@ def trendline_is_valid(
             if line is None:
                 return False
 
-            # Price should not meaningfully break
-            # below support before second anchor.
             if (
                 candles[i]["low"]
-                < line * (1 - tolerance)
+                < line
+                * (1 - tolerance)
             ):
+
                 return False
 
     elif kind == "resistance":
@@ -1631,11 +1739,14 @@ def trendline_is_valid(
 
             if (
                 candles[i]["high"]
-                > line * (1 + tolerance)
+                > line
+                * (1 + tolerance)
             ):
+
                 return False
 
     else:
+
         return False
 
     return True
@@ -1654,10 +1765,12 @@ def find_valid_trendlines(
     lows = lows[-max_pivots:]
 
     # --------------------------------------------------------
-    # Resistance trendlines
+    # Resistance
     # --------------------------------------------------------
 
-    for a in range(len(highs)):
+    for a in range(
+        len(highs)
+    ):
 
         for b in range(
             a + 1,
@@ -1680,9 +1793,6 @@ def find_valid_trendlines(
                 p2
             )
 
-            # Resistance can be flat or falling.
-            # A strongly rising resistance is less useful
-            # for the intended breakout structure.
             if slope > 0.01:
                 continue
 
@@ -1698,10 +1808,12 @@ def find_valid_trendlines(
             )
 
     # --------------------------------------------------------
-    # Support trendlines
+    # Support
     # --------------------------------------------------------
 
-    for a in range(len(lows)):
+    for a in range(
+        len(lows)
+    ):
 
         for b in range(
             a + 1,
@@ -1724,8 +1836,6 @@ def find_valid_trendlines(
                 p2
             )
 
-            # Support can be flat or rising.
-            # Strongly falling support is less useful.
             if slope < -0.01:
                 continue
 
@@ -1743,8 +1853,6 @@ def find_valid_trendlines(
     if not candidates:
         return []
 
-    # Prefer recent second anchor,
-    # then flatter/more stable lines.
     candidates.sort(
         key=lambda x: (
             x["p2"]["index"],
@@ -1773,7 +1881,9 @@ def trendline_price(
 # BREAKOUT
 # ============================================================
 
-def candle_body_pct(candle):
+def candle_body_pct(
+    candle
+):
 
     if candle["open"] == 0:
         return 0
@@ -1796,15 +1906,16 @@ def find_trendline_breakout(
 
     last_index = min(
         len(candles) - 1,
-        start_index + max_lookahead
+        start_index
+        + max_lookahead
     )
 
     for trendline in trendlines:
 
-        # Breakout must occur after second anchor.
         scan_start = max(
             start_index,
-            trendline["p2"]["index"] + 1
+            trendline["p2"]["index"]
+            + 1
         )
 
         for i in range(
@@ -1819,17 +1930,26 @@ def find_trendline_breakout(
                 i
             )
 
-            if line is None or line <= 0:
+            if (
+                line is None
+                or line <= 0
+            ):
                 continue
 
             body_pct = candle_body_pct(
                 candle
             )
 
-            if body_pct < MIN_BREAK_BODY_PCT:
+            if (
+                body_pct
+                < MIN_BREAK_BODY_PCT
+            ):
                 continue
 
-            if trendline["type"] == "resistance":
+            if (
+                trendline["type"]
+                == "resistance"
+            ):
 
                 previous_close = candles[
                     i - 1
@@ -1840,7 +1960,8 @@ def find_trendline_breakout(
                     <= line
                     and
                     candle["close"]
-                    > line * (
+                    > line
+                    * (
                         1
                         + TRENDLINE_BREAK_BUFFER
                     )
@@ -1856,7 +1977,10 @@ def find_trendline_breakout(
                         "trendline": trendline,
                     }
 
-            elif trendline["type"] == "support":
+            elif (
+                trendline["type"]
+                == "support"
+            ):
 
                 previous_close = candles[
                     i - 1
@@ -1867,7 +1991,8 @@ def find_trendline_breakout(
                     >= line
                     and
                     candle["close"]
-                    < line * (
+                    < line
+                    * (
                         1
                         - TRENDLINE_BREAK_BUFFER
                     )
@@ -1911,7 +2036,8 @@ def calculate_rvol(
     ]
 
     previous = [
-        x for x in previous
+        x
+        for x in previous
         if x is not None
         and x >= 0
     ]
@@ -1946,21 +2072,21 @@ def choose_levels(
     entry
 ):
 
-    # Only pivots CONFIRMED BEFORE the breakout
-    # are allowed. No future information.
+    # Only pivots confirmed BEFORE breakout.
     confirmed_highs = [
-        p for p in highs
+        p
+        for p in highs
         if p["index"] < break_index
     ]
 
     confirmed_lows = [
-        p for p in lows
+        p
+        for p in lows
         if p["index"] < break_index
     ]
 
     if direction == "LONG":
 
-        # TP = nearest confirmed swing high above entry
         future_highs = [
             p
             for p in confirmed_highs
@@ -1977,7 +2103,6 @@ def choose_levels(
             else None
         )
 
-        # SL = previous confirmed swing low
         previous_lows = [
             p
             for p in confirmed_lows
@@ -1995,7 +2120,10 @@ def choose_levels(
             else None
         )
 
-        if not tp_pivot or not sl_pivot:
+        if (
+            not tp_pivot
+            or not sl_pivot
+        ):
             return None
 
         tp = tp_pivot["price"]
@@ -2007,7 +2135,6 @@ def choose_levels(
 
     else:
 
-        # TP = nearest confirmed swing low below entry
         future_lows = [
             p
             for p in confirmed_lows
@@ -2025,7 +2152,6 @@ def choose_levels(
             else None
         )
 
-        # SL = previous confirmed swing high
         previous_highs = [
             p
             for p in confirmed_highs
@@ -2043,7 +2169,10 @@ def choose_levels(
             else None
         )
 
-        if not tp_pivot or not sl_pivot:
+        if (
+            not tp_pivot
+            or not sl_pivot
+        ):
             return None
 
         tp = tp_pivot["price"]
@@ -2054,7 +2183,7 @@ def choose_levels(
         )
 
     # --------------------------------------------------------
-    # Validate direction
+    # Direction validation
     # --------------------------------------------------------
 
     if direction == "LONG":
@@ -2079,16 +2208,25 @@ def choose_levels(
         risk = sl - entry
         reward = entry - tp
 
-    if risk <= 0 or reward <= 0:
+    if (
+        risk <= 0
+        or reward <= 0
+    ):
         return None
 
     risk_pct = risk / entry
     reward_pct = reward / entry
 
-    if risk_pct < MIN_SL_DISTANCE_PCT:
+    if (
+        risk_pct
+        < MIN_SL_DISTANCE_PCT
+    ):
         return None
 
-    if reward_pct < MIN_TP_DISTANCE_PCT:
+    if (
+        reward_pct
+        < MIN_TP_DISTANCE_PCT
+    ):
         return None
 
     rr = reward / risk
@@ -2141,7 +2279,9 @@ def has_open_trade(
             FROM trades
             WHERE asset = ?
               AND direction = ?
-              AND UPPER(COALESCE(status, 'OPEN')) = 'OPEN'
+              AND UPPER(
+                    COALESCE(status, 'OPEN')
+                  ) = 'OPEN'
             LIMIT 1
             """,
             (
@@ -2157,7 +2297,9 @@ def has_open_trade(
             SELECT id
             FROM trades
             WHERE asset = ?
-              AND UPPER(COALESCE(status, 'OPEN')) = 'OPEN'
+              AND UPPER(
+                    COALESCE(status, 'OPEN')
+                  ) = 'OPEN'
             LIMIT 1
             """,
             (asset,)
@@ -2178,7 +2320,9 @@ def insert_signal_and_trade(
 
     conn = db_connect()
 
-    signal_key = signal["signal_key"]
+    signal_key = signal[
+        "signal_key"
+    ]
 
     try:
 
@@ -2199,7 +2343,10 @@ def insert_signal_and_trade(
                 signal_timestamp,
                 created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?
+            )
             """,
             (
                 signal_key,
@@ -2211,9 +2358,15 @@ def insert_signal_and_trade(
                 signal["sl"],
                 signal["rr"],
                 signal["rvol"],
-                signal["trendline_type_1h"],
-                signal["trendline_type_5m"],
-                signal["signal_timestamp"],
+                signal[
+                    "trendline_type_1h"
+                ],
+                signal[
+                    "trendline_type_5m"
+                ],
+                signal[
+                    "signal_timestamp"
+                ],
                 now_utc_ts(),
             )
         )
@@ -2251,7 +2404,11 @@ def insert_signal_and_trade(
                 contract,
                 notified_new
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?
+            )
             """,
             (
                 signal_key,
@@ -2280,7 +2437,6 @@ def insert_signal_and_trade(
         )
 
         conn.commit()
-
         conn.close()
 
         return True
@@ -2337,13 +2493,15 @@ def close_trade(
     )
 
     direction = (
-        str(row["direction"])
-        .upper()
+        str(
+            row["direction"]
+        ).upper()
         if row["direction"]
         else ""
     )
 
     if entry is None:
+
         conn.close()
         return None
 
@@ -2438,15 +2596,24 @@ def reconcile_open_trades(
         )
 
         entry = safe_float(
-            row_value(trade, "entry")
+            row_value(
+                trade,
+                "entry"
+            )
         )
 
         tp = safe_float(
-            row_value(trade, "tp")
+            row_value(
+                trade,
+                "tp"
+            )
         )
 
         sl = safe_float(
-            row_value(trade, "sl")
+            row_value(
+                trade,
+                "sl"
+            )
         )
 
         entry_ts = safe_int(
@@ -2470,8 +2637,9 @@ def reconcile_open_trades(
 
             print(
                 "[DB WARNING] "
-                f"Skipping incomplete legacy "
-                f"trade id={trade_id}"
+                f"Skipping incomplete "
+                f"legacy trade "
+                f"id={trade_id}"
             )
 
             continue
@@ -2488,10 +2656,6 @@ def reconcile_open_trades(
         if current is None:
             continue
 
-        # ----------------------------------------------------
-        # Max holding time
-        # ----------------------------------------------------
-
         age_seconds = (
             now_utc_ts()
             - entry_ts
@@ -2499,26 +2663,22 @@ def reconcile_open_trades(
 
         exit_reason = None
 
-        # Same candle TP/SL:
-        # SL has priority.
+        # SL has priority when both conditions
+        # are met on the same price check.
         if direction == "LONG":
 
             if current <= sl:
-
                 exit_reason = "SL"
 
             elif current >= tp:
-
                 exit_reason = "TP"
 
         else:
 
             if current >= sl:
-
                 exit_reason = "SL"
 
             elif current <= tp:
-
                 exit_reason = "TP"
 
         if (
@@ -2542,8 +2702,12 @@ def reconcile_open_trades(
 
                 closed.append(
                     {
-                        "trade": result["trade"],
-                        "pnl_pct": result["pnl_pct"],
+                        "trade": result[
+                            "trade"
+                        ],
+                        "pnl_pct": result[
+                            "pnl_pct"
+                        ],
                         "reason": exit_reason,
                     }
                 )
@@ -2593,7 +2757,8 @@ def build_open_trades_message(
     lines = [
         "📊 <b>KRAKEN TRENDLINE SCANNER</b>",
         "",
-        f"🟢 <b>OPEN TRADES: {len(rows)}</b>",
+        f"🟢 <b>OPEN TRADES: "
+        f"{len(rows)}</b>",
         "",
     ]
 
@@ -2612,15 +2777,24 @@ def build_open_trades_message(
         )
 
         entry = safe_float(
-            row_value(trade, "entry")
+            row_value(
+                trade,
+                "entry"
+            )
         )
 
         tp = safe_float(
-            row_value(trade, "tp")
+            row_value(
+                trade,
+                "tp"
+            )
         )
 
         sl = safe_float(
-            row_value(trade, "sl")
+            row_value(
+                trade,
+                "sl"
+            )
         )
 
         entry_ts = safe_int(
@@ -2703,15 +2877,21 @@ def build_open_trades_message(
 
         lines.extend(
             [
-                f"{emoji} <b>{asset} {direction}</b>",
-                f"💰 Entry: <b>{fmt_price(entry)}</b>",
-                f"💵 Current: <b>{fmt_price(current)}</b> "
+                f"{emoji} <b>{asset} "
+                f"{direction}</b>",
+                f"💰 Entry: "
+                f"<b>{fmt_price(entry)}</b>",
+                f"💵 Current: "
+                f"<b>{fmt_price(current)}</b> "
                 f"({fmt_pct(pnl)})",
-                f"🛑 SL: <b>{fmt_price(sl)}</b> "
+                f"🛑 SL: "
+                f"<b>{fmt_price(sl)}</b> "
                 f"({fmt_pct(sl_pct)})",
-                f"🎯 TP: <b>{fmt_price(tp)}</b> "
+                f"🎯 TP: "
+                f"<b>{fmt_price(tp)}</b> "
                 f"({fmt_pct(tp_pct)})",
-                f"⏱ Duration: <b>{duration}</b>",
+                f"⏱ Duration: "
+                f"<b>{duration}</b>",
                 "",
             ]
         )
@@ -2723,7 +2903,9 @@ def build_open_trades_message(
             "🟢 <b>OPEN TRADES: 0 VALID</b>"
         )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -2762,7 +2944,10 @@ def build_performance_message():
 
     pnl = conn.execute(
         """
-        SELECT COALESCE(SUM(pnl_pct), 0)
+        SELECT COALESCE(
+            SUM(pnl_pct),
+            0
+        )
         FROM trades
         WHERE UPPER(status) = 'CLOSED'
         """
@@ -2839,7 +3024,10 @@ def build_close_message(
         )
 
         entry = safe_float(
-            row_value(trade, "entry"),
+            row_value(
+                trade,
+                "entry"
+            ),
             0
         )
 
@@ -2885,23 +3073,32 @@ def build_close_message(
         if entry_ts:
 
             duration = format_duration(
-                exit_ts - entry_ts
+                exit_ts
+                - entry_ts
             )
 
         lines.extend(
             [
                 f"{emoji} <b>CLOSE "
-                f"{asset} {direction}</b>",
-                f"Entry: <b>{fmt_price(entry)}</b>",
-                f"Exit: <b>{fmt_price(exit_price)}</b>",
-                f"Result: <b>{reason}</b>",
-                f"PnL: <b>{fmt_pct(pnl)}</b>",
-                f"Duration: <b>{duration}</b>",
+                f"{asset} "
+                f"{direction}</b>",
+                f"Entry: "
+                f"<b>{fmt_price(entry)}</b>",
+                f"Exit: "
+                f"<b>{fmt_price(exit_price)}</b>",
+                f"Result: "
+                f"<b>{reason}</b>",
+                f"PnL: "
+                f"<b>{fmt_pct(pnl)}</b>",
+                f"Duration: "
+                f"<b>{duration}</b>",
                 "",
             ]
         )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -2934,7 +3131,9 @@ def build_summary_message():
         f"<b>{stats['new_signals']}</b>\n"
         f"Closed Trades: "
         f"<b>{stats['closed_trades']}</b>\n"
-        f"Time: <b>{local:%Y-%m-%d %H:%M}</b>"
+        f"Time: <b>"
+        f"{local:%Y-%m-%d %H:%M}"
+        f"</b>"
     )
 
 
@@ -2951,11 +3150,35 @@ def create_signal_chart(
     sl,
     filename
 ):
+    """
+    Detailed 5M Telegram signal chart.
+
+    Displays:
+      - 5M candles
+      - selected 5M trendline
+      - P1
+      - P2
+      - Breakout
+      - Entry
+      - TP
+      - SL
+      - Entry/TP/SL horizontal levels
+    """
 
     if plt is None:
+        print(
+            "[CHART] matplotlib unavailable"
+        )
         return None
 
     try:
+
+        if not candles:
+            return None
+
+        # ----------------------------------------------------
+        # Last CHART_CANDLES closed candles
+        # ----------------------------------------------------
 
         data = candles[
             -CHART_CANDLES:
@@ -2964,36 +3187,57 @@ def create_signal_chart(
         if not data:
             return None
 
-        xs = list(
-            range(len(data))
+        total_candles = len(
+            candles
         )
 
-        opens = [
-            x["open"]
-            for x in data
-        ]
+        visible_count = len(
+            data
+        )
 
-        highs = [
-            x["high"]
-            for x in data
-        ]
+        offset = (
+            total_candles
+            - visible_count
+        )
 
-        lows = [
-            x["low"]
-            for x in data
-        ]
-
-        closes = [
-            x["close"]
-            for x in data
-        ]
-
-        fig, ax = plt.subplots(
-            figsize=(12, 7)
+        xs = list(
+            range(visible_count)
         )
 
         # ----------------------------------------------------
-        # Candles
+        # OHLC
+        # ----------------------------------------------------
+
+        opens = [
+            candle["open"]
+            for candle in data
+        ]
+
+        highs = [
+            candle["high"]
+            for candle in data
+        ]
+
+        lows = [
+            candle["low"]
+            for candle in data
+        ]
+
+        closes = [
+            candle["close"]
+            for candle in data
+        ]
+
+        # ----------------------------------------------------
+        # FIGURE
+        # ----------------------------------------------------
+
+        fig, ax = plt.subplots(
+            figsize=(14, 8)
+        )
+
+        # ----------------------------------------------------
+        # CANDLESTICKS
         # ----------------------------------------------------
 
         for i in xs:
@@ -3003,20 +3247,32 @@ def create_signal_chart(
             l = lows[i]
             c = closes[i]
 
-            if c >= o:
-                body_bottom = o
-                body_height = c - o
-            else:
-                body_bottom = c
-                body_height = o - c
-
+            # Wick
             ax.plot(
                 [i, i],
                 [l, h],
-                linewidth=0.8
+                linewidth=0.9
             )
 
-            width = 0.55
+            # Body
+            body_bottom = min(
+                o,
+                c
+            )
+
+            body_height = abs(
+                c - o
+            )
+
+            if body_height <= 1e-12:
+
+                body_height = max(
+                    abs(h - l)
+                    * 0.01,
+                    1e-12
+                )
+
+            width = 0.62
 
             ax.add_patch(
                 plt.Rectangle(
@@ -3025,20 +3281,27 @@ def create_signal_chart(
                         body_bottom
                     ),
                     width,
-                    max(
-                        body_height,
-                        1e-12
-                    ),
-                    fill=False
+                    body_height,
+                    fill=True,
+                    alpha=0.55
                 )
             )
 
         # ----------------------------------------------------
-        # Trendline
+        # SELECTED TRENDLINE
         # ----------------------------------------------------
 
         trendline = breakout.get(
             "trendline"
+        )
+
+        breakout_global = breakout.get(
+            "index"
+        )
+
+        direction = breakout.get(
+            "type",
+            ""
         )
 
         if trendline:
@@ -3046,116 +3309,472 @@ def create_signal_chart(
             p1 = trendline["p1"]
             p2 = trendline["p2"]
 
-            start_global = p1["index"]
-            end_global = (
-                len(candles) - 1
+            p1_global = p1["index"]
+            p2_global = p2["index"]
+
+            # Draw trendline from P1 through breakout.
+            line_end_global = (
+                breakout_global
             )
 
-            offset = (
-                len(candles)
-                - len(data)
-            )
+            if (
+                line_end_global
+                < p2_global
+            ):
+                line_end_global = p2_global
 
             x1 = (
-                start_global
+                p1_global
                 - offset
             )
 
             x2 = (
-                end_global
+                line_end_global
                 - offset
             )
 
-            if x2 >= 0:
+            if (
+                x2 >= 0
+                and x1 <= visible_count - 1
+            ):
 
-                y1 = line_value(
-                    p1,
-                    p2,
-                    start_global
+                visible_x1 = max(
+                    0,
+                    x1
                 )
 
-                y2 = line_value(
-                    p1,
-                    p2,
-                    end_global
+                visible_x2 = min(
+                    visible_count - 1,
+                    x2
                 )
 
-                if y1 is not None and y2 is not None:
+                if (
+                    visible_x2
+                    >= visible_x1
+                ):
 
-                    ax.plot(
-                        [x1, x2],
-                        [y1, y2],
-                        linewidth=2,
-                        linestyle="--"
+                    visible_y1 = line_value(
+                        p1,
+                        p2,
+                        visible_x1
+                        + offset
                     )
 
-        # ----------------------------------------------------
-        # Breakout
-        # ----------------------------------------------------
+                    visible_y2 = line_value(
+                        p1,
+                        p2,
+                        visible_x2
+                        + offset
+                    )
 
-        breakout_global = breakout[
-            "index"
-        ]
+                    if (
+                        visible_y1
+                        is not None
+                        and
+                        visible_y2
+                        is not None
+                    ):
+
+                        ax.plot(
+                            [
+                                visible_x1,
+                                visible_x2
+                            ],
+                            [
+                                visible_y1,
+                                visible_y2
+                            ],
+                            linestyle="--",
+                            linewidth=2.5,
+                            label=(
+                                "5M "
+                                f"{trendline['type'].upper()} "
+                                "TRENDLINE"
+                            )
+                        )
+
+            # ------------------------------------------------
+            # P1
+            # ------------------------------------------------
+
+            p1_x = (
+                p1_global
+                - offset
+            )
+
+            if (
+                0
+                <= p1_x
+                < visible_count
+            ):
+
+                ax.scatter(
+                    [p1_x],
+                    [p1["price"]],
+                    s=100,
+                    marker="o",
+                    zorder=7
+                )
+
+                ax.annotate(
+                    (
+                        "P1\n"
+                        f"{fmt_price(p1['price'])}"
+                    ),
+                    (
+                        p1_x,
+                        p1["price"]
+                    ),
+                    xytext=(
+                        -10,
+                        12
+                    ),
+                    textcoords=(
+                        "offset points"
+                    ),
+                    fontsize=8,
+                    fontweight="bold"
+                )
+
+            # ------------------------------------------------
+            # P2
+            # ------------------------------------------------
+
+            p2_x = (
+                p2_global
+                - offset
+            )
+
+            if (
+                0
+                <= p2_x
+                < visible_count
+            ):
+
+                ax.scatter(
+                    [p2_x],
+                    [p2["price"]],
+                    s=100,
+                    marker="o",
+                    zorder=7
+                )
+
+                ax.annotate(
+                    (
+                        "P2\n"
+                        f"{fmt_price(p2['price'])}"
+                    ),
+                    (
+                        p2_x,
+                        p2["price"]
+                    ),
+                    xytext=(
+                        5,
+                        12
+                    ),
+                    textcoords=(
+                        "offset points"
+                    ),
+                    fontsize=8,
+                    fontweight="bold"
+                )
+
+        # ----------------------------------------------------
+        # BREAKOUT
+        # ----------------------------------------------------
 
         breakout_x = (
             breakout_global
-            - (
-                len(candles)
-                - len(data)
-            )
+            - offset
         )
 
-        if 0 <= breakout_x < len(data):
+        if (
+            0
+            <= breakout_x
+            < visible_count
+        ):
+
+            breakout_price = candles[
+                breakout_global
+            ]["close"]
 
             ax.scatter(
                 [breakout_x],
-                [candles[
-                    breakout_global
-                ]["close"]],
-                s=70,
-                marker="o",
-                zorder=5
+                [breakout_price],
+                s=150,
+                marker="X",
+                zorder=10
             )
 
             ax.annotate(
-                "BREAK",
+                (
+                    "BREAKOUT\n"
+                    f"{fmt_price(breakout_price)}"
+                ),
                 (
                     breakout_x,
-                    candles[
-                        breakout_global
-                    ]["close"]
+                    breakout_price
                 ),
-                xytext=(5, 10),
-                textcoords="offset points"
+                xytext=(
+                    8,
+                    18
+                ),
+                textcoords=(
+                    "offset points"
+                ),
+                fontsize=9,
+                fontweight="bold",
+                bbox=dict(
+                    boxstyle=(
+                        "round,pad=0.3"
+                    ),
+                    alpha=0.75
+                )
             )
 
         # ----------------------------------------------------
-        # Entry / TP / SL
+        # ENTRY
+        # ----------------------------------------------------
+
+        entry_x = breakout_x
+
+        if (
+            0
+            <= entry_x
+            < visible_count
+        ):
+
+            ax.scatter(
+                [entry_x],
+                [entry],
+                s=160,
+                marker="o",
+                zorder=12
+            )
+
+            entry_label = (
+                "LONG ENTRY"
+                if direction == "LONG"
+                else
+                "SHORT ENTRY"
+            )
+
+            ax.annotate(
+                (
+                    f"{entry_label}\n"
+                    f"{fmt_price(entry)}"
+                ),
+                (
+                    entry_x,
+                    entry
+                ),
+                xytext=(
+                    12,
+                    -38
+                ),
+                textcoords=(
+                    "offset points"
+                ),
+                fontsize=10,
+                fontweight="bold",
+                bbox=dict(
+                    boxstyle=(
+                        "round,pad=0.3"
+                    ),
+                    alpha=0.80
+                )
+            )
+
+        # ----------------------------------------------------
+        # ENTRY LINE
         # ----------------------------------------------------
 
         ax.axhline(
             entry,
             linestyle="-",
-            linewidth=1.5,
-            label=f"Entry {fmt_price(entry)}"
+            linewidth=1.8,
+            label=(
+                f"ENTRY "
+                f"{fmt_price(entry)}"
+            )
         )
+
+        # ----------------------------------------------------
+        # TP LINE
+        # ----------------------------------------------------
 
         ax.axhline(
             tp,
             linestyle="--",
-            linewidth=1.3,
-            label=f"TP {fmt_price(tp)}"
+            linewidth=1.8,
+            label=(
+                f"TP "
+                f"{fmt_price(tp)}"
+            )
         )
+
+        # ----------------------------------------------------
+        # SL LINE
+        # ----------------------------------------------------
 
         ax.axhline(
             sl,
             linestyle="--",
-            linewidth=1.3,
-            label=f"SL {fmt_price(sl)}"
+            linewidth=1.8,
+            label=(
+                f"SL "
+                f"{fmt_price(sl)}"
+            )
+        )
+
+        # ----------------------------------------------------
+        # TP MARKER
+        # ----------------------------------------------------
+
+        level_x = (
+            visible_count - 1
+        )
+
+        ax.scatter(
+            [level_x],
+            [tp],
+            s=130,
+            marker="^",
+            zorder=11
+        )
+
+        ax.annotate(
+            (
+                "TP\n"
+                f"{fmt_price(tp)}"
+            ),
+            (
+                level_x,
+                tp
+            ),
+            xytext=(
+                -70,
+                8
+            ),
+            textcoords=(
+                "offset points"
+            ),
+            fontsize=9,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle=(
+                    "round,pad=0.3"
+                ),
+                alpha=0.80
+            )
+        )
+
+        # ----------------------------------------------------
+        # SL MARKER
+        # ----------------------------------------------------
+
+        ax.scatter(
+            [level_x],
+            [sl],
+            s=130,
+            marker="v",
+            zorder=11
+        )
+
+        ax.annotate(
+            (
+                "SL\n"
+                f"{fmt_price(sl)}"
+            ),
+            (
+                level_x,
+                sl
+            ),
+            xytext=(
+                -70,
+                -28
+            ),
+            textcoords=(
+                "offset points"
+            ),
+            fontsize=9,
+            fontweight="bold",
+            bbox=dict(
+                boxstyle=(
+                    "round,pad=0.3"
+                ),
+                alpha=0.80
+            )
+        )
+
+        # ----------------------------------------------------
+        # RIGHT SIDE PRICE LABELS
+        # ----------------------------------------------------
+
+        right_x = (
+            visible_count
+            + 1
+        )
+
+        ax.text(
+            right_x,
+            entry,
+            (
+                f"ENTRY "
+                f"{fmt_price(entry)}"
+            ),
+            fontsize=9,
+            fontweight="bold",
+            va="center"
+        )
+
+        ax.text(
+            right_x,
+            tp,
+            (
+                f"TP "
+                f"{fmt_price(tp)}"
+            ),
+            fontsize=9,
+            fontweight="bold",
+            va="center"
+        )
+
+        ax.text(
+            right_x,
+            sl,
+            (
+                f"SL "
+                f"{fmt_price(sl)}"
+            ),
+            fontsize=9,
+            fontweight="bold",
+            va="center"
+        )
+
+        # ----------------------------------------------------
+        # TITLE
+        # ----------------------------------------------------
+
+        trend_type = (
+            trendline["type"].upper()
+            if trendline
+            else "N/A"
+        )
+
+        title = (
+            f"{asset} | 5M TRENDLINE BREAKOUT | "
+            f"{direction}\n"
+            f"Trendline: {trend_type} | "
+            f"Entry: {fmt_price(entry)} | "
+            f"TP: {fmt_price(tp)} | "
+            f"SL: {fmt_price(sl)}"
         )
 
         ax.set_title(
-            f"{asset} 5M Trendline Breakout"
+            title,
+            fontsize=13,
+            fontweight="bold"
         )
 
         ax.set_xlabel(
@@ -3166,22 +3785,50 @@ def create_signal_chart(
             "Price"
         )
 
+        # ----------------------------------------------------
+        # GRID
+        # ----------------------------------------------------
+
         ax.grid(
             alpha=0.25
         )
 
+        # ----------------------------------------------------
+        # LEGEND
+        # ----------------------------------------------------
+
         ax.legend(
-            loc="best"
+            loc="best",
+            fontsize=8
         )
+
+        # ----------------------------------------------------
+        # X RANGE
+        # ----------------------------------------------------
+
+        ax.set_xlim(
+            -2,
+            visible_count + 8
+        )
+
+        # ----------------------------------------------------
+        # FINAL
+        # ----------------------------------------------------
 
         fig.tight_layout()
 
         fig.savefig(
             filename,
-            dpi=130
+            dpi=150,
+            bbox_inches="tight"
         )
 
         plt.close(fig)
+
+        print(
+            "[CHART] Created 5M signal chart:",
+            filename
+        )
 
         return filename
 
@@ -3208,7 +3855,9 @@ def build_signal_message(
     signal
 ):
 
-    direction = signal["direction"]
+    direction = signal[
+        "direction"
+    ]
 
     emoji = (
         "🟢"
@@ -3244,17 +3893,26 @@ def build_signal_message(
         "📊 <b>KRAKEN TRENDLINE SIGNAL</b>\n\n"
         f"{emoji} <b>{direction} "
         f"{signal['asset']}</b>\n\n"
-        f"Pattern: <b>{signal['pattern']}</b>\n"
-        f"Entry: <b>{fmt_price(entry)}</b>\n"
-        f"TP: <b>{fmt_price(tp)}</b> "
+        f"Pattern: "
+        f"<b>{signal['pattern']}</b>\n"
+        f"Entry: "
+        f"<b>{fmt_price(entry)}</b>\n"
+        f"TP: "
+        f"<b>{fmt_price(tp)}</b> "
         f"({fmt_pct(tp_pct)})\n"
-        f"SL: <b>{fmt_price(sl)}</b> "
+        f"SL: "
+        f"<b>{fmt_price(sl)}</b> "
         f"({fmt_pct(sl_pct)})\n"
-        f"RR: <b>{signal['rr']:.2f}</b>\n"
-        f"RVOL: <b>{signal['rvol']:.2f}</b>\n\n"
-        f"1H TL: <b>{signal['trendline_type_1h']}</b>\n"
-        f"5M TL: <b>{signal['trendline_type_5m']}</b>\n"
-        f"Time: <b>"
+        f"RR: "
+        f"<b>{signal['rr']:.2f}</b>\n"
+        f"RVOL: "
+        f"<b>{signal['rvol']:.2f}</b>\n\n"
+        f"1H TL: "
+        f"<b>{signal['trendline_type_1h']}</b>\n"
+        f"5M TL: "
+        f"<b>{signal['trendline_type_5m']}</b>\n"
+        f"Time: "
+        f"<b>"
         f"{ts_to_tehran(signal['signal_timestamp']):%Y-%m-%d %H:%M}"
         f"</b>"
     )
@@ -3268,7 +3926,9 @@ def scan_asset(
     asset
 ):
 
-    contract = CONTRACTS[asset]
+    contract = CONTRACTS[
+        asset
+    ]
 
     # ========================================================
     # 1H DATA
@@ -3326,7 +3986,9 @@ def scan_asset(
 
     stats["breaks_1h"] += 1
 
-    direction = breakout_1h["type"]
+    direction = breakout_1h[
+        "type"
+    ]
 
     # ========================================================
     # 5M DATA
@@ -3365,7 +4027,7 @@ def scan_asset(
     )
 
     # ========================================================
-    # ONLY LOOK FOR 5M BREAKOUT AFTER 1H BREAKOUT
+    # 5M BREAKOUT AFTER 1H BREAKOUT
     # ========================================================
 
     breakout_time_1h = (
@@ -3399,7 +4061,7 @@ def scan_asset(
     if not breakout_5m:
         return None
 
-    # Direction must agree with 1H breakout.
+    # Direction must agree with 1H.
     if (
         breakout_5m["type"]
         != direction
@@ -3430,7 +4092,9 @@ def scan_asset(
     # ENTRY
     # ========================================================
 
-    entry = breakout_5m["price"]
+    entry = breakout_5m[
+        "price"
+    ]
 
     # ========================================================
     # TP / SL
@@ -3466,31 +4130,46 @@ def scan_asset(
 
     signal = {
         "signal_key": signal_key,
+
         "asset": asset,
+
         "contract": contract,
+
         "direction": direction,
+
         "pattern": (
             "Trendline Breakout"
         ),
+
         "entry": entry,
+
         "tp": levels["tp"],
+
         "sl": levels["sl"],
+
         "rr": levels["rr"],
+
         "rvol": rvol,
+
         "trendline_type_1h": (
             breakout_1h[
                 "trendline"
             ]["type"]
         ),
+
         "trendline_type_5m": (
             breakout_5m[
                 "trendline"
             ]["type"]
         ),
+
         "signal_timestamp": (
             signal_timestamp
         ),
+
+        # Used by Telegram chart.
         "candles_5m": candles_5m,
+
         "breakout_5m": breakout_5m,
     }
 
@@ -3519,20 +4198,27 @@ def scan():
         "closed_trades": 0,
     }
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
     print(
-        f"KRAKEN FUTURES TRENDLINE SCANNER "
+        f"KRAKEN FUTURES "
+        f"TRENDLINE SCANNER "
         f"v{VERSION}"
     )
 
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
     print(
-        f"REAL_TRADING = {REAL_TRADING}"
+        f"REAL_TRADING = "
+        f"{REAL_TRADING}"
     )
 
     if REAL_TRADING:
+
         raise RuntimeError(
             "REAL_TRADING must remain False."
         )
@@ -3564,7 +4250,9 @@ def scan():
         )
 
         if message:
-            send_telegram(message)
+            send_telegram(
+                message
+            )
 
     # --------------------------------------------------------
     # Scan assets
@@ -3576,17 +4264,22 @@ def scan():
 
         stats["assets"] += 1
 
-        if signals_created >= MAX_SIGNALS_PER_SCAN:
+        if (
+            signals_created
+            >= MAX_SIGNALS_PER_SCAN
+        ):
             break
 
         try:
 
             # ------------------------------------------------
-            # Avoid multiple open trades for same asset.
-            # Opposite direction is allowed by design.
+            # Do not create another open trade
+            # for the same asset.
             # ------------------------------------------------
 
-            if has_open_trade(asset):
+            if has_open_trade(
+                asset
+            ):
                 continue
 
             signal = scan_asset(
@@ -3600,8 +4293,10 @@ def scan():
             # DB insertion
             # ------------------------------------------------
 
-            inserted = insert_signal_and_trade(
-                signal
+            inserted = (
+                insert_signal_and_trade(
+                    signal
+                )
             )
 
             if not inserted:
@@ -3611,15 +4306,22 @@ def scan():
             stats["new_signals"] += 1
 
             # ------------------------------------------------
-            # Telegram
+            # Telegram signal
             # ------------------------------------------------
 
-            message = build_signal_message(
-                signal
+            message = (
+                build_signal_message(
+                    signal
+                )
             )
 
+            # ------------------------------------------------
+            # 5M CHART
+            # ------------------------------------------------
+
             chart_file = (
-                f"signal_{asset}_"
+                f"signal_"
+                f"{asset}_"
                 f"{signal['direction']}_"
                 f"{signal['signal_timestamp']}.png"
             )
@@ -3639,9 +4341,14 @@ def scan():
                 chart
             )
 
-            if chart and os.path.exists(chart):
+            if (
+                chart
+                and os.path.exists(chart)
+            ):
+
                 try:
                     os.remove(chart)
+
                 except Exception:
                     pass
 
@@ -3658,7 +4365,9 @@ def scan():
     # Summary
     # --------------------------------------------------------
 
-    summary = build_summary_message()
+    summary = (
+        build_summary_message()
+    )
 
     send_telegram(
         summary
@@ -3668,8 +4377,10 @@ def scan():
     # Open trades
     # --------------------------------------------------------
 
-    open_message = build_open_trades_message(
-        prices
+    open_message = (
+        build_open_trades_message(
+            prices
+        )
     )
 
     send_telegram(
@@ -3680,15 +4391,20 @@ def scan():
     # Performance
     # --------------------------------------------------------
 
-    performance = build_performance_message()
+    performance = (
+        build_performance_message()
+    )
 
     send_telegram(
         performance
     )
 
-    print(summary)
+    print(
+        summary
+    )
 
     print()
+
     print(
         f"Signals created: "
         f"{stats['new_signals']}"
@@ -3728,7 +4444,8 @@ def periodic_report_due():
     )
 
     return (
-        now_utc_ts() - last
+        now_utc_ts()
+        - last
         >= PERIODIC_REPORT_SECONDS
     )
 
@@ -3752,7 +4469,9 @@ def mark_periodic_report():
             value = excluded.value
         """,
         (
-            str(now_utc_ts()),
+            str(
+                now_utc_ts()
+            ),
         )
     )
 
@@ -3773,7 +4492,8 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
 
         print(
-            "[STOPPED] Keyboard interrupt"
+            "[STOPPED] "
+            "Keyboard interrupt"
         )
 
         sys.exit(0)
