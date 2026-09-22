@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES TRENDLINE LIVE SIGNAL SCANNER
-# VERSION 7.2.0
+# VERSION 7.2.1
 # ============================================================
 #
 # PAPER ONLY
@@ -55,13 +55,20 @@
 # - Closed candles only
 # - No lookahead
 # - Existing DB preserved
-# - OLD OPEN trades are removed ONCE on first run of this version
-# - Performance starts from new baseline
+# - OLD OPEN trades were removed ONCE by version 7.2.0
+# - Performance baseline remains unchanged
 # - One open trade per asset + direction
 # - Opposite direction is allowed
 # - Maximum 1 NEW signal per scan
 # - REAL_TRADING permanently disabled
 # - All reports are combined into ONE Telegram report message
+#
+# FIX 7.2.1:
+# - 1H breakout now uses the LATEST valid breakout
+# - 15M breakout is selected only AFTER the 1H breakout
+# - 15M breakout selection no longer gets stuck on an old
+#   historical breakout
+# - RVOL is calculated on the selected current 15M breakout
 # ============================================================
 
 import os
@@ -81,7 +88,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "7.2.0"
+VERSION = "7.2.1"
 
 REAL_TRADING = False
 PAPER_TRADING = True
@@ -147,8 +154,9 @@ SL_BUFFER_PCT = 0.05 / 100.0
 # ============================================================
 # Performance
 #
-# New reset key for this version.
-# Performance only counts CLOSED trades after baseline.
+# IMPORTANT:
+# Keep the existing baseline so this bug-fix version
+# does NOT reset Performance.
 # ============================================================
 
 PERFORMANCE_RESET_KEY = "2026-09-22-7.2.0"
@@ -223,7 +231,7 @@ SESSION = requests.Session()
 SESSION.headers.update(
     {
         "User-Agent":
-            "Mozilla/5.0 Kraken-Trendline-Scanner/7.2.0"
+            "Mozilla/5.0 Kraken-Trendline-Scanner/7.2.1"
     }
 )
 
@@ -580,8 +588,10 @@ def init_db():
     # --------------------------------------------------------
     # Remove OLD OPEN trades ONCE
     #
-    # We use a separate migration marker so the deletion
-    # happens only on the first run of VERSION 7.2.0.
+    # IMPORTANT:
+    # Keep this migration key at 7.2.0.
+    # It has already been executed and therefore will NOT
+    # delete existing OPEN trades again.
     # --------------------------------------------------------
 
     conn.execute(
@@ -1653,12 +1663,35 @@ def find_valid_trendline(
 
 # ============================================================
 # TRENDLINE BREAKOUT
+#
+# VERSION 7.2.1 FIX
+#
+# OLD BEHAVIOR:
+#   Returned the FIRST breakout after P2.
+#
+# NEW BEHAVIOR:
+#   Returns the LATEST breakout.
+#
+# Optional after_time:
+#   If provided, only breakout candles at or after
+#   after_time are considered.
+#
+# This is critical for the strategy:
+#
+#   1H breakout
+#        ↓
+#   15M breakout AFTER 1H breakout
+#        ↓
+#   RVOL
+#        ↓
+#   signal
 # ============================================================
 
 def find_trendline_breakout(
     df,
     trendline,
-    direction
+    direction,
+    after_time=None
 ):
 
     if trendline is None:
@@ -1677,11 +1710,32 @@ def find_trendline_breakout(
 
         return None
 
+    # --------------------------------------------------------
+    # Normalize optional time filter
+    # --------------------------------------------------------
+
+    after_dt = None
+
+    if after_time is not None:
+
+        after_dt = parse_time(
+            after_time
+        )
+
     buffer = (
         BREAKOUT_BUFFER_PCT
         /
         100.0
     )
+
+    latest_breakout = None
+
+    # --------------------------------------------------------
+    # Scan ALL closed candles.
+    #
+    # Do NOT return the first breakout.
+    # Keep the latest valid breakout.
+    # --------------------------------------------------------
 
     for i in range(
         start_index,
@@ -1689,6 +1743,22 @@ def find_trendline_breakout(
     ):
 
         row = df.iloc[i]
+
+        row_time = parse_time(
+            row["datetime"]
+        )
+
+        if (
+            after_dt is not None
+            and
+            (
+                row_time is None
+                or
+                row_time < after_dt
+            )
+        ):
+
+            continue
 
         line = line_price(
             p1,
@@ -1714,7 +1784,7 @@ def find_trendline_breakout(
 
             if close > breakout_level:
 
-                return {
+                latest_breakout = {
                     "index": i,
                     "time": row["datetime"],
                     "price": close,
@@ -1735,14 +1805,14 @@ def find_trendline_breakout(
 
             if close < breakout_level:
 
-                return {
+                latest_breakout = {
                     "index": i,
                     "time": row["datetime"],
                     "price": close,
                     "line_price": line,
                 }
 
-    return None
+    return latest_breakout
 
 
 # ============================================================
@@ -1799,7 +1869,7 @@ def calculate_rvol(
 #
 # DB column names remain trendline_5m and breakout_5m_time
 # for backward compatibility with the existing database.
-# Actual stored data is now 15M.
+# Actual stored data is 15M.
 # ============================================================
 
 def get_confirmed_15m_levels(
@@ -2276,10 +2346,6 @@ def close_trade(
 
 # ============================================================
 # RECONCILE OPEN TRADES
-#
-# IMPORTANT:
-# This function NO LONGER sends Telegram messages.
-# Closed trades are returned and included in the unified report.
 # ============================================================
 
 def reconcile_open_trades(
@@ -3567,20 +3633,41 @@ def scan_asset(
 
     # --------------------------------------------------------
     # 15M breakout
+    #
+    # IMPORTANT FIX:
+    #
+    # Only consider 15M breakout candles at or after the
+    # selected 1H breakout.
+    #
+    # This prevents an old 15M breakout from blocking a
+    # valid current setup.
     # --------------------------------------------------------
+
+    bo_1h_dt = parse_time(
+        breakout_1h["time"]
+    )
+
+    if bo_1h_dt is None:
+
+        result["reason"] = (
+            "Invalid 1H breakout time"
+        )
+
+        return result
 
     bo_15m = (
         find_trendline_breakout(
             df_15m,
             trendline_15m,
-            direction
+            direction,
+            after_time=bo_1h_dt
         )
     )
 
     if bo_15m is None:
 
         result["reason"] = (
-            "No 15M breakout"
+            "No 15M breakout after 1H"
         )
 
         return result
@@ -3593,22 +3680,14 @@ def scan_asset(
     # Time ordering
     # --------------------------------------------------------
 
-    bo_1h_dt = parse_time(
-        breakout_1h["time"]
-    )
-
     bo_15m_dt = parse_time(
         bo_15m["time"]
     )
 
-    if (
-        bo_1h_dt is None
-        or
-        bo_15m_dt is None
-    ):
+    if bo_15m_dt is None:
 
         result["reason"] = (
-            "Invalid breakout time"
+            "Invalid 15M breakout time"
         )
 
         return result
@@ -3623,7 +3702,7 @@ def scan_asset(
         return result
 
     # --------------------------------------------------------
-    # RVOL on 15M
+    # RVOL on selected 15M breakout
     # --------------------------------------------------------
 
     rvol = calculate_rvol(
@@ -3867,9 +3946,6 @@ def scan():
 
     # --------------------------------------------------------
     # Reconcile open trades
-    #
-    # In this version old OPEN trades were already removed
-    # on the first run. New OPEN trades are reconciled normally.
     # --------------------------------------------------------
 
     closed_trades = (
