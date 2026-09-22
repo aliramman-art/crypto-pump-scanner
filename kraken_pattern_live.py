@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES TRENDLINE LIVE SIGNAL SCANNER
-# VERSION 7.2.2
+# VERSION 7.2.3
 # ============================================================
 #
 # PAPER ONLY
@@ -9,84 +9,76 @@
 # STRATEGY
 #
 # LONG:
-#   1H swing highs
-#       ↓
-#   descending resistance trendline
-#       ↓
+#   1H descending resistance trendline
+#   minimum 3 confirmed touch points
+#        ↓
 #   1H breakout ABOVE trendline
-#       ↓
-#   15M swing highs
-#       ↓
-#   descending resistance trendline
-#       ↓
+#        ↓
+#   15M descending resistance trendline
+#   minimum 3 confirmed touch points
+#        ↓
 #   15M breakout ABOVE trendline
-#       ↓
+#        ↓
 #   RVOL confirmation
-#       ↓
-#   LONG signal
+#        ↓
+#   LONG SIGNAL
 #
 # SHORT:
-#   1H swing lows
-#       ↓
-#   ascending support trendline
-#       ↓
+#   1H ascending support trendline
+#   minimum 3 confirmed touch points
+#        ↓
 #   1H breakout BELOW trendline
-#       ↓
-#   15M swing lows
-#       ↓
-#   ascending support trendline
-#       ↓
+#        ↓
+#   15M ascending support trendline
+#   minimum 3 confirmed touch points
+#        ↓
 #   15M breakout BELOW trendline
-#       ↓
+#        ↓
 #   RVOL confirmation
-#       ↓
-#   SHORT signal
+#        ↓
+#   SHORT SIGNAL
 #
 # IMPORTANT:
-#   Every valid trendline MUST have at least 3 touch points.
-#
-#   P1 + P2 = anchor points
-#   P3+     = additional confirmed touches on the same line
-#
-#   No lookahead:
-#   only closed candles are used.
-#
-#   PAPER ONLY.
-#   REAL_TRADING = False
-#
-# DB:
-#   Existing DB is preserved.
+#   - Closed candles only
+#   - No lookahead
+#   - Minimum 3 trendline touches
+#   - Existing DB preserved
+#   - PAPER ONLY
 # ============================================================
 
 import os
 import io
 import json
-import time
-import math
 import sqlite3
 import traceback
 from datetime import datetime, timezone, timedelta
 
 import requests
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 
 
 # ============================================================
-# VERSION / MODE
+# VERSION
 # ============================================================
 
-VERSION = "7.2.2"
+VERSION = "7.2.3"
+
+
+# ============================================================
+# MODE
+# ============================================================
 
 REAL_TRADING = False
 PAPER_TRADING = True
 
+
 # ============================================================
-# FILES
+# DATABASE
 # ============================================================
 
 DB_FILE = "kraken_pattern_live_v52.db"
+
 
 # ============================================================
 # KRAKEN
@@ -100,12 +92,21 @@ KRAKEN_CHART_URL = (
     "https://futures.kraken.com/api/charts/v1/trade"
 )
 
+
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+)
+
 
 # ============================================================
 # ASSETS
@@ -154,6 +155,7 @@ ASSETS = [
     "WIF",
 ]
 
+
 # ============================================================
 # CONTRACT MAP
 # ============================================================
@@ -163,15 +165,28 @@ CONTRACT_MAP = {
     for asset in ASSETS
 }
 
+
+def contract_for_asset(asset):
+    return CONTRACT_MAP.get(
+        asset,
+        f"PF_{asset}USD"
+    )
+
+
 # ============================================================
 # TIMEZONE
 # ============================================================
 
-TEHRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+TEHRAN_TZ = timezone(
+    timedelta(
+        hours=3,
+        minutes=30,
+    )
+)
 
 
 # ============================================================
-# STRATEGY SETTINGS
+# STRATEGY
 # ============================================================
 
 PIVOT_LEFT = 3
@@ -179,15 +194,13 @@ PIVOT_RIGHT = 3
 
 MIN_TRENDLINE_BARS = 8
 
-# Maximum distance from trendline for a candle/pivot
-# to count as a touch.
 TRENDLINE_TOLERANCE_PCT = 0.20
 
-# Required breakout distance beyond trendline.
 BREAKOUT_BUFFER_PCT = 0.05
 
-# Minimum number of trendline touch points.
+# HARD REQUIREMENT
 MIN_TRENDLINE_TOUCHES = 3
+
 
 # ============================================================
 # RVOL
@@ -195,6 +208,7 @@ MIN_TRENDLINE_TOUCHES = 3
 
 RVOL_LOOKBACK = 20
 RVOL_MIN = 1.20
+
 
 # ============================================================
 # RISK
@@ -204,6 +218,7 @@ MIN_RR = 1.01
 
 SL_BUFFER_PCT = 0.05 / 100.0
 
+
 # ============================================================
 # TRADE
 # ============================================================
@@ -212,21 +227,19 @@ MAX_HOLD_HOURS = 48
 
 MAX_SIGNALS_PER_SCAN = 1
 
-# ============================================================
-# REPORT
-# ============================================================
-
-PERFORMANCE_BASELINE_KEY = "2026-09-22-7.2.0"
 
 # ============================================================
-# REQUEST SETTINGS
+# HTTP
 # ============================================================
 
 REQUEST_TIMEOUT = 20
 
 HEADERS = {
-    "User-Agent": f"KrakenTrendlineScanner/{VERSION}"
+    "User-Agent": (
+        f"KrakenTrendlineScanner/{VERSION}"
+    )
 }
+
 
 # ============================================================
 # STATS
@@ -246,140 +259,206 @@ SCAN_STATS = {
 
 
 # ============================================================
-# UTILS
+# TIME HELPERS
 # ============================================================
 
 def now_utc():
-    return datetime.now(timezone.utc)
-
-
-def now_tehran():
-    return now_utc().astimezone(TEHRAN_TZ)
-
-
-def format_time(dt=None):
-    if dt is None:
-        dt = now_tehran()
-
-    if isinstance(dt, str):
-        try:
-            dt = pd.to_datetime(dt, utc=True).to_pydatetime()
-        except Exception:
-            return str(dt)
-
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-
-    return dt.astimezone(TEHRAN_TZ).strftime(
-        "%Y-%m-%d %H:%M:%S"
+    return datetime.now(
+        timezone.utc
     )
 
 
-def safe_float(value, default=None):
+def now_tehran():
+    return now_utc().astimezone(
+        TEHRAN_TZ
+    )
+
+
+def format_time(dt=None):
+
+    if dt is None:
+        dt = now_tehran()
+
     try:
-        if value is None:
-            return default
-        return float(value)
+
+        if isinstance(dt, str):
+
+            dt = pd.to_datetime(
+                dt,
+                utc=True,
+            ).to_pydatetime()
+
+        if dt.tzinfo is None:
+            dt = dt.replace(
+                tzinfo=timezone.utc
+            )
+
+        return dt.astimezone(
+            TEHRAN_TZ
+        ).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+
     except Exception:
-        return default
 
-
-def pct_change(entry, current):
-    if not entry or not current:
-        return 0.0
-
-    return ((current - entry) / entry) * 100.0
+        return str(dt)
 
 
 def duration_text(seconds):
-    if seconds is None:
-        return "-"
 
     try:
-        seconds = max(0, int(seconds))
+        seconds = max(
+            0,
+            int(seconds)
+        )
     except Exception:
         return "-"
 
     days = seconds // 86400
-    hours = (seconds % 86400) // 3600
-    minutes = (seconds % 3600) // 60
+
+    hours = (
+        seconds % 86400
+    ) // 3600
+
+    minutes = (
+        seconds % 3600
+    ) // 60
 
     if days > 0:
-        return f"{days}d {hours}h {minutes}m"
+        return (
+            f"{days}d "
+            f"{hours}h "
+            f"{minutes}m"
+        )
 
     if hours > 0:
-        return f"{hours}h {minutes}m"
+        return (
+            f"{hours}h "
+            f"{minutes}m"
+        )
 
     return f"{minutes}m"
+
+
+def safe_float(
+    value,
+    default=None,
+):
+
+    try:
+
+        if value is None:
+            return default
+
+        return float(value)
+
+    except Exception:
+
+        return default
+
+
+def pct_change(
+    entry,
+    current,
+):
+
+    if not entry or not current:
+        return 0.0
+
+    return (
+        (current - entry)
+        / entry
+    ) * 100.0
 
 
 # ============================================================
 # HTTP
 # ============================================================
 
-def http_get(url, params=None):
+def http_get(
+    url,
+    params=None,
+):
+
     try:
-        r = requests.get(
+
+        response = requests.get(
             url,
             params=params,
             headers=HEADERS,
             timeout=REQUEST_TIMEOUT,
         )
 
-        if r.status_code != 200:
+        if response.status_code != 200:
+
+            print(
+                f"[HTTP] {response.status_code} "
+                f"{url}"
+            )
+
             return None
 
-        return r.json()
+        return response.json()
 
-    except Exception:
+    except Exception as e:
+
+        print(
+            f"[HTTP ERROR] {url}: {e}"
+        )
+
         return None
 
 
 # ============================================================
-# CONTRACT
-# ============================================================
-
-def contract_for_asset(asset):
-    return CONTRACT_MAP.get(
-        asset,
-        f"PF_{asset}USD"
-    )
-
-
-# ============================================================
-# KRAKEN TICKERS
+# TICKERS
 # ============================================================
 
 def get_tickers():
-    data = http_get(KRAKEN_TICKER_URL)
+
+    data = http_get(
+        KRAKEN_TICKER_URL
+    )
 
     if not data:
         return {}
 
-    tickers = data.get("tickers")
+    tickers = data.get(
+        "tickers"
+    )
 
-    if not isinstance(tickers, list):
+    if not isinstance(
+        tickers,
+        list,
+    ):
         return {}
 
     result = {}
 
     for item in tickers:
-        symbol = item.get("symbol")
 
-        if not symbol:
-            continue
+        symbol = item.get(
+            "symbol"
+        )
 
-        result[symbol] = item
+        if symbol:
+            result[symbol] = item
 
     return result
 
 
-def get_current_price(asset):
-    symbol = contract_for_asset(asset)
+def get_current_price(
+    asset
+):
+
+    symbol = contract_for_asset(
+        asset
+    )
 
     tickers = get_tickers()
 
-    item = tickers.get(symbol)
+    item = tickers.get(
+        symbol
+    )
 
     if not item:
         return None
@@ -390,9 +469,15 @@ def get_current_price(asset):
         "markPrice",
         "indexPrice",
     ):
-        value = safe_float(item.get(key))
 
-        if value is not None and value > 0:
+        value = safe_float(
+            item.get(key)
+        )
+
+        if (
+            value is not None
+            and value > 0
+        ):
             return value
 
     return None
@@ -402,12 +487,19 @@ def get_current_price(asset):
 # OHLC
 # ============================================================
 
-def get_ohlc(asset, interval):
-    symbol = contract_for_asset(asset)
+def get_ohlc(
+    asset,
+    interval,
+):
+
+    symbol = contract_for_asset(
+        asset
+    )
 
     url = (
-        f"{KRAKEN_CHART_URL}/trade/"
-        f"{symbol}/{interval}"
+        f"{KRAKEN_CHART_URL}/"
+        f"{symbol}/"
+        f"{interval}"
     )
 
     data = http_get(url)
@@ -417,13 +509,25 @@ def get_ohlc(asset, interval):
 
     candles = None
 
-    if isinstance(data, dict):
-        candles = data.get("candles")
+    if isinstance(
+        data,
+        dict,
+    ):
+
+        candles = data.get(
+            "candles"
+        )
 
         if candles is None:
-            candles = data.get("data")
+            candles = data.get(
+                "data"
+            )
 
-    if candles is None and isinstance(data, list):
+    elif isinstance(
+        data,
+        list,
+    ):
+
         candles = data
 
     if not candles:
@@ -431,43 +535,71 @@ def get_ohlc(asset, interval):
 
     rows = []
 
-    for c in candles:
-
-        if isinstance(c, dict):
-
-            ts = (
-                c.get("time")
-                or c.get("timestamp")
-                or c.get("ts")
-            )
-
-            op = c.get("open")
-            hi = c.get("high")
-            lo = c.get("low")
-            cl = c.get("close")
-            vol = (
-                c.get("volume")
-                or c.get("vol")
-            )
-
-        elif isinstance(c, (list, tuple)) and len(c) >= 5:
-
-            ts = c[0]
-            op = c[1]
-            hi = c[2]
-            lo = c[3]
-            cl = c[4]
-            vol = c[5] if len(c) > 5 else 0
-
-        else:
-            continue
+    for candle in candles:
 
         try:
+
+            if isinstance(
+                candle,
+                dict,
+            ):
+
+                ts = (
+                    candle.get("time")
+                    or candle.get("timestamp")
+                    or candle.get("ts")
+                )
+
+                op = candle.get(
+                    "open"
+                )
+
+                hi = candle.get(
+                    "high"
+                )
+
+                lo = candle.get(
+                    "low"
+                )
+
+                cl = candle.get(
+                    "close"
+                )
+
+                vol = (
+                    candle.get("volume")
+                    or candle.get("vol")
+                    or 0
+                )
+
+            elif isinstance(
+                candle,
+                (list, tuple),
+            ):
+
+                if len(candle) < 5:
+                    continue
+
+                ts = candle[0]
+                op = candle[1]
+                hi = candle[2]
+                lo = candle[3]
+                cl = candle[4]
+
+                vol = (
+                    candle[5]
+                    if len(candle) > 5
+                    else 0
+                )
+
+            else:
+
+                continue
+
             ts = float(ts)
 
-            # Kraken may return milliseconds.
             if ts > 10_000_000_000:
-                ts = ts / 1000.0
+                ts /= 1000.0
 
             rows.append(
                 {
@@ -480,47 +612,68 @@ def get_ohlc(asset, interval):
                     "high": float(hi),
                     "low": float(lo),
                     "close": float(cl),
-                    "volume": float(vol or 0),
+                    "volume": float(
+                        vol or 0
+                    ),
                 }
             )
 
         except Exception:
+
             continue
 
     if not rows:
         return None
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(
+        rows
+    )
 
-    df = df.sort_values("time")
-    df = df.drop_duplicates("time")
-    df = df.reset_index(drop=True)
+    df = df.sort_values(
+        "time"
+    )
+
+    df = df.drop_duplicates(
+        "time"
+    )
+
+    df = df.reset_index(
+        drop=True
+    )
 
     # --------------------------------------------------------
     # CLOSED CANDLES ONLY
     # --------------------------------------------------------
 
     if len(df) >= 2:
+
         df = df.iloc[:-1].copy()
 
     if len(df) < 50:
         return None
 
-    return df.reset_index(drop=True)
+    return df.reset_index(
+        drop=True
+    )
 
 
 # ============================================================
 # PIVOTS
 # ============================================================
 
-def find_pivot_highs(df):
-    highs = df["high"].to_numpy()
+def find_pivot_highs(
+    df
+):
+
+    highs = df[
+        "high"
+    ].to_numpy()
 
     pivots = []
 
     for i in range(
         PIVOT_LEFT,
-        len(df) - PIVOT_RIGHT
+        len(df) - PIVOT_RIGHT,
     ):
 
         left = highs[
@@ -528,30 +681,43 @@ def find_pivot_highs(df):
         ]
 
         right = highs[
-            i + 1:i + 1 + PIVOT_RIGHT
+            i + 1:
+            i + 1 + PIVOT_RIGHT
         ]
 
-        if highs[i] > left.max() and highs[i] >= right.max():
+        if (
+            highs[i] > left.max()
+            and highs[i] >= right.max()
+        ):
 
             pivots.append(
                 {
                     "index": i,
-                    "time": df.iloc[i]["time"],
-                    "price": float(highs[i]),
+                    "time": df.iloc[i][
+                        "time"
+                    ],
+                    "price": float(
+                        highs[i]
+                    ),
                 }
             )
 
     return pivots
 
 
-def find_pivot_lows(df):
-    lows = df["low"].to_numpy()
+def find_pivot_lows(
+    df
+):
+
+    lows = df[
+        "low"
+    ].to_numpy()
 
     pivots = []
 
     for i in range(
         PIVOT_LEFT,
-        len(df) - PIVOT_RIGHT
+        len(df) - PIVOT_RIGHT,
     ):
 
         left = lows[
@@ -559,16 +725,24 @@ def find_pivot_lows(df):
         ]
 
         right = lows[
-            i + 1:i + 1 + PIVOT_RIGHT
+            i + 1:
+            i + 1 + PIVOT_RIGHT
         ]
 
-        if lows[i] < left.min() and lows[i] <= right.min():
+        if (
+            lows[i] < left.min()
+            and lows[i] <= right.min()
+        ):
 
             pivots.append(
                 {
                     "index": i,
-                    "time": df.iloc[i]["time"],
-                    "price": float(lows[i]),
+                    "time": df.iloc[i][
+                        "time"
+                    ],
+                    "price": float(
+                        lows[i]
+                    ),
                 }
             )
 
@@ -579,29 +753,58 @@ def find_pivot_lows(df):
 # TRENDLINE MATH
 # ============================================================
 
-def line_price(p1, p2, index):
-    x1 = float(p1["index"])
-    y1 = float(p1["price"])
+def line_price(
+    p1,
+    p2,
+    index,
+):
 
-    x2 = float(p2["index"])
-    y2 = float(p2["price"])
+    x1 = float(
+        p1["index"]
+    )
+
+    y1 = float(
+        p1["price"]
+    )
+
+    x2 = float(
+        p2["index"]
+    )
+
+    y2 = float(
+        p2["price"]
+    )
 
     if x2 == x1:
         return y1
 
-    slope = (y2 - y1) / (x2 - x1)
+    slope = (
+        y2 - y1
+    ) / (
+        x2 - x1
+    )
 
-    return y1 + slope * (
-        float(index) - x1
+    return (
+        y1
+        + slope
+        * (
+            float(index)
+            - x1
+        )
     )
 
 
-def trendline_error_pct(price, line):
+def trendline_error_pct(
+    price,
+    line,
+):
+
     if line == 0:
         return 999.0
 
     return abs(
-        (price - line) / line
+        (price - line)
+        / line
     ) * 100.0
 
 
@@ -614,35 +817,42 @@ def find_valid_trendline(
     direction,
     max_lookback=120,
 ):
-    """
-    direction:
-        LONG  -> descending resistance using highs
-        SHORT -> ascending support using lows
-
-    IMPORTANT:
-        A valid line MUST have at least 3
-        confirmed pivot touch points.
-    """
 
     if len(df) < MIN_TRENDLINE_BARS:
         return None
 
+    # --------------------------------------------------------
+    # Pivot type
+    # --------------------------------------------------------
+
     if direction == "LONG":
-        pivots = find_pivot_highs(df)
+
+        pivots = find_pivot_highs(
+            df
+        )
 
     else:
-        pivots = find_pivot_lows(df)
+
+        pivots = find_pivot_lows(
+            df
+        )
+
+    # --------------------------------------------------------
+    # HARD REQUIREMENT
+    # --------------------------------------------------------
 
     if len(pivots) < MIN_TRENDLINE_TOUCHES:
+
         return None
 
     start_index = max(
         0,
-        len(df) - max_lookback
+        len(df) - max_lookback,
     )
 
     pivots = [
-        p for p in pivots
+        p
+        for p in pivots
         if p["index"] >= start_index
     ]
 
@@ -652,41 +862,48 @@ def find_valid_trendline(
     best = None
 
     # --------------------------------------------------------
-    # Try every pair as anchor points.
-    # Then search for a minimum of 3 touches.
+    # Test every possible anchor pair
     # --------------------------------------------------------
 
-    for a in range(len(pivots) - 1):
+    for a in range(
+        len(pivots) - 1
+    ):
 
         p1 = pivots[a]
 
-        for b in range(a + 1, len(pivots)):
+        for b in range(
+            a + 1,
+            len(pivots),
+        ):
 
             p2 = pivots[b]
 
             if (
-                p2["index"] - p1["index"]
+                p2["index"]
+                - p1["index"]
                 < MIN_TRENDLINE_BARS
             ):
                 continue
 
-            y1 = p1["price"]
-            y2 = p2["price"]
-
             # ------------------------------------------------
-            # LONG = descending resistance
-            # SHORT = ascending support
+            # Direction
             # ------------------------------------------------
 
             if direction == "LONG":
 
-                if y2 >= y1:
+                # Descending resistance
+                if p2["price"] >= p1["price"]:
                     continue
 
             else:
 
-                if y2 <= y1:
+                # Ascending support
+                if p2["price"] <= p1["price"]:
                     continue
+
+            # ------------------------------------------------
+            # Find all touches
+            # ------------------------------------------------
 
             touches = []
 
@@ -706,7 +923,10 @@ def find_valid_trendline(
                     expected,
                 )
 
-                if error <= TRENDLINE_TOLERANCE_PCT:
+                if (
+                    error
+                    <= TRENDLINE_TOLERANCE_PCT
+                ):
 
                     touches.append(
                         {
@@ -719,33 +939,31 @@ def find_valid_trendline(
                     )
 
             # ------------------------------------------------
-            # HARD REQUIREMENT: 3+ touches
+            # MUST HAVE 3 TOUCHES
             # ------------------------------------------------
 
             if len(touches) < MIN_TRENDLINE_TOUCHES:
                 continue
 
-            # Need at least one later touch.
             touches = sorted(
                 touches,
                 key=lambda x: x["index"]
             )
 
-            p_first = touches[0]
-            p_second = touches[1]
+            # ------------------------------------------------
+            # Use first two actual touches as anchors
+            # ------------------------------------------------
 
-            # Recalculate line from the first two
-            # actual touches.
             anchor1 = {
-                "index": p_first["index"],
-                "time": p_first["time"],
-                "price": p_first["price"],
+                "index": touches[0]["index"],
+                "time": touches[0]["time"],
+                "price": touches[0]["price"],
             }
 
             anchor2 = {
-                "index": p_second["index"],
-                "time": p_second["time"],
-                "price": p_second["price"],
+                "index": touches[1]["index"],
+                "time": touches[1]["time"],
+                "price": touches[1]["price"],
             }
 
             if (
@@ -756,18 +974,33 @@ def find_valid_trendline(
                 continue
 
             if direction == "LONG":
-                if anchor2["price"] >= anchor1["price"]:
-                    continue
-            else:
-                if anchor2["price"] <= anchor1["price"]:
+
+                if (
+                    anchor2["price"]
+                    >= anchor1["price"]
+                ):
                     continue
 
-            # Recalculate all touches against final line.
+            else:
+
+                if (
+                    anchor2["price"]
+                    <= anchor1["price"]
+                ):
+                    continue
+
+            # ------------------------------------------------
+            # Recalculate final touches
+            # ------------------------------------------------
+
             final_touches = []
 
             for p in pivots:
 
-                if p["index"] < anchor1["index"]:
+                if (
+                    p["index"]
+                    < anchor1["index"]
+                ):
                     continue
 
                 expected = line_price(
@@ -781,7 +1014,10 @@ def find_valid_trendline(
                     expected,
                 )
 
-                if error <= TRENDLINE_TOLERANCE_PCT:
+                if (
+                    error
+                    <= TRENDLINE_TOLERANCE_PCT
+                ):
 
                     final_touches.append(
                         {
@@ -793,7 +1029,10 @@ def find_valid_trendline(
                         }
                     )
 
-            if len(final_touches) < MIN_TRENDLINE_TOUCHES:
+            if (
+                len(final_touches)
+                < MIN_TRENDLINE_TOUCHES
+            ):
                 continue
 
             final_touches = sorted(
@@ -802,10 +1041,7 @@ def find_valid_trendline(
             )
 
             # ------------------------------------------------
-            # Score:
-            # more touches = better
-            # longer line = better
-            # lower total error = better
+            # Score
             # ------------------------------------------------
 
             total_error = sum(
@@ -819,9 +1055,11 @@ def find_valid_trendline(
             )
 
             score = (
-                len(final_touches) * 1000
+                len(final_touches)
+                * 1000
                 + span
-                - total_error * 100
+                - total_error
+                * 100
             )
 
             candidate = {
@@ -829,11 +1067,17 @@ def find_valid_trendline(
                 "p1": anchor1,
                 "p2": anchor2,
                 "touches": final_touches,
-                "touch_count": len(final_touches),
+                "touch_count": len(
+                    final_touches
+                ),
                 "score": score,
             }
 
-            if best is None or score > best["score"]:
+            if (
+                best is None
+                or score > best["score"]
+            ):
+
                 best = candidate
 
     return best
@@ -849,15 +1093,21 @@ def find_latest_breakout(
     direction,
     start_index=0,
 ):
+
     if trendline is None:
         return None
 
-    touches = trendline["touches"]
+    touches = trendline.get(
+        "touches",
+        []
+    )
 
     if not touches:
         return None
 
-    last_touch_index = touches[-1]["index"]
+    last_touch_index = touches[
+        -1
+    ]["index"]
 
     search_start = max(
         start_index,
@@ -871,7 +1121,7 @@ def find_latest_breakout(
 
     for i in range(
         search_start,
-        len(df)
+        len(df),
     ):
 
         candle = df.iloc[i]
@@ -884,32 +1134,56 @@ def find_latest_breakout(
 
         if direction == "LONG":
 
-            threshold = line * (
-                1 + BREAKOUT_BUFFER_PCT / 100.0
+            threshold = (
+                line
+                * (
+                    1
+                    + BREAKOUT_BUFFER_PCT
+                    / 100.0
+                )
             )
 
-            if candle["close"] > threshold:
+            if (
+                candle["close"]
+                > threshold
+            ):
 
                 breakout = {
                     "index": i,
                     "time": candle["time"],
-                    "price": float(candle["close"]),
-                    "line_price": float(line),
+                    "price": float(
+                        candle["close"]
+                    ),
+                    "line_price": float(
+                        line
+                    ),
                 }
 
         else:
 
-            threshold = line * (
-                1 - BREAKOUT_BUFFER_PCT / 100.0
+            threshold = (
+                line
+                * (
+                    1
+                    - BREAKOUT_BUFFER_PCT
+                    / 100.0
+                )
             )
 
-            if candle["close"] < threshold:
+            if (
+                candle["close"]
+                < threshold
+            ):
 
                 breakout = {
                     "index": i,
                     "time": candle["time"],
-                    "price": float(candle["close"]),
-                    "line_price": float(line),
+                    "price": float(
+                        candle["close"]
+                    ),
+                    "line_price": float(
+                        line
+                    ),
                 }
 
     return breakout
@@ -919,32 +1193,43 @@ def find_latest_breakout(
 # RVOL
 # ============================================================
 
-def calculate_rvol(df, index):
+def calculate_rvol(
+    df,
+    index,
+):
+
     if index < RVOL_LOOKBACK:
         return None
 
     current_volume = safe_float(
-        df.iloc[index]["volume"]
+        df.iloc[index][
+            "volume"
+        ]
     )
 
     if current_volume is None:
         return None
 
-    start = index - RVOL_LOOKBACK
-    end = index
-
     avg_volume = df.iloc[
-        start:end
-    ]["volume"].mean()
+        index - RVOL_LOOKBACK:index
+    ][
+        "volume"
+    ].mean()
 
-    if avg_volume is None or avg_volume <= 0:
+    if (
+        avg_volume is None
+        or avg_volume <= 0
+    ):
         return None
 
-    return current_volume / avg_volume
+    return (
+        current_volume
+        / avg_volume
+    )
 
 
 # ============================================================
-# 15M TP / SL
+# TP / SL
 # ============================================================
 
 def get_tp_sl(
@@ -953,34 +1238,49 @@ def get_tp_sl(
     entry_index,
     entry_price,
 ):
-    highs = find_pivot_highs(df)
-    lows = find_pivot_lows(df)
+
+    highs = find_pivot_highs(
+        df
+    )
+
+    lows = find_pivot_lows(
+        df
+    )
 
     confirmed_highs = [
-        p for p in highs
+        p
+        for p in highs
         if p["index"] < entry_index
     ]
 
     confirmed_lows = [
-        p for p in lows
+        p
+        for p in lows
         if p["index"] < entry_index
     ]
 
+    # --------------------------------------------------------
+    # LONG
+    # --------------------------------------------------------
+
     if direction == "LONG":
 
-        # Nearest confirmed swing high above entry
         tp_candidates = [
-            p for p in confirmed_highs
+            p
+            for p in confirmed_highs
             if p["price"] > entry_price
         ]
 
-        # Latest confirmed swing low below entry
         sl_candidates = [
-            p for p in confirmed_lows
+            p
+            for p in confirmed_lows
             if p["price"] < entry_price
         ]
 
-        if not tp_candidates or not sl_candidates:
+        if (
+            not tp_candidates
+            or not sl_candidates
+        ):
             return None
 
         tp_point = min(
@@ -993,31 +1293,50 @@ def get_tp_sl(
             key=lambda p: p["index"]
         )
 
-        tp = float(tp_point["price"])
+        tp = float(
+            tp_point["price"]
+        )
 
         sl = float(
             sl_point["price"]
-            * (1 - SL_BUFFER_PCT)
+            * (
+                1
+                - SL_BUFFER_PCT
+            )
         )
 
-        reward = tp - entry_price
-        risk = entry_price - sl
+        reward = (
+            tp
+            - entry_price
+        )
+
+        risk = (
+            entry_price
+            - sl
+        )
+
+    # --------------------------------------------------------
+    # SHORT
+    # --------------------------------------------------------
 
     else:
 
-        # Nearest confirmed swing low below entry
         tp_candidates = [
-            p for p in confirmed_lows
+            p
+            for p in confirmed_lows
             if p["price"] < entry_price
         ]
 
-        # Latest confirmed swing high above entry
         sl_candidates = [
-            p for p in confirmed_highs
+            p
+            for p in confirmed_highs
             if p["price"] > entry_price
         ]
 
-        if not tp_candidates or not sl_candidates:
+        if (
+            not tp_candidates
+            or not sl_candidates
+        ):
             return None
 
         tp_point = max(
@@ -1030,20 +1349,35 @@ def get_tp_sl(
             key=lambda p: p["index"]
         )
 
-        tp = float(tp_point["price"])
+        tp = float(
+            tp_point["price"]
+        )
 
         sl = float(
             sl_point["price"]
-            * (1 + SL_BUFFER_PCT)
+            * (
+                1
+                + SL_BUFFER_PCT
+            )
         )
 
-        reward = entry_price - tp
-        risk = sl - entry_price
+        reward = (
+            entry_price
+            - tp
+        )
+
+        risk = (
+            sl
+            - entry_price
+        )
 
     if risk <= 0:
         return None
 
-    rr = reward / risk
+    rr = (
+        reward
+        / risk
+    )
 
     if rr < MIN_RR:
         return None
@@ -1061,23 +1395,35 @@ def get_tp_sl(
 # SERIALIZE TRENDLINE
 # ============================================================
 
-def serialize_trendline(trendline):
+def serialize_trendline(
+    trendline
+):
+
     if not trendline:
         return None
 
     touches = []
 
-    for i, p in enumerate(
-        trendline.get("touches", []),
+    for n, p in enumerate(
+        trendline.get(
+            "touches",
+            []
+        ),
         start=1,
     ):
 
         touches.append(
             {
-                "label": f"P{i}",
-                "index": int(p["index"]),
-                "time": str(p["time"]),
-                "price": float(p["price"]),
+                "label": f"P{n}",
+                "index": int(
+                    p["index"]
+                ),
+                "time": str(
+                    p["time"]
+                ),
+                "price": float(
+                    p["price"]
+                ),
                 "line_price": float(
                     p["line_price"]
                 ),
@@ -1089,29 +1435,45 @@ def serialize_trendline(trendline):
 
     return json.dumps(
         {
-            "direction": trendline.get("direction"),
-            "touch_count": len(touches),
+            "direction": trendline.get(
+                "direction"
+            ),
+            "touch_count": len(
+                touches
+            ),
             "touches": touches,
             "p1": {
                 "index": int(
-                    trendline["p1"]["index"]
+                    trendline["p1"][
+                        "index"
+                    ]
                 ),
                 "time": str(
-                    trendline["p1"]["time"]
+                    trendline["p1"][
+                        "time"
+                    ]
                 ),
                 "price": float(
-                    trendline["p1"]["price"]
+                    trendline["p1"][
+                        "price"
+                    ]
                 ),
             },
             "p2": {
                 "index": int(
-                    trendline["p2"]["index"]
+                    trendline["p2"][
+                        "index"
+                    ]
                 ),
                 "time": str(
-                    trendline["p2"]["time"]
+                    trendline["p2"][
+                        "time"
+                    ]
                 ),
                 "price": float(
-                    trendline["p2"]["price"]
+                    trendline["p2"][
+                        "price"
+                    ]
                 ),
             },
         },
@@ -1120,10 +1482,11 @@ def serialize_trendline(trendline):
 
 
 # ============================================================
-# DATABASE
+# DATABASE CONNECTION
 # ============================================================
 
 def db_connect():
+
     conn = sqlite3.connect(
         DB_FILE,
         timeout=30,
@@ -1134,39 +1497,17 @@ def db_connect():
     return conn
 
 
-def ensure_column(
-    conn,
-    table,
-    column,
-    definition,
-):
-    try:
-        columns = conn.execute(
-            f"PRAGMA table_info({table})"
-        ).fetchall()
-
-        names = {
-            row["name"]
-            for row in columns
-        }
-
-        if column not in names:
-
-            conn.execute(
-                f"""
-                ALTER TABLE {table}
-                ADD COLUMN {column} {definition}
-                """
-            )
-
-            conn.commit()
-
-    except Exception:
-        pass
-
+# ============================================================
+# DATABASE INITIALIZATION / MIGRATION
+# ============================================================
 
 def init_db():
+
     conn = db_connect()
+
+    # --------------------------------------------------------
+    # Create table if completely new
+    # --------------------------------------------------------
 
     conn.execute(
         """
@@ -1197,144 +1538,153 @@ def init_db():
         """
     )
 
-    # --------------------------------------------------------
-    # Preserve old DB
-    # --------------------------------------------------------
-
-    ensure_column(
-        conn,
-        "signals",
-        "contract",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "pattern",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "rr",
-        "REAL",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "exit_price",
-        "REAL",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "exit_time",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "exit_reason",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "duration_seconds",
-        "INTEGER",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "trendline_1h",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "trendline_15m",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "trendline_5m",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "breakout_1h_time",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "breakout_15m_time",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "breakout_5m_time",
-        "TEXT",
-    )
-
-    ensure_column(
-        conn,
-        "signals",
-        "rvol",
-        "REAL",
-    )
+    conn.commit()
 
     # --------------------------------------------------------
-    # Fill missing contract values
+    # REQUIRED COLUMNS
+    #
+    # This is the important DB fix.
     # --------------------------------------------------------
 
-    rows = conn.execute(
-        """
-        SELECT id, asset, contract
-        FROM signals
-        WHERE contract IS NULL
-           OR contract = ''
-        """
+    required_columns = {
+
+        "asset": "TEXT",
+
+        "contract": "TEXT",
+
+        "direction": "TEXT",
+
+        "pattern": "TEXT",
+
+        "entry_price": "REAL",
+
+        "tp": "REAL",
+
+        "sl": "REAL",
+
+        "rr": "REAL",
+
+        "signal_time": "TEXT",
+
+        "status": "TEXT DEFAULT 'OPEN'",
+
+        "exit_price": "REAL",
+
+        "exit_time": "TEXT",
+
+        "exit_reason": "TEXT",
+
+        "duration_seconds": "INTEGER",
+
+        "trendline_1h": "TEXT",
+
+        "trendline_15m": "TEXT",
+
+        "breakout_1h_time": "TEXT",
+
+        "breakout_15m_time": "TEXT",
+
+        # Backward compatibility
+        "breakout_5m_time": "TEXT",
+
+        # Backward compatibility
+        "trendline_5m": "TEXT",
+
+        "rvol": "REAL",
+    }
+
+    columns = conn.execute(
+        "PRAGMA table_info(signals)"
     ).fetchall()
 
-    for row in rows:
+    existing_columns = {
+        row["name"]
+        for row in columns
+    }
 
-        asset = row["asset"]
+    # --------------------------------------------------------
+    # Add missing columns
+    # --------------------------------------------------------
 
-        if asset:
-            conn.execute(
-                """
-                UPDATE signals
-                SET contract = ?
-                WHERE id = ?
-                """,
-                (
-                    contract_for_asset(asset),
-                    row["id"],
-                ),
+    for column, definition in (
+        required_columns.items()
+    ):
+
+        if column not in existing_columns:
+
+            print(
+                "[DB MIGRATION] "
+                f"Adding missing column: "
+                f"{column}"
             )
 
-    conn.commit()
+            try:
+
+                conn.execute(
+                    f"""
+                    ALTER TABLE signals
+                    ADD COLUMN {column}
+                    {definition}
+                    """
+                )
+
+                conn.commit()
+
+            except Exception as e:
+
+                print(
+                    f"[DB MIGRATION ERROR] "
+                    f"{column}: {e}"
+                )
+
+    # --------------------------------------------------------
+    # Make sure existing rows have contracts
+    # --------------------------------------------------------
+
+    try:
+
+        rows = conn.execute(
+            """
+            SELECT id, asset, contract
+            FROM signals
+            """
+        ).fetchall()
+
+        for row in rows:
+
+            asset = row["asset"]
+            contract = row["contract"]
+
+            if (
+                asset
+                and not contract
+            ):
+
+                conn.execute(
+                    """
+                    UPDATE signals
+                    SET contract = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        contract_for_asset(
+                            asset
+                        ),
+                        row["id"],
+                    ),
+                )
+
+        conn.commit()
+
+    except Exception:
+
+        traceback.print_exc()
+
     conn.close()
 
 
 # ============================================================
-# OPEN TRADE
+# OPEN TRADE CHECK
 # ============================================================
 
 def has_open_trade(
@@ -1342,22 +1692,31 @@ def has_open_trade(
     asset,
     direction,
 ):
-    row = conn.execute(
-        """
-        SELECT id
-        FROM signals
-        WHERE asset = ?
-          AND direction = ?
-          AND status = 'OPEN'
-        LIMIT 1
-        """,
-        (
-            asset,
-            direction,
-        ),
-    ).fetchone()
 
-    return row is not None
+    try:
+
+        row = conn.execute(
+            """
+            SELECT id
+            FROM signals
+            WHERE asset = ?
+              AND direction = ?
+              AND status = 'OPEN'
+            LIMIT 1
+            """,
+            (
+                asset,
+                direction,
+            ),
+        ).fetchone()
+
+        return row is not None
+
+    except Exception:
+
+        traceback.print_exc()
+
+        return False
 
 
 # ============================================================
@@ -1378,6 +1737,7 @@ def insert_signal(
     breakout_15m_time,
     rvol,
 ):
+
     conn = db_connect()
 
     try:
@@ -1387,9 +1747,10 @@ def insert_signal(
             asset,
             direction,
         ):
+
             return None
 
-        cur = conn.execute(
+        cursor = conn.execute(
             """
             INSERT INTO signals (
                 asset,
@@ -1410,28 +1771,39 @@ def insert_signal(
                 trendline_5m,
                 rvol
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN',
-                    ?, ?, ?, ?, ?, ?, ?)
+            VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                'OPEN',
+                ?, ?, ?, ?, ?, ?, ?
+            )
             """,
             (
                 asset,
-                contract_for_asset(asset),
+                contract_for_asset(
+                    asset
+                ),
                 direction,
                 "Trendline Breakout",
                 entry_price,
                 tp,
                 sl,
                 rr,
-                signal_time,
+                str(signal_time),
                 serialize_trendline(
                     trendline_1h
                 ),
                 serialize_trendline(
                     trendline_15m
                 ),
-                str(breakout_1h_time),
-                str(breakout_15m_time),
-                str(breakout_15m_time),
+                str(
+                    breakout_1h_time
+                ),
+                str(
+                    breakout_15m_time
+                ),
+                str(
+                    breakout_15m_time
+                ),
                 serialize_trendline(
                     trendline_15m
                 ),
@@ -1441,14 +1813,18 @@ def insert_signal(
 
         conn.commit()
 
-        return cur.lastrowid
+        return cursor.lastrowid
 
     except Exception:
+
         conn.rollback()
+
         traceback.print_exc()
+
         return None
 
     finally:
+
         conn.close()
 
 
@@ -1457,186 +1833,386 @@ def insert_signal(
 # ============================================================
 
 def update_open_trades():
-    conn = db_connect()
 
-    rows = conn.execute(
-        """
-        SELECT *
-        FROM signals
-        WHERE status = 'OPEN'
-        ORDER BY id
-        """
-    ).fetchall()
+    conn = db_connect()
 
     closed = []
 
-    for row in rows:
+    try:
 
-        asset = row["asset"]
-        direction = row["direction"]
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM signals
+            WHERE status = 'OPEN'
+            ORDER BY id
+            """
+        ).fetchall()
 
-        current = get_current_price(asset)
+        for row in rows:
 
-        if current is None:
-            continue
+            # ------------------------------------------------
+            # Convert sqlite Row to dict.
+            #
+            # This prevents legacy-schema crashes.
+            # ------------------------------------------------
 
-        entry = safe_float(
-            row["entry_price"]
-        )
+            data = dict(row)
 
-        tp = safe_float(row["tp"])
-        sl = safe_float(row["sl"])
-
-        if entry is None:
-            continue
-
-        signal_time = row["signal_time"]
-
-        try:
-            opened = pd.to_datetime(
-                signal_time,
-                utc=True,
-            ).to_pydatetime()
-        except Exception:
-            opened = now_utc()
-
-        duration = int(
-            (
-                now_utc()
-                - opened
-            ).total_seconds()
-        )
-
-        exit_price = None
-        exit_reason = None
-
-        # ----------------------------------------------------
-        # TP / SL
-        # Same candle equivalent:
-        # SL is checked first.
-        # ----------------------------------------------------
-
-        if direction == "LONG":
-
-            if current <= sl:
-                exit_price = current
-                exit_reason = "SL"
-
-            elif current >= tp:
-                exit_price = current
-                exit_reason = "TP"
-
-        else:
-
-            if current >= sl:
-                exit_price = current
-                exit_reason = "SL"
-
-            elif current <= tp:
-                exit_price = current
-                exit_reason = "TP"
-
-        # ----------------------------------------------------
-        # TIME EXIT
-        # ----------------------------------------------------
-
-        if (
-            exit_reason is None
-            and duration
-            >= MAX_HOLD_HOURS * 3600
-        ):
-
-            exit_price = current
-            exit_reason = "TIME"
-
-        if exit_reason is not None:
-
-            exit_time = now_utc().isoformat()
-
-            conn.execute(
-                """
-                UPDATE signals
-                SET status = 'CLOSED',
-                    exit_price = ?,
-                    exit_time = ?,
-                    exit_reason = ?,
-                    duration_seconds = ?
-                WHERE id = ?
-                """,
-                (
-                    exit_price,
-                    exit_time,
-                    exit_reason,
-                    duration,
-                    row["id"],
-                ),
+            trade_id = data.get(
+                "id"
             )
 
-            closed.append(
-                {
-                    "id": row["id"],
-                    "asset": asset,
-                    "direction": direction,
-                    "entry": entry,
-                    "exit": exit_price,
-                    "reason": exit_reason,
-                    "duration": duration,
-                }
+            asset = data.get(
+                "asset"
             )
 
-    conn.commit()
-    conn.close()
+            direction = data.get(
+                "direction"
+            )
 
-    return closed
+            entry = safe_float(
+                data.get(
+                    "entry_price"
+                )
+            )
 
+            tp = safe_float(
+                data.get(
+                    "tp"
+                )
+            )
 
-# ============================================================
-# OPEN TRADES
-# ============================================================
+            sl = safe_float(
+                data.get(
+                    "sl"
+                )
+            )
 
-def get_open_trades():
-    conn = db_connect()
+            signal_time = data.get(
+                "signal_time"
+            )
 
-    rows = conn.execute(
-        """
-        SELECT *
-        FROM signals
-        WHERE status = 'OPEN'
-        ORDER BY id DESC
-        """
-    ).fetchall()
+            # ------------------------------------------------
+            # Validate legacy row
+            # ------------------------------------------------
 
-    result = []
+            if not asset:
 
-    for row in rows:
+                print(
+                    f"[DB WARNING] "
+                    f"Trade ID={trade_id} "
+                    f"has no asset. Skipping."
+                )
 
-        item = dict(row)
+                continue
 
-        current = get_current_price(
-            row["asset"]
-        )
+            if direction not in (
+                "LONG",
+                "SHORT",
+            ):
 
-        item["current_price"] = current
+                print(
+                    f"[DB WARNING] "
+                    f"Trade ID={trade_id} "
+                    f"invalid direction. "
+                    f"Skipping."
+                )
 
-        try:
-            opened = pd.to_datetime(
-                row["signal_time"],
-                utc=True,
-            ).to_pydatetime()
+                continue
 
-            item["duration_seconds"] = int(
+            if (
+                entry is None
+                or tp is None
+                or sl is None
+            ):
+
+                print(
+                    f"[DB WARNING] "
+                    f"Trade ID={trade_id} "
+                    f"has incomplete "
+                    f"Entry/TP/SL. "
+                    f"Skipping."
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # Current price
+            # ------------------------------------------------
+
+            current = get_current_price(
+                asset
+            )
+
+            if current is None:
+                continue
+
+            # ------------------------------------------------
+            # Duration
+            # ------------------------------------------------
+
+            try:
+
+                opened = pd.to_datetime(
+                    signal_time,
+                    utc=True,
+                ).to_pydatetime()
+
+            except Exception:
+
+                opened = now_utc()
+
+            duration = int(
                 (
                     now_utc()
                     - opened
                 ).total_seconds()
             )
 
-        except Exception:
-            item["duration_seconds"] = 0
+            exit_price = None
+            exit_reason = None
 
-        result.append(item)
+            # ------------------------------------------------
+            # LONG
+            #
+            # SL checked first.
+            # ------------------------------------------------
 
-    conn.close()
+            if direction == "LONG":
+
+                if current <= sl:
+
+                    exit_price = current
+                    exit_reason = "SL"
+
+                elif current >= tp:
+
+                    exit_price = current
+                    exit_reason = "TP"
+
+            # ------------------------------------------------
+            # SHORT
+            # ------------------------------------------------
+
+            else:
+
+                if current >= sl:
+
+                    exit_price = current
+                    exit_reason = "SL"
+
+                elif current <= tp:
+
+                    exit_price = current
+                    exit_reason = "TP"
+
+            # ------------------------------------------------
+            # TIME EXIT
+            # ------------------------------------------------
+
+            if (
+                exit_reason is None
+                and duration
+                >= MAX_HOLD_HOURS * 3600
+            ):
+
+                exit_price = current
+                exit_reason = "TIME"
+
+            # ------------------------------------------------
+            # Close
+            # ------------------------------------------------
+
+            if exit_reason is not None:
+
+                exit_time = (
+                    now_utc()
+                    .isoformat()
+                )
+
+                conn.execute(
+                    """
+                    UPDATE signals
+                    SET status = 'CLOSED',
+                        exit_price = ?,
+                        exit_time = ?,
+                        exit_reason = ?,
+                        duration_seconds = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        exit_price,
+                        exit_time,
+                        exit_reason,
+                        duration,
+                        trade_id,
+                    ),
+                )
+
+                closed.append(
+                    {
+                        "id": trade_id,
+                        "asset": asset,
+                        "direction": direction,
+                        "entry": entry,
+                        "exit": exit_price,
+                        "reason": exit_reason,
+                        "duration": duration,
+                    }
+                )
+
+        conn.commit()
+
+    except Exception:
+
+        conn.rollback()
+
+        traceback.print_exc()
+
+    finally:
+
+        conn.close()
+
+    return closed
+
+
+# ============================================================
+# GET OPEN TRADES
+# ============================================================
+
+def get_open_trades():
+
+    conn = db_connect()
+
+    result = []
+
+    try:
+
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM signals
+            WHERE status = 'OPEN'
+            ORDER BY id DESC
+            """
+        ).fetchall()
+
+        for row in rows:
+
+            # ------------------------------------------------
+            # Convert to dict first.
+            # ------------------------------------------------
+
+            item = dict(row)
+
+            # ------------------------------------------------
+            # Safe access
+            # ------------------------------------------------
+
+            asset = item.get(
+                "asset"
+            )
+
+            direction = item.get(
+                "direction"
+            )
+
+            entry = safe_float(
+                item.get(
+                    "entry_price"
+                )
+            )
+
+            tp = safe_float(
+                item.get(
+                    "tp"
+                )
+            )
+
+            sl = safe_float(
+                item.get(
+                    "sl"
+                )
+            )
+
+            signal_time = item.get(
+                "signal_time"
+            )
+
+            # ------------------------------------------------
+            # Ignore malformed legacy records
+            # ------------------------------------------------
+
+            if (
+                not asset
+                or direction not in (
+                    "LONG",
+                    "SHORT",
+                )
+                or entry is None
+                or tp is None
+                or sl is None
+            ):
+
+                print(
+                    "[DB WARNING] "
+                    f"Ignoring malformed "
+                    f"OPEN trade "
+                    f"ID={item.get('id')}"
+                )
+
+                continue
+
+            # ------------------------------------------------
+            # Current
+            # ------------------------------------------------
+
+            current = get_current_price(
+                asset
+            )
+
+            item[
+                "current_price"
+            ] = current
+
+            # ------------------------------------------------
+            # Duration
+            # ------------------------------------------------
+
+            try:
+
+                opened = pd.to_datetime(
+                    signal_time,
+                    utc=True,
+                ).to_pydatetime()
+
+                duration = int(
+                    (
+                        now_utc()
+                        - opened
+                    ).total_seconds()
+                )
+
+            except Exception:
+
+                duration = 0
+
+            item[
+                "duration_seconds"
+            ] = duration
+
+            result.append(
+                item
+            )
+
+    except Exception:
+
+        traceback.print_exc()
+
+    finally:
+
+        conn.close()
 
     return result
 
@@ -1646,59 +2222,91 @@ def get_open_trades():
 # ============================================================
 
 def get_performance():
+
     conn = db_connect()
 
-    row = conn.execute(
-        """
-        SELECT
-            COUNT(*) AS total,
-            SUM(
-                CASE
-                    WHEN status = 'CLOSED'
-                     AND exit_reason = 'TP'
-                    THEN 1 ELSE 0
-                END
-            ) AS wins,
-            SUM(
-                CASE
-                    WHEN status = 'CLOSED'
-                     AND exit_reason = 'SL'
-                    THEN 1 ELSE 0
-                END
-            ) AS losses
-        FROM signals
-        """
-    ).fetchone()
+    try:
 
-    conn.close()
+        row = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                SUM(
+                    CASE
+                        WHEN status = 'CLOSED'
+                         AND exit_reason = 'TP'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS wins,
+                SUM(
+                    CASE
+                        WHEN status = 'CLOSED'
+                         AND exit_reason = 'SL'
+                        THEN 1
+                        ELSE 0
+                    END
+                ) AS losses
+            FROM signals
+            """
+        ).fetchone()
 
-    total = int(row["total"] or 0)
-    wins = int(row["wins"] or 0)
-    losses = int(row["losses"] or 0)
+        total = int(
+            row["total"] or 0
+        )
 
-    decided = wins + losses
+        wins = int(
+            row["wins"] or 0
+        )
 
-    winrate = (
-        wins / decided * 100
-        if decided
-        else 0
-    )
+        losses = int(
+            row["losses"] or 0
+        )
 
-    return {
-        "total": total,
-        "wins": wins,
-        "losses": losses,
-        "winrate": winrate,
-    }
+        decided = (
+            wins
+            + losses
+        )
+
+        winrate = (
+            wins
+            / decided
+            * 100.0
+            if decided
+            else 0.0
+        )
+
+        return {
+            "total": total,
+            "wins": wins,
+            "losses": losses,
+            "winrate": winrate,
+        }
+
+    except Exception:
+
+        traceback.print_exc()
+
+        return {
+            "total": 0,
+            "wins": 0,
+            "losses": 0,
+            "winrate": 0.0,
+        }
+
+    finally:
+
+        conn.close()
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM MESSAGE
 # ============================================================
 
 def telegram_send_message(
-    text,
+    message
 ):
+
     if not TELEGRAM_BOT_TOKEN:
         return False
 
@@ -1706,32 +2314,41 @@ def telegram_send_message(
         return False
 
     url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/"
+        "sendMessage"
     )
 
     try:
 
-        r = requests.post(
+        response = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
+                "text": message,
                 "disable_web_page_preview": True,
             },
             timeout=REQUEST_TIMEOUT,
         )
 
-        return r.status_code == 200
+        return (
+            response.status_code == 200
+        )
 
     except Exception:
+
         return False
 
+
+# ============================================================
+# TELEGRAM PHOTO
+# ============================================================
 
 def telegram_send_photo(
     image_bytes,
     caption,
 ):
+
     if not TELEGRAM_BOT_TOKEN:
         return False
 
@@ -1739,13 +2356,14 @@ def telegram_send_photo(
         return False
 
     url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/"
+        "sendPhoto"
     )
 
     try:
 
-        r = requests.post(
+        response = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -1761,9 +2379,12 @@ def telegram_send_photo(
             timeout=REQUEST_TIMEOUT,
         )
 
-        return r.status_code == 200
+        return (
+            response.status_code == 200
+        )
 
     except Exception:
+
         return False
 
 
@@ -1781,6 +2402,7 @@ def format_signal(
     rvol,
     signal_time,
 ):
+
     emoji = (
         "🟢 LONG"
         if direction == "LONG"
@@ -1803,19 +2425,60 @@ def format_signal(
 # ============================================================
 
 def format_open_trades():
+
     trades = get_open_trades()
 
     if not trades:
-        return "OPEN TRADES\nNone"
+
+        return (
+            "OPEN TRADES\n"
+            "None"
+        )
 
     lines = [
         "OPEN TRADES"
     ]
 
-    for t in trades:
+    for trade in trades:
 
-        asset = t["asset"]
-        direction = t["direction"]
+        asset = trade.get(
+            "asset"
+        )
+
+        direction = trade.get(
+            "direction"
+        )
+
+        entry = safe_float(
+            trade.get(
+                "entry_price"
+            )
+        )
+
+        current = safe_float(
+            trade.get(
+                "current_price"
+            )
+        )
+
+        tp = safe_float(
+            trade.get(
+                "tp"
+            )
+        )
+
+        sl = safe_float(
+            trade.get(
+                "sl"
+            )
+        )
+
+        if (
+            entry is None
+            or tp is None
+            or sl is None
+        ):
+            continue
 
         emoji = (
             "🟢"
@@ -1823,13 +2486,8 @@ def format_open_trades():
             else "🔴"
         )
 
-        current = t["current_price"]
+        if current is not None:
 
-        entry = safe_float(
-            t["entry_price"]
-        )
-
-        if current is not None and entry:
             change = pct_change(
                 entry,
                 current,
@@ -1837,25 +2495,36 @@ def format_open_trades():
 
             if direction == "SHORT":
                 change = -change
+
+            current_text = (
+                f"{current:.8g} "
+                f"({change:+.2f}%)"
+            )
+
         else:
-            change = 0.0
+
+            current_text = "-"
 
         duration = duration_text(
-            t["duration_seconds"]
+            trade.get(
+                "duration_seconds",
+                0,
+            )
         )
 
         lines.append(
-            f"\n{emoji} {direction} {asset}"
-            f"\nEntry: {entry:.8g}"
-            f"\nCurrent: "
-            f"{current:.8g}"
-            f" ({change:+.2f}%)"
-            f"\nSL: {float(t['sl']):.8g}"
-            f"\nTP: {float(t['tp']):.8g}"
-            f"\nDuration: {duration}"
+            f"\n{emoji} "
+            f"{direction} {asset}\n"
+            f"Entry: {entry:.8g}\n"
+            f"Current: {current_text}\n"
+            f"SL: {sl:.8g}\n"
+            f"TP: {tp:.8g}\n"
+            f"Duration: {duration}"
         )
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -1863,14 +2532,21 @@ def format_open_trades():
 # ============================================================
 
 def format_performance():
-    p = get_performance()
+
+    performance = (
+        get_performance()
+    )
 
     return (
         "PERFORMANCE\n"
-        f"Total: {p['total']}\n"
-        f"Wins: {p['wins']}\n"
-        f"Losses: {p['losses']}\n"
-        f"Win Rate: {p['winrate']:.2f}%"
+        f"Total: "
+        f"{performance['total']}\n"
+        f"Wins: "
+        f"{performance['wins']}\n"
+        f"Losses: "
+        f"{performance['losses']}\n"
+        f"Win Rate: "
+        f"{performance['winrate']:.2f}%"
     )
 
 
@@ -1888,44 +2564,41 @@ def create_chart(
     tp,
     sl,
 ):
-    """
-    Clear 15M chart.
 
-    Shows:
-      - candles
-      - complete trendline
-      - P1/P2/P3/... all touches
-      - breakout
-      - Entry
-      - TP
-      - SL
-    """
+    touches = trendline.get(
+        "touches",
+        []
+    )
 
-    # --------------------------------------------------------
-    # Keep enough recent candles for readable chart.
-    # But include all trendline points.
-    # --------------------------------------------------------
+    if len(touches) < MIN_TRENDLINE_TOUCHES:
 
-    touch_indices = [
-        int(x["index"])
-        for x in trendline.get(
-            "touches",
-            []
+        return None
+
+    important_indices = [
+        int(
+            p["index"]
         )
+        for p in touches
     ]
 
-    important = touch_indices + [
-        int(breakout["index"])
-    ]
+    important_indices.append(
+        int(
+            breakout["index"]
+        )
+    )
 
     left_index = max(
         0,
-        min(important) - 20
+        min(
+            important_indices
+        ) - 20,
     )
 
     right_index = min(
         len(df),
-        max(important) + 25
+        max(
+            important_indices
+        ) + 25,
     )
 
     chart_df = df.iloc[
@@ -1939,34 +2612,47 @@ def create_chart(
         figsize=(15, 8)
     )
 
-    x_values = np.arange(
-        len(chart_df)
-    )
-
     # --------------------------------------------------------
     # Candles
     # --------------------------------------------------------
 
-    for local_i, (_, candle) in enumerate(
+    for local_i, (
+        _,
+        candle,
+    ) in enumerate(
         chart_df.iterrows()
     ):
 
-        o = float(candle["open"])
-        h = float(candle["high"])
-        l = float(candle["low"])
-        c = float(candle["close"])
+        op = float(
+            candle["open"]
+        )
 
-        if c >= o:
-            body_low = o
-            body_high = c
-        else:
-            body_low = c
-            body_high = o
+        hi = float(
+            candle["high"]
+        )
+
+        lo = float(
+            candle["low"]
+        )
+
+        cl = float(
+            candle["close"]
+        )
+
+        body_low = min(
+            op,
+            cl,
+        )
+
+        body_high = max(
+            op,
+            cl,
+        )
 
         # Wick
         ax.plot(
             [local_i, local_i],
-            [l, h],
+            [lo, hi],
             linewidth=1,
         )
 
@@ -1976,16 +2662,18 @@ def create_chart(
         ax.add_patch(
             plt.Rectangle(
                 (
-                    local_i - width / 2,
+                    local_i
+                    - width / 2,
                     body_low,
                 ),
                 width,
                 max(
-                    body_high - body_low,
+                    body_high
+                    - body_low,
                     1e-12,
                 ),
                 fill=True,
-                alpha=0.7,
+                alpha=0.70,
             )
         )
 
@@ -2001,42 +2689,57 @@ def create_chart(
         right_index,
     ):
 
-        price = line_price(
+        value = line_price(
             trendline["p1"],
             trendline["p2"],
             global_i,
         )
 
         line_x.append(
-            global_i - left_index
+            global_i
+            - left_index
         )
 
-        line_y.append(price)
+        line_y.append(
+            value
+        )
 
     ax.plot(
         line_x,
         line_y,
-        linewidth=2.0,
-        label="Trendline",
+        linewidth=2.2,
+        label=(
+            "Trendline "
+            f"({len(touches)} touches)"
+        ),
     )
 
     # --------------------------------------------------------
     # ALL TOUCH POINTS
     # --------------------------------------------------------
 
-    for n, touch in enumerate(
-        trendline["touches"],
+    for number, touch in enumerate(
+        touches,
         start=1,
     ):
 
-        idx = int(
+        global_index = int(
             touch["index"]
         )
 
-        if idx < left_index or idx >= right_index:
+        if (
+            global_index
+            < left_index
+            or global_index
+            >= right_index
+        ):
             continue
 
-        local_x = idx - left_index
+        local_x = (
+            global_index
+            - left_index
+        )
+
         price = float(
             touch["price"]
         )
@@ -2044,17 +2747,20 @@ def create_chart(
         ax.scatter(
             [local_x],
             [price],
-            s=70,
-            zorder=5,
+            s=80,
+            zorder=6,
         )
 
         ax.annotate(
-            f"P{n}",
+            f"P{number}",
             (
                 local_x,
                 price,
             ),
-            xytext=(0, 10),
+            xytext=(
+                0,
+                10,
+            ),
             textcoords="offset points",
             ha="center",
             fontsize=10,
@@ -2089,7 +2795,7 @@ def create_chart(
             [by],
             marker="*",
             s=220,
-            zorder=8,
+            zorder=10,
             label="BREAKOUT",
         )
 
@@ -2099,7 +2805,10 @@ def create_chart(
                 bx,
                 by,
             ),
-            xytext=(0, 18),
+            xytext=(
+                0,
+                18,
+            ),
             textcoords="offset points",
             ha="center",
             fontsize=11,
@@ -2107,14 +2816,16 @@ def create_chart(
         )
 
     # --------------------------------------------------------
-    # ENTRY
+    # Entry
     # --------------------------------------------------------
 
     ax.axhline(
         entry,
         linestyle="--",
         linewidth=1.5,
-        label=f"Entry {entry:.8g}",
+        label=(
+            f"Entry {entry:.8g}"
+        ),
     )
 
     # --------------------------------------------------------
@@ -2125,7 +2836,9 @@ def create_chart(
         tp,
         linestyle="--",
         linewidth=1.2,
-        label=f"TP {tp:.8g}",
+        label=(
+            f"TP {tp:.8g}"
+        ),
     )
 
     # --------------------------------------------------------
@@ -2136,16 +2849,18 @@ def create_chart(
         sl,
         linestyle="--",
         linewidth=1.2,
-        label=f"SL {sl:.8g}",
+        label=(
+            f"SL {sl:.8g}"
+        ),
     )
 
     # --------------------------------------------------------
-    # X labels
+    # X-axis
     # --------------------------------------------------------
 
     step = max(
         1,
-        len(chart_df) // 10
+        len(chart_df) // 10,
     )
 
     ticks = list(
@@ -2160,11 +2875,12 @@ def create_chart(
 
     for i in ticks:
 
-        ts = chart_df.iloc[i]["time"]
-
         try:
+
             dt = pd.Timestamp(
-                ts
+                chart_df.iloc[i][
+                    "time"
+                ]
             ).tz_convert(
                 TEHRAN_TZ
             )
@@ -2176,11 +2892,19 @@ def create_chart(
             )
 
         except Exception:
+
             labels.append(
-                str(ts)
+                str(
+                    chart_df.iloc[i][
+                        "time"
+                    ]
+                )
             )
 
-    ax.set_xticks(ticks)
+    ax.set_xticks(
+        ticks
+    )
+
     ax.set_xticklabels(
         labels,
         rotation=35,
@@ -2193,8 +2917,8 @@ def create_chart(
 
     ax.set_title(
         f"KRAKEN 15M {asset} "
-        f"{direction} Trendline Breakout"
-        f" | {trendline['touch_count']} touches"
+        f"{direction} Trendline Breakout "
+        f"| {len(touches)} Touches"
     )
 
     ax.set_xlabel(
@@ -2216,20 +2940,22 @@ def create_chart(
 
     plt.tight_layout()
 
-    buffer = io.BytesIO()
+    image = io.BytesIO()
 
     plt.savefig(
-        buffer,
+        image,
         format="png",
         dpi=150,
         bbox_inches="tight",
     )
 
-    plt.close(fig)
+    plt.close(
+        fig
+    )
 
-    buffer.seek(0)
+    image.seek(0)
 
-    return buffer.getvalue()
+    return image.getvalue()
 
 
 # ============================================================
@@ -2237,16 +2963,41 @@ def create_chart(
 # ============================================================
 
 def send_new_signal_alert(
-    asset,
-    direction,
-    entry,
-    sl,
-    tp,
-    rr,
-    rvol,
-    signal_time,
-    chart_bytes,
+    signal
 ):
+
+    asset = signal[
+        "asset"
+    ]
+
+    direction = signal[
+        "direction"
+    ]
+
+    entry = signal[
+        "entry"
+    ]
+
+    sl = signal[
+        "sl"
+    ]
+
+    tp = signal[
+        "tp"
+    ]
+
+    rr = signal[
+        "rr"
+    ]
+
+    rvol = signal[
+        "rvol"
+    ]
+
+    signal_time = signal[
+        "signal_time"
+    ]
+
     message = (
         "🚨 NEW SIGNAL\n\n"
         + format_signal(
@@ -2265,31 +3016,74 @@ def send_new_signal_alert(
         message
     )
 
-    if chart_bytes:
+    chart = signal.get(
+        "chart"
+    )
+
+    if chart:
+
+        emoji = (
+            "🟢 LONG"
+            if direction == "LONG"
+            else "🔴 SHORT"
+        )
+
         caption = (
-            f"{'🟢 LONG' if direction == 'LONG' else '🔴 SHORT'} "
-            f"{asset} | 15M\n"
+            f"{emoji} {asset} | 15M\n"
             f"Entry: {entry:.8g}\n"
             f"SL: {sl:.8g}\n"
-            f"TP: {tp:.8g}"
+            f"TP: {tp:.8g}\n"
+            f"RR: {rr:.2f}\n"
+            f"RVOL: {rvol:.2f}"
         )
 
         telegram_send_photo(
-            chart_bytes,
+            chart,
             caption,
         )
 
 
 # ============================================================
-# CLOSE ALERT
+# CLOSE ALERTS
 # ============================================================
 
 def send_close_alerts(
-    closed_trades,
+    closed_trades
 ):
+
     for trade in closed_trades:
 
-        direction = trade["direction"]
+        asset = trade[
+            "asset"
+        ]
+
+        direction = trade[
+            "direction"
+        ]
+
+        entry = trade[
+            "entry"
+        ]
+
+        exit_price = trade[
+            "exit"
+        ]
+
+        reason = trade[
+            "reason"
+        ]
+
+        duration = trade[
+            "duration"
+        ]
+
+        result = pct_change(
+            entry,
+            exit_price,
+        )
+
+        if direction == "SHORT":
+            result = -result
 
         emoji = (
             "🟢"
@@ -2297,29 +3091,15 @@ def send_close_alerts(
             else "🔴"
         )
 
-        entry = trade["entry"]
-        exit_price = trade["exit"]
-
-        if direction == "LONG":
-            result_pct = pct_change(
-                entry,
-                exit_price,
-            )
-        else:
-            result_pct = -pct_change(
-                entry,
-                exit_price,
-            )
-
         message = (
-            f"🔔 CLOSE {trade['asset']} "
+            f"🔔 CLOSE {asset}\n"
             f"{emoji} {direction}\n"
             f"Entry: {entry:.8g}\n"
             f"Exit: {exit_price:.8g}\n"
-            f"Result: {result_pct:+.2f}%\n"
-            f"Reason: {trade['reason']}\n"
+            f"Result: {result:+.2f}%\n"
+            f"Reason: {reason}\n"
             f"Duration: "
-            f"{duration_text(trade['duration'])}"
+            f"{duration_text(duration)}"
         )
 
         telegram_send_message(
@@ -2331,11 +3111,12 @@ def send_close_alerts(
 # SCAN ONE ASSET
 # ============================================================
 
-def scan_asset(asset):
-    global SCAN_STATS
+def scan_asset(
+    asset
+):
 
     # --------------------------------------------------------
-    # 1H
+    # 1H OHLC
     # --------------------------------------------------------
 
     df_1h = get_ohlc(
@@ -2351,66 +3132,91 @@ def scan_asset(asset):
     ] += 1
 
     # --------------------------------------------------------
-    # Find both 1H trendlines
+    # 1H LONG TRENDLINE
     # --------------------------------------------------------
 
-    long_line_1h = find_valid_trendline(
-        df_1h,
-        "LONG",
+    long_line_1h = (
+        find_valid_trendline(
+            df_1h,
+            "LONG",
+        )
     )
 
-    short_line_1h = find_valid_trendline(
-        df_1h,
-        "SHORT",
+    # --------------------------------------------------------
+    # 1H SHORT TRENDLINE
+    # --------------------------------------------------------
+
+    short_line_1h = (
+        find_valid_trendline(
+            df_1h,
+            "SHORT",
+        )
     )
 
     if long_line_1h:
+
         SCAN_STATS[
             "trendlines_1h"
         ] += 1
 
     if short_line_1h:
+
         SCAN_STATS[
             "trendlines_1h"
         ] += 1
 
     # --------------------------------------------------------
-    # 1H breakouts
+    # 1H LONG BREAKOUT
     # --------------------------------------------------------
 
-    long_breakout_1h = (
-        find_latest_breakout(
-            df_1h,
-            long_line_1h,
-            "LONG",
-        )
-        if long_line_1h
-        else None
-    )
+    long_breakout_1h = None
 
-    short_breakout_1h = (
-        find_latest_breakout(
-            df_1h,
-            short_line_1h,
-            "SHORT",
+    if long_line_1h:
+
+        long_breakout_1h = (
+            find_latest_breakout(
+                df_1h,
+                long_line_1h,
+                "LONG",
+            )
         )
-        if short_line_1h
-        else None
-    )
+
+    # --------------------------------------------------------
+    # 1H SHORT BREAKOUT
+    # --------------------------------------------------------
+
+    short_breakout_1h = None
+
+    if short_line_1h:
+
+        short_breakout_1h = (
+            find_latest_breakout(
+                df_1h,
+                short_line_1h,
+                "SHORT",
+            )
+        )
 
     if long_breakout_1h:
+
         SCAN_STATS[
             "breakouts_1h"
         ] += 1
 
     if short_breakout_1h:
+
         SCAN_STATS[
             "breakouts_1h"
         ] += 1
 
+    # --------------------------------------------------------
+    # Candidate breakouts
+    # --------------------------------------------------------
+
     candidates = []
 
     if long_breakout_1h:
+
         candidates.append(
             (
                 long_breakout_1h,
@@ -2420,6 +3226,7 @@ def scan_asset(asset):
         )
 
     if short_breakout_1h:
+
         candidates.append(
             (
                 short_breakout_1h,
@@ -2431,35 +3238,44 @@ def scan_asset(asset):
     if not candidates:
         return None
 
+    # --------------------------------------------------------
     # Most recent 1H breakout
+    # --------------------------------------------------------
+
     candidates.sort(
-        key=lambda x: x[0]["index"],
+        key=lambda item:
+        item[0]["index"],
         reverse=True,
     )
 
-    breakout_1h, direction, trendline_1h = (
-        candidates[0]
-    )
+    (
+        breakout_1h,
+        direction,
+        trendline_1h,
+    ) = candidates[0]
 
     # --------------------------------------------------------
-    # Existing open trade
+    # Check existing open trade
     # --------------------------------------------------------
 
     conn = db_connect()
 
-    already_open = has_open_trade(
-        conn,
-        asset,
-        direction,
-    )
+    try:
 
-    conn.close()
+        if has_open_trade(
+            conn,
+            asset,
+            direction,
+        ):
 
-    if already_open:
-        return None
+            return None
+
+    finally:
+
+        conn.close()
 
     # --------------------------------------------------------
-    # 15M
+    # 15M OHLC
     # --------------------------------------------------------
 
     df_15m = get_ohlc(
@@ -2475,12 +3291,14 @@ def scan_asset(asset):
     ] += 1
 
     # --------------------------------------------------------
-    # Find 15M trendline
+    # 15M trendline
     # --------------------------------------------------------
 
-    trendline_15m = find_valid_trendline(
-        df_15m,
-        direction,
+    trendline_15m = (
+        find_valid_trendline(
+            df_15m,
+            direction,
+        )
     )
 
     if trendline_15m is None:
@@ -2491,10 +3309,10 @@ def scan_asset(asset):
     ] += 1
 
     # --------------------------------------------------------
-    # Map 1H breakout time to 15M index
+    # Find first 15M candle at/after 1H breakout
     # --------------------------------------------------------
 
-    breakout_time = pd.Timestamp(
+    breakout_1h_time = pd.Timestamp(
         breakout_1h["time"]
     )
 
@@ -2504,24 +3322,29 @@ def scan_asset(asset):
         len(df_15m)
     ):
 
-        if (
-            pd.Timestamp(
-                df_15m.iloc[i]["time"]
-            )
-            >= breakout_time
-        ):
+        candle_time = pd.Timestamp(
+            df_15m.iloc[i][
+                "time"
+            ]
+        )
+
+        if candle_time >= breakout_1h_time:
+
             start_index = i
+
             break
 
     # --------------------------------------------------------
     # 15M breakout
     # --------------------------------------------------------
 
-    breakout_15m = find_latest_breakout(
-        df_15m,
-        trendline_15m,
-        direction,
-        start_index=start_index,
+    breakout_15m = (
+        find_latest_breakout(
+            df_15m,
+            trendline_15m,
+            direction,
+            start_index=start_index,
+        )
     )
 
     if breakout_15m is None:
@@ -2537,7 +3360,9 @@ def scan_asset(asset):
 
     rvol = calculate_rvol(
         df_15m,
-        breakout_15m["index"],
+        breakout_15m[
+            "index"
+        ],
     )
 
     if rvol is None:
@@ -2554,12 +3379,18 @@ def scan_asset(asset):
     # Entry
     # --------------------------------------------------------
 
-    entry_index = breakout_15m["index"]
+    entry_index = (
+        breakout_15m[
+            "index"
+        ]
+    )
 
     entry_price = float(
         df_15m.iloc[
             entry_index
-        ]["close"]
+        ][
+            "close"
+        ]
     )
 
     # --------------------------------------------------------
@@ -2576,9 +3407,17 @@ def scan_asset(asset):
     if risk is None:
         return None
 
-    tp = risk["tp"]
-    sl = risk["sl"]
-    rr = risk["rr"]
+    tp = risk[
+        "tp"
+    ]
+
+    sl = risk[
+        "sl"
+    ]
+
+    rr = risk[
+        "rr"
+    ]
 
     # --------------------------------------------------------
     # Signal time
@@ -2587,7 +3426,9 @@ def scan_asset(asset):
     signal_time = (
         df_15m.iloc[
             entry_index
-        ]["time"]
+        ][
+            "time"
+        ]
     )
 
     # --------------------------------------------------------
@@ -2601,11 +3442,21 @@ def scan_asset(asset):
         tp=tp,
         sl=sl,
         rr=rr,
-        signal_time=str(signal_time),
+        signal_time=str(
+            signal_time
+        ),
         trendline_1h=trendline_1h,
         trendline_15m=trendline_15m,
-        breakout_1h_time=breakout_1h["time"],
-        breakout_15m_time=breakout_15m["time"],
+        breakout_1h_time=(
+            breakout_1h[
+                "time"
+            ]
+        ),
+        breakout_15m_time=(
+            breakout_15m[
+                "time"
+            ]
+        ),
         rvol=rvol,
     )
 
@@ -2648,22 +3499,30 @@ def scan_asset(asset):
 
 
 # ============================================================
-# SCAN SUMMARY
+# RESET STATS
 # ============================================================
 
 def reset_stats():
+
     for key in SCAN_STATS:
+
         SCAN_STATS[key] = 0
 
 
+# ============================================================
+# SCAN SUMMARY
+# ============================================================
+
 def scan_summary():
+
     return (
         "📊 SCAN SUMMARY\n\n"
         f"Version: {VERSION}\n"
-        f"Mode: PAPER ONLY\n"
-        f"Time: Tehran\n\n"
+        "Mode: PAPER ONLY\n"
+        "Time: Tehran\n\n"
         f"Assets Scanned: "
-        f"{SCAN_STATS['assets_scanned']}/{len(ASSETS)}\n"
+        f"{SCAN_STATS['assets_scanned']}/"
+        f"{len(ASSETS)}\n"
         f"1H OHLC OK: "
         f"{SCAN_STATS['ohlc_1h_ok']}\n"
         f"15M OHLC OK: "
@@ -2684,20 +3543,21 @@ def scan_summary():
 
 
 # ============================================================
-# MAIN REPORT
+# PERIODIC REPORT
 # ============================================================
 
 def send_periodic_report():
-    parts = [
-        scan_summary(),
-        "",
-        format_open_trades(),
-        "",
-        format_performance(),
-    ]
+
+    report = (
+        scan_summary()
+        + "\n\n"
+        + format_open_trades()
+        + "\n\n"
+        + format_performance()
+    )
 
     telegram_send_message(
-        "\n".join(parts)
+        report
     )
 
 
@@ -2707,51 +3567,80 @@ def send_periodic_report():
 
 def main():
 
-    print("=" * 70)
     print(
-        f"KRAKEN FUTURES TRENDLINE "
+        "=" * 70
+    )
+
+    print(
+        "KRAKEN FUTURES TRENDLINE "
         f"LIVE SIGNAL SCANNER V{VERSION}"
     )
-    print("=" * 70)
-    print("MODE: PAPER ONLY")
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "MODE: PAPER ONLY"
+    )
+
     print(
         f"MIN TRENDLINE TOUCHES: "
         f"{MIN_TRENDLINE_TOUCHES}"
     )
+
     print(
         f"RVOL MIN: {RVOL_MIN}"
     )
+
     print(
         f"MIN RR: {MIN_RR}"
     )
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
+    # --------------------------------------------------------
+    # Safety
+    # --------------------------------------------------------
 
     if REAL_TRADING:
+
         raise RuntimeError(
             "REAL_TRADING must remain False."
         )
+
+    # --------------------------------------------------------
+    # DB migration FIRST
+    # --------------------------------------------------------
 
     init_db()
 
     reset_stats()
 
     # --------------------------------------------------------
-    # First reconcile open trades
+    # Reconcile existing open trades
     # --------------------------------------------------------
 
     try:
-        closed = update_open_trades()
+
+        closed = (
+            update_open_trades()
+        )
 
         if closed:
+
             send_close_alerts(
                 closed
             )
 
     except Exception:
+
         traceback.print_exc()
 
     # --------------------------------------------------------
-    # Scan assets
+    # Scan
     # --------------------------------------------------------
 
     new_signals = []
@@ -2775,9 +3664,10 @@ def main():
             if signal:
 
                 print(
-                    f"[SIGNAL] "
+                    "[SIGNAL] "
                     f"{signal['asset']} "
                     f"{signal['direction']} "
+                    f"Entry="
                     f"{signal['entry']}"
                 )
 
@@ -2786,10 +3676,15 @@ def main():
                 )
 
                 # ------------------------------------------------
-                # Only one new signal per scan
+                # Maximum one new signal
+                # per scan
                 # ------------------------------------------------
 
-                if len(new_signals) >= MAX_SIGNALS_PER_SCAN:
+                if (
+                    len(new_signals)
+                    >= MAX_SIGNALS_PER_SCAN
+                ):
+
                     break
 
         except Exception:
@@ -2801,44 +3696,67 @@ def main():
             traceback.print_exc()
 
     # --------------------------------------------------------
-    # Send new signal
+    # New signal alerts
     # --------------------------------------------------------
 
     for signal in new_signals:
 
-        send_new_signal_alert(
-            asset=signal["asset"],
-            direction=signal["direction"],
-            entry=signal["entry"],
-            sl=signal["sl"],
-            tp=signal["tp"],
-            rr=signal["rr"],
-            rvol=signal["rvol"],
-            signal_time=signal["signal_time"],
-            chart_bytes=signal["chart"],
-        )
+        try:
+
+            send_new_signal_alert(
+                signal
+            )
+
+        except Exception:
+
+            traceback.print_exc()
 
     # --------------------------------------------------------
     # Unified report
     # --------------------------------------------------------
 
-    send_periodic_report()
+    try:
+
+        send_periodic_report()
+
+    except Exception:
+
+        traceback.print_exc()
 
     # --------------------------------------------------------
-    # Console
+    # Console report
     # --------------------------------------------------------
 
     print()
-    print(scan_summary())
-    print()
-    print(format_open_trades())
-    print()
-    print(format_performance())
+    print(
+        scan_summary()
+    )
 
     print()
-    print("=" * 70)
-    print("SCAN FINISHED")
-    print("=" * 70)
+
+    print(
+        format_open_trades()
+    )
+
+    print()
+
+    print(
+        format_performance()
+    )
+
+    print()
+
+    print(
+        "=" * 70
+    )
+
+    print(
+        "SCAN FINISHED"
+    )
+
+    print(
+        "=" * 70
+    )
 
 
 # ============================================================
