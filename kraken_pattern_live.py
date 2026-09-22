@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES TRENDLINE LIVE SIGNAL SCANNER
-# VERSION 7.2.9
+# VERSION 7.3.0
 # ============================================================
 #
 # PAPER ONLY
@@ -55,7 +55,12 @@
 # - CLOSED CANDLES ONLY
 # - NO LOOKAHEAD
 # - NO STALE HISTORICAL BREAKOUT
+# - 1H BREAKOUT MUST BE FRESH
+# - 15M BREAKOUT MUST BE FRESH
+# - 5M BREAKOUT MUST BE FRESH
 # - FINAL CONFIRMATION MUST BE LATEST CLOSED 5M CANDLE
+# - 15M BREAKOUT -> FINAL SIGNAL MAX 45 MINUTES
+# - 5M BREAKOUT -> FINAL SIGNAL MAX 15 MINUTES
 # - EXISTING DB PRESERVED
 # - NEW STRATEGY GENERATION STARTS FROM ZERO
 # - LEGACY OPEN TRADES ARE IGNORED
@@ -88,7 +93,7 @@ import matplotlib.pyplot as plt
 # VERSION / MODE
 # ============================================================
 
-VERSION = "7.2.9"
+VERSION = "7.3.0"
 
 REAL_TRADING = False
 PAPER_TRADING = True
@@ -204,16 +209,42 @@ OHLC_COUNT = 300
 # ============================================================
 # FRESHNESS
 # ============================================================
+#
+# These are intentionally strict.
+#
+# 1H breakout:
+#   maximum age = 3 hours
+#
+# 15M breakout:
+#   maximum age = 45 minutes
+#
+# 5M breakout:
+#   maximum age = 15 minutes
+#
+# The age is checked BOTH by candle count and by real elapsed
+# time. This prevents old historical candles from becoming
+# "fresh" simply because the dataframe happens to end there.
+# ============================================================
 
-MAX_1H_BREAKOUT_AGE_BARS = 1
-
-MAX_15M_BREAKOUT_AGE_BARS = 4
-
+MAX_1H_BREAKOUT_AGE_BARS = 3
+MAX_15M_BREAKOUT_AGE_BARS = 3
 MAX_5M_BREAKOUT_AGE_BARS = 3
 
-MAX_RETEST_WAIT_BARS = 6
+MAX_1H_BREAKOUT_AGE_MINUTES = 180
+MAX_15M_BREAKOUT_AGE_MINUTES = 45
+MAX_5M_BREAKOUT_AGE_MINUTES = 15
 
-MAX_CONFIRMATION_WAIT_BARS = 3
+# 15M breakout must reach final signal within 45 minutes.
+MAX_15M_TO_SIGNAL_MINUTES = 45
+
+# 5M breakout must reach final signal within 15 minutes.
+MAX_5M_TO_SIGNAL_MINUTES = 15
+
+# Retest must happen quickly after 5M breakout.
+MAX_RETEST_WAIT_BARS = 3
+
+# Confirmation must happen quickly after retest.
+MAX_CONFIRMATION_WAIT_BARS = 2
 
 RETEST_TOLERANCE_PCT = 0.15
 
@@ -257,12 +288,14 @@ SESSION.headers.update({
 # ============================================================
 
 def now_utc():
+
     return datetime.now(
         timezone.utc
     )
 
 
 def now_tehran():
+
     return now_utc().astimezone(
         TEHRAN_TZ
     )
@@ -344,6 +377,36 @@ def iso_time(value):
 
     except Exception:
         return str(value)
+
+
+def minutes_between(
+    start_time,
+    end_time
+):
+
+    try:
+
+        start = pd.to_datetime(
+            start_time,
+            utc=True
+        )
+
+        end = pd.to_datetime(
+            end_time,
+            utc=True
+        )
+
+        minutes = (
+            end - start
+        ).total_seconds() / 60.0
+
+        if pd.isna(minutes):
+            return None
+
+        return float(minutes)
+
+    except Exception:
+        return None
 
 
 # ============================================================
@@ -667,10 +730,18 @@ def get_ohlc(
 
     try:
 
+        # IMPORTANT:
+        # Do NOT use from=0.
+        #
+        # The scanner needs the latest market candles.
+        # Requesting the whole historical range can expose very
+        # old candles and can make stale historical breakouts
+        # appear in candidate logic.
+        #
+        # The endpoint is asked for the latest OHLC data.
         response = SESSION.get(
             url,
             params={
-                "from": 0,
                 "count": OHLC_COUNT,
             },
             timeout=20
@@ -722,8 +793,11 @@ def get_ohlc(
             .reset_index(drop=True)
         )
 
-        # Last candle = current/open candle.
-        # Only closed candles are used.
+        # ----------------------------------------------------
+        # Remove current/open candle.
+        # Closed candles only.
+        # ----------------------------------------------------
+
         if len(df) >= 2:
             df = df.iloc[:-1].copy()
 
@@ -1418,11 +1492,22 @@ def breakout_condition(
 # ============================================================
 # FRESH BREAKOUT
 # ============================================================
+#
+# Critical freshness protection:
+#
+# 1. Only last N candles are inspected.
+# 2. Breakout must be younger than the configured real-time age.
+# 3. If after_time is provided, breakout must happen AFTER it.
+# 4. Breakout -> current latest closed candle age is checked.
+#
+# Therefore a 2022 breakout cannot become a 2026 candidate.
+# ============================================================
 
 def find_fresh_breakout(
     df,
     direction,
     max_age_bars,
+    max_age_minutes,
     after_time=None
 ):
 
@@ -1436,6 +1521,20 @@ def find_fresh_breakout(
         len(df) - 1
     )
 
+    latest_time = df.iloc[
+        last_index
+    ]["time"]
+
+    try:
+
+        latest_time = pd.to_datetime(
+            latest_time,
+            utc=True
+        )
+
+    except Exception:
+        return None
+
     start_index = max(
         PIVOT_LEFT
         + PIVOT_RIGHT
@@ -1443,6 +1542,8 @@ def find_fresh_breakout(
         last_index
         - max_age_bars
     )
+
+    candidates = []
 
     for i in range(
         start_index,
@@ -1453,11 +1554,58 @@ def find_fresh_breakout(
             df.iloc[i]["time"]
         )
 
-        if (
-            after_time is not None
-            and current_time <= after_time
+        try:
+
+            current_time = pd.to_datetime(
+                current_time,
+                utc=True
+            )
+
+        except Exception:
+            continue
+
+        # ----------------------------------------------------
+        # Must happen after previous timeframe breakout.
+        # ----------------------------------------------------
+
+        if after_time is not None:
+
+            try:
+
+                after_ts = pd.to_datetime(
+                    after_time,
+                    utc=True
+                )
+
+                if current_time <= after_ts:
+                    continue
+
+            except Exception:
+                continue
+
+        # ----------------------------------------------------
+        # REAL-TIME AGE CHECK
+        # ----------------------------------------------------
+
+        age_minutes = (
+            latest_time
+            - current_time
+        ).total_seconds() / 60.0
+
+        if pd.isna(
+            age_minutes
         ):
             continue
+
+        if age_minutes < 0:
+            continue
+
+        if age_minutes > max_age_minutes:
+            continue
+
+        # ----------------------------------------------------
+        # TRENDLINE MUST EXIST BEFORE BREAKOUT CANDLE.
+        # ----------------------------------------------------
 
         line = find_valid_trendline(
             df,
@@ -1522,7 +1670,7 @@ def find_fresh_breakout(
             ):
                 continue
 
-            return {
+            candidates.append({
                 "index": i,
                 "time": current_time,
                 "price": safe_float(
@@ -1531,9 +1679,85 @@ def find_fresh_breakout(
                 "trendline": line,
                 "line_price": current_line,
                 "direction": direction,
-            }
+                "age_minutes": float(
+                    age_minutes
+                ),
+            })
 
-    return None
+    if not candidates:
+        return None
+
+    # Most recent valid breakout.
+    candidates.sort(
+        key=lambda x:
+            x["time"],
+        reverse=True
+    )
+
+    return candidates[0]
+
+
+# ============================================================
+# EXPLICIT BREAKOUT FRESHNESS
+# ============================================================
+
+def is_breakout_fresh(
+    breakout,
+    latest_time,
+    max_age_minutes,
+    after_time=None
+):
+
+    if breakout is None:
+        return False
+
+    try:
+
+        breakout_time = pd.to_datetime(
+            breakout.get("time"),
+            utc=True
+        )
+
+        latest = pd.to_datetime(
+            latest_time,
+            utc=True
+        )
+
+    except Exception:
+        return False
+
+    if after_time is not None:
+
+        try:
+
+            after_ts = pd.to_datetime(
+                after_time,
+                utc=True
+            )
+
+            if breakout_time <= after_ts:
+                return False
+
+        except Exception:
+            return False
+
+    age_minutes = (
+        latest
+        - breakout_time
+    ).total_seconds() / 60.0
+
+    if pd.isna(
+        age_minutes
+    ):
+        return False
+
+    if age_minutes < 0:
+        return False
+
+    return (
+        age_minutes
+        <= max_age_minutes
+    )
 
 
 # ============================================================
@@ -1626,9 +1850,34 @@ def find_first_retest_and_confirmation(
         "index"
     ]
 
+    b_time = breakout[
+        "time"
+    ]
+
     last_index = (
         len(df) - 1
     )
+
+    latest_time = df.iloc[
+        last_index
+    ]["time"]
+
+    # --------------------------------------------------------
+    # 5M BREAKOUT MUST STILL BE FRESH.
+    # --------------------------------------------------------
+
+    if not is_breakout_fresh(
+        breakout,
+        latest_time,
+        MAX_5M_BREAKOUT_AGE_MINUTES
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # FIRST RETEST
+    #
+    # Maximum 3 x 5M = 15 minutes.
+    # --------------------------------------------------------
 
     retest = None
 
@@ -1722,6 +1971,28 @@ def find_first_retest_and_confirmation(
     if retest is None:
         return None
 
+    # --------------------------------------------------------
+    # FINAL SIGNAL MUST STILL BE WITHIN 15M BREAKOUT WINDOW.
+    # --------------------------------------------------------
+
+    retest_age_from_b5 = minutes_between(
+        b_time,
+        retest["time"]
+    )
+
+    if (
+        retest_age_from_b5 is None
+        or retest_age_from_b5
+        > MAX_5M_TO_SIGNAL_MINUTES
+    ):
+        return None
+
+    # --------------------------------------------------------
+    # CONFIRMATION
+    #
+    # Maximum 2 x 5M candles after retest.
+    # --------------------------------------------------------
+
     confirmation = None
 
     confirm_start = (
@@ -1792,6 +2063,30 @@ def find_first_retest_and_confirmation(
         if not confirmed:
             continue
 
+        confirmation_time = candle[
+            "time"
+        ]
+
+        # ----------------------------------------------------
+        # 5M BREAKOUT -> SIGNAL <= 15 MINUTES
+        # ----------------------------------------------------
+
+        signal_age_from_b5 = minutes_between(
+            b_time,
+            confirmation_time
+        )
+
+        if (
+            signal_age_from_b5 is None
+            or signal_age_from_b5
+            > MAX_5M_TO_SIGNAL_MINUTES
+        ):
+            continue
+
+        # ----------------------------------------------------
+        # FINAL CONFIRMATION MUST BE LATEST CLOSED 5M.
+        # ----------------------------------------------------
+
         if (
             REQUIRE_LATEST_CONFIRMATION
             and
@@ -1801,7 +2096,7 @@ def find_first_retest_and_confirmation(
 
         confirmation = {
             "index": i,
-            "time": candle["time"],
+            "time": confirmation_time,
             "price": candle_close,
         }
 
@@ -2134,18 +2429,6 @@ def strategy_epoch_key():
 
 def initialize_strategy_generation():
 
-    """
-    Starts a clean strategy generation when VERSION changes.
-
-    Existing DB rows remain untouched.
-    Rows created before this epoch are ignored by:
-      - open trade management
-      - open trade display
-      - duplicate checks
-      - performance
-      - current strategy open-trade blocking
-    """
-
     version_key = strategy_generation_key()
     epoch_key = strategy_epoch_key()
 
@@ -2250,27 +2533,6 @@ def get_strategy_epoch():
         return None
 
     return value
-
-
-def current_generation_filter_sql():
-
-    epoch = get_strategy_epoch()
-
-    if not epoch:
-        return (
-            "1 = 0",
-            ()
-        )
-
-    return (
-        """
-        signal_time IS NOT NULL
-        AND signal_time >= ?
-        """,
-        (
-            epoch,
-        )
-    )
 
 
 # ============================================================
@@ -2753,13 +3015,9 @@ def get_performance():
         )).fetchall()
 
         total = 0
-
         wins = 0
-
         losses = 0
-
         time_exits = 0
-
         pnl_pct = 0.0
 
         for row in rows:
@@ -2808,15 +3066,12 @@ def get_performance():
             ]
 
             if reason == "TP":
-
                 wins += 1
 
             elif reason == "SL":
-
                 losses += 1
 
             elif reason == "TIME":
-
                 time_exits += 1
 
         decided = (
@@ -2945,15 +3200,12 @@ def fmt_price(value):
         return "-"
 
     if value >= 1000:
-
         return f"{value:,.2f}"
 
     if value >= 1:
-
         return f"{value:.4f}"
 
     if value >= 0.01:
-
         return f"{value:.6f}"
 
     return f"{value:.8f}"
@@ -3036,22 +3288,25 @@ def candidate_score(candidate):
         0
     )
 
-    trendline_1h = candidate.get(
-        "trendline_1h"
-    )
-
-    trendline_15m = candidate.get(
-        "trendline_15m"
-    )
-
-    trendline_5m = candidate.get(
-        "trendline_5m"
-    )
-
     for line, weight in (
-        (trendline_1h, 0.01),
-        (trendline_15m, 0.02),
-        (trendline_5m, 0.03),
+        (
+            candidate.get(
+                "trendline_1h"
+            ),
+            0.01
+        ),
+        (
+            candidate.get(
+                "trendline_15m"
+            ),
+            0.02
+        ),
+        (
+            candidate.get(
+                "trendline_5m"
+            ),
+            0.03
+        ),
     ):
 
         if line is None:
@@ -3268,15 +3523,12 @@ def close_message(
 ):
 
     if trade["reason"] == "TP":
-
         emoji = "🟢"
 
     elif trade["reason"] == "SL":
-
         emoji = "🔴"
 
     else:
-
         emoji = "⏱"
 
     entry = safe_float(
@@ -3606,10 +3858,6 @@ def maybe_send_periodic_report(
 
     parts.append("")
 
-    # --------------------------------------------------------
-    # NEW SIGNAL HAS PRIORITY
-    # --------------------------------------------------------
-
     if (
         not new_signal_sent
         and top_candidate is not None
@@ -3916,7 +4164,6 @@ def create_15m_chart(
         start
     )
 
-    # Pivot highs
     for p in highs:
 
         idx = p.get(
@@ -3960,7 +4207,6 @@ def create_15m_chart(
             fontsize=8
         )
 
-    # Pivot lows
     for p in lows:
 
         idx = p.get(
@@ -4099,7 +4345,6 @@ def create_15m_chart(
                 label="15M Trendline"
             )
 
-        # Trendline touches
         for touch_number, p in enumerate(
             line.get(
                 "touches",
@@ -4570,6 +4815,186 @@ def make_candidate(
 
 
 # ============================================================
+# VALIDATE ENTIRE CANDIDATE CHAIN
+# ============================================================
+
+def validate_candidate_freshness(
+    candidate
+):
+
+    if candidate is None:
+        return False
+
+    df1 = candidate.get(
+        "df1"
+    )
+
+    df15 = candidate.get(
+        "df15"
+    )
+
+    df5 = candidate.get(
+        "df5"
+    )
+
+    b1 = candidate.get(
+        "b1"
+    )
+
+    b15 = candidate.get(
+        "b15"
+    )
+
+    b5 = candidate.get(
+        "b5"
+    )
+
+    # --------------------------------------------------------
+    # 1H freshness
+    # --------------------------------------------------------
+
+    if b1 is not None:
+
+        if df1 is None:
+            return False
+
+        latest_1h = df1.iloc[
+            -1
+        ]["time"]
+
+        if not is_breakout_fresh(
+            b1,
+            latest_1h,
+            MAX_1H_BREAKOUT_AGE_MINUTES
+        ):
+            return False
+
+    # --------------------------------------------------------
+    # 15M freshness
+    # --------------------------------------------------------
+
+    if b15 is not None:
+
+        if df15 is None:
+            return False
+
+        latest_15m = df15.iloc[
+            -1
+        ]["time"]
+
+        if not is_breakout_fresh(
+            b15,
+            latest_15m,
+            MAX_15M_BREAKOUT_AGE_MINUTES,
+            after_time=(
+                b1["time"]
+                if b1 is not None
+                else None
+            )
+        ):
+            return False
+
+        # 15M breakout must be linked to the current
+        # 1H breakout cycle.
+        if b1 is not None:
+
+            chain_age = minutes_between(
+                b1["time"],
+                b15["time"]
+            )
+
+            if (
+                chain_age is None
+                or chain_age < 0
+                or chain_age
+                > MAX_1H_BREAKOUT_AGE_MINUTES
+            ):
+                return False
+
+    # --------------------------------------------------------
+    # 5M freshness
+    # --------------------------------------------------------
+
+    if b5 is not None:
+
+        if df5 is None:
+            return False
+
+        latest_5m = df5.iloc[
+            -1
+        ]["time"]
+
+        if not is_breakout_fresh(
+            b5,
+            latest_5m,
+            MAX_5M_BREAKOUT_AGE_MINUTES,
+            after_time=(
+                b15["time"]
+                if b15 is not None
+                else None
+            )
+        ):
+            return False
+
+        if b15 is not None:
+
+            chain_age = minutes_between(
+                b15["time"],
+                b5["time"]
+            )
+
+            if (
+                chain_age is None
+                or chain_age < 0
+                or chain_age
+                > MAX_15M_TO_SIGNAL_MINUTES
+            ):
+                return False
+
+    # --------------------------------------------------------
+    # Retest / confirmation freshness
+    # --------------------------------------------------------
+
+    confirmation = candidate.get(
+        "confirmation"
+    )
+
+    if confirmation is not None:
+
+        if b15 is not None:
+
+            age = minutes_between(
+                b15["time"],
+                confirmation["time"]
+            )
+
+            if (
+                age is None
+                or age < 0
+                or age
+                > MAX_15M_TO_SIGNAL_MINUTES
+            ):
+                return False
+
+        if b5 is not None:
+
+            age = minutes_between(
+                b5["time"],
+                confirmation["time"]
+            )
+
+            if (
+                age is None
+                or age < 0
+                or age
+                > MAX_5M_TO_SIGNAL_MINUTES
+            ):
+                return False
+
+    return True
+
+
+# ============================================================
 # SCAN ONE ASSET
 # ============================================================
 
@@ -4624,7 +5049,8 @@ def scan_asset(
         b1 = find_fresh_breakout(
             df1,
             direction,
-            MAX_1H_BREAKOUT_AGE_BARS
+            MAX_1H_BREAKOUT_AGE_BARS,
+            MAX_1H_BREAKOUT_AGE_MINUTES
         )
 
         if b1 is not None:
@@ -4640,6 +5066,7 @@ def scan_asset(
     if not b1_candidates:
         return []
 
+    # Most recent fresh 1H breakout only.
     b1 = max(
         b1_candidates,
         key=lambda x:
@@ -4693,9 +5120,15 @@ def scan_asset(
             b1=b1
         )
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     stats[
         "trendlines_15m"
@@ -4709,11 +5142,14 @@ def scan_asset(
         df15,
         direction,
         MAX_15M_BREAKOUT_AGE_BARS,
+        MAX_15M_BREAKOUT_AGE_MINUTES,
         after_time=b1["time"]
     )
 
     if b15 is None:
 
+        # The 1H breakout itself is still valid,
+        # but there is no fresh 15M breakout.
         candidate = make_candidate(
             asset,
             direction,
@@ -4724,13 +5160,36 @@ def scan_asset(
             line15=line15
         )
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     stats[
         "breakouts_15m"
     ] += 1
+
+    # --------------------------------------------------------
+    # Explicit 1H -> 15M chain check.
+    # --------------------------------------------------------
+
+    chain_age = minutes_between(
+        b1["time"],
+        b15["time"]
+    )
+
+    if (
+        chain_age is None
+        or chain_age < 0
+        or chain_age
+        > MAX_1H_BREAKOUT_AGE_MINUTES
+    ):
+        return []
 
     # ========================================================
     # RVOL
@@ -4754,9 +5213,15 @@ def scan_asset(
             line15=line15
         )
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     if rvol < RVOL_MIN:
 
@@ -4772,9 +5237,15 @@ def scan_asset(
             rvol=rvol
         )
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     stats[
         "rvol_confirmed"
@@ -4807,9 +5278,15 @@ def scan_asset(
             rvol=rvol
         )
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     stats[
         "ohlc_5m_ok"
@@ -4835,9 +5312,15 @@ def scan_asset(
             rvol=rvol
         )
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     stats[
         "trendlines_5m"
@@ -4851,6 +5334,7 @@ def scan_asset(
         df5,
         direction,
         MAX_5M_BREAKOUT_AGE_BARS,
+        MAX_5M_BREAKOUT_AGE_MINUTES,
         after_time=b15["time"]
     )
 
@@ -4870,13 +5354,37 @@ def scan_asset(
             rvol=rvol
         )
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     stats[
         "breakouts_5m"
     ] += 1
+
+    # --------------------------------------------------------
+    # 15M BREAKOUT -> 5M BREAKOUT must remain in the
+    # current 15M strategy cycle.
+    # --------------------------------------------------------
+
+    b15_to_b5 = minutes_between(
+        b15["time"],
+        b5["time"]
+    )
+
+    if (
+        b15_to_b5 is None
+        or b15_to_b5 < 0
+        or b15_to_b5
+        > MAX_15M_TO_SIGNAL_MINUTES
+    ):
+        return []
 
     # ========================================================
     # RETEST + CONFIRMATION
@@ -4890,7 +5398,7 @@ def scan_asset(
         )
     )
 
-    # No retest yet
+    # No valid fresh retest/confirmation.
     if rc is None:
 
         candidate = make_candidate(
@@ -4908,9 +5416,15 @@ def scan_asset(
             rvol=rvol
         )
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     retest = rc[
         "retest"
@@ -4924,9 +5438,6 @@ def scan_asset(
         "retests_5m"
     ] += 1
 
-    # If confirmation is not available,
-    # find_first_retest_and_confirmation returns None.
-    # The candidate above remains the correct stage.
     if confirmation is None:
 
         candidate = make_candidate(
@@ -4945,13 +5456,49 @@ def scan_asset(
             retest=retest
         )
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     stats[
         "confirmations_5m"
     ] += 1
+
+    # ========================================================
+    # FINAL CONFIRMATION FRESHNESS
+    # ========================================================
+
+    b15_to_confirmation = minutes_between(
+        b15["time"],
+        confirmation["time"]
+    )
+
+    if (
+        b15_to_confirmation is None
+        or b15_to_confirmation < 0
+        or b15_to_confirmation
+        > MAX_15M_TO_SIGNAL_MINUTES
+    ):
+        return []
+
+    b5_to_confirmation = minutes_between(
+        b5["time"],
+        confirmation["time"]
+    )
+
+    if (
+        b5_to_confirmation is None
+        or b5_to_confirmation < 0
+        or b5_to_confirmation
+        > MAX_5M_TO_SIGNAL_MINUTES
+    ):
+        return []
 
     if REQUIRE_LATEST_CONFIRMATION:
 
@@ -4960,26 +5507,7 @@ def scan_asset(
         ] != (
             len(df5) - 1
         ):
-
-            candidate = make_candidate(
-                asset,
-                direction,
-                "RETEST",
-                df1,
-                df15,
-                df5=df5,
-                b1=b1,
-                b15=b15,
-                b5=b5,
-                line15=line15,
-                line5=line5,
-                rvol=rvol,
-                retest=retest
-            )
-
-            return [
-                candidate
-            ]
+            return []
 
     # ========================================================
     # ENTRY
@@ -4992,26 +5520,7 @@ def scan_asset(
     )
 
     if entry_price is None:
-
-        candidate = make_candidate(
-            asset,
-            direction,
-            "RETEST",
-            df1,
-            df15,
-            df5=df5,
-            b1=b1,
-            b15=b15,
-            b5=b5,
-            line15=line15,
-            line5=line5,
-            rvol=rvol,
-            retest=retest
-        )
-
-        return [
-            candidate
-        ]
+        return []
 
     entry_time = confirmation[
         "time"
@@ -5049,9 +5558,15 @@ def scan_asset(
 
         candidate["entry"] = entry_price
 
-        return [
+        if validate_candidate_freshness(
             candidate
-        ]
+        ):
+
+            return [
+                candidate
+            ]
+
+        return []
 
     # ========================================================
     # FINAL READY SIGNAL
@@ -5076,6 +5591,11 @@ def scan_asset(
     )
 
     candidate["entry"] = entry_price
+
+    if not validate_candidate_freshness(
+        candidate
+    ):
+        return []
 
     stats[
         "ready"
@@ -5103,7 +5623,6 @@ def summary_message(
         candidate_text = (
             f"{top_candidate['asset']} "
             f"{top_candidate['direction']} "
-            f""
             f"({top_candidate.get('stage', '-')})"
         )
 
@@ -5112,6 +5631,10 @@ def summary_message(
         f"Version: {VERSION}\n"
         f"Mode: PAPER ONLY\n"
         f"Time: Tehran\n\n"
+        f"Freshness:\n"
+        f"1H ≤ {MAX_1H_BREAKOUT_AGE_MINUTES}m\n"
+        f"15M ≤ {MAX_15M_BREAKOUT_AGE_MINUTES}m\n"
+        f"5M ≤ {MAX_5M_BREAKOUT_AGE_MINUTES}m\n\n"
         f"Assets Scanned: "
         f"{assets_count}/{len(ASSETS)}\n"
         f"1H OHLC OK: "
@@ -5175,6 +5698,28 @@ def main():
     print(
         "PAPER_TRADING:",
         PAPER_TRADING
+    )
+
+    print(
+        "FRESHNESS:"
+    )
+
+    print(
+        "1H:",
+        MAX_1H_BREAKOUT_AGE_MINUTES,
+        "minutes"
+    )
+
+    print(
+        "15M:",
+        MAX_15M_BREAKOUT_AGE_MINUTES,
+        "minutes"
+    )
+
+    print(
+        "5M:",
+        MAX_5M_BREAKOUT_AGE_MINUTES,
+        "minutes"
     )
 
     if REAL_TRADING:
@@ -5364,7 +5909,7 @@ def main():
             traceback.print_exc()
 
     # ========================================================
-    # CLEAN / SCORE CANDIDATES
+    # CLEAN / SCORE / FRESHNESS FILTER
     # ========================================================
 
     clean_candidates = []
@@ -5372,6 +5917,11 @@ def main():
     for candidate in candidates:
 
         try:
+
+            if not validate_candidate_freshness(
+                candidate
+            ):
+                continue
 
             candidate[
                 "candidate_score"
@@ -5541,10 +6091,6 @@ def main():
             f"{signal['entry']}"
         )
 
-        # ----------------------------------------------------
-        # SIGNAL MESSAGE
-        # ----------------------------------------------------
-
         telegram_send(
             signal_message(
                 signal
@@ -5552,7 +6098,7 @@ def main():
         )
 
         # ----------------------------------------------------
-        # 15M SIGNAL CHART
+        # SIGNAL 15M CHART
         # ----------------------------------------------------
 
         try:
@@ -5587,14 +6133,13 @@ def main():
 
             traceback.print_exc()
 
-        # Only one signal per scan.
         break
 
     # ========================================================
     # TOP CANDIDATE
     #
     # IMPORTANT:
-    # If a NEW SIGNAL was inserted, candidate is NOT sent.
+    # Only fresh candidates can reach this section.
     # ========================================================
 
     top_candidate = None
@@ -5605,6 +6150,9 @@ def main():
             x for x in candidates
             if x.get("stage")
             != "READY"
+            and validate_candidate_freshness(
+                x
+            )
         ]
 
         non_ready.sort(
@@ -5663,10 +6211,6 @@ def main():
                     "candidate_score"
                 )
             )
-
-            # ------------------------------------------------
-            # TOP CANDIDATE MESSAGE
-            # ------------------------------------------------
 
             telegram_send(
                 candidate_message(
@@ -5745,9 +6289,6 @@ def main():
 
     # ========================================================
     # PERIODIC REPORT
-    #
-    # If this scan created a new signal, no candidate is
-    # included in the periodic report for this scan.
     # ========================================================
 
     try:
