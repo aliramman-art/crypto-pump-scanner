@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES TRENDLINE LIVE SIGNAL SCANNER
-# VERSION 7.2.8
+# VERSION 7.2.9
 # ============================================================
 #
 # PAPER ONLY
@@ -57,8 +57,13 @@
 # - NO STALE HISTORICAL BREAKOUT
 # - FINAL CONFIRMATION MUST BE LATEST CLOSED 5M CANDLE
 # - EXISTING DB PRESERVED
-# - PERFORMANCE IS CUMULATIVE
-# - INVALID LEGACY DB ROWS MUST NOT CRASH SCANNER
+# - NEW STRATEGY GENERATION STARTS FROM ZERO
+# - LEGACY OPEN TRADES ARE IGNORED
+# - LEGACY PERFORMANCE IS IGNORED
+# - NEW SIGNAL HAS PRIORITY OVER TOP CANDIDATE
+# - TOP CANDIDATE IS SHOWN ONLY WHEN THERE IS NO NEW SIGNAL
+# - TOP CANDIDATE CHART = 15M
+# - SIGNAL CHART = 15M
 # ============================================================
 
 import os
@@ -83,7 +88,7 @@ import matplotlib.pyplot as plt
 # VERSION / MODE
 # ============================================================
 
-VERSION = "7.2.8"
+VERSION = "7.2.9"
 
 REAL_TRADING = False
 PAPER_TRADING = True
@@ -717,7 +722,7 @@ def get_ohlc(
             .reset_index(drop=True)
         )
 
-        # Last candle is current/open candle.
+        # Last candle = current/open candle.
         # Only closed candles are used.
         if len(df) >= 2:
             df = df.iloc[:-1].copy()
@@ -1625,10 +1630,6 @@ def find_first_retest_and_confirmation(
         len(df) - 1
     )
 
-    # --------------------------------------------------------
-    # FIRST RETEST
-    # --------------------------------------------------------
-
     retest = None
 
     retest_start = (
@@ -1720,10 +1721,6 @@ def find_first_retest_and_confirmation(
 
     if retest is None:
         return None
-
-    # --------------------------------------------------------
-    # CONFIRMATION
-    # --------------------------------------------------------
 
     confirmation = None
 
@@ -2122,6 +2119,161 @@ def init_db():
 
 
 # ============================================================
+# STRATEGY GENERATION
+# ============================================================
+
+def strategy_generation_key():
+
+    return "strategy_generation_version"
+
+
+def strategy_epoch_key():
+
+    return "strategy_generation_epoch"
+
+
+def initialize_strategy_generation():
+
+    """
+    Starts a clean strategy generation when VERSION changes.
+
+    Existing DB rows remain untouched.
+    Rows created before this epoch are ignored by:
+      - open trade management
+      - open trade display
+      - duplicate checks
+      - performance
+      - current strategy open-trade blocking
+    """
+
+    version_key = strategy_generation_key()
+    epoch_key = strategy_epoch_key()
+
+    conn = db_connect()
+
+    try:
+
+        row = conn.execute("""
+            SELECT value
+            FROM scanner_meta
+            WHERE key = ?
+        """, (
+            version_key,
+        )).fetchone()
+
+        existing_version = (
+            row["value"]
+            if row is not None
+            else None
+        )
+
+        epoch_row = conn.execute("""
+            SELECT value
+            FROM scanner_meta
+            WHERE key = ?
+        """, (
+            epoch_key,
+        )).fetchone()
+
+        existing_epoch = (
+            epoch_row["value"]
+            if epoch_row is not None
+            else None
+        )
+
+        if (
+            existing_version == VERSION
+            and existing_epoch
+        ):
+
+            return existing_epoch
+
+        new_epoch = now_utc().isoformat()
+
+        conn.execute("""
+            INSERT INTO scanner_meta (
+                key,
+                value
+            )
+            VALUES (?, ?)
+            ON CONFLICT(key)
+            DO UPDATE SET
+                value = excluded.value
+        """, (
+            version_key,
+            VERSION,
+        ))
+
+        conn.execute("""
+            INSERT INTO scanner_meta (
+                key,
+                value
+            )
+            VALUES (?, ?)
+            ON CONFLICT(key)
+            DO UPDATE SET
+                value = excluded.value
+        """, (
+            epoch_key,
+            new_epoch,
+        ))
+
+        conn.commit()
+
+        print(
+            "NEW STRATEGY GENERATION STARTED"
+        )
+
+        print(
+            "Version:",
+            VERSION
+        )
+
+        print(
+            "Epoch:",
+            new_epoch
+        )
+
+        return new_epoch
+
+    finally:
+        conn.close()
+
+
+def get_strategy_epoch():
+
+    value = get_meta(
+        strategy_epoch_key()
+    )
+
+    if not value:
+        return None
+
+    return value
+
+
+def current_generation_filter_sql():
+
+    epoch = get_strategy_epoch()
+
+    if not epoch:
+        return (
+            "1 = 0",
+            ()
+        )
+
+    return (
+        """
+        signal_time IS NOT NULL
+        AND signal_time >= ?
+        """,
+        (
+            epoch,
+        )
+    )
+
+
+# ============================================================
 # OPEN TRADE CHECK
 # ============================================================
 
@@ -2129,6 +2281,11 @@ def has_open_trade(
     asset,
     direction
 ):
+
+    epoch = get_strategy_epoch()
+
+    if not epoch:
+        return False
 
     conn = db_connect()
 
@@ -2140,10 +2297,12 @@ def has_open_trade(
             WHERE asset = ?
               AND direction = ?
               AND status = 'OPEN'
+              AND signal_time >= ?
             LIMIT 1
         """, (
             asset,
             direction,
+            epoch,
         )).fetchone()
 
         return row is not None
@@ -2162,6 +2321,11 @@ def signal_already_exists(
     confirmation_time
 ):
 
+    epoch = get_strategy_epoch()
+
+    if not epoch:
+        return False
+
     conn = db_connect()
 
     try:
@@ -2175,6 +2339,7 @@ def signal_already_exists(
             FROM signals
             WHERE asset = ?
               AND direction = ?
+              AND signal_time >= ?
               AND (
                     confirmation_5m_time = ?
                     OR signal_time = ?
@@ -2183,6 +2348,7 @@ def signal_already_exists(
         """, (
             asset,
             direction,
+            epoch,
             confirmation_iso,
             confirmation_iso,
         )).fetchone()
@@ -2310,6 +2476,11 @@ def insert_signal(
 
 def update_open_trades():
 
+    epoch = get_strategy_epoch()
+
+    if not epoch:
+        return []
+
     conn = db_connect()
 
     try:
@@ -2318,7 +2489,10 @@ def update_open_trades():
             SELECT *
             FROM signals
             WHERE status = 'OPEN'
-        """).fetchall()
+              AND signal_time >= ?
+        """, (
+            epoch,
+        )).fetchall()
 
         closed = []
 
@@ -2355,11 +2529,6 @@ def update_open_trades():
                 row["sl"]
             )
 
-            # ------------------------------------------------
-            # Legacy / incomplete DB row.
-            # Do NOT crash and do NOT delete it.
-            # ------------------------------------------------
-
             if (
                 entry is None
                 or tp is None
@@ -2368,10 +2537,11 @@ def update_open_trades():
             ):
                 print(
                     "WARNING: "
-                    f"Incomplete OPEN trade "
+                    f"Incomplete CURRENT "
+                    f"OPEN trade "
                     f"id={row['id']} "
                     f"asset={asset}. "
-                    "Skipped."
+                    "Skipped safely."
                 )
                 continue
 
@@ -2476,6 +2646,11 @@ def update_open_trades():
 
 def get_open_trades():
 
+    epoch = get_strategy_epoch()
+
+    if not epoch:
+        return []
+
     conn = db_connect()
 
     try:
@@ -2484,8 +2659,11 @@ def get_open_trades():
             SELECT *
             FROM signals
             WHERE status = 'OPEN'
+              AND signal_time >= ?
             ORDER BY signal_time DESC
-        """).fetchall()
+        """, (
+            epoch,
+        )).fetchall()
 
         result = []
 
@@ -2542,6 +2720,19 @@ def get_open_trades():
 
 def get_performance():
 
+    epoch = get_strategy_epoch()
+
+    if not epoch:
+
+        return {
+            "total": 0,
+            "wins": 0,
+            "losses": 0,
+            "time": 0,
+            "win_rate": 0.0,
+            "pnl_pct": 0.0,
+        }
+
     conn = db_connect()
 
     try:
@@ -2554,9 +2745,12 @@ def get_performance():
                 exit_reason
             FROM signals
             WHERE status = 'CLOSED'
+              AND signal_time >= ?
               AND entry_price IS NOT NULL
               AND exit_price IS NOT NULL
-        """).fetchall()
+        """, (
+            epoch,
+        )).fetchall()
 
         total = 0
 
@@ -2815,6 +3009,212 @@ def format_duration(
 
 
 # ============================================================
+# CANDIDATE SCORE
+# ============================================================
+
+def candidate_score(candidate):
+
+    score = 0.0
+
+    stage = candidate.get(
+        "stage",
+        ""
+    )
+
+    stage_points = {
+        "1H_BREAKOUT": 20,
+        "15M_BREAKOUT": 40,
+        "RVOL_CONFIRMED": 55,
+        "5M_TRENDLINE": 65,
+        "5M_BREAKOUT": 75,
+        "RETEST": 85,
+        "READY": 100,
+    }
+
+    score += stage_points.get(
+        stage,
+        0
+    )
+
+    trendline_1h = candidate.get(
+        "trendline_1h"
+    )
+
+    trendline_15m = candidate.get(
+        "trendline_15m"
+    )
+
+    trendline_5m = candidate.get(
+        "trendline_5m"
+    )
+
+    for line, weight in (
+        (trendline_1h, 0.01),
+        (trendline_15m, 0.02),
+        (trendline_5m, 0.03),
+    ):
+
+        if line is None:
+            continue
+
+        touches = len(
+            line.get(
+                "touches",
+                []
+            )
+        )
+
+        score += (
+            touches
+            * weight
+        )
+
+    rvol = safe_float(
+        candidate.get(
+            "rvol"
+        )
+    )
+
+    if rvol is not None:
+
+        score += min(
+            10.0,
+            max(
+                0.0,
+                (rvol - RVOL_MIN)
+                * 5.0
+            )
+        )
+
+    rr = safe_float(
+        candidate.get(
+            "rr"
+        )
+    )
+
+    if rr is not None:
+
+        score += min(
+            10.0,
+            max(
+                0.0,
+                (rr - MIN_RR)
+                * 5.0
+            )
+        )
+
+    return float(
+        score
+    )
+
+
+# ============================================================
+# CANDIDATE MESSAGE
+# ============================================================
+
+def candidate_message(
+    candidate
+):
+
+    emoji = (
+        "🟢"
+        if candidate["direction"]
+        == "LONG"
+        else "🔴"
+    )
+
+    stage = candidate.get(
+        "stage",
+        "-"
+    )
+
+    score = safe_float(
+        candidate.get(
+            "candidate_score"
+        ),
+        0
+    )
+
+    rvol = safe_float(
+        candidate.get(
+            "rvol"
+        )
+    )
+
+    rr = safe_float(
+        candidate.get(
+            "rr"
+        )
+    )
+
+    lines = [
+        "🏆 TOP CANDIDATE",
+        "",
+        f"{emoji} "
+        f"{candidate['asset']} "
+        f"{candidate['direction']}",
+        f"Score: {score:.1f}",
+        f"Stage: {stage}",
+        "",
+        "1H Breakout: "
+        f"{format_time(candidate.get('breakout_1h_time'))}",
+        "15M Breakout: "
+        f"{format_time(candidate.get('breakout_15m_time'))}",
+        "RVOL: "
+        f"{rvol:.2f}"
+        if rvol is not None
+        else "RVOL: -",
+    ]
+
+    if candidate.get(
+        "breakout_5m_time"
+    ) is not None:
+
+        lines.append(
+            "5M Breakout: "
+            f"{format_time(candidate.get('breakout_5m_time'))}"
+        )
+
+    if candidate.get(
+        "retest_5m_time"
+    ) is not None:
+
+        lines.append(
+            "5M Retest: "
+            f"{format_time(candidate.get('retest_5m_time'))}"
+        )
+
+    if rr is not None:
+
+        lines.append(
+            f"RR: {rr:.2f}"
+        )
+
+    if candidate.get(
+        "entry"
+    ) is not None:
+
+        lines.extend([
+            "",
+            f"Entry: "
+            f"{fmt_price(candidate.get('entry'))}",
+            f"TP: "
+            f"{fmt_price(candidate.get('tp'))}",
+            f"SL: "
+            f"{fmt_price(candidate.get('sl'))}",
+        ])
+
+    lines.extend([
+        "",
+        "Waiting for next strategy condition."
+    ])
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
 # SIGNAL MESSAGE
 # ============================================================
 
@@ -2830,6 +3230,7 @@ def signal_message(
     )
 
     return (
+        f"🆕 NEW SIGNAL\n\n"
         f"{emoji} "
         f"{signal['direction']} "
         f"{signal['asset']}\n"
@@ -3002,10 +3403,6 @@ def open_trades_message():
             "duration"
         )
 
-        # ----------------------------------------------------
-        # INVALID / LEGACY DB ROW
-        # ----------------------------------------------------
-
         if (
             not asset
             or not direction
@@ -3032,10 +3429,6 @@ def open_trades_message():
             lines.append("")
 
             continue
-
-        # ----------------------------------------------------
-        # NORMAL OPEN TRADE
-        # ----------------------------------------------------
 
         emoji = (
             "🟢"
@@ -3170,10 +3563,13 @@ def set_meta(
 # PERIODIC REPORT
 # ============================================================
 
-def maybe_send_periodic_report():
+def maybe_send_periodic_report(
+    top_candidate=None,
+    new_signal_sent=False
+):
 
     key = (
-        "last_periodic_report"
+        f"last_periodic_report_{VERSION}"
     )
 
     last = get_meta(
@@ -3199,14 +3595,40 @@ def maybe_send_periodic_report():
         except Exception:
             pass
 
-    text = (
-        "📊 PERIODIC REPORT\n\n"
-        f"{open_trades_message()}\n\n"
-        f"{performance_message()}"
+    parts = [
+        "📊 PERIODIC REPORT",
+        "",
+    ]
+
+    parts.append(
+        open_trades_message()
+    )
+
+    parts.append("")
+
+    # --------------------------------------------------------
+    # NEW SIGNAL HAS PRIORITY
+    # --------------------------------------------------------
+
+    if (
+        not new_signal_sent
+        and top_candidate is not None
+    ):
+
+        parts.append(
+            candidate_message(
+                top_candidate
+            )
+        )
+
+        parts.append("")
+
+    parts.append(
+        performance_message()
     )
 
     telegram_send(
-        text
+        "\n".join(parts)
     )
 
     set_meta(
@@ -3322,7 +3744,7 @@ def serialize_trendline(
 
 
 # ============================================================
-# CHART
+# CHART HELPERS
 # ============================================================
 
 def trendline_y_for_index(
@@ -3340,12 +3762,42 @@ def trendline_y_for_index(
     )
 
 
-def create_signal_chart(
+def nearest_pivots_for_chart(
+    df,
+    start
+):
+
+    highs = find_pivot_highs(
+        df
+    )
+
+    lows = find_pivot_lows(
+        df
+    )
+
+    highs = [
+        p for p in highs
+        if p["index"] >= start
+    ]
+
+    lows = [
+        p for p in lows
+        if p["index"] >= start
+    ]
+
+    return highs, lows
+
+
+# ============================================================
+# 15M CHART
+# ============================================================
+
+def create_15m_chart(
     signal
 ):
 
     df = signal.get(
-        "df5"
+        "df15"
     )
 
     if df is None:
@@ -3355,19 +3807,11 @@ def create_signal_chart(
         return None
 
     line = signal.get(
-        "trendline_5m"
+        "trendline_15m"
     )
 
     breakout = signal.get(
-        "b5"
-    )
-
-    retest = signal.get(
-        "retest"
-    )
-
-    confirmation = signal.get(
-        "confirmation"
+        "b15"
     )
 
     entry_price = safe_float(
@@ -3382,13 +3826,6 @@ def create_signal_chart(
         signal.get("sl")
     )
 
-    if (
-        entry_price is None
-        or tp is None
-        or sl is None
-    ):
-        return None
-
     start = max(
         0,
         len(df) - 120
@@ -3399,7 +3836,7 @@ def create_signal_chart(
     ].copy()
 
     fig, ax = plt.subplots(
-        figsize=(15, 8)
+        figsize=(16, 9)
     )
 
     # --------------------------------------------------------
@@ -3457,10 +3894,10 @@ def create_signal_chart(
         ax.add_patch(
             plt.Rectangle(
                 (
-                    local_i - 0.3,
+                    local_i - 0.30,
                     body_low
                 ),
-                0.6,
+                0.60,
                 max(
                     body_high
                     - body_low,
@@ -3471,7 +3908,143 @@ def create_signal_chart(
         )
 
     # --------------------------------------------------------
-    # TRENDLINE
+    # IMPORTANT PIVOTS
+    # --------------------------------------------------------
+
+    highs, lows = nearest_pivots_for_chart(
+        df,
+        start
+    )
+
+    # Pivot highs
+    for p in highs:
+
+        idx = p.get(
+            "index"
+        )
+
+        price = safe_float(
+            p.get("price")
+        )
+
+        if (
+            idx is None
+            or price is None
+        ):
+            continue
+
+        local_x = (
+            idx - start
+        )
+
+        ax.scatter(
+            [local_x],
+            [price],
+            marker="v",
+            s=50,
+            zorder=7
+        )
+
+        ax.annotate(
+            "PH",
+            (
+                local_x,
+                price
+            ),
+            xytext=(
+                0,
+                -14
+            ),
+            textcoords="offset points",
+            ha="center",
+            fontsize=8
+        )
+
+    # Pivot lows
+    for p in lows:
+
+        idx = p.get(
+            "index"
+        )
+
+        price = safe_float(
+            p.get("price")
+        )
+
+        if (
+            idx is None
+            or price is None
+        ):
+            continue
+
+        local_x = (
+            idx - start
+        )
+
+        ax.scatter(
+            [local_x],
+            [price],
+            marker="^",
+            s=50,
+            zorder=7
+        )
+
+        ax.annotate(
+            "PL",
+            (
+                local_x,
+                price
+            ),
+            xytext=(
+                0,
+                8
+            ),
+            textcoords="offset points",
+            ha="center",
+            fontsize=8
+        )
+
+    # --------------------------------------------------------
+    # SUPPORT / RESISTANCE
+    # --------------------------------------------------------
+
+    sr_highs = highs[-3:]
+    sr_lows = lows[-3:]
+
+    for p in sr_highs:
+
+        price = safe_float(
+            p.get("price")
+        )
+
+        if price is None:
+            continue
+
+        ax.axhline(
+            price,
+            linestyle=":",
+            linewidth=0.8,
+            alpha=0.55
+        )
+
+    for p in sr_lows:
+
+        price = safe_float(
+            p.get("price")
+        )
+
+        if price is None:
+            continue
+
+        ax.axhline(
+            price,
+            linestyle=":",
+            linewidth=0.8,
+            alpha=0.55
+        )
+
+    # --------------------------------------------------------
+    # 15M TRENDLINE
     # --------------------------------------------------------
 
     if line is not None:
@@ -3522,13 +4095,17 @@ def create_signal_chart(
             ax.plot(
                 vx,
                 vy,
-                linewidth=2,
-                label="5M Trendline"
+                linewidth=2.5,
+                label="15M Trendline"
             )
 
-        for p in line.get(
-            "touches",
-            []
+        # Trendline touches
+        for touch_number, p in enumerate(
+            line.get(
+                "touches",
+                []
+            ),
+            start=1
         ):
 
             if p is None:
@@ -3561,28 +4138,29 @@ def create_signal_chart(
                 ax.scatter(
                     [local_x],
                     [price],
-                    s=45,
-                    zorder=5
+                    s=70,
+                    zorder=10
                 )
 
                 ax.annotate(
-                    "T",
+                    f"T{touch_number}",
                     (
                         local_x,
                         price
                     ),
                     xytext=(
                         0,
-                        7
+                        9
                     ),
                     textcoords=(
                         "offset points"
                     ),
-                    ha="center"
+                    ha="center",
+                    fontsize=8
                 )
 
     # --------------------------------------------------------
-    # BREAKOUT
+    # 15M BREAKOUT
     # --------------------------------------------------------
 
     if breakout is not None:
@@ -3615,120 +4193,170 @@ def create_signal_chart(
             ax.scatter(
                 [local_x],
                 [price],
-                s=110,
+                s=160,
                 marker=marker,
-                zorder=10,
-                label="5M Breakout"
+                zorder=12,
+                label="15M Breakout"
+            )
+
+            ax.annotate(
+                "BREAKOUT",
+                (
+                    local_x,
+                    price
+                ),
+                xytext=(
+                    0,
+                    18
+                ),
+                textcoords=(
+                    "offset points"
+                ),
+                ha="center",
+                fontsize=9,
+                fontweight="bold"
             )
 
     # --------------------------------------------------------
-    # RETEST
+    # 1H BREAKOUT REFERENCE
     # --------------------------------------------------------
 
-    if retest is not None:
-
-        idx = retest.get(
-            "index"
-        )
-
-        price = safe_float(
-            retest.get("price")
-        )
-
-        if (
-            idx is not None
-            and price is not None
-            and start <= idx < len(df)
-        ):
-
-            local_x = (
-                idx - start
-            )
-
-            ax.scatter(
-                [local_x],
-                [price],
-                s=90,
-                marker="o",
-                zorder=10,
-                label="Retest"
-            )
-
-    # --------------------------------------------------------
-    # CONFIRMATION
-    # --------------------------------------------------------
-
-    if confirmation is not None:
-
-        idx = confirmation.get(
-            "index"
-        )
-
-        price = safe_float(
-            confirmation.get("price")
-        )
-
-        if (
-            idx is not None
-            and price is not None
-            and start <= idx < len(df)
-        ):
-
-            local_x = (
-                idx - start
-            )
-
-            ax.scatter(
-                [local_x],
-                [price],
-                s=140,
-                marker="*",
-                zorder=11,
-                label="Confirmation"
-            )
-
-    # --------------------------------------------------------
-    # ENTRY / TP / SL
-    # --------------------------------------------------------
-
-    ax.axhline(
-        entry_price,
-        linestyle="--",
-        linewidth=1.5,
-        label=(
-            f"Entry "
-            f"{fmt_price(entry_price)}"
-        )
+    b1 = signal.get(
+        "b1"
     )
 
-    ax.axhline(
-        tp,
-        linestyle="--",
-        linewidth=1,
-        label=(
-            f"TP "
-            f"{fmt_price(tp)}"
+    if b1 is not None:
+
+        b1_time = b1.get(
+            "time"
         )
+
+        if b1_time is not None:
+
+            try:
+
+                matching = df.index[
+                    df["time"]
+                    >= pd.Timestamp(
+                        b1_time
+                    )
+                ]
+
+                if len(matching) > 0:
+
+                    idx = int(
+                        matching[0]
+                    )
+
+                    if (
+                        start
+                        <= idx
+                        < len(df)
+                    ):
+
+                        local_x = (
+                            idx - start
+                        )
+
+                        ax.axvline(
+                            local_x,
+                            linestyle="--",
+                            linewidth=1,
+                            alpha=0.7
+                        )
+
+                        ax.annotate(
+                            "1H BREAKOUT",
+                            (
+                                local_x,
+                                ax.get_ylim()[1]
+                            ),
+                            xytext=(
+                                5,
+                                -20
+                            ),
+                            textcoords=(
+                                "offset points"
+                            ),
+                            rotation=90,
+                            fontsize=8
+                        )
+
+            except Exception:
+                pass
+
+    # --------------------------------------------------------
+    # ENTRY
+    # --------------------------------------------------------
+
+    if entry_price is not None:
+
+        ax.axhline(
+            entry_price,
+            linestyle="--",
+            linewidth=1.8,
+            label=(
+                f"Entry "
+                f"{fmt_price(entry_price)}"
+            )
+        )
+
+    # --------------------------------------------------------
+    # TP
+    # --------------------------------------------------------
+
+    if tp is not None:
+
+        ax.axhline(
+            tp,
+            linestyle="--",
+            linewidth=1.2,
+            label=(
+                f"TP "
+                f"{fmt_price(tp)}"
+            )
+        )
+
+    # --------------------------------------------------------
+    # SL
+    # --------------------------------------------------------
+
+    if sl is not None:
+
+        ax.axhline(
+            sl,
+            linestyle="--",
+            linewidth=1.2,
+            label=(
+                f"SL "
+                f"{fmt_price(sl)}"
+            )
+        )
+
+    # --------------------------------------------------------
+    # TITLE
+    # --------------------------------------------------------
+
+    stage = signal.get(
+        "stage",
+        "SIGNAL"
     )
 
-    ax.axhline(
-        sl,
-        linestyle="--",
-        linewidth=1,
-        label=(
-            f"SL "
-            f"{fmt_price(sl)}"
-        )
+    direction = signal.get(
+        "direction"
     )
 
     ax.set_title(
         f"{signal['asset']} "
-        f"{signal['direction']} | "
-        f"5M Breakout + Retest + Confirmation"
+        f"{direction} | "
+        f"15M Trendline Analysis | "
+        f"{stage}",
+        fontsize=14,
+        fontweight="bold"
     )
 
     ax.set_xlabel(
-        "5M Closed Candles"
+        "15M Closed Candles"
     )
 
     ax.set_ylabel(
@@ -3740,7 +4368,8 @@ def create_signal_chart(
     )
 
     ax.legend(
-        loc="best"
+        loc="best",
+        fontsize=8
     )
 
     plt.tight_layout()
@@ -3750,7 +4379,8 @@ def create_signal_chart(
     plt.savefig(
         buffer,
         format="png",
-        dpi=150
+        dpi=160,
+        bbox_inches="tight"
     )
 
     plt.close(
@@ -3760,6 +4390,183 @@ def create_signal_chart(
     buffer.seek(0)
 
     return buffer.getvalue()
+
+
+# ============================================================
+# BUILD BASE CANDIDATE
+# ============================================================
+
+def make_candidate(
+    asset,
+    direction,
+    stage,
+    df1,
+    df15,
+    df5=None,
+    b1=None,
+    b15=None,
+    b5=None,
+    line1=None,
+    line15=None,
+    line5=None,
+    rvol=None,
+    retest=None,
+    confirmation=None,
+    risk=None
+):
+
+    candidate = {
+
+        "asset":
+            asset,
+
+        "direction":
+            direction,
+
+        "stage":
+            stage,
+
+        "df1":
+            df1,
+
+        "df15":
+            df15,
+
+        "df5":
+            df5,
+
+        "b1":
+            b1,
+
+        "b15":
+            b15,
+
+        "b5":
+            b5,
+
+        "trendline_1h":
+            line1
+            if line1 is not None
+            else (
+                b1.get("trendline")
+                if b1 is not None
+                else None
+            ),
+
+        "trendline_15m":
+            line15
+            if line15 is not None
+            else (
+                b15.get("trendline")
+                if b15 is not None
+                else None
+            ),
+
+        "trendline_5m":
+            line5
+            if line5 is not None
+            else (
+                b5.get("trendline")
+                if b5 is not None
+                else None
+            ),
+
+        "rvol":
+            rvol,
+
+        "retest":
+            retest,
+
+        "confirmation":
+            confirmation,
+
+        "entry":
+            None,
+
+        "tp":
+            None,
+
+        "sl":
+            None,
+
+        "rr":
+            None,
+
+        "breakout_1h_time":
+            (
+                b1["time"]
+                if b1 is not None
+                else None
+            ),
+
+        "breakout_15m_time":
+            (
+                b15["time"]
+                if b15 is not None
+                else None
+            ),
+
+        "breakout_5m_time":
+            (
+                b5["time"]
+                if b5 is not None
+                else None
+            ),
+
+        "retest_5m_time":
+            (
+                retest["time"]
+                if retest is not None
+                else None
+            ),
+
+        "confirmation_5m_time":
+            (
+                confirmation["time"]
+                if confirmation is not None
+                else None
+            ),
+
+        "signal_time":
+            (
+                confirmation["time"]
+                if confirmation is not None
+                else None
+            ),
+    }
+
+    if risk is not None:
+
+        candidate["entry"] = safe_float(
+            candidate.get(
+                "confirmation",
+                {}
+            ).get("price")
+            if candidate.get(
+                "confirmation"
+            )
+            else None
+        )
+
+        candidate["tp"] = safe_float(
+            risk.get("tp")
+        )
+
+        candidate["sl"] = safe_float(
+            risk.get("sl")
+        )
+
+        candidate["rr"] = safe_float(
+            risk.get("rr")
+        )
+
+    candidate[
+        "candidate_score"
+    ] = candidate_score(
+        candidate
+    )
+
+    return candidate
 
 
 # ============================================================
@@ -3876,11 +4683,27 @@ def scan_asset(
     )
 
     if line15 is None:
-        return []
+
+        candidate = make_candidate(
+            asset,
+            direction,
+            "1H_BREAKOUT",
+            df1,
+            df15,
+            b1=b1
+        )
+
+        return [
+            candidate
+        ]
 
     stats[
         "trendlines_15m"
     ] += 1
+
+    # ========================================================
+    # 15M BREAKOUT
+    # ========================================================
 
     b15 = find_fresh_breakout(
         df15,
@@ -3890,7 +4713,20 @@ def scan_asset(
     )
 
     if b15 is None:
-        return []
+
+        candidate = make_candidate(
+            asset,
+            direction,
+            "15M_TRENDLINE",
+            df1,
+            df15,
+            b1=b1,
+            line15=line15
+        )
+
+        return [
+            candidate
+        ]
 
     stats[
         "breakouts_15m"
@@ -3906,10 +4742,39 @@ def scan_asset(
     )
 
     if rvol is None:
-        return []
+
+        candidate = make_candidate(
+            asset,
+            direction,
+            "15M_BREAKOUT",
+            df1,
+            df15,
+            b1=b1,
+            b15=b15,
+            line15=line15
+        )
+
+        return [
+            candidate
+        ]
 
     if rvol < RVOL_MIN:
-        return []
+
+        candidate = make_candidate(
+            asset,
+            direction,
+            "15M_BREAKOUT",
+            df1,
+            df15,
+            b1=b1,
+            b15=b15,
+            line15=line15,
+            rvol=rvol
+        )
+
+        return [
+            candidate
+        ]
 
     stats[
         "rvol_confirmed"
@@ -3930,7 +4795,21 @@ def scan_asset(
             "ohlc_5m_failed"
         ] += 1
 
-        return []
+        candidate = make_candidate(
+            asset,
+            direction,
+            "RVOL_CONFIRMED",
+            df1,
+            df15,
+            b1=b1,
+            b15=b15,
+            line15=line15,
+            rvol=rvol
+        )
+
+        return [
+            candidate
+        ]
 
     stats[
         "ohlc_5m_ok"
@@ -3942,7 +4821,23 @@ def scan_asset(
     )
 
     if line5 is None:
-        return []
+
+        candidate = make_candidate(
+            asset,
+            direction,
+            "RVOL_CONFIRMED",
+            df1,
+            df15,
+            df5=df5,
+            b1=b1,
+            b15=b15,
+            line15=line15,
+            rvol=rvol
+        )
+
+        return [
+            candidate
+        ]
 
     stats[
         "trendlines_5m"
@@ -3960,7 +4855,24 @@ def scan_asset(
     )
 
     if b5 is None:
-        return []
+
+        candidate = make_candidate(
+            asset,
+            direction,
+            "5M_TRENDLINE",
+            df1,
+            df15,
+            df5=df5,
+            b1=b1,
+            b15=b15,
+            line15=line15,
+            line5=line5,
+            rvol=rvol
+        )
+
+        return [
+            candidate
+        ]
 
     stats[
         "breakouts_5m"
@@ -3978,8 +4890,27 @@ def scan_asset(
         )
     )
 
+    # No retest yet
     if rc is None:
-        return []
+
+        candidate = make_candidate(
+            asset,
+            direction,
+            "5M_BREAKOUT",
+            df1,
+            df15,
+            df5=df5,
+            b1=b1,
+            b15=b15,
+            b5=b5,
+            line15=line15,
+            line5=line5,
+            rvol=rvol
+        )
+
+        return [
+            candidate
+        ]
 
     retest = rc[
         "retest"
@@ -3993,6 +4924,31 @@ def scan_asset(
         "retests_5m"
     ] += 1
 
+    # If confirmation is not available,
+    # find_first_retest_and_confirmation returns None.
+    # The candidate above remains the correct stage.
+    if confirmation is None:
+
+        candidate = make_candidate(
+            asset,
+            direction,
+            "RETEST",
+            df1,
+            df15,
+            df5=df5,
+            b1=b1,
+            b15=b15,
+            b5=b5,
+            line15=line15,
+            line5=line5,
+            rvol=rvol,
+            retest=retest
+        )
+
+        return [
+            candidate
+        ]
+
     stats[
         "confirmations_5m"
     ] += 1
@@ -4004,7 +4960,26 @@ def scan_asset(
         ] != (
             len(df5) - 1
         ):
-            return []
+
+            candidate = make_candidate(
+                asset,
+                direction,
+                "RETEST",
+                df1,
+                df15,
+                df5=df5,
+                b1=b1,
+                b15=b15,
+                b5=b5,
+                line15=line15,
+                line5=line5,
+                rvol=rvol,
+                retest=retest
+            )
+
+            return [
+                candidate
+            ]
 
     # ========================================================
     # ENTRY
@@ -4017,7 +4992,26 @@ def scan_asset(
     )
 
     if entry_price is None:
-        return []
+
+        candidate = make_candidate(
+            asset,
+            direction,
+            "RETEST",
+            df1,
+            df15,
+            df5=df5,
+            b1=b1,
+            b15=b15,
+            b5=b5,
+            line15=line15,
+            line5=line5,
+            rvol=rvol,
+            retest=retest
+        )
+
+        return [
+            candidate
+        ]
 
     entry_time = confirmation[
         "time"
@@ -4035,85 +5029,53 @@ def scan_asset(
     )
 
     if risk is None:
-        return []
 
-    candidate = {
-
-        "asset":
+        candidate = make_candidate(
             asset,
-
-        "direction":
             direction,
-
-        "stage":
             "READY",
-
-        "entry":
-            entry_price,
-
-        "tp":
-            risk["tp"],
-
-        "sl":
-            risk["sl"],
-
-        "rr":
-            risk["rr"],
-
-        "rvol":
-            rvol,
-
-        "b1":
-            b1,
-
-        "b15":
-            b15,
-
-        "b5":
-            b5,
-
-        "trendline_1h":
-            b1["trendline"],
-
-        "trendline_15m":
-            b15["trendline"],
-
-        "trendline_5m":
-            b5["trendline"],
-
-        "retest":
-            retest,
-
-        "confirmation":
-            confirmation,
-
-        "signal_time":
-            confirmation["time"],
-
-        "breakout_1h_time":
-            b1["time"],
-
-        "breakout_15m_time":
-            b15["time"],
-
-        "breakout_5m_time":
-            b5["time"],
-
-        "retest_5m_time":
-            retest["time"],
-
-        "confirmation_5m_time":
-            confirmation["time"],
-
-        "df1":
             df1,
-
-        "df15":
             df15,
+            df5=df5,
+            b1=b1,
+            b15=b15,
+            b5=b5,
+            line15=line15,
+            line5=line5,
+            rvol=rvol,
+            retest=retest,
+            confirmation=confirmation
+        )
 
-        "df5":
-            df5,
-    }
+        candidate["entry"] = entry_price
+
+        return [
+            candidate
+        ]
+
+    # ========================================================
+    # FINAL READY SIGNAL
+    # ========================================================
+
+    candidate = make_candidate(
+        asset,
+        direction,
+        "READY",
+        df1,
+        df15,
+        df5=df5,
+        b1=b1,
+        b15=b15,
+        b5=b5,
+        line15=line15,
+        line5=line5,
+        rvol=rvol,
+        retest=retest,
+        confirmation=confirmation,
+        risk=risk
+    )
+
+    candidate["entry"] = entry_price
 
     stats[
         "ready"
@@ -4130,8 +5092,20 @@ def scan_asset(
 
 def summary_message(
     stats,
-    assets_count
+    assets_count,
+    top_candidate=None
 ):
+
+    candidate_text = "None"
+
+    if top_candidate is not None:
+
+        candidate_text = (
+            f"{top_candidate['asset']} "
+            f"{top_candidate['direction']} "
+            f""
+            f"({top_candidate.get('stage', '-')})"
+        )
 
     return (
         "📊 SCAN SUMMARY\n\n"
@@ -4167,7 +5141,9 @@ def summary_message(
         f"READY: "
         f"{stats['ready']}\n"
         f"New Signals: "
-        f"{stats['new_signals']}"
+        f"{stats['new_signals']}\n"
+        f"Top Candidate: "
+        f"{candidate_text}"
     )
 
 
@@ -4220,6 +5196,19 @@ def main():
     init_db()
 
     # ========================================================
+    # NEW STRATEGY GENERATION
+    # ========================================================
+
+    strategy_epoch = (
+        initialize_strategy_generation()
+    )
+
+    print(
+        "ACTIVE STRATEGY EPOCH:",
+        strategy_epoch
+    )
+
+    # ========================================================
     # TICKERS
     # ========================================================
 
@@ -4264,7 +5253,7 @@ def main():
         )
 
     # ========================================================
-    # UPDATE OPEN TRADES
+    # UPDATE ONLY NEW-GENERATION OPEN TRADES
     # ========================================================
 
     closed = update_open_trades()
@@ -4375,32 +5364,77 @@ def main():
             traceback.print_exc()
 
     # ========================================================
-    # RANK CANDIDATES
+    # CLEAN / SCORE CANDIDATES
     # ========================================================
 
-    candidates.sort(
+    clean_candidates = []
+
+    for candidate in candidates:
+
+        try:
+
+            candidate[
+                "candidate_score"
+            ] = candidate_score(
+                candidate
+            )
+
+            clean_candidates.append(
+                candidate
+            )
+
+        except Exception:
+            continue
+
+    candidates = clean_candidates
+
+    # ========================================================
+    # READY SIGNALS FIRST
+    # ========================================================
+
+    ready_candidates = [
+        x for x in candidates
+        if x.get("stage")
+        == "READY"
+        and x.get("confirmation")
+        is not None
+    ]
+
+    ready_candidates.sort(
         key=lambda x: (
             safe_float(
-                x.get("rr"),
+                x.get(
+                    "candidate_score"
+                ),
                 0
             ),
             safe_float(
-                x.get("rvol"),
+                x.get(
+                    "rvol"
+                ),
+                0
+            ),
+            safe_float(
+                x.get(
+                    "rr"
+                ),
                 0
             )
         ),
         reverse=True
     )
 
-    selected = candidates[
+    # ========================================================
+    # INSERT MAX ONE SIGNAL
+    # ========================================================
+
+    new_signal_sent = False
+
+    inserted_signal = None
+
+    for signal in ready_candidates[
         :MAX_SIGNALS_PER_SCAN
-    ]
-
-    # ========================================================
-    # INSERT SIGNALS
-    # ========================================================
-
-    for signal in selected:
+    ]:
 
         inserted_id = insert_signal(
 
@@ -4494,6 +5528,10 @@ def main():
             "new_signals"
         ] += 1
 
+        new_signal_sent = True
+
+        inserted_signal = signal
+
         print(
             f"NEW SIGNAL "
             f"#{inserted_id}: "
@@ -4503,19 +5541,23 @@ def main():
             f"{signal['entry']}"
         )
 
+        # ----------------------------------------------------
+        # SIGNAL MESSAGE
+        # ----------------------------------------------------
+
         telegram_send(
             signal_message(
                 signal
             )
         )
 
-        # ====================================================
-        # CHART
-        # ====================================================
+        # ----------------------------------------------------
+        # 15M SIGNAL CHART
+        # ----------------------------------------------------
 
         try:
 
-            chart = create_signal_chart(
+            chart = create_15m_chart(
                 signal
             )
 
@@ -4525,7 +5567,7 @@ def main():
                     f"{'🟢' if signal['direction'] == 'LONG' else '🔴'} "
                     f"{signal['asset']} "
                     f"{signal['direction']}\n"
-                    f"5M Breakout → Retest → Confirmation\n"
+                    f"15M Trendline + Pivots + Breakout\n"
                     f"Entry: "
                     f"{fmt_price(signal['entry'])}\n"
                     f"TP: "
@@ -4545,6 +5587,134 @@ def main():
 
             traceback.print_exc()
 
+        # Only one signal per scan.
+        break
+
+    # ========================================================
+    # TOP CANDIDATE
+    #
+    # IMPORTANT:
+    # If a NEW SIGNAL was inserted, candidate is NOT sent.
+    # ========================================================
+
+    top_candidate = None
+
+    if not new_signal_sent:
+
+        non_ready = [
+            x for x in candidates
+            if x.get("stage")
+            != "READY"
+        ]
+
+        non_ready.sort(
+            key=lambda x: (
+                safe_float(
+                    x.get(
+                        "candidate_score"
+                    ),
+                    0
+                ),
+                safe_float(
+                    x.get(
+                        "rvol"
+                    ),
+                    0
+                ),
+                safe_float(
+                    x.get(
+                        "rr"
+                    ),
+                    0
+                ),
+                (
+                    x.get(
+                        "breakout_15m_time"
+                    )
+                    or
+                    x.get(
+                        "breakout_1h_time"
+                    )
+                    or
+                    pd.Timestamp.min
+                )
+            ),
+            reverse=True
+        )
+
+        if non_ready:
+
+            top_candidate = (
+                non_ready[0]
+            )
+
+            print(
+                "TOP CANDIDATE:",
+                top_candidate[
+                    "asset"
+                ],
+                top_candidate[
+                    "direction"
+                ],
+                top_candidate.get(
+                    "stage"
+                ),
+                top_candidate.get(
+                    "candidate_score"
+                )
+            )
+
+            # ------------------------------------------------
+            # TOP CANDIDATE MESSAGE
+            # ------------------------------------------------
+
+            telegram_send(
+                candidate_message(
+                    top_candidate
+                )
+            )
+
+            # ------------------------------------------------
+            # TOP CANDIDATE 15M CHART
+            # ------------------------------------------------
+
+            try:
+
+                chart = create_15m_chart(
+                    top_candidate
+                )
+
+                if chart is not None:
+
+                    emoji = (
+                        "🟢"
+                        if top_candidate[
+                            "direction"
+                        ] == "LONG"
+                        else "🔴"
+                    )
+
+                    caption = (
+                        f"🏆 TOP CANDIDATE\n"
+                        f"{emoji} "
+                        f"{top_candidate['asset']} "
+                        f"{top_candidate['direction']}\n"
+                        f"Stage: "
+                        f"{top_candidate.get('stage', '-')}\n"
+                        f"Score: "
+                        f"{safe_float(top_candidate.get('candidate_score'), 0):.1f}\n"
+                        f"15M Trendline + Pivots + Key Levels"
+                    )
+
+                    telegram_send_photo(
+                        chart,
+                        caption
+                    )
+
+            except Exception:
+
+                traceback.print_exc()
+
     # ========================================================
     # CONSOLE SUMMARY
     # ========================================================
@@ -4554,7 +5724,10 @@ def main():
     print(
         summary_message(
             stats,
-            scanned
+            scanned,
+            top_candidate
+            if not new_signal_sent
+            else None
         )
     )
 
@@ -4566,19 +5739,27 @@ def main():
 
     print()
 
-    # This is now SAFE even if the DB contains
-    # incomplete legacy OPEN rows.
     print(
         open_trades_message()
     )
 
     # ========================================================
     # PERIODIC REPORT
+    #
+    # If this scan created a new signal, no candidate is
+    # included in the periodic report for this scan.
     # ========================================================
 
     try:
 
-        maybe_send_periodic_report()
+        maybe_send_periodic_report(
+            top_candidate=(
+                top_candidate
+                if not new_signal_sent
+                else None
+            ),
+            new_signal_sent=new_signal_sent
+        )
 
     except Exception:
 
