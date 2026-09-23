@@ -1,6 +1,6 @@
 # ============================================================
 # KRAKEN FUTURES 1H TRENDLINE BREAKOUT PAPER SCANNER
-# VERSION 3.0.0
+# VERSION 3.0.1
 # ============================================================
 #
 # 40 ASSETS
@@ -57,7 +57,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 REAL_TRADING = False
 PAPER_TRADING = True
@@ -100,16 +100,85 @@ KRAKEN_CHART_URL = (
 # ============================================================
 # TELEGRAM
 # ============================================================
+#
+# GitHub Actions must provide:
+#
+# TELEGRAM_BOT_TOKEN
+# TELEGRAM_CHAT_ID
+#
+# IMPORTANT:
+# Never print the actual token.
+#
+# ============================================================
 
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN",
-    ""
-).strip()
+TELEGRAM_BOT_TOKEN = (
+    os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    or os.environ.get("TELEGRAM_TOKEN", "")
+)
 
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    ""
-).strip()
+TELEGRAM_CHAT_ID = (
+    os.environ.get("TELEGRAM_CHAT_ID", "")
+    or os.environ.get("TELEGRAM_CHAT", "")
+)
+
+
+def telegram_config_status():
+
+    token_ok = bool(
+        TELEGRAM_BOT_TOKEN
+        and TELEGRAM_BOT_TOKEN.strip()
+    )
+
+    chat_ok = bool(
+        TELEGRAM_CHAT_ID
+        and TELEGRAM_CHAT_ID.strip()
+    )
+
+    print("")
+    print(
+        "=========================================================="
+    )
+    print(
+        "TELEGRAM CONFIGURATION"
+    )
+    print(
+        "=========================================================="
+    )
+
+    print(
+        "[TELEGRAM] Bot token:",
+        "FOUND" if token_ok else "NOT FOUND"
+    )
+
+    print(
+        "[TELEGRAM] Chat ID:",
+        "FOUND" if chat_ok else "NOT FOUND"
+    )
+
+    if token_ok and chat_ok:
+
+        print(
+            "[TELEGRAM] Configuration: READY"
+        )
+
+    else:
+
+        print(
+            "[TELEGRAM] Configuration: INCOMPLETE"
+        )
+
+        print(
+            "[TELEGRAM] "
+            "Expected environment variables: "
+            "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"
+        )
+
+    print(
+        "=========================================================="
+    )
+    print("")
+
+    return token_ok and chat_ok
 
 
 # ============================================================
@@ -171,9 +240,10 @@ SYMBOLS = [
 SESSION = requests.Session()
 
 SESSION.headers.update({
+
     "User-Agent":
         "Mozilla/5.0 "
-        "(compatible; Kraken-1H-Trendline/3.0)",
+        "(compatible; Kraken-1H-Trendline/3.0.1)",
 
     "Accept":
         "application/json",
@@ -412,11 +482,6 @@ def fetch_ohlc(symbol):
             f"No candles returned"
         )
 
-        print(
-            "[ERROR] "
-            + error
-        )
-
         ERRORS.append(error)
 
         return []
@@ -433,25 +498,11 @@ def fetch_ohlc(symbol):
             ):
                 continue
 
-            ts = row.get(
-                "time"
-            )
-
-            op = row.get(
-                "open"
-            )
-
-            hi = row.get(
-                "high"
-            )
-
-            lo = row.get(
-                "low"
-            )
-
-            cl = row.get(
-                "close"
-            )
+            ts = row.get("time")
+            op = row.get("open")
+            hi = row.get("high")
+            lo = row.get("low")
+            cl = row.get("close")
 
             if None in (
                 ts,
@@ -559,19 +610,14 @@ def is_pivot_high(
     ):
         return False
 
-    price = candles[i][
-        "high"
-    ]
+    price = candles[i]["high"]
 
     for j in range(
         i - PIVOT_LEFT,
         i
     ):
 
-        if (
-            candles[j]["high"]
-            >= price
-        ):
+        if candles[j]["high"] >= price:
             return False
 
     for j in range(
@@ -579,10 +625,7 @@ def is_pivot_high(
         i + PIVOT_RIGHT + 1
     ):
 
-        if (
-            candles[j]["high"]
-            > price
-        ):
+        if candles[j]["high"] > price:
             return False
 
     return True
@@ -602,19 +645,14 @@ def is_pivot_low(
     ):
         return False
 
-    price = candles[i][
-        "low"
-    ]
+    price = candles[i]["low"]
 
     for j in range(
         i - PIVOT_LEFT,
         i
     ):
 
-        if (
-            candles[j]["low"]
-            <= price
-        ):
+        if candles[j]["low"] <= price:
             return False
 
     for j in range(
@@ -622,10 +660,7 @@ def is_pivot_low(
         i + PIVOT_RIGHT + 1
     ):
 
-        if (
-            candles[j]["low"]
-            < price
-        ):
+        if candles[j]["low"] < price:
             return False
 
     return True
@@ -660,6 +695,7 @@ def get_pivots(
         ):
 
             highs.append({
+
                 "index":
                     i,
 
@@ -676,6 +712,7 @@ def get_pivots(
         ):
 
             lows.append({
+
                 "index":
                     i,
 
@@ -1081,15 +1118,13 @@ def calculate_levels(
     previous_highs = [
         p
         for p in highs
-        if p["index"]
-        < entry_index
+        if p["index"] < entry_index
     ]
 
     previous_lows = [
         p
         for p in lows
-        if p["index"]
-        < entry_index
+        if p["index"] < entry_index
     ]
 
     if direction == "LONG":
@@ -1097,8 +1132,7 @@ def calculate_levels(
         targets = [
             p
             for p in previous_highs
-            if p["price"]
-            > entry_price
+            if p["price"] > entry_price
         ]
 
         targets.sort(
@@ -1115,8 +1149,7 @@ def calculate_levels(
         stops = [
             p
             for p in previous_lows
-            if p["price"]
-            < entry_price
+            if p["price"] < entry_price
         ]
 
         stops.sort(
@@ -1138,8 +1171,7 @@ def calculate_levels(
     targets = [
         p
         for p in previous_lows
-        if p["price"]
-        < entry_price
+        if p["price"] < entry_price
     ]
 
     targets.sort(
@@ -1157,8 +1189,7 @@ def calculate_levels(
     stops = [
         p
         for p in previous_highs
-        if p["price"]
-        > entry_price
+        if p["price"] > entry_price
     ]
 
     stops.sort(
@@ -1197,21 +1228,11 @@ def check_breakout(
     latest_i = len(candles) - 1
     previous_i = latest_i - 1
 
-    latest = candles[
-        latest_i
-    ]
+    latest = candles[latest_i]
+    previous = candles[previous_i]
 
-    previous = candles[
-        previous_i
-    ]
-
-    start = trendline[
-        "start"
-    ]
-
-    end = trendline[
-        "end"
-    ]
+    start = trendline["start"]
+    end = trendline["end"]
 
     previous_line = line_value(
         previous_i,
@@ -1363,9 +1384,7 @@ def insert_signal(
     signal
 ):
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     cursor = conn.execute("""
         INSERT OR IGNORE INTO signals (
@@ -1447,7 +1466,7 @@ def insert_signal(
 
 
 # ============================================================
-# GET CURRENT PRICE
+# CURRENT PRICE
 # ============================================================
 
 def current_price(
@@ -1469,9 +1488,7 @@ def update_open_trades(
     price_map
 ):
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     rows = conn.execute("""
         SELECT
@@ -1500,9 +1517,7 @@ def update_open_trades(
             candle_time
         ) = row
 
-        price = price_map.get(
-            symbol
-        )
+        price = price_map.get(symbol)
 
         if price is None:
             continue
@@ -1619,9 +1634,7 @@ def update_open_trades(
 
 def get_open_trades():
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     rows = conn.execute("""
         SELECT
@@ -1649,9 +1662,7 @@ def get_open_trades():
 
 def get_performance():
 
-    conn = sqlite3.connect(
-        DB_FILE
-    )
+    conn = sqlite3.connect(DB_FILE)
 
     total = conn.execute("""
         SELECT COUNT(*)
@@ -1798,69 +1809,6 @@ def current_pnl_percent(
 
 
 # ============================================================
-# TELEGRAM CONFIG CHECK
-# ============================================================
-
-def check_telegram_config():
-
-    print("")
-    print("==========================================================")
-    print("TELEGRAM CONFIGURATION")
-    print("==========================================================")
-
-    if TELEGRAM_BOT_TOKEN:
-
-        print(
-            "[TELEGRAM] Bot token: FOUND"
-        )
-
-        print(
-            "[TELEGRAM] Bot token length:",
-            len(TELEGRAM_BOT_TOKEN)
-        )
-
-    else:
-
-        print(
-            "[TELEGRAM] Bot token: NOT FOUND"
-        )
-
-    if TELEGRAM_CHAT_ID:
-
-        print(
-            "[TELEGRAM] Chat ID: FOUND"
-        )
-
-        print(
-            "[TELEGRAM] Chat ID length:",
-            len(TELEGRAM_CHAT_ID)
-        )
-
-    else:
-
-        print(
-            "[TELEGRAM] Chat ID: NOT FOUND"
-        )
-
-    if (
-        TELEGRAM_BOT_TOKEN
-        and TELEGRAM_CHAT_ID
-    ):
-
-        print(
-            "[TELEGRAM] Configuration: READY"
-        )
-
-    else:
-
-        print(
-            "[TELEGRAM] Configuration: INCOMPLETE"
-        )
-
-    print("==========================================================")
-
-
-# ============================================================
 # TELEGRAM MESSAGE
 # ============================================================
 
@@ -1869,21 +1817,17 @@ def send_telegram(
 ):
 
     if not TELEGRAM_BOT_TOKEN:
-
         print(
-            "[TELEGRAM ERROR] "
-            "TELEGRAM_BOT_TOKEN is empty."
+            "[TELEGRAM] "
+            "Message skipped: bot token missing"
         )
-
         return False
 
     if not TELEGRAM_CHAT_ID:
-
         print(
-            "[TELEGRAM ERROR] "
-            "TELEGRAM_CHAT_ID is empty."
+            "[TELEGRAM] "
+            "Message skipped: chat ID missing"
         )
-
         return False
 
     url = (
@@ -1894,7 +1838,7 @@ def send_telegram(
 
     try:
 
-        response = SESSION.post(
+        r = SESSION.post(
             url,
             json={
                 "chat_id":
@@ -1909,56 +1853,29 @@ def send_telegram(
             timeout=20
         )
 
-        print(
-            "[TELEGRAM] HTTP status:",
-            response.status_code
-        )
-
-        try:
-
-            result = response.json()
-
-        except Exception:
-
-            result = {
-                "raw":
-                    response.text
-            }
-
-        if not response.ok:
+        if not r.ok:
 
             print(
-                "[TELEGRAM ERROR] "
-                f"HTTP {response.status_code}"
-            )
-
-            print(
-                "[TELEGRAM ERROR RESPONSE]",
-                result
+                "[ERROR] Telegram sendMessage:",
+                r.status_code,
+                r.text[:500]
             )
 
             return False
 
-        if not result.get(
-            "ok",
-            False
-        ):
+        data = r.json()
+
+        if not data.get("ok"):
 
             print(
-                "[TELEGRAM ERROR] "
-                "API returned ok=false"
-            )
-
-            print(
-                "[TELEGRAM ERROR RESPONSE]",
-                result
+                "[ERROR] Telegram API:",
+                data
             )
 
             return False
 
         print(
-            "[TELEGRAM] "
-            "Message sent successfully"
+            "[TELEGRAM] Message sent"
         )
 
         return True
@@ -1966,8 +1883,8 @@ def send_telegram(
     except Exception as exc:
 
         print(
-            "[TELEGRAM ERROR]",
-            repr(exc)
+            "[ERROR] Telegram:",
+            exc
         )
 
         return False
@@ -1985,8 +1902,8 @@ def send_telegram_photo(
     if not TELEGRAM_BOT_TOKEN:
 
         print(
-            "[TELEGRAM PHOTO ERROR] "
-            "TELEGRAM_BOT_TOKEN is empty."
+            "[TELEGRAM] "
+            "Photo skipped: bot token missing"
         )
 
         return False
@@ -1994,17 +1911,17 @@ def send_telegram_photo(
     if not TELEGRAM_CHAT_ID:
 
         print(
-            "[TELEGRAM PHOTO ERROR] "
-            "TELEGRAM_CHAT_ID is empty."
+            "[TELEGRAM] "
+            "Photo skipped: chat ID missing"
         )
 
         return False
 
-    if not os.path.isfile(path):
+    if not os.path.exists(path):
 
         print(
-            "[TELEGRAM PHOTO ERROR] "
-            f"File not found: {path}"
+            "[TELEGRAM] "
+            "Photo skipped: file not found"
         )
 
         return False
@@ -2022,7 +1939,7 @@ def send_telegram_photo(
             "rb"
         ) as photo:
 
-            response = SESSION.post(
+            r = SESSION.post(
                 url,
                 data={
                     "chat_id":
@@ -2038,56 +1955,29 @@ def send_telegram_photo(
                 timeout=40
             )
 
-        print(
-            "[TELEGRAM PHOTO] HTTP status:",
-            response.status_code
-        )
-
-        try:
-
-            result = response.json()
-
-        except Exception:
-
-            result = {
-                "raw":
-                    response.text
-            }
-
-        if not response.ok:
+        if not r.ok:
 
             print(
-                "[TELEGRAM PHOTO ERROR] "
-                f"HTTP {response.status_code}"
-            )
-
-            print(
-                "[TELEGRAM PHOTO ERROR RESPONSE]",
-                result
+                "[ERROR] Telegram sendPhoto:",
+                r.status_code,
+                r.text[:500]
             )
 
             return False
 
-        if not result.get(
-            "ok",
-            False
-        ):
+        data = r.json()
+
+        if not data.get("ok"):
 
             print(
-                "[TELEGRAM PHOTO ERROR] "
-                "API returned ok=false"
-            )
-
-            print(
-                "[TELEGRAM PHOTO ERROR RESPONSE]",
-                result
+                "[ERROR] Telegram photo API:",
+                data
             )
 
             return False
 
         print(
-            "[TELEGRAM PHOTO] "
-            "Chart sent successfully"
+            "[TELEGRAM] Photo sent"
         )
 
         return True
@@ -2095,8 +1985,8 @@ def send_telegram_photo(
     except Exception as exc:
 
         print(
-            "[TELEGRAM PHOTO ERROR]",
-            repr(exc)
+            "[ERROR] Telegram photo:",
+            exc
         )
 
         return False
@@ -2133,10 +2023,6 @@ def create_signal_chart(
         figsize=(13, 7)
     )
 
-    # --------------------------------------------------------
-    # Candles
-    # --------------------------------------------------------
-
     for i, row in df.iterrows():
 
         x = i
@@ -2147,9 +2033,12 @@ def create_signal_chart(
         cl = row["close"]
 
         if cl >= op:
+
             body_bottom = op
             body_height = cl - op
+
         else:
+
             body_bottom = cl
             body_height = op - cl
 
@@ -2174,77 +2063,71 @@ def create_signal_chart(
             )
         )
 
-    # --------------------------------------------------------
-    # Pivot points
-    # --------------------------------------------------------
+    chart_start_time = (
+        candles[-CHART_CANDLES]["time"]
+    )
 
-    chart_candles = candles[
-        -CHART_CANDLES:
-    ]
+    chart_candles = (
+        candles[-CHART_CANDLES:]
+    )
 
-    if chart_candles:
+    for pivot in highs:
 
-        chart_start_time = (
-            chart_candles[0]["time"]
-        )
+        if (
+            pivot["time"]
+            >= chart_start_time
+        ):
 
-        for pivot in highs:
+            index = next(
+                (
+                    i
+                    for i, c
+                    in enumerate(
+                        chart_candles
+                    )
+                    if c["time"]
+                    == pivot["time"]
+                ),
+                None
+            )
 
-            if (
-                pivot["time"]
-                >= chart_start_time
-            ):
+            if index is not None:
 
-                index = next(
-                    (
-                        i
-                        for i, c
-                        in enumerate(
-                            chart_candles
-                        )
-                        if c["time"]
-                        == pivot["time"]
-                    ),
-                    None
+                ax.scatter(
+                    index,
+                    pivot["price"],
+                    marker="^",
+                    s=45
                 )
 
-                if index is not None:
+    for pivot in lows:
 
-                    ax.scatter(
-                        index,
-                        pivot["price"],
-                        marker="^",
-                        s=45
+        if (
+            pivot["time"]
+            >= chart_start_time
+        ):
+
+            index = next(
+                (
+                    i
+                    for i, c
+                    in enumerate(
+                        chart_candles
                     )
+                    if c["time"]
+                    == pivot["time"]
+                ),
+                None
+            )
 
-        for pivot in lows:
+            if index is not None:
 
-            if (
-                pivot["time"]
-                >= chart_start_time
-            ):
-
-                index = next(
-                    (
-                        i
-                        for i, c
-                        in enumerate(
-                            chart_candles
-                        )
-                        if c["time"]
-                        == pivot["time"]
-                    ),
-                    None
+                ax.scatter(
+                    index,
+                    pivot["price"],
+                    marker="v",
+                    s=45
                 )
-
-                if index is not None:
-
-                    ax.scatter(
-                        index,
-                        pivot["price"],
-                        marker="v",
-                        s=45
-                    )
 
     # --------------------------------------------------------
     # Trendline
@@ -2266,72 +2149,63 @@ def create_signal_chart(
         "trendline_end_price"
     ]
 
-    start_index_full = next(
-        (
-            i
-            for i, c in enumerate(candles)
-            if c["time"] == start_time
-        ),
-        None
-    )
+    start_index = None
+    end_index = None
 
-    end_index_full = next(
-        (
-            i
-            for i, c in enumerate(candles)
-            if c["time"] == end_time
-        ),
-        None
-    )
+    for i, candle in enumerate(candles):
 
-    line_x = []
-    line_y = []
+        if candle["time"] == start_time:
+            start_index = i
+
+        if candle["time"] == end_time:
+            end_index = i
 
     if (
-        start_index_full is not None
-        and end_index_full is not None
+        start_index is not None
+        and end_index is not None
     ):
 
-        chart_offset = max(
-            0,
+        line_x = []
+        line_y = []
+
+        chart_offset = (
             len(candles)
             - CHART_CANDLES
         )
 
-        for i, candle in enumerate(
-            chart_candles
+        for i in range(
+            max(
+                start_index,
+                chart_offset
+            ),
+            len(candles)
         ):
 
-            full_index = (
-                chart_offset + i
-            )
-
-            if (
-                full_index
-                < start_index_full
-            ):
-                continue
-
             value = line_value(
-                full_index,
-                start_index_full,
+                i,
+                start_index,
                 start_price,
-                end_index_full,
+                end_index,
                 end_price
             )
 
             if value is not None:
 
-                line_x.append(i)
-                line_y.append(value)
+                line_x.append(
+                    i - chart_offset
+                )
 
-    if line_x:
+                line_y.append(
+                    value
+                )
 
-        ax.plot(
-            line_x,
-            line_y,
-            linewidth=2
-        )
+        if line_x:
+
+            ax.plot(
+                line_x,
+                line_y,
+                linewidth=2
+            )
 
     # --------------------------------------------------------
     # Breakout
@@ -2372,12 +2246,6 @@ def create_signal_chart(
             ),
             textcoords="offset points"
         )
-
-    # --------------------------------------------------------
-    # Entry
-    # --------------------------------------------------------
-
-    if breakout_index is not None:
 
         ax.axhline(
             signal["entry_price"],
@@ -2453,8 +2321,7 @@ def create_signal_chart(
     plt.tight_layout()
 
     safe_symbol = (
-        symbol
-        .replace(
+        symbol.replace(
             "/",
             "_"
         )
@@ -2469,9 +2336,7 @@ def create_signal_chart(
         dpi=160
     )
 
-    plt.close(
-        fig
-    )
+    plt.close(fig)
 
     return path
 
@@ -2486,18 +2351,12 @@ def signal_message(
 
     emoji = (
         "🟢"
-        if signal["direction"]
-        == "LONG"
+        if signal["direction"] == "LONG"
         else "🔴"
     )
 
-    tp = signal[
-        "tp_price"
-    ]
-
-    sl = signal[
-        "sl_price"
-    ]
+    tp = signal["tp_price"]
+    sl = signal["sl_price"]
 
     return (
         f"{emoji} NEW 1H SIGNAL\n"
@@ -2723,9 +2582,7 @@ def periodic_report(
         "Mode: PAPER ONLY"
     )
 
-    return "\n".join(
-        lines
-    )
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -2741,9 +2598,7 @@ def analyze_symbol(
         f"\n[SCAN] {symbol}"
     )
 
-    candles = fetch_ohlc(
-        symbol
-    )
+    candles = fetch_ohlc(symbol)
 
     if len(candles) < 50:
 
@@ -2786,25 +2641,17 @@ def analyze_symbol(
         analysis
     )
 
-    resistance = (
-        find_resistance(
-            analysis,
-            highs
-        )
+    resistance = find_resistance(
+        analysis,
+        highs
     )
 
-    support = (
-        find_support(
-            analysis,
-            lows
-        )
+    support = find_support(
+        analysis,
+        lows
     )
 
     signal = None
-
-    # --------------------------------------------------------
-    # LONG
-    # --------------------------------------------------------
 
     long_break = check_breakout(
         closed,
@@ -2815,16 +2662,10 @@ def analyze_symbol(
     if long_break:
 
         if signal_is_fresh(
-            long_break[
-                "candle_time"
-            ]
+            long_break["candle_time"]
         ):
 
             signal = long_break
-
-    # --------------------------------------------------------
-    # SHORT
-    # --------------------------------------------------------
 
     short_break = check_breakout(
         closed,
@@ -2835,16 +2676,10 @@ def analyze_symbol(
     if short_break:
 
         if signal_is_fresh(
-            short_break[
-                "candle_time"
-            ]
+            short_break["candle_time"]
         ):
 
             signal = short_break
-
-    # --------------------------------------------------------
-    # CREATE TRADE
-    # --------------------------------------------------------
 
     if signal:
 
@@ -2877,41 +2712,27 @@ def analyze_symbol(
 
             if valid_levels:
 
-                signal[
-                    "tp_price"
-                ] = tp["price"]
+                signal["tp_price"] = tp["price"]
 
-                signal[
-                    "sl_price"
-                ] = sl["price"]
+                signal["sl_price"] = sl["price"]
 
-                signal[
-                    "tp_source"
-                ] = (
+                signal["tp_source"] = (
                     "Valid prior swing "
                     f"{'HIGH' if signal['direction'] == 'LONG' else 'LOW'}"
                 )
 
-                signal[
-                    "sl_source"
-                ] = (
+                signal["sl_source"] = (
                     "Valid prior swing "
                     f"{'LOW' if signal['direction'] == 'LONG' else 'HIGH'}"
                 )
 
-                signal[
-                    "symbol"
-                ] = symbol
+                signal["symbol"] = symbol
 
-                inserted = insert_signal(
-                    signal
-                )
+                inserted = insert_signal(signal)
 
                 if inserted:
 
-                    NEW_SIGNALS.append(
-                        signal
-                    )
+                    NEW_SIGNALS.append(signal)
 
                     print(
                         f"[NEW SIGNAL] "
@@ -2919,27 +2740,12 @@ def analyze_symbol(
                         f"{signal['direction']}"
                     )
 
-                    # ------------------------------------------------
-                    # TELEGRAM SIGNAL
-                    # ------------------------------------------------
-
-                    telegram_ok = send_telegram(
-                        signal_message(
-                            signal
-                        )
+                    # Telegram signal
+                    send_telegram(
+                        signal_message(signal)
                     )
 
-                    if not telegram_ok:
-
-                        print(
-                            "[WARNING] "
-                            "Telegram signal was NOT sent."
-                        )
-
-                    # ------------------------------------------------
-                    # CHART
-                    # ------------------------------------------------
-
+                    # Telegram chart
                     try:
 
                         chart = create_signal_chart(
@@ -2960,26 +2766,13 @@ def analyze_symbol(
                                 f"1H Trendline Breakout"
                             )
 
-                            photo_ok = (
-                                send_telegram_photo(
-                                    chart,
-                                    caption
-                                )
+                            send_telegram_photo(
+                                chart,
+                                caption
                             )
 
-                            if not photo_ok:
-
-                                print(
-                                    "[WARNING] "
-                                    "Telegram chart was NOT sent."
-                                )
-
                             try:
-
-                                os.remove(
-                                    chart
-                                )
-
+                                os.remove(chart)
                             except Exception:
                                 pass
 
@@ -3057,11 +2850,7 @@ def run_scan():
         "=========================================================="
     )
 
-    # --------------------------------------------------------
-    # Telegram configuration
-    # --------------------------------------------------------
-
-    check_telegram_config()
+    telegram_config_status()
 
     # --------------------------------------------------------
     # Scan 40 assets
@@ -3090,9 +2879,7 @@ def run_scan():
 
             traceback.print_exc()
 
-            ERRORS.append(
-                error
-            )
+            ERRORS.append(error)
 
             SCAN_RESULTS.append({
                 "symbol":
@@ -3113,15 +2900,14 @@ def run_scan():
     )
 
     # --------------------------------------------------------
-    # Send close notifications
+    # Close notifications
     # --------------------------------------------------------
 
     for trade in closed_trades:
 
         emoji = (
             "✅"
-            if trade["reason"]
-            == "TP"
+            if trade["reason"] == "TP"
             else "❌"
         )
 
@@ -3142,19 +2928,10 @@ def run_scan():
             f"📌 PAPER ONLY"
         )
 
-        telegram_ok = send_telegram(
-            message
-        )
-
-        if not telegram_ok:
-
-            print(
-                "[WARNING] "
-                "Trade close notification was NOT sent."
-            )
+        send_telegram(message)
 
     # --------------------------------------------------------
-    # PERIODIC REPORT
+    # Periodic report
     # --------------------------------------------------------
 
     if REPORT_ENABLED:
@@ -3168,16 +2945,7 @@ def run_scan():
             + report
         )
 
-        telegram_ok = send_telegram(
-            report
-        )
-
-        if not telegram_ok:
-
-            print(
-                "[WARNING] "
-                "Periodic report was NOT sent."
-            )
+        send_telegram(report)
 
     print(
         "\n[SCAN COMPLETE]"
