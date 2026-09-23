@@ -1,43 +1,39 @@
 # ============================================================
-# KRAKEN FUTURES 1H TRENDLINE BREAKOUT SIGNAL SCANNER
-# VERSION 1.0.0
+# KRAKEN FUTURES 1H TRENDLINE BREAKOUT SCANNER
+# VERSION 2.0.0
 # ============================================================
 #
-# PURPOSE:
-#   ONLY detect NEW 1H trendline breakouts.
+# PURPOSE
+# ------------------------------------------------------------
+# ONLY detect NEW 1H trendline breakouts.
 #
 # LONG:
-#   1H descending resistance trendline
-#   >= 3 confirmed touch points
-#   previous closed candle <= trendline
-#   latest closed candle CLOSES ABOVE trendline
+#   Descending resistance trendline
+#   Minimum 3 confirmed touches
+#   Previous closed 1H candle <= trendline
+#   Latest closed 1H candle CLOSES ABOVE trendline
 #
 # SHORT:
-#   1H ascending support trendline
-#   >= 3 confirmed touch points
-#   previous closed candle >= trendline
-#   latest closed candle CLOSES BELOW trendline
+#   Ascending support trendline
+#   Minimum 3 confirmed touches
+#   Previous closed 1H candle >= trendline
+#   Latest closed 1H candle CLOSES BELOW trendline
 #
 # NO:
 #   15M
 #   5M
-#   retest
-#   confirmation
-#   entry
+#   Retest
+#   Confirmation
+#   Entry
 #   TP
 #   SL
-#   trade management
+#   Trade management
 #
 # PAPER ONLY
-# NO EXCHANGE ORDERS
-#
-# Telegram:
-#   Set these GitHub Secrets:
-#
-#   TELEGRAM_BOT_TOKEN
-#   TELEGRAM_CHAT_ID
+# REAL_TRADING = False
 #
 # ============================================================
+
 
 import os
 import time
@@ -49,19 +45,46 @@ import requests
 
 
 # ============================================================
-# CONFIG
+# VERSION / MODE
 # ============================================================
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 REAL_TRADING = False
 PAPER_TRADING = True
 
+
+# ============================================================
+# DATABASE
+# ============================================================
+
 DB_FILE = "trendline_1h_breakout.db"
 
-KRAKEN_OHLC_URL = (
-    "https://futures.kraken.com/derivatives/api/v3/ohlc"
+
+# ============================================================
+# KRAKEN FUTURES CHART API
+# ============================================================
+#
+# Current Kraken Futures Charts API:
+#
+# https://futures.kraken.com/api/charts/v1/{tick_type}/{symbol}/{resolution}
+#
+# tick_type:
+#   trade
+#
+# resolution:
+#   1h
+#
+# ============================================================
+
+KRAKEN_CHART_URL = (
+    "https://futures.kraken.com/api/charts/v1"
 )
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN",
@@ -73,48 +96,49 @@ TELEGRAM_CHAT_ID = os.getenv(
     ""
 )
 
-# Scan interval.
-# GitHub Actions can run the script periodically.
-SCAN_INTERVAL_SECONDS = 300
 
-# Number of 1H candles requested.
-CANDLE_LIMIT = 240
+# ============================================================
+# SCAN SETTINGS
+# ============================================================
 
-# Pivot configuration.
+TIMEFRAME = "1h"
+
+CANDLE_COUNT = 250
+
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
 
-# Minimum number of trendline touches.
 MIN_TOUCHES = 3
 
-# Maximum distance of a pivot from trendline.
+LOOKBACK_CANDLES = 200
+
+MIN_LINE_LENGTH = 10
+
+# Maximum pivot distance from the trendline.
 # 0.002 = 0.20%
 TOUCH_TOLERANCE = 0.002
 
-# Minimum slope magnitude.
-# Prevents almost-horizontal lines from being treated
-# as descending/ascending trendlines.
+# Minimum absolute slope:
+# 0.01% per candle.
 MIN_SLOPE_PERCENT_PER_CANDLE = 0.01
 
-# Search only this many latest candles for candidate lines.
-LOOKBACK_CANDLES = 180
 
-# Maximum number of candles between first and last
-# touch used for a trendline.
-MIN_LINE_LENGTH = 10
+# ============================================================
+# 40 KRAKEN FUTURES USD MARKETS
+# ============================================================
 
-# Assets.
 SYMBOLS = [
     "PF_XBTUSD",
     "PF_ETHUSD",
     "PF_SOLUSD",
     "PF_XRPUSD",
-    "PF_LTCUSD",
     "PF_DOGEUSD",
     "PF_ADAUSD",
     "PF_LINKUSD",
     "PF_AVAXUSD",
     "PF_DOTUSD",
+    "PF_LTCUSD",
+
     "PF_BNBUSD",
     "PF_TRXUSD",
     "PF_UNIUSD",
@@ -125,6 +149,28 @@ SYMBOLS = [
     "PF_FILUSD",
     "PF_ARBUSD",
     "PF_OPUSD",
+
+    "PF_XLMUSD",
+    "PF_BCHUSD",
+    "PF_ETCUSD",
+    "PF_ALGOUSD",
+    "PF_APTUSD",
+    "PF_INJUSD",
+    "PF_SEIUSD",
+    "PF_TAOUSD",
+    "PF_WIFUSD",
+    "PF_PEPEUSD",
+
+    "PF_SHIBUSD",
+    "PF_ZECUSD",
+    "PF_EOSUSD",
+    "PF_QNTUSD",
+    "PF_IMXUSD",
+    "PF_RUNEUSD",
+    "PF_MKRUSD",
+    "PF_SNXXUSD",
+    "PF_CRVUSD",
+    "PF_ENSUSD",
 ]
 
 
@@ -135,37 +181,93 @@ SYMBOLS = [
 SESSION = requests.Session()
 
 SESSION.headers.update({
-    "User-Agent": "1H-Trendline-Breakout-Scanner/1.0"
+    "User-Agent": (
+        "Mozilla/5.0 "
+        "(compatible; Kraken-1H-Trendline-Scanner/2.0)"
+    ),
+    "Accept": "application/json",
 })
 
 
 # ============================================================
-# DATABASE
+# GLOBAL SCAN RESULTS
+# ============================================================
+
+SCAN_RESULTS = []
+
+NEW_SIGNALS = []
+
+ERRORS = []
+
+
+# ============================================================
+# TIME HELPERS
+# ============================================================
+
+def utc_now_timestamp():
+    return int(
+        datetime.now(
+            timezone.utc
+        ).timestamp()
+    )
+
+
+def format_utc(timestamp_ms):
+    if timestamp_ms > 10_000_000_000:
+        timestamp = timestamp_ms / 1000
+    else:
+        timestamp = timestamp_ms
+
+    dt = datetime.fromtimestamp(
+        timestamp,
+        tz=timezone.utc
+    )
+
+    return dt.strftime(
+        "%Y-%m-%d %H:%M UTC"
+    )
+
+
+# ============================================================
+# DATABASE INIT
 # ============================================================
 
 def init_db():
-    conn = sqlite3.connect(DB_FILE)
+
+    conn = sqlite3.connect(
+        DB_FILE
+    )
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS signals (
+
             id INTEGER PRIMARY KEY AUTOINCREMENT,
 
             symbol TEXT NOT NULL,
+
             direction TEXT NOT NULL,
 
             candle_time INTEGER NOT NULL,
 
             candle_open REAL,
+
             candle_high REAL,
+
             candle_low REAL,
+
             candle_close REAL,
 
             trendline_type TEXT,
+
             trendline_start_time INTEGER,
+
             trendline_end_time INTEGER,
 
             trendline_start_price REAL,
+
             trendline_end_price REAL,
+
+            trendline_value REAL,
 
             touches INTEGER,
 
@@ -184,14 +286,18 @@ def init_db():
 
 
 # ============================================================
-# DATABASE - INSERT ONLY NEW SIGNAL
+# INSERT NEW SIGNAL
 # ============================================================
 
 def insert_signal(signal):
-    conn = sqlite3.connect(DB_FILE)
 
-    cur = conn.execute("""
+    conn = sqlite3.connect(
+        DB_FILE
+    )
+
+    cursor = conn.execute("""
         INSERT OR IGNORE INTO signals (
+
             symbol,
             direction,
             candle_time,
@@ -209,12 +315,25 @@ def insert_signal(signal):
             trendline_start_price,
             trendline_end_price,
 
+            trendline_value,
+
             touches,
 
             created_at
+
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (
+            ?, ?, ?,
+            ?, ?, ?, ?,
+            ?,
+            ?, ?,
+            ?, ?,
+            ?,
+            ?,
+            ?
+        )
     """, (
+
         signal["symbol"],
         signal["direction"],
         signal["candle_time"],
@@ -232,12 +351,16 @@ def insert_signal(signal):
         signal["trendline_start_price"],
         signal["trendline_end_price"],
 
+        signal["trendline_value"],
+
         signal["touches"],
 
-        int(time.time())
+        utc_now_timestamp()
     ))
 
-    inserted = cur.rowcount == 1
+    inserted = (
+        cursor.rowcount == 1
+    )
 
     conn.commit()
     conn.close()
@@ -246,80 +369,95 @@ def insert_signal(signal):
 
 
 # ============================================================
-# TIME
-# ============================================================
-
-def utc_datetime(timestamp):
-    return datetime.fromtimestamp(
-        timestamp,
-        tz=timezone.utc
-    )
-
-
-def format_time(timestamp):
-    dt = utc_datetime(timestamp)
-
-    return dt.strftime(
-        "%Y-%m-%d %H:%M UTC"
-    )
-
-
-# ============================================================
-# KRAKEN OHLC
+# FETCH KRAKEN 1H CANDLES
 # ============================================================
 
 def fetch_ohlc(symbol):
+
+    url = (
+        f"{KRAKEN_CHART_URL}/"
+        f"trade/"
+        f"{symbol}/"
+        f"{TIMEFRAME}"
+    )
+
     params = {
-        "symbol": symbol,
-        "interval": 60
+        "count": CANDLE_COUNT
     }
 
     try:
+
         response = SESSION.get(
-            KRAKEN_OHLC_URL,
+            url,
             params=params,
-            timeout=20
+            timeout=25
         )
 
         response.raise_for_status()
 
         data = response.json()
 
-    except Exception as e:
+    except Exception as exc:
+
+        error = (
+            f"{symbol}: "
+            f"OHLC request failed: "
+            f"{exc}"
+        )
+
         print(
-            f"[ERROR] OHLC request failed "
-            f"{symbol}: {e}"
+            "[ERROR] "
+            + error
+        )
+
+        ERRORS.append(
+            error
         )
 
         return []
 
-    if not isinstance(data, dict):
-        return []
-
-    # Kraken Futures responses can vary slightly.
-    raw = data.get("candles")
-
-    if raw is None:
-        raw = data.get("result")
-
-    if raw is None:
-        raw = data.get("data")
-
-    if raw is None:
-        print(
-            f"[ERROR] No candle data for {symbol}"
+    if not isinstance(
+        data,
+        dict
+    ):
+        error = (
+            f"{symbol}: "
+            f"Invalid API response."
         )
+
+        print(
+            "[ERROR] "
+            + error
+        )
+
+        ERRORS.append(
+            error
+        )
+
         return []
 
-    # Some APIs return:
-    # {"candles": [...]}
-    #
-    # Some wrappers may return:
-    # {"result": {"candles": [...]}}
-    if isinstance(raw, dict):
-        raw = raw.get("candles")
+    raw = data.get(
+        "candles"
+    )
 
-    if not isinstance(raw, list):
+    if not isinstance(
+        raw,
+        list
+    ):
+        error = (
+            f"{symbol}: "
+            f"No candles in API response."
+        )
+
+        print(
+            "[ERROR] "
+            + error
+        )
+
+        ERRORS.append(
+            error
+        )
+
         return []
 
     candles = []
@@ -327,72 +465,69 @@ def fetch_ohlc(symbol):
     for row in raw:
 
         try:
-            # Common Kraken Futures OHLC format:
-            #
-            # [
-            #   time,
-            #   open,
-            #   high,
-            #   low,
-            #   close,
-            #   ...
-            # ]
 
-            if isinstance(row, dict):
+            if not isinstance(
+                row,
+                dict
+            ):
+                continue
 
-                timestamp = (
-                    row.get("time")
-                    or row.get("timestamp")
-                )
+            timestamp = row.get(
+                "time"
+            )
 
-                open_price = (
-                    row.get("open")
-                    or row.get("o")
-                )
+            open_price = row.get(
+                "open"
+            )
 
-                high_price = (
-                    row.get("high")
-                    or row.get("h")
-                )
+            high_price = row.get(
+                "high"
+            )
 
-                low_price = (
-                    row.get("low")
-                    or row.get("l")
-                )
+            low_price = row.get(
+                "low"
+            )
 
-                close_price = (
-                    row.get("close")
-                    or row.get("c")
-                )
+            close_price = row.get(
+                "close"
+            )
 
-            else:
-
-                if len(row) < 5:
-                    continue
-
-                timestamp = row[0]
-                open_price = row[1]
-                high_price = row[2]
-                low_price = row[3]
-                close_price = row[4]
+            if (
+                timestamp is None
+                or open_price is None
+                or high_price is None
+                or low_price is None
+                or close_price is None
+            ):
+                continue
 
             timestamp = int(
                 float(timestamp)
             )
 
-            # If timestamp is milliseconds.
-            if timestamp > 10_000_000_000:
-                timestamp //= 1000
+            # Kraken returns milliseconds.
+            if timestamp < 10_000_000_000:
+                timestamp *= 1000
 
-            candle = {
+            candles.append({
                 "time": timestamp,
-                "open": float(open_price),
-                "high": float(high_price),
-                "low": float(low_price),
-                "close": float(close_price)
-            }
 
-            candles.append(candle)
+                "open": float(
+                    open_price
+                ),
+
+                "high": float(
+                    high_price
+                ),
+
+                "low": float(
+                    low_price
+                ),
+
+                "close": float(
+                    close_price
+                )
+            })
 
         except Exception:
             continue
@@ -401,27 +536,51 @@ def fetch_ohlc(symbol):
         key=lambda x: x["time"]
     )
 
-    return candles[-CANDLE_LIMIT:]
+    # Remove duplicates.
+    unique = {}
+
+    for candle in candles:
+        unique[
+            candle["time"]
+        ] = candle
+
+    candles = list(
+        unique.values()
+    )
+
+    candles.sort(
+        key=lambda x: x["time"]
+    )
+
+    return candles[-CANDLE_COUNT:]
 
 
 # ============================================================
-# REMOVE CURRENT OPEN CANDLE
+# REMOVE CURRENT 1H CANDLE
 # ============================================================
 
-def get_closed_candles(candles):
+def get_closed_candles(
+    candles
+):
+
     if not candles:
         return []
 
-    now = int(time.time())
+    now_ms = int(
+        time.time() * 1000
+    )
 
-    # 1H candle beginning timestamp.
-    current_hour = (
-        now // 3600
-    ) * 3600
+    ONE_HOUR_MS = 60 * 60 * 1000
+
+    current_hour_start = (
+        now_ms // ONE_HOUR_MS
+    ) * ONE_HOUR_MS
 
     closed = [
-        c for c in candles
-        if c["time"] < current_hour
+        candle
+        for candle in candles
+        if candle["time"]
+        < current_hour_start
     ]
 
     return closed
@@ -435,28 +594,33 @@ def is_pivot_high(
     candles,
     index
 ):
-    left = PIVOT_LEFT
-    right = PIVOT_RIGHT
 
-    if index < left:
+    if index < PIVOT_LEFT:
         return False
 
-    if index + right >= len(candles):
+    if (
+        index + PIVOT_RIGHT
+        >= len(candles)
+    ):
         return False
 
-    price = candles[index]["high"]
+    price = candles[index][
+        "high"
+    ]
 
     for i in range(
-        index - left,
+        index - PIVOT_LEFT,
         index
     ):
+
         if candles[i]["high"] >= price:
             return False
 
     for i in range(
         index + 1,
-        index + right + 1
+        index + PIVOT_RIGHT + 1
     ):
+
         if candles[i]["high"] > price:
             return False
 
@@ -471,28 +635,33 @@ def is_pivot_low(
     candles,
     index
 ):
-    left = PIVOT_LEFT
-    right = PIVOT_RIGHT
 
-    if index < left:
+    if index < PIVOT_LEFT:
         return False
 
-    if index + right >= len(candles):
+    if (
+        index + PIVOT_RIGHT
+        >= len(candles)
+    ):
         return False
 
-    price = candles[index]["low"]
+    price = candles[index][
+        "low"
+    ]
 
     for i in range(
-        index - left,
+        index - PIVOT_LEFT,
         index
     ):
+
         if candles[i]["low"] <= price:
             return False
 
     for i in range(
         index + 1,
-        index + right + 1
+        index + PIVOT_RIGHT + 1
     ):
+
         if candles[i]["low"] < price:
             return False
 
@@ -500,40 +669,60 @@ def is_pivot_low(
 
 
 # ============================================================
-# GET PIVOTS
+# FIND PIVOTS
 # ============================================================
 
-def get_pivots(candles):
+def get_pivots(
+    candles
+):
+
     highs = []
     lows = []
 
     start = max(
         PIVOT_LEFT,
-        len(candles) - LOOKBACK_CANDLES
+        len(candles)
+        - LOOKBACK_CANDLES
     )
 
-    end = len(candles) - PIVOT_RIGHT
+    end = (
+        len(candles)
+        - PIVOT_RIGHT
+    )
 
-    for i in range(start, end):
+    for i in range(
+        start,
+        end
+    ):
 
         if is_pivot_high(
             candles,
             i
         ):
+
             highs.append({
                 "index": i,
-                "time": candles[i]["time"],
-                "price": candles[i]["high"]
+                "time": candles[i][
+                    "time"
+                ],
+                "price": candles[i][
+                    "high"
+                ]
             })
 
         if is_pivot_low(
             candles,
             i
         ):
+
             lows.append({
                 "index": i,
-                "time": candles[i]["time"],
-                "price": candles[i]["low"]
+                "time": candles[i][
+                    "time"
+                ],
+                "price": candles[i][
+                    "low"
+                ]
             })
 
     return highs, lows
@@ -550,7 +739,8 @@ def line_value(
     x2,
     y2
 ):
-    if x2 == x1:
+
+    if x1 == x2:
         return None
 
     slope = (
@@ -568,16 +758,20 @@ def line_value(
 
 
 # ============================================================
-# LINE SLOPE %
+# SLOPE %
 # ============================================================
 
-def slope_percent_per_candle(
+def slope_percent(
     x1,
     y1,
     x2,
     y2
 ):
-    if x2 == x1:
+
+    if x1 == x2:
+        return 0.0
+
+    if y1 == 0:
         return 0.0
 
     slope = (
@@ -586,28 +780,25 @@ def slope_percent_per_candle(
         x2 - x1
     )
 
-    if y1 == 0:
-        return 0.0
-
     return (
         slope / y1
     ) * 100.0
 
 
 # ============================================================
-# FIND BEST DESCENDING RESISTANCE
+# DESCENDING RESISTANCE
 # ============================================================
 
 def find_descending_resistance(
     candles,
     pivots
 ):
+
     if len(pivots) < MIN_TOUCHES:
         return None
 
     best = None
 
-    # Candidate lines from pairs of pivot highs.
     for a in range(
         len(pivots) - 1
     ):
@@ -623,13 +814,16 @@ def find_descending_resistance(
             x1 = p1["index"]
             x2 = p2["index"]
 
-            if x2 - x1 < MIN_LINE_LENGTH:
+            if (
+                x2 - x1
+                < MIN_LINE_LENGTH
+            ):
                 continue
 
             y1 = p1["price"]
             y2 = p2["price"]
 
-            slope_pct = slope_percent_per_candle(
+            slope = slope_percent(
                 x1,
                 y1,
                 x2,
@@ -637,18 +831,24 @@ def find_descending_resistance(
             )
 
             # Must be descending.
-            if slope_pct >= -MIN_SLOPE_PERCENT_PER_CANDLE:
+            if (
+                slope
+                >= -MIN_SLOPE_PERCENT_PER_CANDLE
+            ):
                 continue
 
             touches = []
 
             valid = True
 
-            for p in pivots:
+            for pivot in pivots:
 
-                x = p["index"]
+                x = pivot["index"]
 
-                if x < x1 or x > x2:
+                if (
+                    x < x1
+                    or x > x2
+                ):
                     continue
 
                 expected = line_value(
@@ -662,20 +862,27 @@ def find_descending_resistance(
                 if expected is None:
                     continue
 
-                deviation = abs(
-                    p["price"] - expected
-                ) / expected
+                deviation = (
+                    abs(
+                        pivot["price"]
+                        - expected
+                    )
+                    / expected
+                )
 
-                if deviation <= TOUCH_TOLERANCE:
-                    touches.append(p)
+                if (
+                    deviation
+                    <= TOUCH_TOLERANCE
+                ):
+                    touches.append(
+                        pivot
+                    )
 
             if len(touches) < MIN_TOUCHES:
                 continue
 
-            # Resistance line should not have been
-            # decisively broken by previous candles.
-            #
-            # We check candles from x1 to x2.
+            # No previous confirmed close
+            # may have broken this resistance.
             for i in range(
                 x1,
                 x2 + 1
@@ -692,11 +899,13 @@ def find_descending_resistance(
                 if expected is None:
                     continue
 
-                # A previous close above the line invalidates
-                # the old resistance.
-                if candles[i]["close"] > (
-                    expected * (
-                        1 + TOUCH_TOLERANCE
+                if (
+                    candles[i]["close"]
+                    >
+                    expected
+                    * (
+                        1
+                        + TOUCH_TOLERANCE
                     )
                 ):
                     valid = False
@@ -706,21 +915,29 @@ def find_descending_resistance(
                 continue
 
             score = (
-                len(touches) * 1000
+                len(touches) * 10000
                 + x2
             )
 
             candidate = {
-                "type": "DESCENDING_RESISTANCE",
+                "type":
+                    "DESCENDING_RESISTANCE",
+
                 "start": p1,
+
                 "end": p2,
-                "touches": len(touches),
-                "score": score
+
+                "touches":
+                    len(touches),
+
+                "score":
+                    score
             }
 
             if (
                 best is None
-                or candidate["score"] > best["score"]
+                or candidate["score"]
+                > best["score"]
             ):
                 best = candidate
 
@@ -728,13 +945,14 @@ def find_descending_resistance(
 
 
 # ============================================================
-# FIND BEST ASCENDING SUPPORT
+# ASCENDING SUPPORT
 # ============================================================
 
 def find_ascending_support(
     candles,
     pivots
 ):
+
     if len(pivots) < MIN_TOUCHES:
         return None
 
@@ -755,13 +973,16 @@ def find_ascending_support(
             x1 = p1["index"]
             x2 = p2["index"]
 
-            if x2 - x1 < MIN_LINE_LENGTH:
+            if (
+                x2 - x1
+                < MIN_LINE_LENGTH
+            ):
                 continue
 
             y1 = p1["price"]
             y2 = p2["price"]
 
-            slope_pct = slope_percent_per_candle(
+            slope = slope_percent(
                 x1,
                 y1,
                 x2,
@@ -769,18 +990,24 @@ def find_ascending_support(
             )
 
             # Must be ascending.
-            if slope_pct <= MIN_SLOPE_PERCENT_PER_CANDLE:
+            if (
+                slope
+                <= MIN_SLOPE_PERCENT_PER_CANDLE
+            ):
                 continue
 
             touches = []
 
             valid = True
 
-            for p in pivots:
+            for pivot in pivots:
 
-                x = p["index"]
+                x = pivot["index"]
 
-                if x < x1 or x > x2:
+                if (
+                    x < x1
+                    or x > x2
+                ):
                     continue
 
                 expected = line_value(
@@ -794,18 +1021,27 @@ def find_ascending_support(
                 if expected is None:
                     continue
 
-                deviation = abs(
-                    p["price"] - expected
-                ) / expected
+                deviation = (
+                    abs(
+                        pivot["price"]
+                        - expected
+                    )
+                    / expected
+                )
 
-                if deviation <= TOUCH_TOLERANCE:
-                    touches.append(p)
+                if (
+                    deviation
+                    <= TOUCH_TOLERANCE
+                ):
+                    touches.append(
+                        pivot
+                    )
 
             if len(touches) < MIN_TOUCHES:
                 continue
 
-            # Previous candle closes below support
-            # => old support already broken.
+            # No previous confirmed close
+            # may have broken support.
             for i in range(
                 x1,
                 x2 + 1
@@ -822,9 +1058,13 @@ def find_ascending_support(
                 if expected is None:
                     continue
 
-                if candles[i]["close"] < (
-                    expected * (
-                        1 - TOUCH_TOLERANCE
+                if (
+                    candles[i]["close"]
+                    <
+                    expected
+                    * (
+                        1
+                        - TOUCH_TOLERANCE
                     )
                 ):
                     valid = False
@@ -834,21 +1074,29 @@ def find_ascending_support(
                 continue
 
             score = (
-                len(touches) * 1000
+                len(touches) * 10000
                 + x2
             )
 
             candidate = {
-                "type": "ASCENDING_SUPPORT",
+                "type":
+                    "ASCENDING_SUPPORT",
+
                 "start": p1,
+
                 "end": p2,
-                "touches": len(touches),
-                "score": score
+
+                "touches":
+                    len(touches),
+
+                "score":
+                    score
             }
 
             if (
                 best is None
-                or candidate["score"] > best["score"]
+                or candidate["score"]
+                > best["score"]
             ):
                 best = candidate
 
@@ -863,28 +1111,36 @@ def check_long_breakout(
     candles,
     resistance
 ):
+
     if resistance is None:
         return None
 
     if len(candles) < 2:
         return None
 
-    latest_index = len(candles) - 1
-    previous_index = len(candles) - 2
-
-    start = resistance["start"]
-    end = resistance["end"]
-
-    latest = candles[latest_index]
-    previous = candles[previous_index]
-
-    latest_line = line_value(
-        latest_index,
-        start["index"],
-        start["price"],
-        end["index"],
-        end["price"]
+    latest_index = (
+        len(candles) - 1
     )
+
+    previous_index = (
+        len(candles) - 2
+    )
+
+    latest = candles[
+        latest_index
+    ]
+
+    previous = candles[
+        previous_index
+    ]
+
+    start = resistance[
+        "start"
+    ]
+
+    end = resistance[
+        "end"
+    ]
 
     previous_line = line_value(
         previous_index,
@@ -894,28 +1150,37 @@ def check_long_breakout(
         end["price"]
     )
 
+    latest_line = line_value(
+        latest_index,
+        start["index"],
+        start["price"],
+        end["index"],
+        end["price"]
+    )
+
     if (
-        latest_line is None
-        or previous_line is None
+        previous_line is None
+        or latest_line is None
     ):
         return None
 
-    # Fresh breakout:
-    #
-    # Previous closed candle was at/below line.
-    # Latest closed candle closes above line.
-
     previous_ok = (
         previous["close"]
-        <= previous_line * (
-            1 + TOUCH_TOLERANCE
+        <=
+        previous_line
+        * (
+            1
+            + TOUCH_TOLERANCE
         )
     )
 
     latest_break = (
         latest["close"]
-        > latest_line * (
-            1 + TOUCH_TOLERANCE
+        >
+        latest_line
+        * (
+            1
+            + TOUCH_TOLERANCE
         )
     )
 
@@ -926,71 +1191,85 @@ def check_long_breakout(
         return None
 
     return {
-        "direction": "LONG",
+        "direction":
+            "LONG",
 
-        "candle_time": latest["time"],
+        "candle_time":
+            latest["time"],
 
-        "open": latest["open"],
-        "high": latest["high"],
-        "low": latest["low"],
-        "close": latest["close"],
+        "open":
+            latest["open"],
 
-        "trendline_type": (
-            resistance["type"]
-        ),
+        "high":
+            latest["high"],
 
-        "trendline_start_time": (
-            start["time"]
-        ),
+        "low":
+            latest["low"],
 
-        "trendline_end_time": (
-            end["time"]
-        ),
+        "close":
+            latest["close"],
 
-        "trendline_start_price": (
-            start["price"]
-        ),
+        "trendline_type":
+            resistance["type"],
 
-        "trendline_end_price": (
-            end["price"]
-        ),
+        "trendline_start_time":
+            start["time"],
 
-        "trendline_value": latest_line,
+        "trendline_end_time":
+            end["time"],
 
-        "touches": resistance["touches"]
+        "trendline_start_price":
+            start["price"],
+
+        "trendline_end_price":
+            end["price"],
+
+        "trendline_value":
+            latest_line,
+
+        "touches":
+            resistance["touches"]
     }
 
 
 # ============================================================
-# CHECK SHORT BREAKOUT
+# CHECK SHORT BREAKDOWN
 # ============================================================
 
 def check_short_breakout(
     candles,
     support
 ):
+
     if support is None:
         return None
 
     if len(candles) < 2:
         return None
 
-    latest_index = len(candles) - 1
-    previous_index = len(candles) - 2
-
-    start = support["start"]
-    end = support["end"]
-
-    latest = candles[latest_index]
-    previous = candles[previous_index]
-
-    latest_line = line_value(
-        latest_index,
-        start["index"],
-        start["price"],
-        end["index"],
-        end["price"]
+    latest_index = (
+        len(candles) - 1
     )
+
+    previous_index = (
+        len(candles) - 2
+    )
+
+    latest = candles[
+        latest_index
+    ]
+
+    previous = candles[
+        previous_index
+    ]
+
+    start = support[
+        "start"
+    ]
+
+    end = support[
+        "end"
+    ]
 
     previous_line = line_value(
         previous_index,
@@ -1000,28 +1279,37 @@ def check_short_breakout(
         end["price"]
     )
 
+    latest_line = line_value(
+        latest_index,
+        start["index"],
+        start["price"],
+        end["index"],
+        end["price"]
+    )
+
     if (
-        latest_line is None
-        or previous_line is None
+        previous_line is None
+        or latest_line is None
     ):
         return None
 
-    # Fresh breakdown:
-    #
-    # Previous closed candle was at/above line.
-    # Latest closed candle closes below line.
-
     previous_ok = (
         previous["close"]
-        >= previous_line * (
-            1 - TOUCH_TOLERANCE
+        >=
+        previous_line
+        * (
+            1
+            - TOUCH_TOLERANCE
         )
     )
 
     latest_break = (
         latest["close"]
-        < latest_line * (
-            1 - TOUCH_TOLERANCE
+        <
+        latest_line
+        * (
+            1
+            - TOUCH_TOLERANCE
         )
     )
 
@@ -1032,72 +1320,90 @@ def check_short_breakout(
         return None
 
     return {
-        "direction": "SHORT",
+        "direction":
+            "SHORT",
 
-        "candle_time": latest["time"],
+        "candle_time":
+            latest["time"],
 
-        "open": latest["open"],
-        "high": latest["high"],
-        "low": latest["low"],
-        "close": latest["close"],
+        "open":
+            latest["open"],
 
-        "trendline_type": (
-            support["type"]
-        ),
+        "high":
+            latest["high"],
 
-        "trendline_start_time": (
-            start["time"]
-        ),
+        "low":
+            latest["low"],
 
-        "trendline_end_time": (
-            end["time"]
-        ),
+        "close":
+            latest["close"],
 
-        "trendline_start_price": (
-            start["price"]
-        ),
+        "trendline_type":
+            support["type"],
 
-        "trendline_end_price": (
-            end["price"]
-        ),
+        "trendline_start_time":
+            start["time"],
 
-        "trendline_value": latest_line,
+        "trendline_end_time":
+            end["time"],
 
-        "touches": support["touches"]
+        "trendline_start_price":
+            start["price"],
+
+        "trendline_end_price":
+            end["price"],
+
+        "trendline_value":
+            latest_line,
+
+        "touches":
+            support["touches"]
     }
 
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM SEND
 # ============================================================
 
-def send_telegram(message):
+def send_telegram(
+    message
+):
+
     if not TELEGRAM_BOT_TOKEN:
         print(
-            "[INFO] TELEGRAM_BOT_TOKEN "
-            "not configured."
+            "[INFO] "
+            "TELEGRAM_BOT_TOKEN "
+            "is not configured."
         )
         return False
 
     if not TELEGRAM_CHAT_ID:
         print(
-            "[INFO] TELEGRAM_CHAT_ID "
-            "not configured."
+            "[INFO] "
+            "TELEGRAM_CHAT_ID "
+            "is not configured."
         )
         return False
 
     url = (
-        "https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}"
+        "https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}"
         "/sendMessage"
     )
 
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
+        "chat_id":
+            TELEGRAM_CHAT_ID,
+
+        "text":
+            message,
+
+        "disable_web_page_preview":
+            True
     }
 
     try:
+
         response = SESSION.post(
             url,
             json=payload,
@@ -1108,70 +1414,225 @@ def send_telegram(message):
 
         return True
 
-    except Exception as e:
+    except Exception as exc:
 
         print(
-            f"[ERROR] Telegram failed: {e}"
+            "[ERROR] Telegram send failed: "
+            f"{exc}"
         )
 
         return False
 
 
 # ============================================================
-# FORMAT SIGNAL
+# FORMAT NEW SIGNAL
 # ============================================================
 
 def format_signal(
-    symbol,
     signal
 ):
+
     if signal["direction"] == "LONG":
+
         emoji = "🟢"
-        title = "1H TRENDLINE BREAKOUT"
-        direction = "LONG"
+
+        title = (
+            "1H TRENDLINE BREAKOUT"
+        )
+
     else:
+
         emoji = "🔴"
-        title = "1H TRENDLINE BREAKDOWN"
-        direction = "SHORT"
 
-    candle_time = format_time(
-        signal["candle_time"]
-    )
+        title = (
+            "1H TRENDLINE BREAKDOWN"
+        )
 
-    message = (
+    return (
         f"{emoji} {title}\n"
         f"\n"
-        f"Symbol: {symbol}\n"
-        f"Direction: {direction}\n"
+        f"Symbol: {signal['symbol']}\n"
+        f"Direction: "
+        f"{signal['direction']}\n"
         f"Timeframe: 1H\n"
         f"\n"
-        f"Break Candle Close: "
+        f"Break Close: "
         f"{signal['close']}\n"
-        f"Trendline Price: "
+        f"Trendline: "
         f"{signal['trendline_value']}\n"
-        f"\n"
         f"Touches: "
         f"{signal['touches']}\n"
-        f"Trendline: "
-        f"{signal['trendline_type']}\n"
         f"\n"
-        f"Candle: {candle_time}\n"
+        f"Candle: "
+        f"{format_utc(signal['candle_time'])}\n"
         f"\n"
         f"⚠️ NEW SIGNAL\n"
         f"1H trendline break only."
     )
 
-    return message
+
+# ============================================================
+# FORMAT SUMMARY
+# ============================================================
+
+def format_summary():
+
+    scanned = len(
+        SCAN_RESULTS
+    )
+
+    successful = sum(
+        1
+        for x in SCAN_RESULTS
+        if x["status"] == "OK"
+    )
+
+    failed = sum(
+        1
+        for x in SCAN_RESULTS
+        if x["status"] != "OK"
+    )
+
+    longs = sum(
+        1
+        for x in NEW_SIGNALS
+        if x["direction"] == "LONG"
+    )
+
+    shorts = sum(
+        1
+        for x in NEW_SIGNALS
+        if x["direction"] == "SHORT"
+    )
+
+    lines = []
+
+    lines.append(
+        "📊 1H TRENDLINE SCANNER"
+    )
+
+    lines.append("")
+
+    lines.append(
+        f"Version: {VERSION}"
+    )
+
+    lines.append(
+        f"Assets: {scanned}/40"
+    )
+
+    lines.append(
+        f"Data OK: {successful}"
+    )
+
+    lines.append(
+        f"Errors: {failed}"
+    )
+
+    lines.append("")
+
+    lines.append(
+        f"🟢 New LONG: {longs}"
+    )
+
+    lines.append(
+        f"🔴 New SHORT: {shorts}"
+    )
+
+    lines.append("")
+
+    if not NEW_SIGNALS:
+
+        lines.append(
+            "No new 1H trendline breakouts."
+        )
+
+    else:
+
+        lines.append(
+            "NEW SIGNALS:"
+        )
+
+        lines.append("")
+
+        for signal in NEW_SIGNALS:
+
+            if signal["direction"] == "LONG":
+                emoji = "🟢"
+            else:
+                emoji = "🔴"
+
+            lines.append(
+                f"{emoji} "
+                f"{signal['symbol']} "
+                f"{signal['direction']}"
+            )
+
+            lines.append(
+                f"Close: "
+                f"{signal['close']}"
+            )
+
+            lines.append(
+                f"Line: "
+                f"{signal['trendline_value']}"
+            )
+
+            lines.append(
+                f"Touches: "
+                f"{signal['touches']}"
+            )
+
+            lines.append(
+                f"Time: "
+                f"{format_utc(signal['candle_time'])}"
+            )
+
+            lines.append("")
+
+    if ERRORS:
+
+        lines.append(
+            "⚠️ DATA ERRORS:"
+        )
+
+        # Don't flood Telegram with 40 errors.
+        for error in ERRORS[:8]:
+
+            lines.append(
+                "• "
+                + error[:180]
+            )
+
+        if len(ERRORS) > 8:
+
+            lines.append(
+                f"• ... "
+                f"{len(ERRORS) - 8} more"
+            )
+
+    lines.append("")
+
+    lines.append(
+        "Mode: PAPER ONLY"
+    )
+
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
-# ANALYZE ONE SYMBOL
+# ANALYZE SYMBOL
 # ============================================================
 
-def analyze_symbol(symbol):
+def analyze_symbol(
+    symbol
+):
 
     print(
-        f"\n[SCAN] {symbol}"
+        "\n"
+        f"[SCAN] {symbol}"
     )
 
     candles = fetch_ohlc(
@@ -1179,35 +1640,75 @@ def analyze_symbol(symbol):
     )
 
     if len(candles) < 40:
-        print(
-            f"[SKIP] {symbol} "
-            f"not enough candles: "
-            f"{len(candles)}"
+
+        error = (
+            f"{symbol}: "
+            f"not enough candles "
+            f"({len(candles)})"
         )
+
+        print(
+            "[SKIP] "
+            + error
+        )
+
+        SCAN_RESULTS.append({
+            "symbol":
+                symbol,
+
+            "status":
+                "ERROR"
+        })
+
+        if not any(
+            error in x
+            for x in ERRORS
+        ):
+            ERRORS.append(
+                error
+            )
+
         return
 
-    candles = get_closed_candles(
+    closed = get_closed_candles(
         candles
     )
 
-    if len(candles) < 40:
-        print(
-            f"[SKIP] {symbol} "
-            f"not enough CLOSED candles."
+    if len(closed) < 40:
+
+        error = (
+            f"{symbol}: "
+            f"not enough CLOSED "
+            f"candles ({len(closed)})"
         )
+
+        print(
+            "[SKIP] "
+            + error
+        )
+
+        SCAN_RESULTS.append({
+            "symbol":
+                symbol,
+
+            "status":
+                "ERROR"
+        })
+
+        ERRORS.append(
+            error
+        )
+
         return
 
     # --------------------------------------------------------
-    # IMPORTANT
+    # The latest CLOSED candle is the possible breakout
+    # candle.
     #
-    # The latest candle is the latest CLOSED 1H candle.
-    #
-    # Pivots are calculated from candles BEFORE that candle.
-    # This prevents the current breakout candle from becoming
-    # a pivot and contaminating the trendline.
+    # It must NOT be used to create the trendline pivots.
     # --------------------------------------------------------
 
-    analysis_candles = candles[:-1]
+    analysis_candles = closed[:-1]
 
     highs, lows = get_pivots(
         analysis_candles
@@ -1215,32 +1716,42 @@ def analyze_symbol(symbol):
 
     print(
         f"[INFO] {symbol} "
-        f"pivot highs={len(highs)} "
-        f"pivot lows={len(lows)}"
+        f"pivot_highs={len(highs)} "
+        f"pivot_lows={len(lows)}"
     )
 
-    resistance = find_descending_resistance(
-        analysis_candles,
-        highs
+    resistance = (
+        find_descending_resistance(
+            analysis_candles,
+            highs
+        )
     )
 
-    support = find_ascending_support(
-        analysis_candles,
-        lows
+    support = (
+        find_ascending_support(
+            analysis_candles,
+            lows
+        )
     )
+
+    symbol_signal = None
 
     # --------------------------------------------------------
     # LONG
     # --------------------------------------------------------
 
-    long_signal = check_long_breakout(
-        candles,
-        resistance
+    long_signal = (
+        check_long_breakout(
+            closed,
+            resistance
+        )
     )
 
     if long_signal:
 
-        long_signal["symbol"] = symbol
+        long_signal[
+            "symbol"
+        ] = symbol
 
         inserted = insert_signal(
             long_signal
@@ -1248,40 +1759,42 @@ def analyze_symbol(symbol):
 
         if inserted:
 
-            message = format_signal(
-                symbol,
+            print(
+                f"[NEW LONG] "
+                f"{symbol}"
+            )
+
+            NEW_SIGNALS.append(
                 long_signal
             )
 
-            print(
-                "\n"
-                + message
-            )
-
-            send_telegram(
-                message
+            symbol_signal = (
+                long_signal
             )
 
         else:
 
             print(
                 f"[DUPLICATE] "
-                f"{symbol} LONG "
-                f"{long_signal['candle_time']}"
+                f"{symbol} LONG"
             )
 
     # --------------------------------------------------------
     # SHORT
     # --------------------------------------------------------
 
-    short_signal = check_short_breakout(
-        candles,
-        support
+    short_signal = (
+        check_short_breakout(
+            closed,
+            support
+        )
     )
 
     if short_signal:
 
-        short_signal["symbol"] = symbol
+        short_signal[
+            "symbol"
+        ] = symbol
 
         inserted = insert_signal(
             short_signal
@@ -1289,72 +1802,97 @@ def analyze_symbol(symbol):
 
         if inserted:
 
-            message = format_signal(
-                symbol,
+            print(
+                f"[NEW SHORT] "
+                f"{symbol}"
+            )
+
+            NEW_SIGNALS.append(
                 short_signal
             )
 
-            print(
-                "\n"
-                + message
-            )
-
-            send_telegram(
-                message
+            symbol_signal = (
+                short_signal
             )
 
         else:
 
             print(
                 f"[DUPLICATE] "
-                f"{symbol} SHORT "
-                f"{short_signal['candle_time']}"
+                f"{symbol} SHORT"
             )
 
     # --------------------------------------------------------
-    # DEBUG
+    # PRINT TRENDLINES
     # --------------------------------------------------------
 
     if resistance:
 
         print(
-            f"[TRENDLINE] {symbol} "
-            f"DESCENDING RESISTANCE "
-            f"touches={resistance['touches']} "
-            f"start={resistance['start']['price']} "
-            f"end={resistance['end']['price']}"
+            f"[LINE] {symbol} "
+            f"DESCENDING "
+            f"touches="
+            f"{resistance['touches']} "
+            f"start="
+            f"{resistance['start']['price']} "
+            f"end="
+            f"{resistance['end']['price']}"
         )
 
     if support:
 
         print(
-            f"[TRENDLINE] {symbol} "
-            f"ASCENDING SUPPORT "
-            f"touches={support['touches']} "
-            f"start={support['start']['price']} "
-            f"end={support['end']['price']}"
+            f"[LINE] {symbol} "
+            f"ASCENDING "
+            f"touches="
+            f"{support['touches']} "
+            f"start="
+            f"{support['start']['price']} "
+            f"end="
+            f"{support['end']['price']}"
         )
+
+    SCAN_RESULTS.append({
+        "symbol":
+            symbol,
+
+        "status":
+            "OK"
+    })
 
 
 # ============================================================
-# RUN ONE SCAN
+# RUN SCAN
 # ============================================================
 
 def run_scan():
 
+    global SCAN_RESULTS
+    global NEW_SIGNALS
+    global ERRORS
+
+    SCAN_RESULTS = []
+    NEW_SIGNALS = []
+    ERRORS = []
+
     print(
         "\n"
-        "===================================================="
+        "============================================================"
     )
 
     print(
-        f"KRAKEN 1H TRENDLINE BREAKOUT SCANNER "
+        f"KRAKEN FUTURES "
+        f"1H TRENDLINE BREAKOUT SCANNER "
         f"v{VERSION}"
     )
 
     print(
-        f"Time: "
-        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+        f"UTC: "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}"
+    )
+
+    print(
+        f"Assets: {len(SYMBOLS)}"
     )
 
     print(
@@ -1366,7 +1904,7 @@ def run_scan():
     )
 
     print(
-        "===================================================="
+        "============================================================"
     )
 
     for symbol in SYMBOLS:
@@ -1377,17 +1915,60 @@ def run_scan():
                 symbol
             )
 
-        except Exception as e:
+        except Exception as exc:
+
+            error = (
+                f"{symbol}: "
+                f"unexpected error: "
+                f"{exc}"
+            )
 
             print(
-                f"[ERROR] "
-                f"{symbol}: {e}"
+                "[ERROR] "
+                + error
             )
 
             traceback.print_exc()
 
+            ERRORS.append(
+                error
+            )
+
+            SCAN_RESULTS.append({
+                "symbol":
+                    symbol,
+
+                "status":
+                    "ERROR"
+            })
+
+    # --------------------------------------------------------
+    # TELEGRAM INDIVIDUAL NEW SIGNALS
+    # --------------------------------------------------------
+
+    for signal in NEW_SIGNALS:
+
+        message = format_signal(
+            signal
+        )
+
+        send_telegram(
+            message
+        )
+
+    # --------------------------------------------------------
+    # TELEGRAM PERIODIC SCAN REPORT
+    # --------------------------------------------------------
+
+    summary = format_summary()
+
     print(
-        "\n[SCAN COMPLETE]"
+        "\n"
+        + summary
+    )
+
+    send_telegram(
+        summary
     )
 
 
@@ -1399,14 +1980,13 @@ def main():
 
     init_db()
 
-    # --------------------------------------------------------
-    # SINGLE RUN
-    #
-    # GitHub Actions can call this script every few minutes.
-    # --------------------------------------------------------
-
     run_scan()
 
 
+# ============================================================
+# ENTRY
+# ============================================================
+
 if __name__ == "__main__":
+
     main()
