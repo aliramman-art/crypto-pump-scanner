@@ -1,128 +1,234 @@
-name: Kraken Pattern Live Scanner
+name: Kraken Futures Trendline Live Scanner
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
-
-  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: kraken-pattern-live
+  group: kraken-trendline-live
   cancel-in-progress: false
 
 jobs:
   scanner:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
 
-      # ======================================================
-      # CHECKOUT
-      # ======================================================
-
+      # =========================================================
+      # CHECKOUT REPOSITORY
+      # =========================================================
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          persist-credentials: true
 
-      # ======================================================
-      # PYTHON
-      # ======================================================
-
+      # =========================================================
+      # SETUP PYTHON
+      # =========================================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ======================================================
-      # DEPENDENCIES
-      # ======================================================
-
+      # =========================================================
+      # INSTALL DEPENDENCIES
+      # =========================================================
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pandas requests numpy matplotlib
+          pip install requests pandas matplotlib
 
-      # ======================================================
-      # SHOW RUNNER PUBLIC IP
-      # ======================================================
-
-      - name: Show Runner Public IP
+      # =========================================================
+      # SHOW DATABASE STATUS BEFORE RUN
+      # =========================================================
+      - name: Check persistent database
         run: |
-          echo "Runner public IP:"
-          curl -s https://api.ipify.org
-          echo
+          echo "=========================================="
+          echo "DATABASE STATUS BEFORE SCAN"
+          echo "=========================================="
 
-      # ======================================================
-      # RUN LIVE SCANNER
-      # ======================================================
+          if [ -f "kraken_pattern_live_v52.db" ]; then
+            echo "DB FOUND"
+            ls -lh kraken_pattern_live_v52.db
 
-      - name: Run Kraken Pattern Live Scanner
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+            python - <<'PY'
+          import sqlite3
+          import os
+
+          db = "kraken_pattern_live_v52.db"
+
+          con = sqlite3.connect(db)
+
+          try:
+              tables = con.execute("""
+                  SELECT name
+                  FROM sqlite_master
+                  WHERE type='table'
+                  ORDER BY name
+              """).fetchall()
+
+              print("Tables:")
+              for t in tables:
+                  print(" -", t[0])
+
+              for table in ["trades", "signals"]:
+                  try:
+                      count = con.execute(
+                          f"SELECT COUNT(*) FROM {table}"
+                      ).fetchone()[0]
+
+                      print(f"{table}: {count} rows")
+                  except Exception:
+                      pass
+
+          finally:
+              con.close()
+          PY
+
+          else
+            echo "DB NOT FOUND"
+            echo "A new database will be created by the scanner."
+          fi
+
+      # =========================================================
+      # RUN SCANNER
+      # =========================================================
+      - name: Run Trendline Scanner
         run: |
           python kraken_pattern_live.py
 
-      # ======================================================
-      # SAVE DATABASE STATE
-      # ======================================================
-
-      - name: Save scanner state
+      # =========================================================
+      # SQLITE CHECKPOINT
+      # =========================================================
+      # Make sure SQLite WAL data is written into the main DB
+      # before Git commits the file.
+      # =========================================================
+      - name: Finalize SQLite database
         if: always()
         run: |
-          set -e
+          if [ -f "kraken_pattern_live_v52.db" ]; then
+
+            python - <<'PY'
+          import sqlite3
+
+          db = "kraken_pattern_live_v52.db"
+
+          con = sqlite3.connect(db)
+
+          try:
+              try:
+                  con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+              except Exception as e:
+                  print("WAL checkpoint warning:", e)
+
+              con.commit()
+
+          finally:
+              con.close()
+
+          print("SQLite database finalized.")
+          PY
+
+          fi
+
+      # =========================================================
+      # SHOW DATABASE STATUS AFTER RUN
+      # =========================================================
+      - name: Check database after scan
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "DATABASE STATUS AFTER SCAN"
+          echo "=========================================="
+
+          if [ -f "kraken_pattern_live_v52.db" ]; then
+            ls -lh kraken_pattern_live_v52.db
+
+            python - <<'PY'
+          import sqlite3
+
+          db = "kraken_pattern_live_v52.db"
+
+          con = sqlite3.connect(db)
+
+          try:
+              tables = con.execute("""
+                  SELECT name
+                  FROM sqlite_master
+                  WHERE type='table'
+                  ORDER BY name
+              """).fetchall()
+
+              print("Tables:")
+              for t in tables:
+                  print(" -", t[0])
+
+              for table in ["trades", "signals"]:
+                  try:
+                      count = con.execute(
+                          f"SELECT COUNT(*) FROM {table}"
+                      ).fetchone()[0]
+
+                      print(f"{table}: {count} rows")
+                  except Exception:
+                      pass
+
+          finally:
+              con.close()
+          PY
+
+          else
+            echo "ERROR: Database file does not exist."
+            exit 1
+          fi
+
+      # =========================================================
+      # SAVE DATABASE INTO GITHUB REPOSITORY
+      # =========================================================
+      - name: Persist SQLite database
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "PERSISTING DATABASE"
+          echo "=========================================="
+
+          if [ ! -f "kraken_pattern_live_v52.db" ]; then
+            echo "Database file not found. Nothing to save."
+            exit 0
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if [ -f "kraken_pattern_live_v52.db" ]; then
+          git add kraken_pattern_live_v52.db
 
-            echo "Database found:"
-            ls -lh kraken_pattern_live_v52.db
-
-            git add kraken_pattern_live_v52.db
-
-            if git diff --cached --quiet; then
-              echo "No database changes."
-              exit 0
-            fi
-
-            git commit -m "Update Kraken live scanner state"
-
-            echo "Fetching latest remote main..."
-            git fetch origin main
-
-            echo "Rebasing local changes onto latest remote main..."
-            git rebase origin/main
-
-            echo "Pushing scanner state..."
-
-            for attempt in 1 2 3 4 5; do
-              if git push origin HEAD:main; then
-                echo "Database state pushed successfully."
-                exit 0
-              fi
-
-              echo "Push failed on attempt $attempt."
-
-              if [ "$attempt" -lt 5 ]; then
-                echo "Fetching latest remote main and retrying..."
-
-                git fetch origin main
-
-                git rebase origin/main
-              fi
-            done
-
-            echo "ERROR: Failed to push database state after 5 attempts."
-            exit 1
-
+          if git diff --cached --quiet; then
+            echo "No database changes to commit."
           else
-            echo "ERROR: kraken_pattern_live_v52.db was not created/found."
-            exit 1
+            git commit -m "Persist trendline scanner database [skip ci]"
+            git push
+            echo "Database successfully persisted."
+          fi
+
+      # =========================================================
+      # FINAL DATABASE CHECK
+      # =========================================================
+      - name: Final status
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "TRENDLINE SCANNER WORKFLOW FINISHED"
+          echo "=========================================="
+
+          if [ -f "kraken_pattern_live_v52.db" ]; then
+            echo "Persistent DB: OK"
+            ls -lh kraken_pattern_live_v52.db
+          else
+            echo "Persistent DB: MISSING"
           fi
