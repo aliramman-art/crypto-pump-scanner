@@ -19,51 +19,43 @@ jobs:
 
     steps:
 
-      # =========================================================
-      # CHECKOUT REPOSITORY
-      # =========================================================
+      # ============================================================
+      # CHECKOUT
+      # ============================================================
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
 
-      # =========================================================
-      # SETUP PYTHON
-      # =========================================================
+      # ============================================================
+      # PYTHON
+      # ============================================================
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # =========================================================
-      # INSTALL DEPENDENCIES
-      # =========================================================
+      # ============================================================
+      # DEPENDENCIES
+      # ============================================================
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests pandas matplotlib
 
-      # =========================================================
-      # DATABASE BEFORE SCAN
-      # =========================================================
+      # ============================================================
+      # CHECK DATABASE
+      # ============================================================
       - name: Check persistent database
         run: |
-          echo "=================================================="
-          echo "DATABASE STATUS BEFORE SCAN"
-          echo "=================================================="
-
-          echo "Current directory:"
-          pwd
-
-          echo ""
-          echo "Expected database:"
-          echo "trendline_1h_breakout_v30.db"
+          echo "=============================================="
+          echo "CHECKING PERSISTENT DATABASE"
+          echo "=============================================="
 
           if [ -f "trendline_1h_breakout_v30.db" ]; then
 
-            echo ""
-            echo "DB FOUND"
+            echo "Database FOUND:"
             ls -lh trendline_1h_breakout_v30.db
 
             python - <<'PY'
@@ -71,250 +63,235 @@ jobs:
 
           db = "trendline_1h_breakout_v30.db"
 
-          con = sqlite3.connect(db)
+          conn = sqlite3.connect(db)
 
-          try:
-              tables = con.execute("""
-                  SELECT name
-                  FROM sqlite_master
-                  WHERE type='table'
-                  ORDER BY name
-              """).fetchall()
+          tables = conn.execute("""
+              SELECT name
+              FROM sqlite_master
+              WHERE type='table'
+          """).fetchall()
 
-              print("Tables:")
+          print("Tables:", [x[0] for x in tables])
 
-              for table in tables:
-                  print(" -", table[0])
+          if any(x[0] == "signals" for x in tables):
 
-              print("")
-              print("Row counts:")
+              total = conn.execute(
+                  "SELECT COUNT(*) FROM signals"
+              ).fetchone()[0]
 
-              for (table,) in tables:
-                  try:
-                      count = con.execute(
-                          f'SELECT COUNT(*) FROM "{table}"'
-                      ).fetchone()[0]
+              open_trades = conn.execute(
+                  "SELECT COUNT(*) FROM signals WHERE status='OPEN'"
+              ).fetchone()[0]
 
-                      print(
-                          f" - {table}: {count}"
-                      )
+              closed_trades = conn.execute(
+                  "SELECT COUNT(*) FROM signals WHERE status='CLOSED'"
+              ).fetchone()[0]
 
-                  except Exception as exc:
-                      print(
-                          f" - {table}: ERROR {exc}"
-                      )
+              print("Total signals:", total)
+              print("Open trades:", open_trades)
+              print("Closed trades:", closed_trades)
 
-          finally:
-              con.close()
+          conn.close()
           PY
 
           else
 
-            echo ""
-            echo "DB NOT FOUND"
-            echo "A new database will be created by Python."
+            echo "Database NOT FOUND."
+            echo "First run will create trendline_1h_breakout_v30.db."
 
           fi
 
-      # =========================================================
-      # VERIFY PYTHON DATABASE CONFIG
-      # =========================================================
-      - name: Verify scanner database configuration
+      # ============================================================
+      # VERIFY TELEGRAM SECRETS
+      # ============================================================
+      - name: Verify Telegram secrets
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          echo "=================================================="
-          echo "PYTHON DATABASE CONFIGURATION"
-          echo "=================================================="
+          echo "=============================================="
+          echo "TELEGRAM SECRET CHECK"
+          echo "=============================================="
 
-          grep -nE 'VERSION|DB_FILE' \
-            kraken_pattern_live.py || true
+          if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
+            echo "[TELEGRAM] Bot token: FOUND"
+          else
+            echo "[TELEGRAM] Bot token: NOT FOUND"
+          fi
 
-      # =========================================================
+          if [ -n "$TELEGRAM_CHAT_ID" ]; then
+            echo "[TELEGRAM] Chat ID: FOUND"
+          else
+            echo "[TELEGRAM] Chat ID: NOT FOUND"
+          fi
+
+          if [ -z "$TELEGRAM_BOT_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+            echo ""
+            echo "::error::Telegram secrets are not available."
+            echo "::error::Required secret names:"
+            echo "::error::TELEGRAM_BOT_TOKEN"
+            echo "::error::TELEGRAM_CHAT_ID"
+            exit 1
+          fi
+
+          echo ""
+          echo "[TELEGRAM] Configuration: COMPLETE"
+
+      # ============================================================
       # RUN SCANNER
-      # =========================================================
+      # ============================================================
       - name: Run Trendline Scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
+          echo "=============================================="
+          echo "STARTING KRAKEN FUTURES TRENDLINE SCANNER"
+          echo "=============================================="
+
           python kraken_pattern_live.py
 
-      # =========================================================
-      # SQLITE FINALIZE
-      # =========================================================
+      # ============================================================
+      # FINALIZE SQLITE
+      # ============================================================
       - name: Finalize SQLite database
-        if: success()
+        if: always()
         run: |
 
-          echo "=================================================="
-          echo "FINALIZING SQLITE DATABASE"
-          echo "=================================================="
+          if [ -f "trendline_1h_breakout_v30.db" ]; then
 
-          if [ ! -f "trendline_1h_breakout_v30.db" ]; then
+            echo "Finalizing SQLite database..."
 
-            echo "ERROR:"
-            echo "trendline_1h_breakout_v30.db was not created."
-
-            exit 1
-
-          fi
-
-          python - <<'PY'
+            python - <<'PY'
           import sqlite3
 
           db = "trendline_1h_breakout_v30.db"
 
-          con = sqlite3.connect(db)
+          conn = sqlite3.connect(db)
 
           try:
+              conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+              print("SQLite WAL checkpoint completed.")
+          except Exception as e:
+              print("SQLite WAL checkpoint warning:", e)
 
-              con.commit()
-
-              try:
-                  con.execute(
-                      "PRAGMA wal_checkpoint(TRUNCATE)"
-                  )
-              except Exception as exc:
-                  print(
-                      "WAL checkpoint warning:",
-                      exc
-                  )
-
-              con.commit()
-
-          finally:
-              con.close()
-
-          print(
-              "SQLite database finalized."
-          )
+          conn.commit()
+          conn.close()
           PY
 
-      # =========================================================
-      # VERIFY DATABASE AFTER SCAN
-      # =========================================================
-      - name: Verify database after scan
-        if: success()
+          else
+
+            echo "Database file not found during finalization."
+
+          fi
+
+      # ============================================================
+      # CHECK DATABASE AFTER SCAN
+      # ============================================================
+      - name: Check database after scan
+        if: always()
         run: |
 
-          echo "=================================================="
+          echo "=============================================="
           echo "DATABASE STATUS AFTER SCAN"
-          echo "=================================================="
+          echo "=============================================="
 
-          if [ ! -f "trendline_1h_breakout_v30.db" ]; then
+          if [ -f "trendline_1h_breakout_v30.db" ]; then
 
-            echo "ERROR: Database missing."
+            ls -lh trendline_1h_breakout_v30.db
 
-            exit 1
-
-          fi
-
-          ls -lh trendline_1h_breakout_v30.db
-
-          python - <<'PY'
+            python - <<'PY'
           import sqlite3
 
           db = "trendline_1h_breakout_v30.db"
 
-          con = sqlite3.connect(db)
+          conn = sqlite3.connect(db)
 
-          try:
+          total = conn.execute(
+              "SELECT COUNT(*) FROM signals"
+          ).fetchone()[0]
 
-              tables = con.execute("""
-                  SELECT name
-                  FROM sqlite_master
-                  WHERE type='table'
-                  ORDER BY name
-              """).fetchall()
+          open_trades = conn.execute(
+              "SELECT COUNT(*) FROM signals WHERE status='OPEN'"
+          ).fetchone()[0]
 
-              print("Tables:")
+          closed_trades = conn.execute(
+              "SELECT COUNT(*) FROM signals WHERE status='CLOSED'"
+          ).fetchone()[0]
 
-              for table in tables:
-                  print(" -", table[0])
+          pnl = conn.execute(
+              """
+              SELECT COALESCE(SUM(pnl_percent), 0)
+              FROM signals
+              WHERE status='CLOSED'
+              """
+          ).fetchone()[0]
 
-              print("")
-              print("Row counts:")
+          print("Total signals:", total)
+          print("Open trades:", open_trades)
+          print("Closed trades:", closed_trades)
+          print("Closed PnL:", pnl)
 
-              for (table,) in tables:
-
-                  try:
-
-                      count = con.execute(
-                          f'SELECT COUNT(*) FROM "{table}"'
-                      ).fetchone()[0]
-
-                      print(
-                          f" - {table}: {count}"
-                      )
-
-                  except Exception as exc:
-
-                      print(
-                          f" - {table}: ERROR {exc}"
-                      )
-
-          finally:
-              con.close()
+          conn.close()
           PY
 
-      # =========================================================
-      # PERSIST DATABASE INTO REPOSITORY
-      # =========================================================
-      - name: Persist SQLite database
-        if: success()
-        run: |
+          else
 
-          echo "=================================================="
-          echo "PERSISTING DATABASE"
-          echo "=================================================="
-
-          if [ ! -f "trendline_1h_breakout_v30.db" ]; then
-
-            echo "ERROR: Database file not found."
-
+            echo "::error::trendline_1h_breakout_v30.db was not created."
             exit 1
 
           fi
 
-          git config user.name \
-            "github-actions[bot]"
+      # ============================================================
+      # PERSIST DATABASE
+      # ============================================================
+      - name: Persist SQLite database
+        if: always()
+        run: |
 
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ ! -f "trendline_1h_breakout_v30.db" ]; then
+
+            echo "::error::Database file missing."
+            exit 1
+
+          fi
+
+          echo "=============================================="
+          echo "PERSISTING DATABASE"
+          echo "=============================================="
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add trendline_1h_breakout_v30.db
 
           if git diff --cached --quiet; then
 
-            echo "No database changes detected."
+            echo "No database changes to commit."
 
           else
 
-            git commit \
-              -m "Persist trendline scanner database [skip ci]"
-
+            git commit -m "Persist trendline scanner database [skip ci]"
             git push
 
-            echo "DATABASE SUCCESSFULLY PERSISTED."
+            echo "Database successfully persisted."
 
           fi
 
-      # =========================================================
+      # ============================================================
       # FINAL STATUS
-      # =========================================================
+      # ============================================================
       - name: Final status
         if: always()
         run: |
 
-          echo "=================================================="
-          echo "WORKFLOW FINAL STATUS"
-          echo "=================================================="
+          echo "=============================================="
+          echo "WORKFLOW FINISHED"
+          echo "=============================================="
 
           if [ -f "trendline_1h_breakout_v30.db" ]; then
-
-            echo "Persistent DB: OK"
-
-            ls -lh \
-              trendline_1h_breakout_v30.db
-
+            echo "Database: trendline_1h_breakout_v30.db"
+            ls -lh trendline_1h_breakout_v30.db
           else
-
-            echo "Persistent DB: MISSING"
-
+            echo "Database: NOT FOUND"
           fi
