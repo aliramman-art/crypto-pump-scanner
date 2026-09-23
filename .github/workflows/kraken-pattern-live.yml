@@ -45,36 +45,31 @@ jobs:
           pip install requests pandas matplotlib
 
       # =========================================================
-      # SHOW FILES / DATABASE BEFORE SCAN
+      # DATABASE BEFORE SCAN
       # =========================================================
-      - name: Diagnose persistent database
+      - name: Check persistent database
         run: |
           echo "=================================================="
-          echo "REPOSITORY / DATABASE DIAGNOSTIC"
+          echo "DATABASE STATUS BEFORE SCAN"
           echo "=================================================="
 
-          echo ""
-          echo "CURRENT DIRECTORY:"
+          echo "Current directory:"
           pwd
 
           echo ""
-          echo "DATABASE FILES:"
-          find . -maxdepth 3 -type f \
-            \( -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" \) \
-            -print -exec ls -lh {} \; || true
+          echo "Expected database:"
+          echo "trendline_1h_breakout_v30.db"
 
-          echo ""
-          echo "TARGET DATABASE:"
-          if [ -f "kraken_pattern_live_v52.db" ]; then
-            echo "FOUND: kraken_pattern_live_v52.db"
-            ls -lh kraken_pattern_live_v52.db
+          if [ -f "trendline_1h_breakout_v30.db" ]; then
+
+            echo ""
+            echo "DB FOUND"
+            ls -lh trendline_1h_breakout_v30.db
 
             python - <<'PY'
           import sqlite3
 
-          db = "kraken_pattern_live_v52.db"
-
-          print("DB:", db)
+          db = "trendline_1h_breakout_v30.db"
 
           con = sqlite3.connect(db)
 
@@ -86,12 +81,13 @@ jobs:
                   ORDER BY name
               """).fetchall()
 
-              print("TABLES:")
-              for row in tables:
-                  print(" ", row[0])
+              print("Tables:")
+
+              for table in tables:
+                  print(" -", table[0])
 
               print("")
-              print("ROW COUNTS:")
+              print("Row counts:")
 
               for (table,) in tables:
                   try:
@@ -99,39 +95,38 @@ jobs:
                           f'SELECT COUNT(*) FROM "{table}"'
                       ).fetchone()[0]
 
-                      print(f"  {table}: {count}")
-                  except Exception as e:
-                      print(f"  {table}: ERROR {e}")
+                      print(
+                          f" - {table}: {count}"
+                      )
+
+                  except Exception as exc:
+                      print(
+                          f" - {table}: ERROR {exc}"
+                      )
 
           finally:
               con.close()
           PY
 
           else
-            echo "NOT FOUND: kraken_pattern_live_v52.db"
-            echo "WARNING: Scanner may create a NEW database."
-          fi
-
-      # =========================================================
-      # SHOW PYTHON DB CONFIGURATION
-      # =========================================================
-      - name: Check scanner DB configuration
-        run: |
-          echo "=================================================="
-          echo "SCANNER DATABASE CONFIGURATION"
-          echo "=================================================="
-
-          if [ -f "kraken_pattern_live.py" ]; then
-            echo "kraken_pattern_live.py FOUND"
 
             echo ""
-            echo "VERSION / DB_FILE references:"
-            grep -nE 'VERSION|DB_FILE|sqlite3\.connect' \
-              kraken_pattern_live.py || true
-          else
-            echo "ERROR: kraken_pattern_live.py NOT FOUND"
-            exit 1
+            echo "DB NOT FOUND"
+            echo "A new database will be created by Python."
+
           fi
+
+      # =========================================================
+      # VERIFY PYTHON DATABASE CONFIG
+      # =========================================================
+      - name: Verify scanner database configuration
+        run: |
+          echo "=================================================="
+          echo "PYTHON DATABASE CONFIGURATION"
+          echo "=================================================="
+
+          grep -nE 'VERSION|DB_FILE' \
+            kraken_pattern_live.py || true
 
       # =========================================================
       # RUN SCANNER
@@ -141,44 +136,55 @@ jobs:
           python kraken_pattern_live.py
 
       # =========================================================
-      # FINALIZE SQLITE
+      # SQLITE FINALIZE
       # =========================================================
       - name: Finalize SQLite database
         if: success()
         run: |
+
           echo "=================================================="
           echo "FINALIZING SQLITE DATABASE"
           echo "=================================================="
 
-          if [ -f "kraken_pattern_live_v52.db" ]; then
+          if [ ! -f "trendline_1h_breakout_v30.db" ]; then
 
-            python - <<'PY'
+            echo "ERROR:"
+            echo "trendline_1h_breakout_v30.db was not created."
+
+            exit 1
+
+          fi
+
+          python - <<'PY'
           import sqlite3
 
-          db = "kraken_pattern_live_v52.db"
+          db = "trendline_1h_breakout_v30.db"
 
           con = sqlite3.connect(db)
 
           try:
+
               con.commit()
 
               try:
-                  con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-              except Exception as e:
-                  print("WAL checkpoint:", e)
+                  con.execute(
+                      "PRAGMA wal_checkpoint(TRUNCATE)"
+                  )
+              except Exception as exc:
+                  print(
+                      "WAL checkpoint warning:",
+                      exc
+                  )
 
               con.commit()
 
           finally:
               con.close()
 
-          print("SQLite database finalized.")
+          print(
+              "SQLite database finalized."
+          )
           PY
-
-          else
-            echo "ERROR: DB file missing after scanner."
-            exit 1
-          fi
 
       # =========================================================
       # VERIFY DATABASE AFTER SCAN
@@ -186,25 +192,30 @@ jobs:
       - name: Verify database after scan
         if: success()
         run: |
+
           echo "=================================================="
-          echo "DATABASE AFTER SCAN"
+          echo "DATABASE STATUS AFTER SCAN"
           echo "=================================================="
 
-          if [ ! -f "kraken_pattern_live_v52.db" ]; then
-            echo "ERROR: kraken_pattern_live_v52.db does not exist."
+          if [ ! -f "trendline_1h_breakout_v30.db" ]; then
+
+            echo "ERROR: Database missing."
+
             exit 1
+
           fi
 
-          ls -lh kraken_pattern_live_v52.db
+          ls -lh trendline_1h_breakout_v30.db
 
           python - <<'PY'
           import sqlite3
 
-          db = "kraken_pattern_live_v52.db"
+          db = "trendline_1h_breakout_v30.db"
 
           con = sqlite3.connect(db)
 
           try:
+
               tables = con.execute("""
                   SELECT name
                   FROM sqlite_master
@@ -212,23 +223,31 @@ jobs:
                   ORDER BY name
               """).fetchall()
 
-              print("TABLES:")
+              print("Tables:")
 
-              for (table,) in tables:
-                  print(" ", table)
+              for table in tables:
+                  print(" -", table[0])
 
               print("")
-              print("ROW COUNTS:")
+              print("Row counts:")
 
               for (table,) in tables:
+
                   try:
+
                       count = con.execute(
                           f'SELECT COUNT(*) FROM "{table}"'
                       ).fetchone()[0]
 
-                      print(f"  {table}: {count}")
-                  except Exception as e:
-                      print(f"  {table}: ERROR {e}")
+                      print(
+                          f" - {table}: {count}"
+                      )
+
+                  except Exception as exc:
+
+                      print(
+                          f" - {table}: ERROR {exc}"
+                      )
 
           finally:
               con.close()
@@ -240,27 +259,40 @@ jobs:
       - name: Persist SQLite database
         if: success()
         run: |
+
           echo "=================================================="
           echo "PERSISTING DATABASE"
           echo "=================================================="
 
-          if [ ! -f "kraken_pattern_live_v52.db" ]; then
+          if [ ! -f "trendline_1h_breakout_v30.db" ]; then
+
             echo "ERROR: Database file not found."
+
             exit 1
+
           fi
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.name \
+            "github-actions[bot]"
 
-          git add kraken_pattern_live_v52.db
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add trendline_1h_breakout_v30.db
 
           if git diff --cached --quiet; then
-            echo "No DB changes detected."
+
+            echo "No database changes detected."
+
           else
-            git commit -m "Persist trendline scanner database [skip ci]"
+
+            git commit \
+              -m "Persist trendline scanner database [skip ci]"
+
             git push
 
-            echo "DATABASE COMMITTED AND PUSHED."
+            echo "DATABASE SUCCESSFULLY PERSISTED."
+
           fi
 
       # =========================================================
@@ -269,13 +301,20 @@ jobs:
       - name: Final status
         if: always()
         run: |
+
           echo "=================================================="
           echo "WORKFLOW FINAL STATUS"
           echo "=================================================="
 
-          if [ -f "kraken_pattern_live_v52.db" ]; then
-            echo "Persistent DB: PRESENT"
-            ls -lh kraken_pattern_live_v52.db
+          if [ -f "trendline_1h_breakout_v30.db" ]; then
+
+            echo "Persistent DB: OK"
+
+            ls -lh \
+              trendline_1h_breakout_v30.db
+
           else
+
             echo "Persistent DB: MISSING"
+
           fi
