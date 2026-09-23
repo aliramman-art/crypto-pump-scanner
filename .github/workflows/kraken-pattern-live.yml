@@ -45,23 +45,36 @@ jobs:
           pip install requests pandas matplotlib
 
       # =========================================================
-      # SHOW DATABASE STATUS BEFORE RUN
+      # SHOW FILES / DATABASE BEFORE SCAN
       # =========================================================
-      - name: Check persistent database
+      - name: Diagnose persistent database
         run: |
-          echo "=========================================="
-          echo "DATABASE STATUS BEFORE SCAN"
-          echo "=========================================="
+          echo "=================================================="
+          echo "REPOSITORY / DATABASE DIAGNOSTIC"
+          echo "=================================================="
 
+          echo ""
+          echo "CURRENT DIRECTORY:"
+          pwd
+
+          echo ""
+          echo "DATABASE FILES:"
+          find . -maxdepth 3 -type f \
+            \( -name "*.db" -o -name "*.sqlite" -o -name "*.sqlite3" \) \
+            -print -exec ls -lh {} \; || true
+
+          echo ""
+          echo "TARGET DATABASE:"
           if [ -f "kraken_pattern_live_v52.db" ]; then
-            echo "DB FOUND"
+            echo "FOUND: kraken_pattern_live_v52.db"
             ls -lh kraken_pattern_live_v52.db
 
             python - <<'PY'
           import sqlite3
-          import os
 
           db = "kraken_pattern_live_v52.db"
+
+          print("DB:", db)
 
           con = sqlite3.connect(db)
 
@@ -73,27 +86,51 @@ jobs:
                   ORDER BY name
               """).fetchall()
 
-              print("Tables:")
-              for t in tables:
-                  print(" -", t[0])
+              print("TABLES:")
+              for row in tables:
+                  print(" ", row[0])
 
-              for table in ["trades", "signals"]:
+              print("")
+              print("ROW COUNTS:")
+
+              for (table,) in tables:
                   try:
                       count = con.execute(
-                          f"SELECT COUNT(*) FROM {table}"
+                          f'SELECT COUNT(*) FROM "{table}"'
                       ).fetchone()[0]
 
-                      print(f"{table}: {count} rows")
-                  except Exception:
-                      pass
+                      print(f"  {table}: {count}")
+                  except Exception as e:
+                      print(f"  {table}: ERROR {e}")
 
           finally:
               con.close()
           PY
 
           else
-            echo "DB NOT FOUND"
-            echo "A new database will be created by the scanner."
+            echo "NOT FOUND: kraken_pattern_live_v52.db"
+            echo "WARNING: Scanner may create a NEW database."
+          fi
+
+      # =========================================================
+      # SHOW PYTHON DB CONFIGURATION
+      # =========================================================
+      - name: Check scanner DB configuration
+        run: |
+          echo "=================================================="
+          echo "SCANNER DATABASE CONFIGURATION"
+          echo "=================================================="
+
+          if [ -f "kraken_pattern_live.py" ]; then
+            echo "kraken_pattern_live.py FOUND"
+
+            echo ""
+            echo "VERSION / DB_FILE references:"
+            grep -nE 'VERSION|DB_FILE|sqlite3\.connect' \
+              kraken_pattern_live.py || true
+          else
+            echo "ERROR: kraken_pattern_live.py NOT FOUND"
+            exit 1
           fi
 
       # =========================================================
@@ -104,14 +141,15 @@ jobs:
           python kraken_pattern_live.py
 
       # =========================================================
-      # SQLITE CHECKPOINT
-      # =========================================================
-      # Make sure SQLite WAL data is written into the main DB
-      # before Git commits the file.
+      # FINALIZE SQLITE
       # =========================================================
       - name: Finalize SQLite database
-        if: always()
+        if: success()
         run: |
+          echo "=================================================="
+          echo "FINALIZING SQLITE DATABASE"
+          echo "=================================================="
+
           if [ -f "kraken_pattern_live_v52.db" ]; then
 
             python - <<'PY'
@@ -122,10 +160,12 @@ jobs:
           con = sqlite3.connect(db)
 
           try:
+              con.commit()
+
               try:
                   con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
               except Exception as e:
-                  print("WAL checkpoint warning:", e)
+                  print("WAL checkpoint:", e)
 
               con.commit()
 
@@ -135,22 +175,29 @@ jobs:
           print("SQLite database finalized.")
           PY
 
+          else
+            echo "ERROR: DB file missing after scanner."
+            exit 1
           fi
 
       # =========================================================
-      # SHOW DATABASE STATUS AFTER RUN
+      # VERIFY DATABASE AFTER SCAN
       # =========================================================
-      - name: Check database after scan
-        if: always()
+      - name: Verify database after scan
+        if: success()
         run: |
-          echo "=========================================="
-          echo "DATABASE STATUS AFTER SCAN"
-          echo "=========================================="
+          echo "=================================================="
+          echo "DATABASE AFTER SCAN"
+          echo "=================================================="
 
-          if [ -f "kraken_pattern_live_v52.db" ]; then
-            ls -lh kraken_pattern_live_v52.db
+          if [ ! -f "kraken_pattern_live_v52.db" ]; then
+            echo "ERROR: kraken_pattern_live_v52.db does not exist."
+            exit 1
+          fi
 
-            python - <<'PY'
+          ls -lh kraken_pattern_live_v52.db
+
+          python - <<'PY'
           import sqlite3
 
           db = "kraken_pattern_live_v52.db"
@@ -165,42 +212,41 @@ jobs:
                   ORDER BY name
               """).fetchall()
 
-              print("Tables:")
-              for t in tables:
-                  print(" -", t[0])
+              print("TABLES:")
 
-              for table in ["trades", "signals"]:
+              for (table,) in tables:
+                  print(" ", table)
+
+              print("")
+              print("ROW COUNTS:")
+
+              for (table,) in tables:
                   try:
                       count = con.execute(
-                          f"SELECT COUNT(*) FROM {table}"
+                          f'SELECT COUNT(*) FROM "{table}"'
                       ).fetchone()[0]
 
-                      print(f"{table}: {count} rows")
-                  except Exception:
-                      pass
+                      print(f"  {table}: {count}")
+                  except Exception as e:
+                      print(f"  {table}: ERROR {e}")
 
           finally:
               con.close()
           PY
 
-          else
-            echo "ERROR: Database file does not exist."
-            exit 1
-          fi
-
       # =========================================================
-      # SAVE DATABASE INTO GITHUB REPOSITORY
+      # PERSIST DATABASE INTO REPOSITORY
       # =========================================================
       - name: Persist SQLite database
-        if: always()
+        if: success()
         run: |
-          echo "=========================================="
+          echo "=================================================="
           echo "PERSISTING DATABASE"
-          echo "=========================================="
+          echo "=================================================="
 
           if [ ! -f "kraken_pattern_live_v52.db" ]; then
-            echo "Database file not found. Nothing to save."
-            exit 0
+            echo "ERROR: Database file not found."
+            exit 1
           fi
 
           git config user.name "github-actions[bot]"
@@ -209,25 +255,26 @@ jobs:
           git add kraken_pattern_live_v52.db
 
           if git diff --cached --quiet; then
-            echo "No database changes to commit."
+            echo "No DB changes detected."
           else
             git commit -m "Persist trendline scanner database [skip ci]"
             git push
-            echo "Database successfully persisted."
+
+            echo "DATABASE COMMITTED AND PUSHED."
           fi
 
       # =========================================================
-      # FINAL DATABASE CHECK
+      # FINAL STATUS
       # =========================================================
       - name: Final status
         if: always()
         run: |
-          echo "=========================================="
-          echo "TRENDLINE SCANNER WORKFLOW FINISHED"
-          echo "=========================================="
+          echo "=================================================="
+          echo "WORKFLOW FINAL STATUS"
+          echo "=================================================="
 
           if [ -f "kraken_pattern_live_v52.db" ]; then
-            echo "Persistent DB: OK"
+            echo "Persistent DB: PRESENT"
             ls -lh kraken_pattern_live_v52.db
           else
             echo "Persistent DB: MISSING"
