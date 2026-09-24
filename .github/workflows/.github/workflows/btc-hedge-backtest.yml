@@ -1,0 +1,36 @@
+name: BTC Hedge Backtest
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests
+
+      - name: Run BTC Hedge Backtest
+        run: |
+          python btc_hedge_backtest.py
+
+      - name: Upload Backtest Results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: btc-hedge-backtest-results
+          path: |
+            btc_hedge_trades.csv
+            btc_hedge_summary.csv
+          if-no-files-found: warn
