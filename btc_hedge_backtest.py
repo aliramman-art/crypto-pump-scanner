@@ -1,18 +1,57 @@
 # ============================================================
 # KRAKEN FUTURES BTC HEDGE BACKTEST
-# VERSION 2.2
+# VERSION 3.0
 # ============================================================
 #
 # PAPER / BACKTEST ONLY
 #
-# CAPITAL:
-#   $2.00
+# PURPOSE:
+#   Test whether a REAL $2 account using 10x leverage
+#   can reach +10% net equity after:
+#
+#       - trading fees
+#       - slippage
+#       - funding
+#       - hedge costs
+#       - liquidation risk
+#
+# IMPORTANT CHANGE FROM VERSION 2.x:
+#
+#   CAPITAL IS NOW A REAL ACCOUNT EQUITY.
+#
+#   The account is NOT reset to $2 after every cycle.
+#
+#   Example:
+#
+#       START      $2.00
+#       cycle 1    $1.96
+#       cycle 2    $2.03
+#       cycle 3    $2.17
+#       cycle 4    $2.20  -> TARGET REACHED
+#
+#   OR:
+#
+#       START      $2.00
+#       cycle 1    $1.40
+#       cycle 2    $0.70
+#       cycle 3    $0.00  -> LIQUIDATED
+#
+# No artificial equity reconstruction is allowed.
+#
+# ============================================================
 #
 # LEVERAGE:
 #   10x
 #
-# INITIAL POSITION:
-#   $10 notional
+# START CAPITAL:
+#   $2.00
+#
+# INITIAL NOTIONAL:
+#   Dynamic:
+#       equity * leverage
+#
+#   Therefore:
+#       $2.00 * 10 = $20 initial notional
 #
 # HEDGE:
 #   Trigger after 2% adverse movement
@@ -28,24 +67,18 @@
 #   Slippage
 #   Funding
 #
-# IMPORTANT:
-#   This is a mechanism backtest.
-#   LONG and SHORT are tested independently.
-#   No overlapping cycles.
+# TARGET:
+#   +$0.20 net equity
+#   = +10% from original $2
 #
 # CONSERVATIVE INTRABAR RULE:
-#   If liquidation and hedge trigger are both inside
-#   the same 5m candle, liquidation wins.
-#
-# TARGET:
-#   +$0.20 net equity per cycle
-#   = +10% of starting $2
+#   If liquidation and hedge trigger happen in the
+#   same 5m candle, liquidation wins.
 #
 # ============================================================
 
 import csv
 import math
-import os
 import sys
 import time
 import traceback
@@ -58,7 +91,7 @@ import requests
 # CONFIG
 # ============================================================
 
-VERSION = "2.2"
+VERSION = "3.0"
 
 REAL_TRADING = False
 PAPER_TRADING = True
@@ -68,12 +101,31 @@ TIMEFRAME = "5m"
 
 LOOKBACK_DAYS = 182
 
+# ------------------------------------------------------------
+# REAL ACCOUNT EQUITY
+# ------------------------------------------------------------
+
 CAPITAL_START = 2.00
 
 LEVERAGE = 10.0
 
-INITIAL_NOTIONAL = 10.00
-INITIAL_MARGIN = INITIAL_NOTIONAL / LEVERAGE
+# Dynamic notional:
+#
+# At $2 equity:
+#       $2 * 10 = $20
+#
+# After equity changes:
+#       equity * 10
+#
+# This keeps leverage consistent instead of keeping
+# a fixed $10 position while account equity changes.
+DYNAMIC_INITIAL_NOTIONAL = True
+
+FIXED_INITIAL_NOTIONAL = 10.00
+
+# ------------------------------------------------------------
+# HEDGE
+# ------------------------------------------------------------
 
 HEDGE_TRIGGER_PCT = 0.02
 
@@ -85,39 +137,73 @@ HEDGE_MODELS = {
     "C_100": 1.00,
 }
 
+# ------------------------------------------------------------
+# TARGET
+# ------------------------------------------------------------
+
 TARGET_NET_PROFIT = 0.20
 
-# Model assumptions.
-# These are NOT claimed to be the user's actual account fee tier.
+TARGET_EQUITY = (
+    CAPITAL_START
+    + TARGET_NET_PROFIT
+)
+
+TARGET_RETURN_PCT = (
+    TARGET_NET_PROFIT
+    / CAPITAL_START
+    * 100.0
+)
+
+# ------------------------------------------------------------
+# COST MODEL
+# ------------------------------------------------------------
+
 TAKER_FEE_RATE = 0.0005
+
 SLIPPAGE_RATE = 0.0002
 
-# Conservative liquidation buffer.
+# ------------------------------------------------------------
+# LIQUIDATION
+# ------------------------------------------------------------
+
 LIQUIDATION_BUFFER_USD = 0.0
 
-# Kraken maintenance margin used if instrument endpoint
-# does not provide a usable value.
 DEFAULT_MAINTENANCE_MARGIN_RATE = 0.005
 
-# Candle duration.
+# ------------------------------------------------------------
+# CANDLE
+# ------------------------------------------------------------
+
 CANDLE_SECONDS = 300
 
-# Kraken candle endpoint supports a finite number of rows.
 CHUNK_CANDLES = 1000
 
-# HTTP settings.
+# ------------------------------------------------------------
+# HTTP
+# ------------------------------------------------------------
+
 REQUEST_TIMEOUT = 30
+
 MAX_RETRIES = 5
+
 RETRY_SLEEP = 2.0
 
-# Funding analytics interval.
-# Kraken supports 60,300,900,1800,3600,14400,43200,86400,604800.
+# ------------------------------------------------------------
+# FUNDING
+# ------------------------------------------------------------
+
 FUNDING_INTERVAL_SECONDS = 14400
 
-# Outputs.
+# ------------------------------------------------------------
+# OUTPUTS
+# ------------------------------------------------------------
+
 TRADES_CSV = "btc_hedge_trades.csv"
+
 SUMMARY_CSV = "btc_hedge_summary.csv"
+
 EQUITY_CSV = "btc_hedge_equity.csv"
+
 FUNDING_CSV = "btc_hedge_funding.csv"
 
 
@@ -163,7 +249,7 @@ SESSION.headers.update(
     {
         "User-Agent": (
             "Mozilla/5.0 "
-            "(compatible; BTC-Hedge-Backtest/2.2)"
+            "(compatible; BTC-Hedge-Backtest/3.0)"
         ),
         "Accept": "application/json",
     }
@@ -175,10 +261,17 @@ SESSION.headers.update(
 # ============================================================
 
 def log(message=""):
-    now = datetime.now(timezone.utc).strftime(
+
+    now = datetime.now(
+        timezone.utc
+    ).strftime(
         "%Y-%m-%d %H:%M:%S UTC"
     )
-    print(f"[{now}] {message}", flush=True)
+
+    print(
+        f"[{now}] {message}",
+        flush=True,
+    )
 
 
 # ============================================================
@@ -190,9 +283,13 @@ def request_json(
     params=None,
     allow_empty=False,
 ):
+
     last_error = None
 
-    for attempt in range(1, MAX_RETRIES + 1):
+    for attempt in range(
+        1,
+        MAX_RETRIES + 1,
+    ):
 
         try:
 
@@ -207,8 +304,10 @@ def request_json(
                 data = response.json()
 
                 if data is None:
+
                     if allow_empty:
                         return {}
+
                     raise RuntimeError(
                         f"Empty JSON response from {url}"
                     )
@@ -222,8 +321,10 @@ def request_json(
             )
 
             log(
-                f"HTTP error {response.status_code} "
-                f"(attempt {attempt}/{MAX_RETRIES})"
+                f"HTTP error "
+                f"{response.status_code} "
+                f"(attempt "
+                f"{attempt}/{MAX_RETRIES})"
             )
 
         except Exception as exc:
@@ -232,12 +333,16 @@ def request_json(
 
             log(
                 f"Request error "
-                f"(attempt {attempt}/{MAX_RETRIES}): "
+                f"(attempt "
+                f"{attempt}/{MAX_RETRIES}): "
                 f"{exc}"
             )
 
         if attempt < MAX_RETRIES:
-            time.sleep(RETRY_SLEEP * attempt)
+
+            time.sleep(
+                RETRY_SLEEP * attempt
+            )
 
     raise last_error
 
@@ -247,14 +352,21 @@ def request_json(
 # ============================================================
 
 def utc_now():
-    return datetime.now(timezone.utc)
+
+    return datetime.now(
+        timezone.utc
+    )
 
 
 def dt_to_ts(dt):
-    return int(dt.timestamp())
+
+    return int(
+        dt.timestamp()
+    )
 
 
 def ts_to_dt(ts):
+
     return datetime.fromtimestamp(
         float(ts),
         tz=timezone.utc,
@@ -266,7 +378,10 @@ def parse_timestamp(value):
     if value is None:
         return None
 
-    if isinstance(value, (int, float)):
+    if isinstance(
+        value,
+        (int, float),
+    ):
 
         x = float(value)
 
@@ -275,13 +390,18 @@ def parse_timestamp(value):
 
         return int(x)
 
-    text_value = str(value).strip()
+    text_value = str(
+        value
+    ).strip()
 
     if not text_value:
         return None
 
     try:
-        numeric = float(text_value)
+
+        numeric = float(
+            text_value
+        )
 
         if numeric > 1_000_000_000_000:
             numeric /= 1000.0
@@ -303,13 +423,17 @@ def parse_timestamp(value):
         )
 
         if dt.tzinfo is None:
+
             dt = dt.replace(
                 tzinfo=timezone.utc
             )
 
-        return int(dt.timestamp())
+        return int(
+            dt.timestamp()
+        )
 
     except Exception:
+
         return None
 
 
@@ -319,7 +443,10 @@ def parse_timestamp(value):
 
 def parse_candle(row):
 
-    if isinstance(row, dict):
+    if isinstance(
+        row,
+        dict,
+    ):
 
         timestamp = (
             row.get("time")
@@ -353,15 +480,22 @@ def parse_candle(row):
             or 0
         )
 
-    elif isinstance(row, (list, tuple)):
+    elif isinstance(
+        row,
+        (list, tuple),
+    ):
 
         if len(row) < 5:
             return None
 
         timestamp = row[0]
+
         open_price = row[1]
+
         high_price = row[2]
+
         low_price = row[3]
+
         close_price = row[4]
 
         volume = (
@@ -371,28 +505,53 @@ def parse_candle(row):
         )
 
     else:
+
         return None
 
-    ts = parse_timestamp(timestamp)
+    ts = parse_timestamp(
+        timestamp
+    )
 
     if ts is None:
         return None
 
     try:
 
-        o = float(open_price)
-        h = float(high_price)
-        l = float(low_price)
-        c = float(close_price)
-        v = float(volume or 0)
+        o = float(
+            open_price
+        )
+
+        h = float(
+            high_price
+        )
+
+        l = float(
+            low_price
+        )
+
+        c = float(
+            close_price
+        )
+
+        v = float(
+            volume or 0
+        )
 
     except Exception:
+
         return None
 
     if not all(
         math.isfinite(x)
-        for x in (o, h, l, c, v)
+        for x in (
+            o,
+            h,
+            l,
+            c,
+            v,
+        )
     ):
+
         return None
 
     if h < l:
@@ -410,12 +569,16 @@ def parse_candle(row):
 
 
 # ============================================================
-# CANDLE RESPONSE EXTRACTION
+# CANDLE RESPONSE
 # ============================================================
 
 def extract_candle_rows(data):
 
-    if not isinstance(data, dict):
+    if not isinstance(
+        data,
+        dict,
+    ):
+
         return []
 
     candidates = [
@@ -424,9 +587,14 @@ def extract_candle_rows(data):
         data.get("results"),
     ]
 
-    result = data.get("result")
+    result = data.get(
+        "result"
+    )
 
-    if isinstance(result, dict):
+    if isinstance(
+        result,
+        dict,
+    ):
 
         candidates.extend(
             [
@@ -438,7 +606,11 @@ def extract_candle_rows(data):
 
     for candidate in candidates:
 
-        if isinstance(candidate, list):
+        if isinstance(
+            candidate,
+            list,
+        ):
+
             return candidate
 
     return []
@@ -454,14 +626,22 @@ def download_candles():
 
     start_dt = (
         end_dt
-        - timedelta(days=LOOKBACK_DAYS)
+        - timedelta(
+            days=LOOKBACK_DAYS
+        )
     )
 
-    start_ts = dt_to_ts(start_dt)
-    end_ts = dt_to_ts(end_dt)
+    start_ts = dt_to_ts(
+        start_dt
+    )
+
+    end_ts = dt_to_ts(
+        end_dt
+    )
 
     log(
-        f"Downloading Kraken {TIMEFRAME} candles..."
+        f"Downloading Kraken "
+        f"{TIMEFRAME} candles..."
     )
 
     candles_by_ts = {}
@@ -490,21 +670,35 @@ def download_candles():
             params=params,
         )
 
-        rows = extract_candle_rows(data)
+        rows = extract_candle_rows(
+            data
+        )
 
         parsed_count = 0
 
         for row in rows:
 
-            candle = parse_candle(row)
+            candle = parse_candle(
+                row
+            )
 
             if candle is None:
                 continue
 
-            ts = candle["timestamp"]
+            ts = candle[
+                "timestamp"
+            ]
 
-            if start_ts <= ts < end_ts:
-                candles_by_ts[ts] = candle
+            if (
+                start_ts
+                <= ts
+                < end_ts
+            ):
+
+                candles_by_ts[
+                    ts
+                ] = candle
+
                 parsed_count += 1
 
         if candles_by_ts:
@@ -516,7 +710,8 @@ def download_candles():
             log(
                 "Candles downloaded: "
                 f"{len(candles_by_ts):,} | "
-                f"latest={ts_to_dt(latest_ts).isoformat()}"
+                f"latest="
+                f"{ts_to_dt(latest_ts).isoformat()}"
             )
 
         else:
@@ -525,25 +720,26 @@ def download_candles():
                 "Candles downloaded: 0"
             )
 
-        if parsed_count == 0:
+        cursor = chunk_end
 
-            # Move forward even if the endpoint
-            # unexpectedly returns no rows.
-            cursor = chunk_end
-
-        else:
-
-            cursor = chunk_end
-
-        time.sleep(0.05)
+        time.sleep(
+            0.05
+        )
 
     candles = [
         candles_by_ts[k]
-        for k in sorted(candles_by_ts)
+        for k in sorted(
+            candles_by_ts
+        )
     ]
 
-    # Only closed candles.
-    now_ts = dt_to_ts(utc_now())
+    # --------------------------------------------------------
+    # Closed candles only.
+    # --------------------------------------------------------
+
+    now_ts = dt_to_ts(
+        utc_now()
+    )
 
     closed_cutoff = (
         now_ts
@@ -564,12 +760,14 @@ def download_candles():
     ]
 
     if not candles:
+
         raise RuntimeError(
             "No closed candles downloaded."
         )
 
     log(
-        f"Final closed candles: {len(candles):,}"
+        f"Final closed candles: "
+        f"{len(candles):,}"
     )
 
     log(
@@ -588,7 +786,9 @@ def download_candles():
 
 def load_instrument():
 
-    log("Loading Kraken instrument information...")
+    log(
+        "Loading Kraken instrument information..."
+    )
 
     data = request_json(
         INSTRUMENTS_URL
@@ -596,32 +796,52 @@ def load_instrument():
 
     instruments = []
 
-    if isinstance(data, dict):
+    if isinstance(
+        data,
+        dict,
+    ):
 
         instruments = (
-            data.get("instruments")
-            or data.get("result", {}).get(
+            data.get(
+                "instruments"
+            )
+            or data.get(
+                "result",
+                {},
+            ).get(
                 "instruments",
-                []
+                [],
             )
         )
 
-    if not isinstance(instruments, list):
+    if not isinstance(
+        instruments,
+        list,
+    ):
+
         instruments = []
 
     target = None
 
     for item in instruments:
 
-        if not isinstance(item, dict):
+        if not isinstance(
+            item,
+            dict,
+        ):
             continue
 
         symbol = str(
-            item.get("symbol", "")
+            item.get(
+                "symbol",
+                "",
+            )
         ).upper()
 
         if symbol == SYMBOL.upper():
+
             target = item
+
             break
 
     maintenance_rate = (
@@ -629,7 +849,9 @@ def load_instrument():
     )
 
     instrument_type = "unknown"
+
     tradeable = None
+
     reference_initial_margin = None
 
     if target:
@@ -645,37 +867,67 @@ def load_instrument():
         )
 
         possible_maintenance = [
-            target.get("maintenanceMarginRate"),
-            target.get("maintenanceMargin"),
-            target.get("mm"),
+            target.get(
+                "maintenanceMarginRate"
+            ),
+            target.get(
+                "maintenanceMargin"
+            ),
+            target.get(
+                "mm"
+            ),
         ]
 
-        for value in possible_maintenance:
+        for value in (
+            possible_maintenance
+        ):
 
             try:
 
-                x = float(value)
+                x = float(
+                    value
+                )
 
-                if 0 < x < 1:
+                if (
+                    0
+                    < x
+                    < 1
+                ):
+
                     maintenance_rate = x
+
                     break
 
             except Exception:
                 pass
 
         possible_initial = [
-            target.get("initialMarginRate"),
-            target.get("initialMargin"),
+            target.get(
+                "initialMarginRate"
+            ),
+            target.get(
+                "initialMargin"
+            ),
         ]
 
-        for value in possible_initial:
+        for value in (
+            possible_initial
+        ):
 
             try:
 
-                x = float(value)
+                x = float(
+                    value
+                )
 
-                if 0 < x < 1:
+                if (
+                    0
+                    < x
+                    < 1
+                ):
+
                     reference_initial_margin = x
+
                     break
 
             except Exception:
@@ -698,7 +950,10 @@ def load_instrument():
         f"{maintenance_rate:.4%}"
     )
 
-    if reference_initial_margin is not None:
+    if (
+        reference_initial_margin
+        is not None
+    ):
 
         log(
             "Exchange reference initial margin: "
@@ -709,7 +964,9 @@ def load_instrument():
         "symbol": SYMBOL,
         "type": instrument_type,
         "tradeable": tradeable,
-        "maintenance_margin_rate": maintenance_rate,
+        "maintenance_margin_rate": (
+            maintenance_rate
+        ),
         "reference_initial_margin": (
             reference_initial_margin
         ),
@@ -717,93 +974,139 @@ def load_instrument():
 
 
 # ============================================================
-# FUNDING HELPERS
+# FUNDING
 # ============================================================
 
 def normalize_funding_rate(value):
 
     try:
 
-        x = float(value)
+        x = float(
+            value
+        )
 
     except Exception:
+
         return None
 
     if not math.isfinite(x):
+
         return None
 
     return x
 
 
-def extract_funding_records_from_standard(data):
+def extract_funding_records_from_standard(
+    data,
+):
 
-    if not isinstance(data, dict):
+    if not isinstance(
+        data,
+        dict,
+    ):
+
         return []
 
-    candidates = []
+    candidates = [
+        data.get(
+            "rates"
+        )
+    ]
 
-    candidates.append(
-        data.get("rates")
+    result = data.get(
+        "result"
     )
 
-    result = data.get("result")
+    if isinstance(
+        result,
+        dict,
+    ):
 
-    if isinstance(result, dict):
         candidates.append(
-            result.get("rates")
+            result.get(
+                "rates"
+            )
         )
 
     for candidate in candidates:
 
-        if isinstance(candidate, list):
+        if not isinstance(
+            candidate,
+            list,
+        ):
 
-            records = []
+            continue
 
-            for item in candidate:
+        records = []
 
-                if not isinstance(item, dict):
-                    continue
+        for item in candidate:
 
-                ts = parse_timestamp(
-                    item.get("timestamp")
-                    or item.get("time")
+            if not isinstance(
+                item,
+                dict,
+            ):
+
+                continue
+
+            ts = parse_timestamp(
+                item.get(
+                    "timestamp"
                 )
+                or item.get(
+                    "time"
+                )
+            )
+
+            if (
+                item.get(
+                    "fundingRate"
+                )
+                is not None
+            ):
 
                 rate = normalize_funding_rate(
-                    item.get("fundingRate")
-                    if item.get("fundingRate")
-                    is not None
-                    else item.get("relativeFundingRate")
-                )
-
-                # Prefer fundingRate when available.
-                if (
-                    item.get("fundingRate")
-                    is not None
-                ):
-                    rate = normalize_funding_rate(
-                        item.get("fundingRate")
+                    item.get(
+                        "fundingRate"
                     )
-
-                if ts is None or rate is None:
-                    continue
-
-                records.append(
-                    {
-                        "timestamp": ts,
-                        "rate": rate,
-                        "source": "historical",
-                    }
                 )
 
-            return records
+            else:
+
+                rate = normalize_funding_rate(
+                    item.get(
+                        "relativeFundingRate"
+                    )
+                )
+
+            if (
+                ts is None
+                or rate is None
+            ):
+
+                continue
+
+            records.append(
+                {
+                    "timestamp": ts,
+                    "rate": rate,
+                    "source": "historical",
+                }
+            )
+
+        return records
 
     return []
 
 
-def extract_funding_records_from_analytics(data):
+def extract_funding_records_from_analytics(
+    data,
+):
 
-    if not isinstance(data, dict):
+    if not isinstance(
+        data,
+        dict,
+    ):
+
         return []
 
     root = data
@@ -812,47 +1115,87 @@ def extract_funding_records_from_analytics(data):
         data.get("result"),
         dict,
     ):
-        root = data["result"]
+
+        root = data[
+            "result"
+        ]
 
     timestamps = (
-        root.get("timestamp")
-        or root.get("timestamps")
+        root.get(
+            "timestamp"
+        )
+        or root.get(
+            "timestamps"
+        )
         or []
     )
 
-    payload = root.get("data")
+    payload = root.get(
+        "data"
+    )
 
-    if isinstance(payload, dict):
+    if isinstance(
+        payload,
+        dict,
+    ):
+
         rate_values = (
-            payload.get("rate")
-            or payload.get("fundingRate")
-            or payload.get("funding_rate")
+            payload.get(
+                "rate"
+            )
+            or payload.get(
+                "fundingRate"
+            )
+            or payload.get(
+                "funding_rate"
+            )
             or []
         )
 
         if not timestamps:
+
             timestamps = (
-                payload.get("timestamp")
-                or payload.get("timestamps")
+                payload.get(
+                    "timestamp"
+                )
+                or payload.get(
+                    "timestamps"
+                )
                 or []
             )
 
     else:
+
         rate_values = (
-            root.get("rate")
-            or root.get("fundingRate")
+            root.get(
+                "rate"
+            )
+            or root.get(
+                "fundingRate"
+            )
             or []
         )
 
-    if not isinstance(timestamps, list):
+    if not isinstance(
+        timestamps,
+        list,
+    ):
+
         return []
 
-    if not isinstance(rate_values, list):
+    if not isinstance(
+        rate_values,
+        list,
+    ):
+
         return []
 
     records = []
 
-    for ts_value, rate_value in zip(
+    for (
+        ts_value,
+        rate_value,
+    ) in zip(
         timestamps,
         rate_values,
     ):
@@ -865,7 +1208,11 @@ def extract_funding_records_from_analytics(data):
             rate_value
         )
 
-        if ts is None or rate is None:
+        if (
+            ts is None
+            or rate is None
+        ):
+
             continue
 
         records.append(
@@ -891,14 +1238,15 @@ def download_funding():
 
     start_ts = dt_to_ts(
         utc_now()
-        - timedelta(days=LOOKBACK_DAYS)
+        - timedelta(
+            days=LOOKBACK_DAYS
+        )
     )
 
     records = []
 
     # --------------------------------------------------------
-    # Method 1:
-    # Official historical funding endpoint.
+    # Historical endpoint
     # --------------------------------------------------------
 
     try:
@@ -932,10 +1280,7 @@ def download_funding():
         )
 
     # --------------------------------------------------------
-    # Method 2:
-    # Official Kraken Market Analytics funding endpoint.
-    #
-    # This is used if the historical endpoint returns no rows.
+    # Analytics fallback
     # --------------------------------------------------------
 
     if not records:
@@ -955,7 +1300,9 @@ def download_funding():
                 params={
                     "since": start_ts,
                     "to": end_ts,
-                    "interval": FUNDING_INTERVAL_SECONDS,
+                    "interval": (
+                        FUNDING_INTERVAL_SECONDS
+                    ),
                 },
                 allow_empty=True,
             )
@@ -980,23 +1327,24 @@ def download_funding():
                 f"{exc}"
             )
 
-    # --------------------------------------------------------
-    # Filter to backtest range.
-    # --------------------------------------------------------
-
     filtered = []
 
     for row in records:
 
-        ts = row["timestamp"]
+        ts = row[
+            "timestamp"
+        ]
 
-        if start_ts <= ts <= end_ts:
+        if (
+            start_ts
+            <= ts
+            <= end_ts
+        ):
 
             filtered.append(
                 row
             )
 
-    # Deduplicate.
     dedup = {}
 
     for row in filtered:
@@ -1007,7 +1355,9 @@ def download_funding():
 
     funding = [
         dedup[k]
-        for k in sorted(dedup)
+        for k in sorted(
+            dedup
+        )
     ]
 
     if not funding:
@@ -1018,15 +1368,16 @@ def download_funding():
         )
 
         log(
-            "The backtest will continue with "
-            "funding_cost = 0 only because no "
-            "Kraken funding data was available."
+            "Backtest will continue with "
+            "funding cost = 0 where no funding "
+            "event exists."
         )
 
     else:
 
         log(
-            f"Final funding rows: {len(funding):,}"
+            f"Final funding rows: "
+            f"{len(funding):,}"
         )
 
         log(
@@ -1042,14 +1393,6 @@ def download_funding():
 # ============================================================
 # FUNDING LOOKUP
 # ============================================================
-
-def build_funding_lookup(funding):
-
-    return {
-        int(row["timestamp"]): row
-        for row in funding
-    }
-
 
 def get_funding_events_between(
     funding,
@@ -1069,7 +1412,7 @@ def get_funding_events_between(
 
 
 # ============================================================
-# PRICE LOOKUP FOR FUNDING
+# PRICE LOOKUP
 # ============================================================
 
 def price_before_timestamp(
@@ -1077,11 +1420,8 @@ def price_before_timestamp(
     timestamp,
 ):
 
-    # Binary search would be faster, but the funding list
-    # is tiny compared with the candle list. This helper is
-    # intentionally simple and deterministic.
-
     lo = 0
+
     hi = len(candles) - 1
 
     answer = None
@@ -1092,11 +1432,16 @@ def price_before_timestamp(
             lo + hi
         ) // 2
 
-        ts = candles[mid]["timestamp"]
+        ts = candles[
+            mid
+        ]["timestamp"]
 
         if ts <= timestamp:
 
-            answer = candles[mid]["close"]
+            answer = candles[
+                mid
+            ]["close"]
+
             lo = mid + 1
 
         else:
@@ -1110,33 +1455,21 @@ def price_before_timestamp(
 # POSITION HELPERS
 # ============================================================
 
-def position_notional(qty, price):
-    return abs(qty) * price
-
-
-def position_direction(qty):
-
-    if qty > 0:
-        return "LONG"
-
-    if qty < 0:
-        return "SHORT"
-
-    return "FLAT"
-
-
 def apply_slippage(
     price,
     side,
 ):
 
     if side == "BUY":
+
         return price * (
-            1.0 + SLIPPAGE_RATE
+            1.0
+            + SLIPPAGE_RATE
         )
 
     return price * (
-        1.0 - SLIPPAGE_RATE
+        1.0
+        - SLIPPAGE_RATE
     )
 
 
@@ -1144,7 +1477,10 @@ def execution_fee(
     notional,
 ):
 
-    return abs(notional) * TAKER_FEE_RATE
+    return (
+        abs(notional)
+        * TAKER_FEE_RATE
+    )
 
 
 def signed_pnl(
@@ -1153,14 +1489,14 @@ def signed_pnl(
     exit_price,
 ):
 
-    return qty * (
-        exit_price - entry_price
+    return (
+        qty
+        * (
+            exit_price
+            - entry_price
+        )
     )
 
-
-# ============================================================
-# EQUITY
-# ============================================================
 
 def unrealized_pnl(
     positions,
@@ -1186,23 +1522,9 @@ def total_open_notional(
 ):
 
     return sum(
-        abs(pos["qty"]) * price
+        abs(pos["qty"])
+        * price
         for pos in positions
-    )
-
-
-def current_margin_requirement(
-    positions,
-):
-
-    total_notional = sum(
-        abs(pos["notional"])
-        for pos in positions
-    )
-
-    return (
-        total_notional
-        / LEVERAGE
     )
 
 
@@ -1221,6 +1543,99 @@ def current_equity(
     )
 
 
+def position_direction(
+    qty,
+):
+
+    if qty > 0:
+        return "LONG"
+
+    if qty < 0:
+        return "SHORT"
+
+    return "FLAT"
+
+
+# ============================================================
+# MARGIN
+# ============================================================
+
+def margin_requirement(
+    positions,
+    price,
+):
+
+    notional = total_open_notional(
+        positions,
+        price,
+    )
+
+    return (
+        notional
+        / LEVERAGE
+    )
+
+
+def available_margin(
+    cash,
+    positions,
+    price,
+):
+
+    used_margin = margin_requirement(
+        positions,
+        price,
+    )
+
+    return max(
+        0.0,
+        cash
+        - used_margin,
+    )
+
+
+def can_add_position(
+    cash,
+    positions,
+    new_qty,
+    price,
+):
+
+    if cash <= 0:
+        return False
+
+    new_notional = (
+        abs(new_qty)
+        * price
+    )
+
+    new_margin = (
+        new_notional
+        / LEVERAGE
+    )
+
+    new_fee = execution_fee(
+        new_notional
+    )
+
+    used_margin = margin_requirement(
+        positions,
+        price,
+    )
+
+    total_required = (
+        used_margin
+        + new_margin
+        + new_fee
+    )
+
+    return (
+        total_required
+        <= cash
+        + 1e-12
+    )
+
+
 # ============================================================
 # LIQUIDATION
 # ============================================================
@@ -1234,7 +1649,7 @@ def approximate_liquidation_price(
     if not positions:
         return None
 
-    total_qty = sum(
+    net_qty = sum(
         pos["qty"]
         for pos in positions
     )
@@ -1244,10 +1659,16 @@ def approximate_liquidation_price(
         for pos in positions
     )
 
-    if total_abs_qty <= 0:
+    if (
+        abs(net_qty)
+        < 1e-12
+    ):
+
+        # Fully hedged.
+        # There is no directional liquidation
+        # under this simplified cross-margin model.
         return None
 
-    # Weighted average entry based on absolute quantity.
     weighted_entry = (
         sum(
             abs(pos["qty"])
@@ -1256,27 +1677,6 @@ def approximate_liquidation_price(
         )
         / total_abs_qty
     )
-
-    net_qty = total_qty
-
-    if abs(net_qty) < 1e-12:
-        return None
-
-    # Cross-margin approximation:
-    #
-    # equity(price)
-    # =
-    # cash + net_qty * (price - weighted_entry)
-    #
-    # liquidation when:
-    #
-    # equity <= maintenance_rate *
-    #           abs(net_qty) * price
-    #
-    # Solve approximately for price.
-    #
-    # This is deliberately conservative and is NOT
-    # Kraken's exact liquidation engine.
 
     a = (
         net_qty
@@ -1297,16 +1697,14 @@ def approximate_liquidation_price(
     if abs(a) < 1e-12:
         return None
 
-    liq = -b / a
+    liq = (
+        -b
+        / a
+    )
 
     if liq <= 0:
         return None
 
-    if net_qty > 0:
-        # Long liquidation below current area.
-        return liq
-
-    # Short liquidation above current area.
     return liq
 
 
@@ -1316,7 +1714,11 @@ def is_liquidation_hit(
     net_qty,
 ):
 
-    if liq_price is None:
+    if (
+        liq_price is None
+        or abs(net_qty) < 1e-12
+    ):
+
         return False
 
     if net_qty > 0:
@@ -1326,68 +1728,47 @@ def is_liquidation_hit(
             <= liq_price
         )
 
-    if net_qty < 0:
-
-        return (
-            candle["high"]
-            >= liq_price
-        )
-
-    return False
+    return (
+        candle["high"]
+        >= liq_price
+    )
 
 
 # ============================================================
-# DRAW DOWN
+# DRAWDOWN
 # ============================================================
 
 def update_drawdown(
-    cycle,
+    account,
     equity,
 ):
 
-    peak = cycle.get(
+    if equity > account[
         "peak_equity"
-    )
+    ]:
 
-    if peak is None:
-        peak = equity
+        account[
+            "peak_equity"
+        ] = equity
 
-    if equity > peak:
-        peak = equity
-
-    cycle["peak_equity"] = peak
-
-    dd = equity - peak
-
-    if dd < cycle["max_drawdown"]:
-        cycle["max_drawdown"] = dd
-
-
-# ============================================================
-# TARGET CHECK
-# ============================================================
-
-def target_reached(
-    cash,
-    positions,
-    price,
-):
-
-    equity = current_equity(
-        cash,
-        positions,
-        price,
-    )
-
-    return (
+    dd = (
         equity
-        >= CAPITAL_START
-        + TARGET_NET_PROFIT
+        - account[
+            "peak_equity"
+        ]
     )
+
+    if dd < account[
+        "max_drawdown"
+    ]:
+
+        account[
+            "max_drawdown"
+        ] = dd
 
 
 # ============================================================
-# OPEN POSITION
+# POSITION CREATION
 # ============================================================
 
 def create_position(
@@ -1429,7 +1810,7 @@ def create_position(
 
 
 # ============================================================
-# CLOSE ALL POSITIONS
+# CLOSE POSITIONS
 # ============================================================
 
 def close_all_positions(
@@ -1439,14 +1820,18 @@ def close_all_positions(
 ):
 
     total_pnl = 0.0
+
     total_fee = 0.0
+
     total_slippage = 0.0
 
     fills = []
 
     for pos in positions:
 
-        qty = pos["qty"]
+        qty = pos[
+            "qty"
+        ]
 
         side = (
             "SELL"
@@ -1470,7 +1855,6 @@ def close_all_positions(
             * exit_price
         )
 
-        # Slippage cost relative to raw market price.
         slippage_cost = (
             abs(qty)
             * abs(
@@ -1480,18 +1864,26 @@ def close_all_positions(
         )
 
         total_pnl += pnl
+
         total_fee += fee
-        total_slippage += slippage_cost
+
+        total_slippage += (
+            slippage_cost
+        )
 
         fills.append(
             {
                 "label": pos["label"],
                 "qty": qty,
-                "entry_price": pos["entry_price"],
+                "entry_price": pos[
+                    "entry_price"
+                ],
                 "exit_price": exit_price,
                 "pnl": pnl,
                 "fee": fee,
-                "slippage": slippage_cost,
+                "slippage": (
+                    slippage_cost
+                ),
             }
         )
 
@@ -1504,11 +1896,11 @@ def close_all_positions(
 
 
 # ============================================================
-# FUNDING APPLICATION
+# FUNDING
 # ============================================================
 
 def apply_funding_events(
-    cash,
+    account,
     positions,
     funding,
     candles,
@@ -1518,9 +1910,9 @@ def apply_funding_events(
 ):
 
     if not positions:
+
         return (
-            cash,
-            last_funding_ts,
+            last_funding_ts
         )
 
     events = get_funding_events_between(
@@ -1531,10 +1923,15 @@ def apply_funding_events(
 
     for event in events:
 
-        event_ts = event["timestamp"]
+        event_ts = event[
+            "timestamp"
+        ]
 
-        # Do not apply the same funding event twice.
-        if event_ts <= last_funding_ts:
+        if (
+            event_ts
+            <= last_funding_ts
+        ):
+
             continue
 
         funding_price = price_before_timestamp(
@@ -1543,11 +1940,16 @@ def apply_funding_events(
         )
 
         if funding_price is None:
-            funding_price = positions[0][
-                "entry_price"
-            ]
 
-        rate = event["rate"]
+            funding_price = (
+                positions[0][
+                    "entry_price"
+                ]
+            )
+
+        rate = event[
+            "rate"
+        ]
 
         for pos in positions:
 
@@ -1557,37 +1959,55 @@ def apply_funding_events(
             )
 
             # Positive funding:
-            # long pays, short receives.
+            #
+            # LONG pays
+            # SHORT receives
             #
             # Negative funding:
-            # short pays, long receives.
+            #
+            # LONG receives
+            # SHORT pays
             payment = (
                 pos["qty"]
                 * funding_price
                 * rate
             )
 
-            cash -= payment
+            account[
+                "equity_cash"
+            ] -= payment
 
-            cycle["funding_total"] += (
+            cycle[
+                "funding_total"
+            ] += (
                 -payment
             )
 
-            cycle["funding_events"] += 1
+            cycle[
+                "funding_events"
+            ] += 1
 
-            cycle["funding_records"].append(
+            cycle[
+                "funding_records"
+            ].append(
                 {
                     "timestamp": event_ts,
-                    "datetime": ts_to_dt(
-                        event_ts
-                    ).isoformat(),
+                    "datetime": (
+                        ts_to_dt(
+                            event_ts
+                        ).isoformat()
+                    ),
                     "rate": rate,
-                    "position_label": pos["label"],
+                    "position_label": (
+                        pos["label"]
+                    ),
                     "qty": pos["qty"],
                     "price": funding_price,
                     "notional": notional,
                     "payment": payment,
-                    "cash_effect": -payment,
+                    "cash_effect": (
+                        -payment
+                    ),
                     "source": event.get(
                         "source",
                         "unknown",
@@ -1598,8 +2018,7 @@ def apply_funding_events(
         last_funding_ts = event_ts
 
     return (
-        cash,
-        last_funding_ts,
+        last_funding_ts
     )
 
 
@@ -1608,102 +2027,147 @@ def apply_funding_events(
 # ============================================================
 
 def hedge_qty_for_model(
-    initial_qty,
+    original_qty,
     hedge_ratio,
 ):
 
     return (
-        -initial_qty
+        -original_qty
         * hedge_ratio
     )
 
 
 # ============================================================
-# CAN HEDGE?
+# CREATE ACCOUNT
 # ============================================================
 
-def can_add_position(
-    cash,
-    positions,
-    new_qty,
-    price,
+def create_account():
+
+    return {
+        "equity_cash": CAPITAL_START,
+        "peak_equity": CAPITAL_START,
+        "max_drawdown": 0.0,
+        "total_realized_pnl": 0.0,
+        "total_fees": 0.0,
+        "total_slippage": 0.0,
+        "total_funding": 0.0,
+        "liquidations": 0,
+        "target_reached": False,
+        "account_failed": False,
+    }
+
+
+# ============================================================
+# INITIAL NOTIONAL
+# ============================================================
+
+def calculate_initial_notional(
+    equity,
 ):
 
-    new_notional = (
-        abs(new_qty)
-        * price
-    )
+    if DYNAMIC_INITIAL_NOTIONAL:
 
-    required_margin = (
-        new_notional
-        / LEVERAGE
-    )
-
-    new_fee = execution_fee(
-        new_notional
-    )
-
-    existing_margin = (
-        current_margin_requirement(
-            positions
+        return (
+            equity
+            * LEVERAGE
         )
-    )
 
-    total_required = (
-        existing_margin
-        + required_margin
-        + new_fee
-    )
-
-    # This is a conservative isolated-style
-    # available-cash check.
-    return (
-        total_required
-        <= cash
-        + 1e-12
-    )
+    return FIXED_INITIAL_NOTIONAL
 
 
 # ============================================================
-# CYCLE CREATION
+# CREATE CYCLE
 # ============================================================
 
 def create_cycle(
+    account,
     model_name,
     direction,
     first_candle,
 ):
 
-    raw_entry = first_candle["close"]
+    raw_entry = first_candle[
+        "close"
+    ]
 
-    initial_qty = (
-        INITIAL_NOTIONAL
+    equity_before = (
+        account[
+            "equity_cash"
+        ]
+    )
+
+    initial_notional = (
+        calculate_initial_notional(
+            equity_before
+        )
+    )
+
+    if (
+        initial_notional
+        <= 0
+    ):
+
+        return None
+
+    initial_qty_abs = (
+        initial_notional
         / raw_entry
     )
 
     if direction == "LONG":
-        initial_qty = abs(initial_qty)
+
+        initial_qty = abs(
+            initial_qty_abs
+        )
+
     else:
-        initial_qty = -abs(initial_qty)
+
+        initial_qty = -abs(
+            initial_qty_abs
+        )
 
     position = create_position(
         initial_qty,
         raw_entry,
-        first_candle["timestamp"],
+        first_candle[
+            "timestamp"
+        ],
         "INITIAL",
     )
 
-    cash = (
-        CAPITAL_START
-        - position["entry_fee"]
-    )
+    entry_fee = position[
+        "entry_fee"
+    ]
 
-    initial_equity = (
-        cash
-        + unrealized_pnl(
-            [position],
-            raw_entry,
-        )
+    # Entry fee is immediately deducted
+    # from real account cash.
+    account[
+        "equity_cash"
+    ] -= entry_fee
+
+    account[
+        "total_fees"
+    ] += entry_fee
+
+    if (
+        account[
+            "equity_cash"
+        ]
+        <= 0
+    ):
+
+        account[
+            "account_failed"
+        ] = True
+
+        return None
+
+    initial_equity = current_equity(
+        account[
+            "equity_cash"
+        ],
+        [position],
+        raw_entry,
     )
 
     cycle = {
@@ -1711,20 +2175,34 @@ def create_cycle(
         "direction": direction,
 
         "start_timestamp": (
-            first_candle["timestamp"]
+            first_candle[
+                "timestamp"
+            ]
         ),
 
         "entry_price": (
-            position["entry_price"]
+            position[
+                "entry_price"
+            ]
         ),
 
         "entry_raw_price": raw_entry,
 
-        "initial_qty": initial_qty,
+        "initial_notional": (
+            initial_notional
+        ),
 
-        "positions": [position],
+        "initial_qty": (
+            initial_qty
+        ),
 
-        "cash": cash,
+        "equity_before": (
+            equity_before
+        ),
+
+        "positions": [
+            position
+        ],
 
         "hedge_count": 0,
 
@@ -1734,7 +2212,7 @@ def create_cycle(
 
         "gross_pnl": 0.0,
 
-        "fees": position["entry_fee"],
+        "fees": entry_fee,
 
         "slippage": 0.0,
 
@@ -1769,13 +2247,269 @@ def create_cycle(
         "target_hit": False,
 
         "liquidation_price_at_entry": None,
+
+        "equity_after": None,
+
+        "net_pnl": None,
+
+        "net_return_pct": None,
     }
 
     return cycle
 
 
 # ============================================================
-# CYCLE EXECUTION
+# FINALIZE CYCLE
+# ============================================================
+
+def finalize_cycle(
+    cycle,
+    account,
+):
+
+    final_equity = (
+        account[
+            "equity_cash"
+        ]
+    )
+
+    equity_before = (
+        cycle[
+            "equity_before"
+        ]
+    )
+
+    cycle[
+        "equity_after"
+    ] = final_equity
+
+    cycle[
+        "net_pnl"
+    ] = (
+        final_equity
+        - equity_before
+    )
+
+    if equity_before > 0:
+
+        cycle[
+            "net_return_pct"
+        ] = (
+            cycle["net_pnl"]
+            / equity_before
+            * 100.0
+        )
+
+    else:
+
+        cycle[
+            "net_return_pct"
+        ] = -100.0
+
+    cycle[
+        "duration_hours"
+    ] = (
+        cycle[
+            "duration_seconds"
+        ]
+        / 3600.0
+    )
+
+    cycle[
+        "hedge1_price"
+    ] = (
+        cycle[
+            "hedge_prices"
+        ][0]
+        if len(
+            cycle[
+                "hedge_prices"
+            ]
+        ) >= 1
+        else None
+    )
+
+    cycle[
+        "hedge2_price"
+    ] = (
+        cycle[
+            "hedge_prices"
+        ][1]
+        if len(
+            cycle[
+                "hedge_prices"
+            ]
+        ) >= 2
+        else None
+    )
+
+    cycle[
+        "hedge1_size"
+    ] = (
+        cycle[
+            "hedge_sizes"
+        ][0]
+        if len(
+            cycle[
+                "hedge_sizes"
+            ]
+        ) >= 1
+        else None
+    )
+
+    cycle[
+        "hedge2_size"
+    ] = (
+        cycle[
+            "hedge_sizes"
+        ][1]
+        if len(
+            cycle[
+                "hedge_sizes"
+            ]
+        ) >= 2
+        else None
+    )
+
+    liq_price = cycle.get(
+        "liquidation_price_at_entry"
+    )
+
+    entry_price = cycle[
+        "entry_price"
+    ]
+
+    if (
+        liq_price is not None
+        and entry_price > 0
+    ):
+
+        cycle[
+            "liquidation_distance_pct"
+        ] = (
+            abs(
+                liq_price
+                - entry_price
+            )
+            / entry_price
+            * 100.0
+        )
+
+    else:
+
+        cycle[
+            "liquidation_distance_pct"
+        ] = None
+
+    return cycle
+
+
+# ============================================================
+# CLOSE CYCLE
+# ============================================================
+
+def close_cycle(
+    cycle,
+    account,
+    raw_exit_price,
+    timestamp,
+    reason,
+):
+
+    (
+        pnl,
+        fee,
+        slippage,
+        fills,
+    ) = close_all_positions(
+        cycle[
+            "positions"
+        ],
+        raw_exit_price,
+        timestamp,
+    )
+
+    cycle[
+        "gross_pnl"
+    ] += pnl
+
+    cycle[
+        "fees"
+    ] += fee
+
+    cycle[
+        "exit_fees"
+    ] += fee
+
+    cycle[
+        "slippage"
+    ] += slippage
+
+    cycle[
+        "exit_slippage"
+    ] += slippage
+
+    # Real account cash changes only here
+    # by realized PnL and exit fee.
+    account[
+        "equity_cash"
+    ] += pnl
+
+    account[
+        "equity_cash"
+    ] -= fee
+
+    account[
+        "total_realized_pnl"
+    ] += pnl
+
+    account[
+        "total_fees"
+    ] += fee
+
+    account[
+        "total_slippage"
+    ] += slippage
+
+    cycle[
+        "exit_raw_price"
+    ] = raw_exit_price
+
+    cycle[
+        "exit_price"
+    ] = (
+        fills[-1][
+            "exit_price"
+        ]
+        if fills
+        else raw_exit_price
+    )
+
+    cycle[
+        "exit_timestamp"
+    ] = timestamp
+
+    cycle[
+        "exit_reason"
+    ] = reason
+
+    cycle[
+        "duration_seconds"
+    ] = (
+        timestamp
+        - cycle[
+            "start_timestamp"
+        ]
+    )
+
+    return finalize_cycle(
+        cycle,
+        account,
+    )
+
+
+# ============================================================
+# RUN CYCLE
 # ============================================================
 
 def run_cycle(
@@ -1786,20 +2520,50 @@ def run_cycle(
     direction,
     funding,
     maintenance_rate,
+    account,
 ):
 
-    if start_index >= len(candles):
-        return None, len(candles)
+    if (
+        start_index
+        >= len(candles)
+    ):
+
+        return (
+            None,
+            len(candles),
+        )
+
+    if (
+        account[
+            "account_failed"
+        ]
+        or account[
+            "target_reached"
+        ]
+    ):
+
+        return (
+            None,
+            len(candles),
+        )
 
     first_candle = candles[
         start_index
     ]
 
     cycle = create_cycle(
-        model_name,
-        direction,
-        first_candle,
+        account=account,
+        model_name=model_name,
+        direction=direction,
+        first_candle=first_candle,
     )
+
+    if cycle is None:
+
+        return (
+            None,
+            len(candles),
+        )
 
     initial_qty = cycle[
         "initial_qty"
@@ -1809,26 +2573,32 @@ def run_cycle(
         "entry_price"
     ]
 
-    hedge_trigger_price = (
-        first_entry_price
-        * (
-            1.0
-            - HEDGE_TRIGGER_PCT
+    if direction == "LONG":
+
+        hedge_trigger_price = (
+            first_entry_price
+            * (
+                1.0
+                - HEDGE_TRIGGER_PCT
+            )
         )
-        if direction == "LONG"
-        else
-        first_entry_price
-        * (
-            1.0
-            + HEDGE_TRIGGER_PCT
+
+    else:
+
+        hedge_trigger_price = (
+            first_entry_price
+            * (
+                1.0
+                + HEDGE_TRIGGER_PCT
+            )
         )
-    )
 
     last_funding_ts = (
-        first_candle["timestamp"]
+        first_candle[
+            "timestamp"
+        ]
     )
 
-    # Start scanning AFTER the entry candle.
     i = start_index + 1
 
     while i < len(candles):
@@ -1836,54 +2606,70 @@ def run_cycle(
         candle = candles[i]
 
         # ----------------------------------------------------
-        # Funding
+        # FUNDING
         # ----------------------------------------------------
 
-        (
-            cycle["cash"],
-            last_funding_ts,
-        ) = apply_funding_events(
-            cycle["cash"],
-            cycle["positions"],
-            funding,
-            candles,
-            last_funding_ts,
-            candle["timestamp"],
-            cycle,
+        last_funding_ts = (
+            apply_funding_events(
+                account=account,
+                positions=cycle[
+                    "positions"
+                ],
+                funding=funding,
+                candles=candles,
+                last_funding_ts=last_funding_ts,
+                current_ts=candle[
+                    "timestamp"
+                ],
+                cycle=cycle,
+            )
         )
 
-        # ----------------------------------------------------
-        # Mark-to-market at candle open.
-        # ----------------------------------------------------
-
-        mark_equity = current_equity(
-            cycle["cash"],
-            cycle["positions"],
-            candle["open"],
+        account_equity_open = current_equity(
+            account[
+                "equity_cash"
+            ],
+            cycle[
+                "positions"
+            ],
+            candle[
+                "open"
+            ],
         )
 
         update_drawdown(
+            account,
+            account_equity_open,
+        )
+
+        update_cycle_drawdown(
             cycle,
-            mark_equity,
+            account_equity_open,
         )
 
         # ----------------------------------------------------
-        # Current net quantity.
+        # NET POSITION
         # ----------------------------------------------------
 
         net_qty = sum(
             pos["qty"]
-            for pos in cycle["positions"]
+            for pos in cycle[
+                "positions"
+            ]
         )
 
         # ----------------------------------------------------
-        # Approximate liquidation.
+        # LIQUIDATION
         # ----------------------------------------------------
 
         liq_price = (
             approximate_liquidation_price(
-                cycle["cash"],
-                cycle["positions"],
+                account[
+                    "equity_cash"
+                ],
+                cycle[
+                    "positions"
+                ],
                 maintenance_rate,
             )
         )
@@ -1901,32 +2687,38 @@ def run_cycle(
         )
 
         # ----------------------------------------------------
-        # Hedge trigger.
+        # HEDGE TRIGGER
         # ----------------------------------------------------
 
         hedge_trigger_hit = False
 
-        if cycle["hedge_count"] < MAX_HEDGES:
+        if (
+            cycle[
+                "hedge_count"
+            ]
+            < MAX_HEDGES
+        ):
 
             if direction == "LONG":
 
                 hedge_trigger_hit = (
-                    candle["low"]
+                    candle[
+                        "low"
+                    ]
                     <= hedge_trigger_price
                 )
 
             else:
 
                 hedge_trigger_hit = (
-                    candle["high"]
+                    candle[
+                        "high"
+                    ]
                     >= hedge_trigger_price
                 )
 
         # ----------------------------------------------------
-        # CRITICAL CONSERVATIVE RULE:
-        #
-        # If liquidation and hedge happen in the
-        # same candle, liquidation wins.
+        # LIQUIDATION WINS SAME CANDLE
         # ----------------------------------------------------
 
         if liquidation_hit:
@@ -1934,63 +2726,69 @@ def run_cycle(
             raw_exit = (
                 liq_price
                 if liq_price is not None
-                else candle["close"]
+                else candle[
+                    "close"
+                ]
             )
 
-            (
-                pnl,
-                fee,
-                slippage,
-                fills,
-            ) = close_all_positions(
-                cycle["positions"],
-                raw_exit,
-                candle["timestamp"],
+            cycle = close_cycle(
+                cycle=cycle,
+                account=account,
+                raw_exit_price=raw_exit,
+                timestamp=candle[
+                    "timestamp"
+                ],
+                reason="LIQUIDATION",
             )
 
-            cycle["gross_pnl"] += pnl
-            cycle["fees"] += fee
-            cycle["exit_fees"] += fee
-            cycle["slippage"] += slippage
-            cycle["exit_slippage"] += slippage
+            cycle[
+                "liquidation_count"
+            ] = 1
 
-            cycle["cash"] += pnl
-            cycle["cash"] -= fee
+            account[
+                "liquidations"
+            ] += 1
 
-            cycle["liquidation_count"] = 1
+            # Liquidation means the account cannot
+            # continue as if nothing happened.
+            if (
+                account[
+                    "equity_cash"
+                ]
+                < 0
+            ):
 
-            cycle["exit_raw_price"] = raw_exit
-
-            cycle["exit_price"] = (
-                fills[-1]["exit_price"]
-                if fills
-                else raw_exit
-            )
-
-            cycle["exit_timestamp"] = (
-                candle["timestamp"]
-            )
-
-            cycle["exit_reason"] = (
-                "LIQUIDATION"
-            )
-
-            cycle["duration_seconds"] = (
-                candle["timestamp"]
-                - cycle["start_timestamp"]
-            )
-
-            final_equity = cycle["cash"]
+                account[
+                    "equity_cash"
+                ] = 0.0
 
             update_drawdown(
-                cycle,
-                final_equity,
+                account,
+                account[
+                    "equity_cash"
+                ],
             )
 
+            update_cycle_drawdown(
+                cycle,
+                account[
+                    "equity_cash"
+                ],
+            )
+
+            if (
+                account[
+                    "equity_cash"
+                ]
+                <= 0
+            ):
+
+                account[
+                    "account_failed"
+                ] = True
+
             return (
-                finalize_cycle(
-                    cycle
-                ),
+                cycle,
                 i + 1,
             )
 
@@ -2000,216 +2798,293 @@ def run_cycle(
 
         if hedge_trigger_hit:
 
-            raw_hedge_price = (
-                hedge_trigger_price
-            )
-
             hedge_qty = hedge_qty_for_model(
                 initial_qty,
                 hedge_ratio,
             )
 
-            # For second hedge the same model size is used.
-            # This preserves the requested model definition.
+            # Do not allow a hedge to use more
+            # margin than the account actually has.
             if can_add_position(
-                cycle["cash"],
-                cycle["positions"],
+                account[
+                    "equity_cash"
+                ],
+                cycle[
+                    "positions"
+                ],
                 hedge_qty,
-                raw_hedge_price,
+                hedge_trigger_price,
             ):
 
                 hedge_label = (
-                    f"HEDGE_{cycle['hedge_count'] + 1}"
+                    "HEDGE_"
+                    + str(
+                        cycle[
+                            "hedge_count"
+                        ]
+                        + 1
+                    )
                 )
 
                 hedge_position = create_position(
                     hedge_qty,
-                    raw_hedge_price,
-                    candle["timestamp"],
+                    hedge_trigger_price,
+                    candle[
+                        "timestamp"
+                    ],
                     hedge_label,
                 )
 
-                cycle["cash"] -= (
-                    hedge_position["entry_fee"]
+                hedge_fee = hedge_position[
+                    "entry_fee"
+                ]
+
+                account[
+                    "equity_cash"
+                ] -= hedge_fee
+
+                account[
+                    "total_fees"
+                ] += hedge_fee
+
+                cycle[
+                    "fees"
+                ] += hedge_fee
+
+                cycle[
+                    "hedge_count"
+                ] += 1
+
+                cycle[
+                    "hedge_prices"
+                ].append(
+                    hedge_position[
+                        "entry_price"
+                    ]
                 )
 
-                cycle["fees"] += (
-                    hedge_position["entry_fee"]
+                cycle[
+                    "hedge_sizes"
+                ].append(
+                    abs(
+                        hedge_qty
+                    )
                 )
 
-                cycle["hedge_count"] += 1
-
-                cycle["hedge_prices"].append(
-                    hedge_position["entry_price"]
-                )
-
-                cycle["hedge_sizes"].append(
-                    abs(hedge_qty)
-                )
-
-                cycle["positions"].append(
+                cycle[
+                    "positions"
+                ].append(
                     hedge_position
                 )
 
-                # After each hedge, move the next hedge
-                # trigger another 2% against the ORIGINAL
-                # direction.
-                if cycle["hedge_count"] < MAX_HEDGES:
+                # Next hedge is another 2%
+                # against the original direction.
+                if (
+                    cycle[
+                        "hedge_count"
+                    ]
+                    < MAX_HEDGES
+                ):
 
                     if direction == "LONG":
 
-                        hedge_trigger_price = (
-                            hedge_trigger_price
-                            * (
-                                1.0
-                                - HEDGE_TRIGGER_PCT
-                            )
+                        hedge_trigger_price *= (
+                            1.0
+                            - HEDGE_TRIGGER_PCT
                         )
 
                     else:
 
-                        hedge_trigger_price = (
-                            hedge_trigger_price
-                            * (
-                                1.0
-                                + HEDGE_TRIGGER_PCT
-                            )
+                        hedge_trigger_price *= (
+                            1.0
+                            + HEDGE_TRIGGER_PCT
                         )
 
             else:
 
-                cycle["blocked_hedges"] += 1
+                cycle[
+                    "blocked_hedges"
+                ] += 1
 
-                # Do not repeatedly attempt the same blocked
-                # hedge on every candle.
-                cycle["hedge_count"] += 1
+                # Important:
+                # once a hedge is blocked, count that
+                # hedge slot as consumed so the system
+                # does not repeatedly attempt it.
+                cycle[
+                    "hedge_count"
+                ] += 1
 
         # ----------------------------------------------------
-        # Target check.
+        # TARGET CHECK
         #
-        # We calculate the hypothetical closing cost at the
-        # current candle close. This prevents claiming +10%
-        # before closing costs.
+        # Calculate the actual amount the account would
+        # have after closing all positions at candle close,
+        # including exit fee and exit slippage.
         # ----------------------------------------------------
 
-        raw_target_price = candle["close"]
+        raw_target_price = candle[
+            "close"
+        ]
 
         projected_pnl = unrealized_pnl(
-            cycle["positions"],
+            cycle[
+                "positions"
+            ],
             raw_target_price,
         )
 
-        projected_exit_fee = execution_fee(
+        projected_exit_notional = (
             total_open_notional(
-                cycle["positions"],
+                cycle[
+                    "positions"
+                ],
                 raw_target_price,
             )
         )
 
-        projected_exit_slippage = (
-            sum(
-                abs(pos["qty"])
-                * (
-                    SLIPPAGE_RATE
-                    * raw_target_price
-                )
-                for pos in cycle["positions"]
+        projected_exit_fee = (
+            execution_fee(
+                projected_exit_notional
             )
         )
 
+        projected_exit_slippage = sum(
+            abs(
+                pos["qty"]
+            )
+            * (
+                SLIPPAGE_RATE
+                * raw_target_price
+            )
+            for pos in cycle[
+                "positions"
+            ]
+        )
+
         projected_equity = (
-            cycle["cash"]
+            account[
+                "equity_cash"
+            ]
             + projected_pnl
             - projected_exit_fee
             - projected_exit_slippage
         )
 
         update_drawdown(
+            account,
+            projected_equity,
+        )
+
+        update_cycle_drawdown(
             cycle,
             projected_equity,
         )
 
+        # ----------------------------------------------------
+        # TARGET
+        # ----------------------------------------------------
+
         if (
             projected_equity
-            >= (
-                CAPITAL_START
-                + TARGET_NET_PROFIT
-            )
+            >= TARGET_EQUITY
         ):
 
-            (
-                pnl,
-                fee,
-                slippage,
-                fills,
-            ) = close_all_positions(
-                cycle["positions"],
-                raw_target_price,
-                candle["timestamp"],
+            cycle = close_cycle(
+                cycle=cycle,
+                account=account,
+                raw_exit_price=raw_target_price,
+                timestamp=candle[
+                    "timestamp"
+                ],
+                reason="TARGET",
             )
 
-            cycle["gross_pnl"] += pnl
-            cycle["fees"] += fee
-            cycle["exit_fees"] += fee
-            cycle["slippage"] += slippage
-            cycle["exit_slippage"] += slippage
+            cycle[
+                "target_hit"
+            ] = True
 
-            cycle["cash"] += pnl
-            cycle["cash"] -= fee
-
-            cycle["target_hit"] = True
-
-            cycle["exit_raw_price"] = (
-                raw_target_price
-            )
-
-            cycle["exit_price"] = (
-                fills[-1]["exit_price"]
-                if fills
-                else raw_target_price
-            )
-
-            cycle["exit_timestamp"] = (
-                candle["timestamp"]
-            )
-
-            cycle["exit_reason"] = (
-                "TARGET"
-            )
-
-            cycle["duration_seconds"] = (
-                candle["timestamp"]
-                - cycle["start_timestamp"]
-            )
-
-            final_equity = cycle["cash"]
+            account[
+                "target_reached"
+            ] = True
 
             update_drawdown(
+                account,
+                account[
+                    "equity_cash"
+                ],
+            )
+
+            update_cycle_drawdown(
                 cycle,
-                final_equity,
+                account[
+                    "equity_cash"
+                ],
             )
 
             return (
-                finalize_cycle(
-                    cycle
-                ),
+                cycle,
                 i + 1,
             )
 
         # ----------------------------------------------------
-        # Update drawdown at candle close.
+        # CLOSE MARK
         # ----------------------------------------------------
 
         close_equity = current_equity(
-            cycle["cash"],
-            cycle["positions"],
-            candle["close"],
+            account[
+                "equity_cash"
+            ],
+            cycle[
+                "positions"
+            ],
+            candle[
+                "close"
+            ],
         )
 
         update_drawdown(
+            account,
+            close_equity,
+        )
+
+        update_cycle_drawdown(
             cycle,
             close_equity,
         )
+
+        # ----------------------------------------------------
+        # ACCOUNT FAILURE
+        # ----------------------------------------------------
+
+        if (
+            close_equity
+            <= 0
+        ):
+
+            cycle = close_cycle(
+                cycle=cycle,
+                account=account,
+                raw_exit_price=candle[
+                    "close"
+                ],
+                timestamp=candle[
+                    "timestamp"
+                ],
+                reason="ACCOUNT_BLOWN",
+            )
+
+            account[
+                "equity_cash"
+            ] = 0.0
+
+            account[
+                "account_failed"
+            ] = True
+
+            return (
+                cycle,
+                i + 1,
+            )
 
         i += 1
 
@@ -2217,151 +3092,77 @@ def run_cycle(
     # END OF DATA
     # ========================================================
 
-    final_candle = candles[-1]
+    final_candle = candles[
+        -1
+    ]
 
-    raw_exit = final_candle["close"]
-
-    (
-        pnl,
-        fee,
-        slippage,
-        fills,
-    ) = close_all_positions(
-        cycle["positions"],
-        raw_exit,
-        final_candle["timestamp"],
-    )
-
-    cycle["gross_pnl"] += pnl
-    cycle["fees"] += fee
-    cycle["exit_fees"] += fee
-    cycle["slippage"] += slippage
-    cycle["exit_slippage"] += slippage
-
-    cycle["cash"] += pnl
-    cycle["cash"] -= fee
-
-    cycle["exit_raw_price"] = raw_exit
-
-    cycle["exit_price"] = (
-        fills[-1]["exit_price"]
-        if fills
-        else raw_exit
-    )
-
-    cycle["exit_timestamp"] = (
-        final_candle["timestamp"]
-    )
-
-    cycle["exit_reason"] = (
-        "END_OF_DATA"
-    )
-
-    cycle["duration_seconds"] = (
-        final_candle["timestamp"]
-        - cycle["start_timestamp"]
+    cycle = close_cycle(
+        cycle=cycle,
+        account=account,
+        raw_exit_price=final_candle[
+            "close"
+        ],
+        timestamp=final_candle[
+            "timestamp"
+        ],
+        reason="END_OF_DATA",
     )
 
     update_drawdown(
+        account,
+        account[
+            "equity_cash"
+        ],
+    )
+
+    update_cycle_drawdown(
         cycle,
-        cycle["cash"],
+        account[
+            "equity_cash"
+        ],
     )
 
     return (
-        finalize_cycle(
-            cycle
-        ),
+        cycle,
         len(candles),
     )
 
 
 # ============================================================
-# FINALIZE CYCLE
+# CYCLE DRAWDOWN
 # ============================================================
 
-def finalize_cycle(
+def update_cycle_drawdown(
     cycle,
+    equity,
 ):
 
-    final_equity = cycle["cash"]
+    if equity > cycle[
+        "peak_equity"
+    ]:
 
-    net_pnl = (
-        final_equity
-        - CAPITAL_START
+        cycle[
+            "peak_equity"
+        ] = equity
+
+    dd = (
+        equity
+        - cycle[
+            "peak_equity"
+        ]
     )
 
-    net_return_pct = (
-        net_pnl
-        / CAPITAL_START
-        * 100.0
-    )
+    if dd < cycle[
+        "max_drawdown"
+    ]:
 
-    duration_hours = (
-        cycle["duration_seconds"]
-        / 3600.0
-    )
-
-    cycle["final_equity"] = final_equity
-    cycle["net_pnl"] = net_pnl
-    cycle["net_return_pct"] = net_return_pct
-    cycle["duration_hours"] = duration_hours
-
-    cycle["hedge1_price"] = (
-        cycle["hedge_prices"][0]
-        if len(cycle["hedge_prices"]) >= 1
-        else None
-    )
-
-    cycle["hedge2_price"] = (
-        cycle["hedge_prices"][1]
-        if len(cycle["hedge_prices"]) >= 2
-        else None
-    )
-
-    cycle["hedge1_size"] = (
-        cycle["hedge_sizes"][0]
-        if len(cycle["hedge_sizes"]) >= 1
-        else None
-    )
-
-    cycle["hedge2_size"] = (
-        cycle["hedge_sizes"][1]
-        if len(cycle["hedge_sizes"]) >= 2
-        else None
-    )
-
-    # Liquidation distance at entry.
-    liq_price = cycle.get(
-        "liquidation_price_at_entry"
-    )
-
-    entry_price = cycle[
-        "entry_price"
-    ]
-
-    if (
-        liq_price is not None
-        and entry_price > 0
-    ):
-
-        cycle["liquidation_distance_pct"] = (
-            abs(
-                liq_price
-                - entry_price
-            )
-            / entry_price
-            * 100.0
-        )
-
-    else:
-
-        cycle["liquidation_distance_pct"] = None
-
-    return cycle
+        cycle[
+            "max_drawdown"
+        ] = dd
 
 
 # ============================================================
-# SCENARIO RUNNER
+# RUN SCENARIO
 # ============================================================
 
 def run_scenario(
@@ -2374,17 +3175,53 @@ def run_scenario(
 ):
 
     log("")
-    log("=" * 70)
+
     log(
-        f"SCENARIO: {model_name} | {direction}"
+        "=" * 80
     )
-    log("=" * 70)
+
+    log(
+        f"SCENARIO: "
+        f"{model_name} | "
+        f"{direction}"
+    )
+
+    log(
+        "=" * 80
+    )
+
+    account = create_account()
 
     cycles = []
 
+    equity_history = []
+
     index = 0
 
-    while index < len(candles) - 1:
+    cycle_number = 0
+
+    while (
+        index
+        < len(candles) - 1
+    ):
+
+        if account[
+            "target_reached"
+        ]:
+
+            break
+
+        if account[
+            "account_failed"
+        ]:
+
+            break
+
+        equity_before = (
+            account[
+                "equity_cash"
+            ]
+        )
 
         result, next_index = run_cycle(
             candles=candles,
@@ -2394,19 +3231,136 @@ def run_scenario(
             direction=direction,
             funding=funding,
             maintenance_rate=maintenance_rate,
+            account=account,
         )
 
         if result is None:
+
             break
 
-        cycles.append(result)
+        cycle_number += 1
+
+        result[
+            "cycle_number"
+        ] = cycle_number
+
+        result[
+            "account_equity_after"
+        ] = account[
+            "equity_cash"
+        ]
+
+        result[
+            "account_return_pct"
+        ] = (
+            (
+                account[
+                    "equity_cash"
+                ]
+                - CAPITAL_START
+            )
+            / CAPITAL_START
+            * 100.0
+        )
+
+        cycles.append(
+            result
+        )
+
+        equity_history.append(
+            {
+                "model": model_name,
+                "direction": direction,
+                "cycle_number": cycle_number,
+                "start_timestamp": (
+                    result[
+                        "start_timestamp"
+                    ]
+                ),
+                "exit_timestamp": (
+                    result[
+                        "exit_timestamp"
+                    ]
+                ),
+                "exit_reason": (
+                    result[
+                        "exit_reason"
+                    ]
+                ),
+                "equity_before": equity_before,
+                "equity_after": (
+                    account[
+                        "equity_cash"
+                    ]
+                ),
+                "cycle_pnl": (
+                    result[
+                        "net_pnl"
+                    ]
+                ),
+                "account_return_pct": (
+                    result[
+                        "account_return_pct"
+                    ]
+                ),
+            }
+        )
 
         if next_index <= index:
-            next_index = index + 1
+
+            next_index = (
+                index + 1
+            )
 
         index = next_index
 
-    return cycles
+    log(
+        f"Scenario cycles: "
+        f"{len(cycles)}"
+    )
+
+    log(
+        f"Final equity: "
+        f"${account['equity_cash']:.6f}"
+    )
+
+    log(
+        f"Return: "
+        f"{(
+            account['equity_cash']
+            - CAPITAL_START
+        )
+        / CAPITAL_START
+        * 100.0:.4f}%"
+    )
+
+    if account[
+        "target_reached"
+    ]:
+
+        log(
+            "TARGET: REACHED"
+        )
+
+    elif account[
+        "account_failed"
+    ]:
+
+        log(
+            "ACCOUNT: LIQUIDATED / FAILED"
+        )
+
+    else:
+
+        log(
+            "TARGET: NOT REACHED"
+        )
+
+    return (
+        cycles,
+        equity_history,
+        account,
+    )
 
 
 # ============================================================
@@ -2415,6 +3369,8 @@ def run_scenario(
 
 def summarize_scenario(
     cycles,
+    equity_history,
+    account,
     model_name,
     direction,
 ):
@@ -2427,67 +3383,140 @@ def summarize_scenario(
             "cycles": 0,
             "successful_cycles": 0,
             "success_pct": 0.0,
-            "average_profit": 0.0,
-            "average_return_pct": 0.0,
-            "max_loss": 0.0,
-            "max_drawdown": 0.0,
-            "liquidations": 0,
+            "average_cycle_pnl": 0.0,
+            "average_cycle_return_pct": 0.0,
+            "max_cycle_loss": 0.0,
+            "max_drawdown_usd": (
+                account[
+                    "max_drawdown"
+                ]
+            ),
+            "max_drawdown_pct": (
+                account[
+                    "max_drawdown"
+                ]
+                / CAPITAL_START
+                * 100.0
+            ),
+            "liquidations": (
+                account[
+                    "liquidations"
+                ]
+            ),
             "target_hits": 0,
             "end_of_data": 0,
+            "account_blown": (
+                1
+                if account[
+                    "account_failed"
+                ]
+                else 0
+            ),
             "blocked_hedges": 0,
-            "final_equity": CAPITAL_START,
-            "final_return_pct": 0.0,
-            "total_net_pnl": 0.0,
-            "total_fees": 0.0,
-            "total_slippage": 0.0,
-            "total_funding": 0.0,
+            "starting_equity": CAPITAL_START,
+            "final_equity": (
+                account[
+                    "equity_cash"
+                ]
+            ),
+            "net_pnl": (
+                account[
+                    "equity_cash"
+                ]
+                - CAPITAL_START
+            ),
+            "return_pct": (
+                (
+                    account[
+                        "equity_cash"
+                    ]
+                    - CAPITAL_START
+                )
+                / CAPITAL_START
+                * 100.0
+            ),
+            "target_equity": TARGET_EQUITY,
+            "target_reached": (
+                1
+                if account[
+                    "target_reached"
+                ]
+                else 0
+            ),
+            "total_fees": (
+                account[
+                    "total_fees"
+                ]
+            ),
+            "total_slippage": (
+                account[
+                    "total_slippage"
+                ]
+            ),
+            "total_funding": (
+                account[
+                    "total_funding"
+                ]
+            ),
             "funding_events": 0,
         }
 
     profits = [
-        c["net_pnl"]
+        c[
+            "net_pnl"
+        ]
         for c in cycles
     ]
 
     returns = [
-        c["net_return_pct"]
+        c[
+            "net_return_pct"
+        ]
         for c in cycles
     ]
 
     successful = [
         c
         for c in cycles
-        if c["net_pnl"] > 0
+        if c[
+            "net_pnl"
+        ] > 0
     ]
 
     liquidations = sum(
         1
         for c in cycles
-        if c["exit_reason"]
+        if c[
+            "exit_reason"
+        ]
         == "LIQUIDATION"
     )
 
     targets = sum(
         1
         for c in cycles
-        if c["exit_reason"]
+        if c[
+            "exit_reason"
+        ]
         == "TARGET"
     )
 
     end_data = sum(
         1
         for c in cycles
-        if c["exit_reason"]
+        if c[
+            "exit_reason"
+        ]
         == "END_OF_DATA"
     )
 
-    total_net_pnl = sum(
-        profits
-    )
-
-    final_equity = (
-        CAPITAL_START
-        + total_net_pnl
+    account_blown = sum(
+        1
+        for c in cycles
+        if c[
+            "exit_reason"
+        ]
+        == "ACCOUNT_BLOWN"
     )
 
     return {
@@ -2506,23 +3535,32 @@ def summarize_scenario(
             * 100.0
         ),
 
-        "average_profit": (
+        "average_cycle_pnl": (
             sum(profits)
             / len(profits)
         ),
 
-        "average_return_pct": (
+        "average_cycle_return_pct": (
             sum(returns)
             / len(returns)
         ),
 
-        "max_loss": min(
+        "max_cycle_loss": min(
             profits
         ),
 
-        "max_drawdown": min(
-            c["max_drawdown"]
-            for c in cycles
+        "max_drawdown_usd": (
+            account[
+                "max_drawdown"
+            ]
+        ),
+
+        "max_drawdown_pct": (
+            account[
+                "max_drawdown"
+            ]
+            / CAPITAL_START
+            * 100.0
         ),
 
         "liquidations": liquidations,
@@ -2531,41 +3569,75 @@ def summarize_scenario(
 
         "end_of_data": end_data,
 
+        "account_blown": account_blown,
+
         "blocked_hedges": sum(
-            c["blocked_hedges"]
+            c[
+                "blocked_hedges"
+            ]
             for c in cycles
         ),
 
-        "final_equity": final_equity,
+        "starting_equity": (
+            CAPITAL_START
+        ),
 
-        "final_return_pct": (
+        "final_equity": (
+            account[
+                "equity_cash"
+            ]
+        ),
+
+        "net_pnl": (
+            account[
+                "equity_cash"
+            ]
+            - CAPITAL_START
+        ),
+
+        "return_pct": (
             (
-                final_equity
+                account[
+                    "equity_cash"
+                ]
                 - CAPITAL_START
             )
             / CAPITAL_START
             * 100.0
         ),
 
-        "total_net_pnl": total_net_pnl,
+        "target_equity": TARGET_EQUITY,
 
-        "total_fees": sum(
-            c["fees"]
-            for c in cycles
+        "target_reached": (
+            1
+            if account[
+                "target_reached"
+            ]
+            else 0
         ),
 
-        "total_slippage": sum(
-            c["slippage"]
-            for c in cycles
+        "total_fees": (
+            account[
+                "total_fees"
+            ]
         ),
 
-        "total_funding": sum(
-            c["funding_total"]
-            for c in cycles
+        "total_slippage": (
+            account[
+                "total_slippage"
+            ]
+        ),
+
+        "total_funding": (
+            account[
+                "total_funding"
+            ]
         ),
 
         "funding_events": sum(
-            c["funding_events"]
+            c[
+                "funding_events"
+            ]
             for c in cycles
         ),
     }
@@ -2576,35 +3648,68 @@ def summarize_scenario(
 # ============================================================
 
 def write_trades_csv(
-    all_cycles
+    all_cycles,
 ):
 
     fields = [
         "model",
         "direction",
+        "cycle_number",
+
         "start_datetime",
+
+        "equity_before",
+
+        "initial_notional",
+
         "entry_price",
+
         "entry_raw_price",
+
         "hedge1_price",
         "hedge1_size",
+
         "hedge2_price",
         "hedge2_size",
+
         "hedge_count",
+
         "blocked_hedges",
+
         "exit_datetime",
+
         "exit_price",
+
         "exit_raw_price",
+
         "exit_reason",
+
         "duration_hours",
+
         "gross_pnl",
+
         "fees",
+
         "slippage",
+
         "funding_total",
+
         "net_pnl",
+
         "net_return_pct",
+
+        "equity_after",
+
+        "account_equity_after",
+
+        "account_return_pct",
+
         "max_drawdown",
+
         "liquidation_price_at_entry",
+
         "liquidation_distance_pct",
+
         "target_hit",
     ]
 
@@ -2626,14 +3731,34 @@ def write_trades_csv(
 
             writer.writerow(
                 {
-                    "model": c["model"],
-                    "direction": c["direction"],
+                    "model": c[
+                        "model"
+                    ],
+
+                    "direction": c[
+                        "direction"
+                    ],
+
+                    "cycle_number": c.get(
+                        "cycle_number",
+                        "",
+                    ),
 
                     "start_datetime": (
                         ts_to_dt(
-                            c["start_timestamp"]
+                            c[
+                                "start_timestamp"
+                            ]
                         ).isoformat()
                     ),
+
+                    "equity_before": c[
+                        "equity_before"
+                    ],
+
+                    "initial_notional": c[
+                        "initial_notional"
+                    ],
 
                     "entry_price": c[
                         "entry_price"
@@ -2669,10 +3794,13 @@ def write_trades_csv(
 
                     "exit_datetime": (
                         ts_to_dt(
-                            c["exit_timestamp"]
+                            c[
+                                "exit_timestamp"
+                            ]
                         ).isoformat()
-                        if c["exit_timestamp"]
-                        is not None
+                        if c[
+                            "exit_timestamp"
+                        ] is not None
                         else ""
                     ),
 
@@ -2716,6 +3844,18 @@ def write_trades_csv(
                         "net_return_pct"
                     ],
 
+                    "equity_after": c[
+                        "equity_after"
+                    ],
+
+                    "account_equity_after": c[
+                        "account_equity_after"
+                    ],
+
+                    "account_return_pct": c[
+                        "account_return_pct"
+                    ],
+
                     "max_drawdown": c[
                         "max_drawdown"
                     ],
@@ -2740,7 +3880,7 @@ def write_trades_csv(
 # ============================================================
 
 def write_summary_csv(
-    summaries
+    summaries,
 ):
 
     if not summaries:
@@ -2765,7 +3905,10 @@ def write_summary_csv(
         writer.writeheader()
 
         for row in summaries:
-            writer.writerow(row)
+
+            writer.writerow(
+                row
+            )
 
 
 # ============================================================
@@ -2773,7 +3916,7 @@ def write_summary_csv(
 # ============================================================
 
 def write_funding_csv(
-    funding
+    funding,
 ):
 
     fields = [
@@ -2803,15 +3946,20 @@ def write_funding_csv(
                 {
                     "datetime": (
                         ts_to_dt(
-                            row["timestamp"]
+                            row[
+                                "timestamp"
+                            ]
                         ).isoformat()
                     ),
+
                     "timestamp": row[
                         "timestamp"
                     ],
+
                     "rate": row[
                         "rate"
                     ],
+
                     "source": row.get(
                         "source",
                         "",
@@ -2825,7 +3973,7 @@ def write_funding_csv(
 # ============================================================
 
 def write_equity_csv(
-    all_cycles
+    all_equity_history,
 ):
 
     fields = [
@@ -2835,13 +3983,11 @@ def write_equity_csv(
         "start_datetime",
         "exit_datetime",
         "exit_reason",
-        "net_pnl",
-        "net_return_pct",
-        "cumulative_pnl",
-        "equity",
+        "equity_before",
+        "cycle_pnl",
+        "equity_after",
+        "account_return_pct",
     ]
-
-    cumulative_by_scenario = {}
 
     with open(
         EQUITY_CSV,
@@ -2857,71 +4003,61 @@ def write_equity_csv(
 
         writer.writeheader()
 
-        counters = {}
-
-        for c in all_cycles:
-
-            key = (
-                c["model"],
-                c["direction"],
-            )
-
-            counters[key] = (
-                counters.get(key, 0)
-                + 1
-            )
-
-            cumulative_by_scenario[key] = (
-                cumulative_by_scenario.get(
-                    key,
-                    0.0,
-                )
-                + c["net_pnl"]
-            )
-
-            equity = (
-                CAPITAL_START
-                + cumulative_by_scenario[key]
-            )
+        for row in all_equity_history:
 
             writer.writerow(
                 {
-                    "model": c["model"],
-                    "direction": c["direction"],
-                    "cycle_number": counters[key],
+                    "model": row[
+                        "model"
+                    ],
+
+                    "direction": row[
+                        "direction"
+                    ],
+
+                    "cycle_number": row[
+                        "cycle_number"
+                    ],
 
                     "start_datetime": (
                         ts_to_dt(
-                            c["start_timestamp"]
+                            row[
+                                "start_timestamp"
+                            ]
                         ).isoformat()
                     ),
 
                     "exit_datetime": (
                         ts_to_dt(
-                            c["exit_timestamp"]
+                            row[
+                                "exit_timestamp"
+                            ]
                         ).isoformat()
-                        if c["exit_timestamp"]
-                        is not None
+                        if row[
+                            "exit_timestamp"
+                        ] is not None
                         else ""
                     ),
 
-                    "exit_reason": c[
+                    "exit_reason": row[
                         "exit_reason"
                     ],
 
-                    "net_pnl": c[
-                        "net_pnl"
+                    "equity_before": row[
+                        "equity_before"
                     ],
 
-                    "net_return_pct": c[
-                        "net_return_pct"
+                    "cycle_pnl": row[
+                        "cycle_pnl"
                     ],
 
-                    "cumulative_pnl": (
-                        cumulative_by_scenario[key]
-                    ),
+                    "equity_after": row[
+                        "equity_after"
+                    ],
 
-                    "equity": equity,
+                    "account_return_pct": row[
+                        "account_return_pct"
+                    ],
                 }
             )
 
@@ -2931,25 +4067,55 @@ def write_equity_csv(
 # ============================================================
 
 def print_summary(
-    summaries
+    summaries,
 ):
 
     log("")
-    log("=" * 100)
-    log("FINAL BTC HEDGE BACKTEST REPORT")
-    log("=" * 100)
 
     log(
-        f"Capital start: ${CAPITAL_START:.2f}"
+        "=" * 120
     )
 
     log(
-        f"Leverage: {LEVERAGE:.1f}x"
+        "FINAL BTC HEDGE BACKTEST REPORT"
     )
 
     log(
-        f"Initial notional: ${INITIAL_NOTIONAL:.2f}"
+        "=" * 120
     )
+
+    log(
+        f"Version: {VERSION}"
+    )
+
+    log(
+        f"Capital start: "
+        f"${CAPITAL_START:.2f}"
+    )
+
+    log(
+        f"Leverage: "
+        f"{LEVERAGE:.1f}x"
+    )
+
+    if DYNAMIC_INITIAL_NOTIONAL:
+
+        log(
+            "Initial notional: "
+            "DYNAMIC = equity × leverage"
+        )
+
+        log(
+            f"Initial notional at start: "
+            f"${CAPITAL_START * LEVERAGE:.2f}"
+        )
+
+    else:
+
+        log(
+            f"Initial notional: "
+            f"${FIXED_INITIAL_NOTIONAL:.2f}"
+        )
 
     log(
         f"Hedge trigger: "
@@ -2957,9 +4123,18 @@ def print_summary(
     )
 
     log(
-        f"Target: "
-        f"+${TARGET_NET_PROFIT:.2f} "
-        f"(+{TARGET_NET_PROFIT / CAPITAL_START * 100:.1f}%)"
+        f"Maximum hedges: "
+        f"{MAX_HEDGES}"
+    )
+
+    log(
+        f"Target equity: "
+        f"${TARGET_EQUITY:.2f}"
+    )
+
+    log(
+        f"Target return: "
+        f"+{TARGET_RETURN_PCT:.2f}%"
     )
 
     log(
@@ -2977,41 +4152,101 @@ def print_summary(
     header = (
         "MODEL      DIR    CYCLES   "
         "SUCCESS%   AVG PNL   MAX LOSS   "
-        "DD        LIQ   TARGET   "
-        "FINAL $   RETURN%"
+        "MAX DD $   LIQ   TARGET   "
+        "FINAL $   RETURN%   STATUS"
     )
 
     print(header)
 
-    print("-" * len(header))
+    print(
+        "-" * len(header)
+    )
 
     for s in summaries:
+
+        if s[
+            "target_reached"
+        ]:
+
+            status = "TARGET"
+
+        elif s[
+            "account_blown"
+        ]:
+
+            status = "BLOWN"
+
+        else:
+
+            status = "NOT_REACHED"
 
         print(
             f"{s['model']:<10} "
             f"{s['direction']:<6} "
             f"{s['cycles']:>7} "
             f"{s['success_pct']:>10.2f} "
-            f"{s['average_profit']:>10.4f} "
-            f"{s['max_loss']:>10.4f} "
-            f"{s['max_drawdown']:>9.4f} "
+            f"{s['average_cycle_pnl']:>10.5f} "
+            f"{s['max_cycle_loss']:>10.5f} "
+            f"{s['max_drawdown_usd']:>10.5f} "
             f"{s['liquidations']:>5} "
             f"{s['target_hits']:>8} "
-            f"{s['final_equity']:>9.4f} "
-            f"{s['final_return_pct']:>8.2f}"
+            f"{s['final_equity']:>9.5f} "
+            f"{s['return_pct']:>9.2f} "
+            f"{status}"
         )
 
     log("")
-    log("=" * 100)
 
     log(
-        "Important: FINAL RETURN is the result of "
-        "sequential independent cycles for each scenario."
+        "=" * 120
     )
 
     log(
-        "It is NOT a claim that all six scenarios "
-        "were traded simultaneously."
+        "ACCOUNT MODEL:"
+    )
+
+    log(
+        "Each scenario starts with exactly "
+        f"${CAPITAL_START:.2f}."
+    )
+
+    log(
+        "Equity is carried forward between cycles."
+    )
+
+    log(
+        "Equity is NEVER reset to $2 after a cycle."
+    )
+
+    log(
+        "If target is reached, that scenario stops."
+    )
+
+    log(
+        "If the account is blown, that scenario stops."
+    )
+
+    log("")
+
+    log(
+        "IMPORTANT:"
+    )
+
+    log(
+        "The six scenarios are independent."
+    )
+
+    log(
+        "They are NOT traded simultaneously."
+    )
+
+    log(
+        "FINAL EQUITY is the actual simulated "
+        "account equity for each independent scenario."
+    )
+
+    log(
+        "=" * 120
     )
 
 
@@ -3022,10 +4257,23 @@ def print_summary(
 def main():
 
     print("")
-    print("=" * 70)
-    print("KRAKEN FUTURES BTC HEDGE BACKTEST")
-    print(f"VERSION {VERSION}")
-    print("=" * 70)
+
+    print(
+        "=" * 80
+    )
+
+    print(
+        "KRAKEN FUTURES BTC HEDGE BACKTEST"
+    )
+
+    print(
+        f"VERSION {VERSION}"
+    )
+
+    print(
+        "=" * 80
+    )
+
     print("")
 
     # --------------------------------------------------------
@@ -3033,40 +4281,50 @@ def main():
     # --------------------------------------------------------
 
     if REAL_TRADING:
+
         raise RuntimeError(
             "REAL_TRADING must remain False."
         )
 
     if not PAPER_TRADING:
+
         raise RuntimeError(
             "PAPER_TRADING must remain True."
         )
 
     # --------------------------------------------------------
-    # Basic validation
+    # Validation
     # --------------------------------------------------------
 
     if CAPITAL_START <= 0:
+
         raise RuntimeError(
             "CAPITAL_START must be positive."
         )
 
     if LEVERAGE <= 0:
+
         raise RuntimeError(
             "LEVERAGE must be positive."
         )
 
-    if INITIAL_NOTIONAL <= 0:
+    if (
+        not DYNAMIC_INITIAL_NOTIONAL
+        and FIXED_INITIAL_NOTIONAL <= 0
+    ):
+
         raise RuntimeError(
-            "INITIAL_NOTIONAL must be positive."
+            "FIXED_INITIAL_NOTIONAL must be positive."
         )
 
     if MAX_HEDGES < 0:
+
         raise RuntimeError(
             "MAX_HEDGES cannot be negative."
         )
 
     if not HEDGE_MODELS:
+
         raise RuntimeError(
             "No hedge models configured."
         )
@@ -3093,29 +4351,35 @@ def main():
 
     funding = download_funding()
 
-    # Save raw funding immediately so even a later failure
-    # does not destroy the useful diagnostic output.
     write_funding_csv(
         funding
     )
 
     # --------------------------------------------------------
-    # Run all scenarios.
+    # Scenarios
     # --------------------------------------------------------
 
     all_cycles = []
+
+    all_equity_history = []
+
     summaries = []
 
-    for model_name, hedge_ratio in (
-        HEDGE_MODELS.items()
-    ):
+    for (
+        model_name,
+        hedge_ratio,
+    ) in HEDGE_MODELS.items():
 
         for direction in (
             "LONG",
             "SHORT",
         ):
 
-            cycles = run_scenario(
+            (
+                cycles,
+                equity_history,
+                account,
+            ) = run_scenario(
                 candles=candles,
                 model_name=model_name,
                 hedge_ratio=hedge_ratio,
@@ -3128,10 +4392,16 @@ def main():
                 cycles
             )
 
+            all_equity_history.extend(
+                equity_history
+            )
+
             summary = summarize_scenario(
-                cycles,
-                model_name,
-                direction,
+                cycles=cycles,
+                equity_history=equity_history,
+                account=account,
+                model_name=model_name,
+                direction=direction,
             )
 
             summaries.append(
@@ -3139,7 +4409,7 @@ def main():
             )
 
     # --------------------------------------------------------
-    # Outputs
+    # OUTPUTS
     # --------------------------------------------------------
 
     write_trades_csv(
@@ -3151,11 +4421,11 @@ def main():
     )
 
     write_equity_csv(
-        all_cycles
+        all_equity_history
     )
 
     # --------------------------------------------------------
-    # Report
+    # REPORT
     # --------------------------------------------------------
 
     print_summary(
@@ -3163,6 +4433,7 @@ def main():
     )
 
     log("")
+
     log(
         "Output files:"
     )
@@ -3184,6 +4455,7 @@ def main():
     )
 
     log("")
+
     log(
         "BACKTEST COMPLETED SUCCESSFULLY."
     )
@@ -3210,9 +4482,18 @@ if __name__ == "__main__":
     except Exception as exc:
 
         print("")
-        print("=" * 70)
-        print("BACKTEST FAILED")
-        print("=" * 70)
+
+        print(
+            "=" * 80
+        )
+
+        print(
+            "BACKTEST FAILED"
+        )
+
+        print(
+            "=" * 80
+        )
 
         print(
             f"{type(exc).__name__}: {exc}"
@@ -3220,6 +4501,8 @@ if __name__ == "__main__":
 
         traceback.print_exc()
 
-        print("=" * 70)
+        print(
+            "=" * 80
+        )
 
         sys.exit(1)
