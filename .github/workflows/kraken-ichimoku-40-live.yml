@@ -9,15 +9,23 @@ on:
 permissions:
   contents: write
 
+# ==========================================================
+# IMPORTANT:
+# Do NOT cancel an active run.
+# The database must be allowed to reach the commit/push step.
+# ==========================================================
+
 concurrency:
   group: kraken-ichimoku-40-live
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
+
   scanner:
+
     runs-on: ubuntu-latest
 
-    timeout-minutes: 8
+    timeout-minutes: 5
 
     steps:
 
@@ -61,27 +69,49 @@ jobs:
           python kraken_ichimoku_40_live.py
 
       # ======================================================
-      # PERSIST SQLITE DATABASE
+      # CHECK DATABASE
+      # ======================================================
+
+      - name: Check database
+        run: |
+          echo "Checking database..."
+
+          if [ -f kraken_ichimoku_40.db ]; then
+            ls -lh kraken_ichimoku_40.db
+          else
+            echo "ERROR: kraken_ichimoku_40.db was not created."
+            exit 1
+          fi
+
+      # ======================================================
+      # PERSIST DATABASE
       # ======================================================
 
       - name: Persist trading database
-        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if [ ! -f kraken_ichimoku_40.db ]; then
-            echo "Database file not found."
-            exit 0
-          fi
-
           git add -f kraken_ichimoku_40.db
 
           if git diff --cached --quiet; then
-            echo "No database changes to commit."
+            echo "No database changes."
             exit 0
           fi
 
           git commit -m "Persist Ichimoku 40 trading database"
 
           git push
+
+          echo "Database successfully persisted."
+
+      # ======================================================
+      # FINAL STATUS
+      # ======================================================
+
+      - name: Scanner completed
+        run: |
+          echo "=================================================="
+          echo "KRAKEN ICHIMOKU 40 SCAN COMPLETED"
+          echo "DATABASE PERSISTED"
+          echo "=================================================="
