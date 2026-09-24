@@ -2,8 +2,12 @@ name: Kraken Ichimoku 40 Live
 
 on:
   workflow_dispatch:
+
   schedule:
     - cron: "*/5 * * * *"
+
+permissions:
+  contents: write
 
 concurrency:
   group: kraken-ichimoku-40-live
@@ -12,21 +16,42 @@ concurrency:
 jobs:
   scanner:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+
+    timeout-minutes: 8
 
     steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # ======================================================
+      # DEPENDENCIES
+      # ======================================================
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install requests matplotlib
+
+      # ======================================================
+      # RUN SCANNER
+      # ======================================================
 
       - name: Run Kraken Ichimoku 40 Live Scanner
         env:
@@ -34,3 +59,29 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python kraken_ichimoku_40_live.py
+
+      # ======================================================
+      # PERSIST SQLITE DATABASE
+      # ======================================================
+
+      - name: Persist trading database
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ ! -f kraken_ichimoku_40.db ]; then
+            echo "Database file not found."
+            exit 0
+          fi
+
+          git add -f kraken_ichimoku_40.db
+
+          if git diff --cached --quiet; then
+            echo "No database changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Persist Ichimoku 40 trading database"
+
+          git push
