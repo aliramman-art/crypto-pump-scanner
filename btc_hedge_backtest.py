@@ -1,58 +1,46 @@
 # ============================================================
-# KRAKEN FUTURES BTC HEDGE BACKTEST
-# VERSION 2.0
+# BTC FUTURES HEDGE BACKTEST
+# VERSION 2.1
 # ============================================================
 #
-# DATA:
-#   Kraken Futures
-#   PF_XBTUSD
-#   5-minute candles
-#   Last 6 months
+# KRAKEN FUTURES
 #
 # CAPITAL:
 #   $2.00
-#   10x leverage
-#   Initial position = $10
-#   Initial margin = $1
+#
+# LEVERAGE:
+#   10x
+#
+# INITIAL POSITION:
+#   $10 notional
 #
 # HEDGE:
-#   Trigger = 2%
-#   Maximum hedges = 2
+#   Trigger: 2% adverse move
+#   Maximum: 2 hedges
 #
 # MODELS:
-#   A = 50%  -> $5 hedge each
-#   B = 75%  -> $7.50 hedge each
-#   C = 100% -> $10 hedge each
+#   A = 50% hedge  -> $5
+#   B = 75% hedge  -> $7.50
+#   C = 100% hedge -> $10
 #
 # TARGET:
-#   +$0.20 net per cycle
+#   +$0.20 net
+#   = +10% of initial $2
 #
-# COSTS:
-#   Kraken Futures Tier-1 taker fee = 0.05%
-#   Slippage = 0.02% per execution
-#   Funding = Kraken historical funding
+# PAPER BACKTEST ONLY
+# NO REAL ORDERS
 #
 # IMPORTANT:
-#   PAPER / BACKTEST ONLY
-#   NO API KEY
-#   NO ORDERS
-#
-# CONSERVATIVE INTRABAR RULE:
-#   If liquidation and hedge can both occur inside the
-#   same 5m candle, liquidation wins.
-#
-# EXIT:
-#   1) Net target +$0.20
-#   2) Liquidation
-#   3) End of data
-#
-# NO TIME EXIT.
-#
-# OUTPUT:
-#   btc_hedge_trades.csv
-#   btc_hedge_summary.csv
-#   btc_hedge_equity.csv
-#   btc_hedge_funding.csv
+#   - Closed 5m candles
+#   - No lookahead
+#   - Sequential cycles
+#   - No overlapping cycles
+#   - Long and Short tested separately
+#   - Liquidation wins if liquidation and hedge are
+#     both inside the same candle
+#   - Fees included
+#   - Slippage included
+#   - Funding included
 #
 # ============================================================
 
@@ -71,9 +59,15 @@ import requests
 # CONFIG
 # ============================================================
 
-VERSION = "2.0"
+VERSION = "2.1"
+
+REAL_TRADING = False
+PAPER_TRADING = True
 
 SYMBOL = "PF_XBTUSD"
+TIMEFRAME = "5m"
+
+LOOKBACK_DAYS = 182
 
 CAPITAL_START = 2.00
 LEVERAGE = 10.0
@@ -84,34 +78,29 @@ INITIAL_MARGIN = INITIAL_NOTIONAL / LEVERAGE
 HEDGE_TRIGGER_PCT = 0.02
 MAX_HEDGES = 2
 
+HEDGE_MODELS = {
+    "A_50": 0.50,
+    "B_75": 0.75,
+    "C_100": 1.00,
+}
+
 TARGET_NET_PROFIT = 0.20
 
-# Kraken Futures Tier 1 taker fee
+# Kraken taker fee assumption used by this backtest.
+# Change only if you want to model another fee tier.
 TAKER_FEE_RATE = 0.0005
 
-# User requested slippage to be included.
-# 0.02% = 2 basis points.
+# Slippage per execution side.
 SLIPPAGE_RATE = 0.0002
 
-# Conservative cross-margin liquidation model.
-# The actual exchange liquidation engine can include
-# additional mechanics, so this is deliberately not presented
-# as an exact account liquidation price.
+# Additional liquidation buffer.
 LIQUIDATION_BUFFER_USD = 0.0
 
-# Kraken chart resolution
-TIMEFRAME = "5m"
 CANDLE_SECONDS = 300
-
-# Download chunk size
 CHUNK_CANDLES = 1000
-
-# Six months approximation.
-LOOKBACK_DAYS = 182
 
 REQUEST_TIMEOUT = 30
 REQUEST_RETRIES = 5
-REQUEST_SLEEP = 0.25
 
 KRAKEN_BASE = "https://futures.kraken.com"
 
@@ -123,9 +112,19 @@ CANDLES_URL = (
     + TIMEFRAME
 )
 
+# ============================================================
+# IMPORTANT FIX
+#
+# Correct Kraken endpoint:
+# /derivatives/api/v3/historical-funding-rates
+#
+# Previous incorrect endpoint:
+# /derivatives/api/v3/historicalfundingrates
+# ============================================================
+
 FUNDING_URL = (
     KRAKEN_BASE
-    + "/derivatives/api/v3/historicalfundingrates"
+    + "/derivatives/api/v3/historical-funding-rates"
 )
 
 INSTRUMENTS_URL = (
@@ -140,26 +139,6 @@ OUTPUT_FUNDING = "btc_hedge_funding.csv"
 
 
 # ============================================================
-# HEDGE MODELS
-# ============================================================
-
-MODELS = {
-    "A": {
-        "hedge_ratio": 0.50,
-        "hedge_notional": 5.00,
-    },
-    "B": {
-        "hedge_ratio": 0.75,
-        "hedge_notional": 7.50,
-    },
-    "C": {
-        "hedge_ratio": 1.00,
-        "hedge_notional": 10.00,
-    },
-}
-
-
-# ============================================================
 # HTTP SESSION
 # ============================================================
 
@@ -169,33 +148,64 @@ SESSION.headers.update(
     {
         "User-Agent": (
             "Mozilla/5.0 "
-            "BTC-Hedge-Backtest/2.0"
-        ),
-        "Accept": "application/json",
+            "BTC-Hedge-Backtest/2.1"
+        )
     }
 )
 
 
 # ============================================================
-# UTILITIES
+# HELPERS
 # ============================================================
 
-def utc_now():
-    return datetime.now(timezone.utc)
-
-
-def iso_utc(ms):
-    return datetime.fromtimestamp(
-        ms / 1000.0,
-        tz=timezone.utc,
-    ).isoformat()
+def log(message):
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    print(f"[{now}] {message}", flush=True)
 
 
 def safe_float(value, default=0.0):
     try:
+        if value is None:
+            return default
+
+        if isinstance(value, bool):
+            return float(value)
+
         return float(value)
     except Exception:
         return default
+
+
+def iso_utc(ts):
+    if ts is None:
+        return ""
+
+    try:
+        ts = float(ts)
+
+        if ts > 10_000_000_000:
+            ts /= 1000.0
+
+        dt = datetime.fromtimestamp(
+            ts,
+            tz=timezone.utc,
+        )
+
+        return dt.isoformat()
+    except Exception:
+        return ""
+
+
+def timestamp_seconds(value):
+    try:
+        value = float(value)
+
+        if value > 10_000_000_000:
+            value /= 1000.0
+
+        return int(value)
+    except Exception:
+        return 0
 
 
 def request_json(
@@ -206,7 +216,9 @@ def request_json(
     last_error = None
 
     for attempt in range(1, retries + 1):
+
         try:
+
             response = SESSION.get(
                 url,
                 params=params,
@@ -215,236 +227,360 @@ def request_json(
 
             response.raise_for_status()
 
-            data = response.json()
-
-            return data
+            return response.json()
 
         except Exception as exc:
+
             last_error = exc
 
-            print(
-                f"API retry "
-                f"{attempt}/{retries}: "
-                f"{url}"
+            log(
+                f"HTTP attempt "
+                f"{attempt}/{retries} failed: "
+                f"{url} | {exc}"
             )
 
-            print(f"ERROR: {exc}")
-
             if attempt < retries:
-                time.sleep(
-                    REQUEST_SLEEP * attempt
-                )
+                time.sleep(2 * attempt)
 
-    raise RuntimeError(
-        f"Kraken request failed after "
-        f"{retries} attempts: {url}"
-    ) from last_error
+    raise last_error
 
 
 # ============================================================
 # KRAKEN INSTRUMENT
 # ============================================================
 
-def get_instrument():
-    print()
-    print("=" * 70)
-    print("LOADING KRAKEN FUTURES INSTRUMENT")
-    print("=" * 70)
+def load_instrument():
 
-    data = request_json(INSTRUMENTS_URL)
+    log("Loading Kraken instrument information...")
 
-    instruments = data.get(
-        "instruments",
-        [],
+    data = request_json(
+        INSTRUMENTS_URL
     )
+
+    instruments = []
+
+    if isinstance(data, dict):
+
+        for key in (
+            "instruments",
+            "result",
+            "data",
+        ):
+
+            value = data.get(key)
+
+            if isinstance(value, list):
+                instruments = value
+                break
+
+            if isinstance(value, dict):
+                instruments = list(value.values())
+                break
+
+    elif isinstance(data, list):
+
+        instruments = data
+
+    if not instruments:
+        raise RuntimeError(
+            "Could not parse Kraken instruments response."
+        )
 
     target = None
 
     for item in instruments:
-        symbol = str(
-            item.get("symbol", "")
-        ).upper()
 
-        if symbol == SYMBOL.upper():
+        if not isinstance(item, dict):
+            continue
+
+        names = [
+            item.get("symbol"),
+            item.get("instrument"),
+            item.get("ticker"),
+            item.get("name"),
+        ]
+
+        if SYMBOL in names:
             target = item
             break
 
     if target is None:
+
+        # Secondary flexible comparison.
+        for item in instruments:
+
+            if not isinstance(item, dict):
+                continue
+
+            text = str(item)
+
+            if SYMBOL in text:
+                target = item
+                break
+
+    if target is None:
         raise RuntimeError(
-            f"Kraken instrument not found: {SYMBOL}"
+            f"Kraken instrument {SYMBOL} not found."
         )
 
-    print(
-        f"Instrument: "
-        f"{target.get('symbol')}"
+    maintenance_margin = None
+    initial_margin = None
+
+    for key in (
+        "maintenanceMargin",
+        "maintenance_margin",
+        "maintenanceMarginRate",
+    ):
+
+        if key in target:
+            maintenance_margin = safe_float(
+                target.get(key),
+                None,
+            )
+
+            if maintenance_margin is not None:
+                break
+
+    for key in (
+        "initialMargin",
+        "initial_margin",
+        "initialMarginRate",
+    ):
+
+        if key in target:
+            initial_margin = safe_float(
+                target.get(key),
+                None,
+            )
+
+            if initial_margin is not None:
+                break
+
+    # Some Kraken responses express margins as percentages,
+    # others may expose them as decimal rates.
+    if maintenance_margin is None:
+        maintenance_margin = 0.005
+
+    if initial_margin is None:
+        initial_margin = 0.01
+
+    if maintenance_margin > 0.10:
+        maintenance_margin /= 100.0
+
+    if initial_margin > 0.10:
+        initial_margin /= 100.0
+
+    log(
+        f"Instrument: {SYMBOL}"
     )
 
-    print(
+    log(
         f"Type: "
-        f"{target.get('type')}"
+        f"{target.get('type', target.get('instrumentType', 'unknown'))}"
     )
 
-    print(
+    log(
         f"Tradeable: "
-        f"{target.get('tradeable')}"
+        f"{target.get('tradeable', target.get('tradable', 'unknown'))}"
     )
 
-    # Prefer retail margin levels when available.
-    levels = target.get(
-        "retailMarginLevels"
-    )
-
-    if not levels:
-        levels = target.get(
-            "marginLevels"
-        )
-
-    if not levels:
-        raise RuntimeError(
-            "No margin levels found for "
-            + SYMBOL
-        )
-
-    first_level = None
-
-    for level in levels:
-        contracts = safe_float(
-            level.get("contracts"),
-            0.0,
-        )
-
-        if contracts <= 0:
-            first_level = level
-            break
-
-    if first_level is None:
-        first_level = levels[0]
-
-    maintenance_margin = safe_float(
-        first_level.get(
-            "maintenanceMargin"
-        ),
-        0.01,
-    )
-
-    exchange_initial_margin = safe_float(
-        first_level.get(
-            "initialMargin"
-        ),
-        0.10,
-    )
-
-    print(
+    log(
         f"Exchange maintenance margin: "
         f"{maintenance_margin * 100:.4f}%"
     )
 
-    print(
+    log(
         f"Exchange reference initial margin: "
-        f"{exchange_initial_margin * 100:.4f}%"
+        f"{initial_margin * 100:.4f}%"
     )
 
     return {
-        "maintenance_margin": maintenance_margin,
-        "exchange_initial_margin": (
-            exchange_initial_margin
-        ),
         "raw": target,
+        "maintenance_margin": maintenance_margin,
+        "initial_margin": initial_margin,
     }
 
 
 # ============================================================
-# KRAKEN CANDLES
+# CANDLE PARSER
 # ============================================================
 
 def parse_candle(item):
-    if not isinstance(item, dict):
-        return None
 
-    timestamp = item.get("time")
+    if isinstance(item, dict):
 
-    if timestamp is None:
-        timestamp = item.get("timestamp")
-
-    if timestamp is None:
-        return None
-
-    timestamp = int(timestamp)
-
-    if timestamp < 10_000_000_000:
-        timestamp *= 1000
-
-    return {
-        "timestamp": timestamp,
-        "open": safe_float(item.get("open")),
-        "high": safe_float(item.get("high")),
-        "low": safe_float(item.get("low")),
-        "close": safe_float(item.get("close")),
-        "volume": safe_float(item.get("volume")),
-    }
-
-
-def download_candles():
-    print()
-    print("=" * 70)
-    print("DOWNLOADING KRAKEN BTC PERPETUAL 5M DATA")
-    print("=" * 70)
-
-    end_dt = utc_now()
-
-    start_dt = (
-        end_dt
-        - timedelta(days=LOOKBACK_DAYS)
-    )
-
-    start_ms = int(
-        start_dt.timestamp() * 1000
-    )
-
-    # Do not use the currently-forming candle.
-    current_bucket_ms = (
-        int(end_dt.timestamp())
-        // CANDLE_SECONDS
-    ) * CANDLE_SECONDS * 1000
-
-    end_ms = current_bucket_ms
-
-    print(
-        "From:",
-        start_dt.isoformat(),
-    )
-
-    print(
-        "To:",
-        datetime.fromtimestamp(
-            end_ms / 1000,
-            timezone.utc,
-        ).isoformat(),
-    )
-
-    candles = []
-
-    cursor_ms = start_ms
-
-    while cursor_ms < end_ms:
-        chunk_end_ms = min(
-            end_ms,
-            cursor_ms
-            + (
-                CHUNK_CANDLES
-                * CANDLE_SECONDS
-                * 1000
-            ),
+        ts = (
+            item.get("time")
+            if item.get("time") is not None
+            else item.get("timestamp")
         )
 
+        if ts is None:
+            ts = item.get("t")
+
+        o = item.get("open")
+        h = item.get("high")
+        l = item.get("low")
+        c = item.get("close")
+
+        if o is None:
+            o = item.get("o")
+
+        if h is None:
+            h = item.get("h")
+
+        if l is None:
+            l = item.get("l")
+
+        if c is None:
+            c = item.get("c")
+
+        if None in (ts, o, h, l, c):
+            return None
+
+        return {
+            "ts": timestamp_seconds(ts),
+            "open": safe_float(o),
+            "high": safe_float(h),
+            "low": safe_float(l),
+            "close": safe_float(c),
+        }
+
+    if isinstance(item, (list, tuple)):
+
+        if len(item) < 5:
+            return None
+
+        # Kraken chart format:
+        # [time, open, high, low, close, ...]
+        try:
+
+            return {
+                "ts": timestamp_seconds(item[0]),
+                "open": safe_float(item[1]),
+                "high": safe_float(item[2]),
+                "low": safe_float(item[3]),
+                "close": safe_float(item[4]),
+            }
+
+        except Exception:
+            return None
+
+    return None
+
+
+# ============================================================
+# CANDLE EXTRACTION
+# ============================================================
+
+def extract_candles(data):
+
+    candidates = []
+
+    if isinstance(data, list):
+        candidates = data
+
+    elif isinstance(data, dict):
+
+        for key in (
+            "candles",
+            "data",
+            "result",
+            "ohlc",
+        ):
+
+            value = data.get(key)
+
+            if isinstance(value, list):
+                candidates = value
+                break
+
+            if isinstance(value, dict):
+
+                for nested_key in (
+                    "candles",
+                    "data",
+                    "result",
+                    "ohlc",
+                ):
+
+                    nested = value.get(nested_key)
+
+                    if isinstance(nested, list):
+                        candidates = nested
+                        break
+
+                if candidates:
+                    break
+
+    parsed = []
+
+    for item in candidates:
+
+        candle = parse_candle(item)
+
+        if candle is None:
+            continue
+
+        if candle["ts"] <= 0:
+            continue
+
+        if candle["open"] <= 0:
+            continue
+
+        if candle["high"] <= 0:
+            continue
+
+        if candle["low"] <= 0:
+            continue
+
+        if candle["close"] <= 0:
+            continue
+
+        parsed.append(candle)
+
+    parsed.sort(
+        key=lambda x: x["ts"]
+    )
+
+    return parsed
+
+
+# ============================================================
+# DOWNLOAD CANDLES
+# ============================================================
+
+def download_candles():
+
+    end_ts = int(
+        datetime.now(timezone.utc).timestamp()
+    )
+
+    start_ts = int(
+        (
+            datetime.now(timezone.utc)
+            - timedelta(days=LOOKBACK_DAYS)
+        ).timestamp()
+    )
+
+    log(
+        f"Downloading {LOOKBACK_DAYS} days "
+        f"of {TIMEFRAME} candles..."
+    )
+
+    all_candles = []
+
+    current = start_ts
+
+    while current < end_ts:
+
         params = {
-            "from": int(
-                cursor_ms / 1000
+            "from": current,
+            "to": min(
+                end_ts,
+                current
+                + CHUNK_CANDLES * CANDLE_SECONDS,
             ),
-            "to": int(
-                chunk_end_ms / 1000
-            ),
-            "count": CHUNK_CANDLES,
         }
 
         data = request_json(
@@ -452,284 +588,325 @@ def download_candles():
             params=params,
         )
 
-        raw_candles = data.get(
-            "candles",
-            [],
-        )
+        batch = extract_candles(data)
 
-        parsed = []
-
-        for item in raw_candles:
-            candle = parse_candle(item)
-
-            if candle is None:
-                continue
-
-            if candle["timestamp"] < start_ms:
-                continue
-
-            if candle["timestamp"] >= end_ms:
-                continue
-
-            parsed.append(candle)
-
-        if not parsed:
-            print(
-                "No candles returned. "
-                f"cursor={iso_utc(cursor_ms)}"
-            )
-
+        if not batch:
             break
 
-        candles.extend(parsed)
+        all_candles.extend(batch)
 
-        last_ts = parsed[-1]["timestamp"]
-
-        next_cursor = (
-            last_ts
-            + CANDLE_SECONDS * 1000
+        newest = max(
+            x["ts"]
+            for x in batch
         )
 
-        if next_cursor <= cursor_ms:
-            raise RuntimeError(
-                "Kraken candle pagination "
-                "did not advance."
-            )
+        if newest <= current:
+            break
 
-        cursor_ms = next_cursor
+        current = newest + CANDLE_SECONDS
 
-        print(
-            f"Downloaded: "
-            f"{len(candles):,} candles | "
-            f"{iso_utc(last_ts)}"
+        log(
+            f"Candles downloaded: "
+            f"{len(all_candles):,} "
+            f"| latest={iso_utc(newest)}"
         )
 
-        time.sleep(REQUEST_SLEEP)
+        if len(batch) < 10:
+            break
 
-    # Deduplicate.
+        time.sleep(0.15)
+
     unique = {}
 
-    for candle in candles:
-        unique[
-            candle["timestamp"]
-        ] = candle
+    for candle in all_candles:
+        unique[candle["ts"]] = candle
 
-    candles = list(
-        unique.values()
-    )
+    candles = list(unique.values())
 
     candles.sort(
-        key=lambda x: x["timestamp"]
+        key=lambda x: x["ts"]
     )
 
-    if len(candles) < 1000:
+    if len(candles) < 100:
         raise RuntimeError(
-            "Too few candles downloaded."
+            "Not enough candles downloaded."
         )
 
-    # Validate gaps.
-    gaps = []
+    # Remove currently open candle.
+    now_ts = int(
+        datetime.now(timezone.utc).timestamp()
+    )
 
-    for i in range(1, len(candles)):
-        delta = (
-            candles[i]["timestamp"]
-            - candles[i - 1]["timestamp"]
+    closed = [
+        c
+        for c in candles
+        if c["ts"] + CANDLE_SECONDS <= now_ts
+    ]
+
+    log(
+        f"Final closed candles: "
+        f"{len(closed):,}"
+    )
+
+    if closed:
+
+        log(
+            f"Range: "
+            f"{iso_utc(closed[0]['ts'])} "
+            f"-> "
+            f"{iso_utc(closed[-1]['ts'])}"
         )
 
-        if delta != CANDLE_SECONDS * 1000:
-            gaps.append(
-                (
-                    candles[i - 1]["timestamp"],
-                    candles[i]["timestamp"],
-                    delta,
-                )
-            )
-
-    print()
-    print(
-        f"TOTAL CANDLES: {len(candles):,}"
-    )
-
-    print(
-        f"DATA START: "
-        f"{iso_utc(candles[0]['timestamp'])}"
-    )
-
-    print(
-        f"DATA END:   "
-        f"{iso_utc(candles[-1]['timestamp'])}"
-    )
-
-    print(
-        f"GAPS: {len(gaps)}"
-    )
-
-    if gaps:
-        print(
-            "WARNING: candle gaps detected."
-        )
-
-        for gap in gaps[:10]:
-            print(
-                " GAP:",
-                iso_utc(gap[0]),
-                "->",
-                iso_utc(gap[1]),
-            )
-
-    return candles
+    return closed
 
 
 # ============================================================
-# KRAKEN FUNDING
+# FUNDING PARSER
 # ============================================================
 
-def download_funding(
-    start_ms,
-    end_ms,
-):
-    print()
-    print("=" * 70)
-    print("DOWNLOADING KRAKEN HISTORICAL FUNDING")
-    print("=" * 70)
+def extract_funding(data):
 
-    params = {
-        "symbol": SYMBOL,
-    }
+    raw = []
 
-    data = request_json(
-        FUNDING_URL,
-        params=params,
-    )
+    if isinstance(data, list):
+        raw = data
 
-    rates = data.get(
-        "rates",
-        [],
-    )
+    elif isinstance(data, dict):
 
-    result = []
+        # Kraken commonly returns result in "rates".
+        for key in (
+            "rates",
+            "fundingRates",
+            "funding_rates",
+            "data",
+            "result",
+        ):
 
-    for item in rates:
-        timestamp_raw = item.get(
-            "timestamp"
-        )
+            value = data.get(key)
 
-        if timestamp_raw is None:
+            if isinstance(value, list):
+                raw = value
+                break
+
+            if isinstance(value, dict):
+
+                for nested_key in (
+                    "rates",
+                    "fundingRates",
+                    "funding_rates",
+                    "data",
+                    "result",
+                ):
+
+                    nested = value.get(nested_key)
+
+                    if isinstance(nested, list):
+                        raw = nested
+                        break
+
+                if raw:
+                    break
+
+    parsed = []
+
+    for item in raw:
+
+        if not isinstance(item, dict):
             continue
 
-        try:
-            dt = datetime.fromisoformat(
-                str(timestamp_raw).replace(
-                    "Z",
-                    "+00:00",
-                )
-            )
+        ts = None
+        rate = None
 
-            timestamp_ms = int(
-                dt.timestamp() * 1000
-            )
+        for key in (
+            "timestamp",
+            "time",
+            "fundingTime",
+            "fundingTimestamp",
+        ):
 
-        except Exception:
+            if item.get(key) is not None:
+                ts = item.get(key)
+                break
+
+        for key in (
+            "relativeFundingRate",
+            "fundingRate",
+            "rate",
+            "relative_rate",
+        ):
+
+            if item.get(key) is not None:
+                rate = item.get(key)
+                break
+
+        if ts is None or rate is None:
             continue
 
-        if timestamp_ms < start_ms:
+        ts = timestamp_seconds(ts)
+        rate = safe_float(rate, None)
+
+        if ts <= 0 or rate is None:
             continue
 
-        if timestamp_ms > end_ms:
-            continue
-
-        # Kraken publishes both:
-        # fundingRate
-        # relativeFundingRate
-        #
-        # For the funding payment calculation,
-        # relativeFundingRate is the percentage rate.
-        relative_rate = safe_float(
-            item.get(
-                "relativeFundingRate"
-            ),
-            0.0,
-        )
-
-        funding_rate = safe_float(
-            item.get(
-                "fundingRate"
-            ),
-            0.0,
-        )
-
-        result.append(
+        parsed.append(
             {
-                "timestamp": timestamp_ms,
-                "funding_rate": funding_rate,
-                "relative_funding_rate": (
-                    relative_rate
-                ),
+                "ts": ts,
+                "rate": rate,
             }
         )
 
-    result.sort(
-        key=lambda x: x["timestamp"]
+    parsed.sort(
+        key=lambda x: x["ts"]
     )
 
-    # Deduplicate.
     unique = {}
 
-    for item in result:
-        unique[
-            item["timestamp"]
-        ] = item
+    for item in parsed:
+        unique[item["ts"]] = item
 
-    result = list(
-        unique.values()
-    )
-
-    result.sort(
-        key=lambda x: x["timestamp"]
-    )
-
-    print(
-        f"FUNDING EVENTS: {len(result):,}"
-    )
-
-    if result:
-        print(
-            "FUNDING START:",
-            iso_utc(
-                result[0]["timestamp"]
-            ),
+    return list(
+        sorted(
+            unique.values(),
+            key=lambda x: x["ts"],
         )
-
-        print(
-            "FUNDING END:",
-            iso_utc(
-                result[-1]["timestamp"]
-            ),
-        )
-
-    return result
+    )
 
 
 # ============================================================
-# POSITION HELPERS
+# DOWNLOAD FUNDING
 # ============================================================
 
-def opposite_direction(direction):
-    if direction == "LONG":
-        return "SHORT"
+def download_funding():
 
-    return "LONG"
+    log(
+        "Downloading Kraken historical funding rates..."
+    )
+
+    # Correct endpoint:
+    #
+    # /derivatives/api/v3/historical-funding-rates
+    #
+    # Required parameter:
+    # symbol=PF_XBTUSD
+
+    data = request_json(
+        FUNDING_URL,
+        params={
+            "symbol": SYMBOL,
+        },
+    )
+
+    funding = extract_funding(data)
+
+    if not funding:
+
+        log(
+            "WARNING: Kraken returned no funding rows."
+        )
+
+        return []
+
+    start_ts = int(
+        (
+            datetime.now(timezone.utc)
+            - timedelta(days=LOOKBACK_DAYS)
+        ).timestamp()
+    )
+
+    end_ts = int(
+        datetime.now(timezone.utc).timestamp()
+    )
+
+    funding = [
+        x
+        for x in funding
+        if start_ts <= x["ts"] <= end_ts
+    ]
+
+    log(
+        f"Funding records: "
+        f"{len(funding):,}"
+    )
+
+    if funding:
+
+        log(
+            f"Funding range: "
+            f"{iso_utc(funding[0]['ts'])} "
+            f"-> "
+            f"{iso_utc(funding[-1]['ts'])}"
+        )
+
+        rates = [
+            x["rate"]
+            for x in funding
+        ]
+
+        avg_rate = (
+            sum(rates) / len(rates)
+            if rates
+            else 0
+        )
+
+        log(
+            f"Average funding rate: "
+            f"{avg_rate:.8f}"
+        )
+
+    return funding
 
 
-def signed_qty(
-    direction,
-    notional,
-    execution_price,
+# ============================================================
+# PRICE AT TIMESTAMP
+# ============================================================
+
+def price_before_timestamp(
+    candles,
+    ts,
 ):
-    qty = (
-        notional
-        / execution_price
-    )
+
+    # Last closed candle at or before timestamp.
+    #
+    # This avoids using a future candle close
+    # to price a funding event.
+
+    lo = 0
+    hi = len(candles) - 1
+    answer = None
+
+    while lo <= hi:
+
+        mid = (lo + hi) // 2
+
+        if candles[mid]["ts"] <= ts:
+
+            answer = candles[mid]
+            lo = mid + 1
+
+        else:
+
+            hi = mid - 1
+
+    if answer is None:
+        return None
+
+    return answer["close"]
+
+
+# ============================================================
+# POSITION
+# ============================================================
+
+def position_qty(
+    notional,
+    price,
+    direction,
+):
+
+    if price <= 0:
+        return 0.0
+
+    qty = notional / price
 
     if direction == "LONG":
         return qty
@@ -737,381 +914,683 @@ def signed_qty(
     return -qty
 
 
+# ============================================================
+# EXECUTION PRICE
+# ============================================================
+
 def execution_price(
-    raw_price,
+    market_price,
     direction,
+    action,
 ):
-    if direction == "LONG":
-        return (
-            raw_price
-            * (1.0 + SLIPPAGE_RATE)
+
+    if market_price <= 0:
+        return market_price
+
+    # BUY gets worse price upward.
+    # SELL gets worse price downward.
+
+    if action == "BUY":
+
+        return market_price * (
+            1.0 + SLIPPAGE_RATE
         )
 
-    return (
-        raw_price
-        * (1.0 - SLIPPAGE_RATE)
+    return market_price * (
+        1.0 - SLIPPAGE_RATE
     )
 
 
-def order_fee(
+def action_for_direction(
+    direction,
+):
+
+    if direction == "LONG":
+        return "BUY"
+
+    return "SELL"
+
+
+# ============================================================
+# FEE
+# ============================================================
+
+def fee_for_notional(
     notional,
 ):
-    return (
-        abs(notional)
-        * TAKER_FEE_RATE
-    )
+
+    return abs(notional) * TAKER_FEE_RATE
 
 
-def position_pnl_at_price(
+# ============================================================
+# UNREALIZED PNL
+# ============================================================
+
+def position_unrealized_pnl(
     position,
-    price,
+    mark_price,
 ):
+
     return (
         position["qty"]
         * (
-            price
-            - position["entry_exec"]
+            mark_price
+            - position["entry_price"]
         )
     )
 
 
-def portfolio_unrealized_pnl(
+def total_unrealized_pnl(
     positions,
-    price,
+    mark_price,
 ):
+
     total = 0.0
 
-    for position in positions:
-        total += position_pnl_at_price(
-            position,
-            price,
+    for p in positions:
+        total += position_unrealized_pnl(
+            p,
+            mark_price,
         )
 
     return total
 
 
-def portfolio_equity(
+# ============================================================
+# POSITION NOTIONAL
+# ============================================================
+
+def total_notional(
+    positions,
+    mark_price,
+):
+
+    total = 0.0
+
+    for p in positions:
+
+        total += abs(
+            p["qty"] * mark_price
+        )
+
+    return total
+
+
+# ============================================================
+# EQUITY
+# ============================================================
+
+def account_equity(
     cash,
     positions,
-    price,
+    mark_price,
 ):
+
     return (
         cash
-        + portfolio_unrealized_pnl(
+        + total_unrealized_pnl(
             positions,
-            price,
+            mark_price,
         )
     )
 
 
-def required_initial_margin(
+# ============================================================
+# MAINTENANCE MARGIN
+# ============================================================
+
+def maintenance_margin_required(
     positions,
+    mark_price,
+    maintenance_margin_rate,
 ):
-    total = 0.0
 
-    for position in positions:
-        total += (
-            position["notional"]
-            / LEVERAGE
-        )
-
-    return total
-
-
-def maintenance_margin(
-    positions,
-    price,
-    maintenance_rate,
-):
-    total_notional = 0.0
-
-    for position in positions:
-        total_notional += (
-            abs(position["qty"])
-            * price
-        )
+    notional = total_notional(
+        positions,
+        mark_price,
+    )
 
     return (
-        total_notional
-        * maintenance_rate
+        notional
+        * maintenance_margin_rate
     )
 
 
-def liquidation_function(
+# ============================================================
+# LIQUIDATION TEST
+# ============================================================
+
+def is_liquidated(
     cash,
     positions,
-    price,
-    maintenance_rate,
+    mark_price,
+    maintenance_margin_rate,
 ):
-    equity = portfolio_equity(
+
+    if not positions:
+        return False
+
+    equity = account_equity(
         cash,
         positions,
-        price,
+        mark_price,
     )
 
-    maintenance = maintenance_margin(
-        positions,
-        price,
-        maintenance_rate,
+    maintenance = (
+        maintenance_margin_required(
+            positions,
+            mark_price,
+            maintenance_margin_rate,
+        )
+        + LIQUIDATION_BUFFER_USD
     )
 
-    return (
-        equity
-        - maintenance
-        - LIQUIDATION_BUFFER_USD
-    )
+    return equity <= maintenance
 
 
 # ============================================================
-# LIQUIDATION PRICE
+# APPROXIMATE LIQUIDATION PRICE
 # ============================================================
 
-def find_liquidation_price(
+def approximate_liquidation_price(
     cash,
     positions,
-    current_price,
-    maintenance_rate,
+    maintenance_margin_rate,
 ):
+
     if not positions:
         return None
 
-    current_value = liquidation_function(
+    net_qty = sum(
+        p["qty"]
+        for p in positions
+    )
+
+    if abs(net_qty) < 1e-12:
+        return None
+
+    # Equity(P):
+    #
+    # cash + sum(qty * (P - entry))
+    #
+    # Maintenance(P):
+    #
+    # abs(net exposure) * P * mm
+    #
+    # Solve:
+    #
+    # cash
+    # + P*net_qty
+    # - sum(qty*entry)
+    # =
+    # abs(net_qty)*P*mm
+
+    constant = (
+        cash
+        - sum(
+            p["qty"] * p["entry_price"]
+            for p in positions
+        )
+    )
+
+    abs_qty = abs(net_qty)
+
+    denominator = (
+        net_qty
+        - abs_qty * maintenance_margin_rate
+    )
+
+    if abs(denominator) < 1e-12:
+        return None
+
+    price = (
+        -constant
+        / denominator
+    )
+
+    if price <= 0:
+        return None
+
+    return price
+
+
+# ============================================================
+# HEDGE DIRECTION
+# ============================================================
+
+def hedge_direction(
+    original_direction,
+):
+
+    if original_direction == "LONG":
+        return "SHORT"
+
+    return "LONG"
+
+
+# ============================================================
+# HEDGE TRIGGER PRICE
+# ============================================================
+
+def hedge_trigger_price(
+    original_entry_price,
+    original_direction,
+    hedge_number,
+):
+
+    adverse_pct = (
+        HEDGE_TRIGGER_PCT
+        * hedge_number
+    )
+
+    if original_direction == "LONG":
+
+        return (
+            original_entry_price
+            * (1.0 - adverse_pct)
+        )
+
+    return (
+        original_entry_price
+        * (1.0 + adverse_pct)
+    )
+
+
+# ============================================================
+# TARGET CHECK
+# ============================================================
+
+def projected_exit_equity(
+    cash,
+    positions,
+    exit_market_price,
+):
+
+    if not positions:
+        return cash
+
+    gross = total_unrealized_pnl(
+        positions,
+        exit_market_price,
+    )
+
+    closing_notional = sum(
+        abs(
+            p["qty"]
+            * exit_market_price
+        )
+        for p in positions
+    )
+
+    closing_fee = fee_for_notional(
+        closing_notional
+    )
+
+    closing_slippage = (
+        closing_notional
+        * SLIPPAGE_RATE
+    )
+
+    return (
+        cash
+        + gross
+        - closing_fee
+        - closing_slippage
+    )
+
+
+def target_reached(
+    cash,
+    positions,
+    market_price,
+):
+
+    target_equity = (
+        CAPITAL_START
+        + TARGET_NET_PROFIT
+    )
+
+    projected = projected_exit_equity(
         cash,
         positions,
-        current_price,
-        maintenance_rate,
+        market_price,
     )
 
-    if current_value <= 0:
-        return current_price
-
-    net_qty = sum(
-        position["qty"]
-        for position in positions
-    )
-
-    # If net long:
-    # lower price is adverse.
-    #
-    # If net short:
-    # higher price is adverse.
-    #
-    # If net neutral:
-    # maintenance grows with price,
-    # therefore the high side is adverse.
-    if net_qty > 1e-18:
-        direction = "DOWN"
-    else:
-        direction = "UP"
-
-    if direction == "DOWN":
-        high = current_price
-        low = current_price * 0.50
-
-        low_value = liquidation_function(
-            cash,
-            positions,
-            low,
-            maintenance_rate,
-        )
-
-        for _ in range(40):
-            if low_value <= 0:
-                break
-
-            low *= 0.75
-
-            if low <= 1e-8:
-                break
-
-            low_value = liquidation_function(
-                cash,
-                positions,
-                low,
-                maintenance_rate,
-            )
-
-        if low_value > 0:
-            return None
-
-        for _ in range(80):
-            mid = (
-                low
-                + high
-            ) / 2.0
-
-            value = liquidation_function(
-                cash,
-                positions,
-                mid,
-                maintenance_rate,
-            )
-
-            if value <= 0:
-                low = mid
-            else:
-                high = mid
-
-        return high
-
-    else:
-        low = current_price
-        high = current_price * 1.50
-
-        high_value = liquidation_function(
-            cash,
-            positions,
-            high,
-            maintenance_rate,
-        )
-
-        for _ in range(40):
-            if high_value <= 0:
-                break
-
-            high *= 1.25
-
-            high_value = liquidation_function(
-                cash,
-                positions,
-                high,
-                maintenance_rate,
-            )
-
-        if high_value > 0:
-            return None
-
-        for _ in range(80):
-            mid = (
-                low
-                + high
-            ) / 2.0
-
-            value = liquidation_function(
-                cash,
-                positions,
-                mid,
-                maintenance_rate,
-            )
-
-            if value <= 0:
-                high = mid
-            else:
-                low = mid
-
-        return low
+    return projected >= target_equity
 
 
-def liquidation_distance_pct(
+# ============================================================
+# TARGET PRICE SOLVER
+# ============================================================
+
+def find_target_price(
     cash,
     positions,
     current_price,
-    maintenance_rate,
 ):
-    liq_price = find_liquidation_price(
-        cash,
-        positions,
-        current_price,
-        maintenance_rate,
+
+    if not positions:
+        return None
+
+    target_equity = (
+        CAPITAL_START
+        + TARGET_NET_PROFIT
     )
 
-    if liq_price is None:
+    net_qty = sum(
+        p["qty"]
+        for p in positions
+    )
+
+    if abs(net_qty) < 1e-12:
         return None
 
-    if current_price <= 0:
-        return None
-
-    return (
-        abs(
-            liq_price
-            / current_price
-            - 1.0
+    constant = (
+        cash
+        - sum(
+            p["qty"]
+            * p["entry_price"]
+            for p in positions
         )
-        * 100.0
     )
+
+    closing_fee_rate = (
+        TAKER_FEE_RATE
+        + SLIPPAGE_RATE
+    )
+
+    denominator = (
+        net_qty
+        - abs(net_qty)
+        * closing_fee_rate
+    )
+
+    if abs(denominator) < 1e-12:
+        return None
+
+    target_price = (
+        target_equity
+        - constant
+    ) / denominator
+
+    if target_price <= 0:
+        return None
+
+    return target_price
 
 
 # ============================================================
-# FUNDING
+# MAX ADVERSE PRICE
+# ============================================================
+
+def update_max_adverse(
+    cycle,
+    candle,
+    original_direction,
+):
+
+    if original_direction == "LONG":
+
+        adverse_price = candle["low"]
+
+        if adverse_price < cycle["min_price"]:
+            cycle["min_price"] = adverse_price
+
+    else:
+
+        adverse_price = candle["high"]
+
+        if adverse_price > cycle["max_price"]:
+            cycle["max_price"] = adverse_price
+
+
+# ============================================================
+# MDD
+# ============================================================
+
+def update_drawdown(
+    cycle,
+    equity,
+):
+
+    if equity > cycle["equity_peak"]:
+        cycle["equity_peak"] = equity
+
+    if cycle["equity_peak"] <= 0:
+        return
+
+    dd = (
+        equity
+        - cycle["equity_peak"]
+    ) / cycle["equity_peak"]
+
+    if dd < cycle["max_drawdown"]:
+        cycle["max_drawdown"] = dd
+
+
+# ============================================================
+# OPEN POSITION
+# ============================================================
+
+def open_position(
+    positions,
+    cash,
+    market_price,
+    direction,
+    notional,
+    label,
+    event_ts,
+):
+
+    action = action_for_direction(
+        direction
+    )
+
+    exec_price = execution_price(
+        market_price,
+        direction,
+        action,
+    )
+
+    qty = position_qty(
+        notional,
+        exec_price,
+        direction,
+    )
+
+    fee = fee_for_notional(
+        notional
+    )
+
+    cash -= fee
+
+    slippage_usd = (
+        abs(qty)
+        * abs(exec_price - market_price)
+    )
+
+    position = {
+        "label": label,
+        "direction": direction,
+        "qty": qty,
+        "notional": notional,
+        "entry_price": exec_price,
+        "market_entry_price": market_price,
+        "fee": fee,
+        "slippage": slippage_usd,
+        "opened_ts": event_ts,
+    }
+
+    positions.append(
+        position
+    )
+
+    return cash, position
+
+
+# ============================================================
+# CLOSE ALL
+# ============================================================
+
+def close_all_positions(
+    positions,
+    cash,
+    market_price,
+    event_ts,
+):
+
+    gross_raw = 0.0
+    closing_fees = 0.0
+    closing_slippage = 0.0
+
+    exit_price_for_report = market_price
+
+    for p in positions:
+
+        if p["qty"] > 0:
+
+            action = "SELL"
+
+        else:
+
+            action = "BUY"
+
+        exec_price = execution_price(
+            market_price,
+            p["direction"],
+            action,
+        )
+
+        pnl = (
+            p["qty"]
+            * (
+                exec_price
+                - p["entry_price"]
+            )
+        )
+
+        notional = abs(
+            p["qty"]
+            * exec_price
+        )
+
+        fee = fee_for_notional(
+            notional
+        )
+
+        slippage = (
+            abs(p["qty"])
+            * abs(
+                exec_price
+                - market_price
+            )
+        )
+
+        gross_raw += pnl
+        closing_fees += fee
+        closing_slippage += slippage
+
+        exit_price_for_report = exec_price
+
+    cash_after = (
+        cash
+        + gross_raw
+        - closing_fees
+    )
+
+    return {
+        "cash_after": cash_after,
+        "gross_raw": gross_raw,
+        "closing_fees": closing_fees,
+        "closing_slippage": closing_slippage,
+        "exit_price": exit_price_for_report,
+        "exit_ts": event_ts,
+    }
+
+
+# ============================================================
+# FUNDING APPLICATION
 # ============================================================
 
 def apply_funding_events(
+    cycle,
     cash,
     positions,
-    funding_events,
+    funding,
     funding_index,
-    until_timestamp,
+    current_ts,
+    candles,
 ):
-    total_funding = 0.0
-    events_used = []
+
+    funding_total = 0.0
+    events_applied = []
 
     while (
-        funding_index
-        < len(funding_events)
+        funding_index < len(funding)
+        and funding[funding_index]["ts"] <= current_ts
     ):
-        event = funding_events[
-            funding_index
-        ]
 
-        if event["timestamp"] > until_timestamp:
-            break
+        event = funding[funding_index]
 
-        rate = event[
-            "relative_funding_rate"
-        ]
+        event_ts = event["ts"]
 
-        # Use the most recent candle close
-        # available at the funding timestamp.
-        #
-        # The caller supplies the price separately
-        # by updating position notional using the
-        # current mark proxy.
-        #
-        # Here we use event's rate and current
-        # position entry framework; caller will
-        # overwrite price in the event object.
-        funding_price = event.get(
-            "price",
-            None,
-        )
-
-        if funding_price is None:
+        # Only funding after cycle entry.
+        if event_ts < cycle["entry_ts"]:
             funding_index += 1
             continue
 
-        event_payment = 0.0
+        price = price_before_timestamp(
+            candles,
+            event_ts,
+        )
 
-        for position in positions:
-            notional = (
-                abs(position["qty"])
-                * funding_price
+        if price is None:
+
+            # Do not apply if there is no safe
+            # historical price available.
+            funding_index += 1
+            continue
+
+        rate = event["rate"]
+
+        event_total = 0.0
+
+        for p in positions:
+
+            notional = abs(
+                p["qty"]
+                * price
             )
 
-            # Positive rate:
-            # Long pays
-            # Short receives
+            # Positive funding:
+            # Long pays / Short receives.
             #
-            # Negative rate:
-            # Long receives
-            # Short pays
+            # Negative funding:
+            # Long receives / Short pays.
+
             payment = (
                 math.copysign(
                     notional * rate,
-                    position["qty"],
+                    p["qty"],
                 )
             )
 
-            event_payment += payment
+            cash -= payment
 
-        cash -= event_payment
+            event_total += payment
 
-        total_funding += event_payment
+        funding_total += event_total
 
-        events_used.append(
+        events_applied.append(
             {
-                "timestamp": event["timestamp"],
+                "cycle_id": cycle["cycle_id"],
+                "model": cycle["model"],
+                "direction": cycle["direction"],
+                "funding_ts": event_ts,
+                "funding_time": iso_utc(event_ts),
                 "rate": rate,
-                "payment": event_payment,
+                "price": price,
+                "payment": event_total,
             }
         )
 
@@ -1120,1279 +1599,1168 @@ def apply_funding_events(
     return (
         cash,
         funding_index,
-        total_funding,
-        events_used,
+        funding_total,
+        events_applied,
     )
 
 
 # ============================================================
-# TARGET EXIT
+# CYCLE RESULT
 # ============================================================
 
-def close_execution_price(
-    raw_price,
-    direction,
-):
-    return execution_price(
-        raw_price,
-        direction,
-    )
-
-
-def projected_exit_equity(
-    cash,
-    positions,
-    raw_exit_price,
-):
-    gross_realized = 0.0
-    closing_fees = 0.0
-
-    for position in positions:
-        direction = (
-            "LONG"
-            if position["qty"] > 0
-            else "SHORT"
-        )
-
-        exec_price = (
-            close_execution_price(
-                raw_exit_price,
-                direction,
-            )
-        )
-
-        gross_realized += (
-            position["qty"]
-            * (
-                exec_price
-                - position["entry_exec"]
-            )
-        )
-
-        closing_notional = (
-            abs(position["qty"])
-            * exec_price
-        )
-
-        closing_fees += order_fee(
-            closing_notional
-        )
-
-    return (
-        cash
-        + gross_realized
-        - closing_fees
-    )
-
-
-def find_target_price(
-    cash,
-    positions,
-    current_price,
-    low,
-    high,
-    target_equity,
-):
-    if not positions:
-        return None
-
-    net_qty = sum(
-        position["qty"]
-        for position in positions
-    )
-
-    current_equity = projected_exit_equity(
-        cash,
-        positions,
-        current_price,
-    )
-
-    if current_equity >= target_equity:
-        return current_price
-
-    if abs(net_qty) < 1e-18:
-        return None
-
-    if net_qty > 0:
-        # Target requires higher price.
-        candidate = high
-
-        if (
-            projected_exit_equity(
-                cash,
-                positions,
-                candidate,
-            )
-            < target_equity
-        ):
-            return None
-
-        lo = current_price
-        hi = candidate
-
-        for _ in range(80):
-            mid = (
-                lo + hi
-            ) / 2.0
-
-            value = projected_exit_equity(
-                cash,
-                positions,
-                mid,
-            )
-
-            if value >= target_equity:
-                hi = mid
-            else:
-                lo = mid
-
-        return hi
-
-    else:
-        # Target requires lower price.
-        candidate = low
-
-        if (
-            projected_exit_equity(
-                cash,
-                positions,
-                candidate,
-            )
-            < target_equity
-        ):
-            return None
-
-        lo = candidate
-        hi = current_price
-
-        for _ in range(80):
-            mid = (
-                lo + hi
-            ) / 2.0
-
-            value = projected_exit_equity(
-                cash,
-                positions,
-                mid,
-            )
-
-            if value >= target_equity:
-                lo = mid
-            else:
-                hi = mid
-
-        return lo
-
-
-# ============================================================
-# CYCLE SIMULATION
-# ============================================================
-
-def simulate_cycle(
-    candles,
-    funding_events,
-    start_index,
-    model_name,
+def empty_cycle(
+    cycle_id,
     model,
-    initial_direction,
-    starting_equity,
-    maintenance_rate,
+    direction,
+    start_equity,
+    entry_ts,
 ):
+
+    return {
+        "cycle_id": cycle_id,
+        "model": model,
+        "direction": direction,
+
+        "start_equity": start_equity,
+
+        "entry_ts": entry_ts,
+        "entry_time": iso_utc(entry_ts),
+        "entry_price": 0.0,
+
+        "hedge1_ts": "",
+        "hedge1_time": "",
+        "hedge1_price": 0.0,
+        "hedge1_size": 0.0,
+
+        "hedge2_ts": "",
+        "hedge2_time": "",
+        "hedge2_price": 0.0,
+        "hedge2_size": 0.0,
+
+        "exit_ts": "",
+        "exit_time": "",
+        "exit_price": 0.0,
+
+        "exit_reason": "",
+
+        "gross_pnl": 0.0,
+        "fees": 0.0,
+        "slippage": 0.0,
+        "funding": 0.0,
+        "net_pnl": 0.0,
+
+        "final_equity": start_equity,
+
+        "max_drawdown_pct": 0.0,
+        "max_adverse_pct": 0.0,
+
+        "liquidation_price": 0.0,
+        "liquidation_distance_pct": 0.0,
+
+        "hedges_used": 0,
+        "hedges_blocked": 0,
+
+        "duration_hours": 0.0,
+
+        "target_reached": False,
+    }
+
+
+# ============================================================
+# RUN ONE CYCLE
+# ============================================================
+
+def run_cycle(
+    model_name,
+    hedge_fraction,
+    direction,
+    candles,
+    funding,
+    maintenance_margin_rate,
+    cycle_id,
+    start_index,
+    starting_equity,
+):
+
     if start_index >= len(candles):
-        return None, len(candles)
+        return None, start_index
 
-    entry_candle = candles[
-        start_index
-    ]
+    entry_candle = candles[start_index]
 
-    raw_entry_price = (
-        entry_candle["open"]
+    entry_market = entry_candle["open"]
+
+    result = empty_cycle(
+        cycle_id,
+        model_name,
+        direction,
+        starting_equity,
+        entry_candle["ts"],
     )
 
-    entry_direction = initial_direction
+    positions = []
 
-    entry_exec = execution_price(
-        raw_entry_price,
-        entry_direction,
-    )
+    cash = starting_equity
 
-    entry_fee = order_fee(
+    total_fees = 0.0
+    total_slippage = 0.0
+    total_funding = 0.0
+
+    # --------------------------------------------------------
+    # Initial margin check
+    # --------------------------------------------------------
+
+    initial_fee = fee_for_notional(
         INITIAL_NOTIONAL
     )
 
-    # Need enough equity for initial margin + entry fee.
-    if (
-        starting_equity
-        < INITIAL_MARGIN + entry_fee
+    if cash < (
+        INITIAL_MARGIN
+        + initial_fee
     ):
-        return {
-            "status": "INSUFFICIENT_CAPITAL",
-            "next_index": len(candles),
-        }, len(candles)
 
-    cash = (
-        starting_equity
-        - entry_fee
-    )
-
-    initial_position = {
-        "direction": entry_direction,
-        "qty": signed_qty(
-            entry_direction,
-            INITIAL_NOTIONAL,
-            entry_exec,
-        ),
-        "notional": INITIAL_NOTIONAL,
-        "entry_raw": raw_entry_price,
-        "entry_exec": entry_exec,
-        "entry_time": entry_candle[
-            "timestamp"
-        ],
-    }
-
-    positions = [
-        initial_position
-    ]
-
-    fees_total = entry_fee
-    slippage_total = (
-        abs(
-            initial_position["qty"]
+        result["exit_reason"] = (
+            "INSUFFICIENT_MARGIN"
         )
-        * abs(
-            entry_exec
-            - raw_entry_price
+
+        result["exit_ts"] = entry_candle["ts"]
+        result["exit_time"] = iso_utc(
+            entry_candle["ts"]
         )
+
+        result["final_equity"] = cash
+
+        return result, start_index + 1
+
+    # --------------------------------------------------------
+    # Initial position
+    # --------------------------------------------------------
+
+    cash, initial_position = open_position(
+        positions=positions,
+        cash=cash,
+        market_price=entry_market,
+        direction=direction,
+        notional=INITIAL_NOTIONAL,
+        label="INITIAL",
+        event_ts=entry_candle["ts"],
     )
 
-    funding_total = 0.0
-
-    hedge_events = []
-
-    blocked_hedges = 0
-
-    next_hedge_number = 1
-
-    # Hedge triggers based on the ORIGINAL entry price.
-    if entry_direction == "LONG":
-        hedge_trigger_prices = [
-            raw_entry_price
-            * (
-                1.0
-                - HEDGE_TRIGGER_PCT
-                * i
-            )
-            for i in range(
-                1,
-                MAX_HEDGES + 1,
-            )
-        ]
-    else:
-        hedge_trigger_prices = [
-            raw_entry_price
-            * (
-                1.0
-                + HEDGE_TRIGGER_PCT
-                * i
-            )
-            for i in range(
-                1,
-                MAX_HEDGES + 1,
-            )
-        ]
-
-    start_time = (
-        entry_candle["timestamp"]
+    result["entry_price"] = (
+        initial_position["entry_price"]
     )
 
-    max_drawdown_pct = 0.0
+    total_fees += (
+        initial_position["fee"]
+    )
 
-    min_liquidation_distance = None
+    total_slippage += (
+        initial_position["slippage"]
+    )
 
-    max_adverse_price = raw_entry_price
+    result["equity_peak"] = (
+        cash
+    )
+
+    result["min_price"] = (
+        entry_market
+    )
+
+    result["max_price"] = (
+        entry_market
+    )
+
+    hedge_count = 0
 
     funding_index = 0
 
-    # Skip funding before entry.
     while (
-        funding_index
-        < len(funding_events)
-        and funding_events[
-            funding_index
-        ]["timestamp"]
-        <= start_time
+        funding_index < len(funding)
+        and funding[funding_index]["ts"]
+        < entry_candle["ts"]
     ):
         funding_index += 1
 
-    last_processed_timestamp = (
-        start_time
-    )
+    # --------------------------------------------------------
+    # Scan forward
+    # --------------------------------------------------------
 
-    exit_reason = None
-    exit_raw_price = None
-    exit_exec_price = None
-    exit_timestamp = None
-
-    liquidation_price = None
-
-    last_index = start_index
+    exit_index = start_index
 
     for i in range(
         start_index,
         len(candles),
     ):
+
         candle = candles[i]
 
-        timestamp = candle[
-            "timestamp"
-        ]
+        exit_index = i
 
         # ----------------------------------------------------
-        # APPLY FUNDING AT / BEFORE CANDLE OPEN
+        # Funding
         # ----------------------------------------------------
 
-        # Attach candle close as funding price proxy
-        # for any funding event falling before this candle.
-        while (
-            funding_index
-            < len(funding_events)
-            and funding_events[
-                funding_index
-            ]["timestamp"]
-            <= timestamp
-        ):
-            funding_events[
-                funding_index
-            ]["price"] = candle[
-                "close"
-            ]
-
-            (
-                cash,
-                funding_index,
-                funding_payment,
-                used_events,
-            ) = apply_funding_events(
-                cash,
-                positions,
-                funding_events,
-                funding_index,
-                timestamp,
-            )
-
-            funding_total += (
-                funding_payment
-            )
-
-            # Record separately later through
-            # the returned funding event list.
-            for used in used_events:
-                pass
-
-        # ----------------------------------------------------
-        # CURRENT OPEN PRICE EQUITY
-        # ----------------------------------------------------
-
-        current_open = candle[
-            "open"
-        ]
-
-        open_equity = portfolio_equity(
+        (
             cash,
-            positions,
-            current_open,
+            funding_index,
+            funding_delta,
+            funding_events,
+        ) = apply_funding_events(
+            cycle=result,
+            cash=cash,
+            positions=positions,
+            funding=funding,
+            funding_index=funding_index,
+            current_ts=(
+                candle["ts"]
+                + CANDLE_SECONDS
+                - 1
+            ),
+            candles=candles,
         )
 
-        cycle_drawdown = (
-            (
-                open_equity
+        total_funding += funding_delta
+
+        # ----------------------------------------------------
+        # Update adverse movement
+        # ----------------------------------------------------
+
+        update_max_adverse(
+            result,
+            candle,
+            direction,
+        )
+
+        # ----------------------------------------------------
+        # Conservative liquidation check
+        #
+        # If liquidation and hedge trigger are both
+        # inside the same candle, liquidation wins.
+        # ----------------------------------------------------
+
+        if is_liquidated(
+            cash,
+            positions,
+            candle["low"],
+            maintenance_margin_rate,
+        ) or is_liquidated(
+            cash,
+            positions,
+            candle["high"],
+            maintenance_margin_rate,
+        ):
+
+            # We need to identify which side can liquidate.
+            #
+            # Long exposure -> low is dangerous.
+            # Short exposure -> high is dangerous.
+            #
+            # If net exposure is flat, liquidation is unlikely
+            # through directional price movement, but fees/funding
+            # can still reduce equity.
+
+            net_qty = sum(
+                p["qty"]
+                for p in positions
+            )
+
+            if net_qty > 0:
+
+                liq_price = candle["low"]
+
+            elif net_qty < 0:
+
+                liq_price = candle["high"]
+
+            else:
+
+                liq_price = candle["close"]
+
+            result["exit_ts"] = candle["ts"]
+            result["exit_time"] = iso_utc(
+                candle["ts"]
+            )
+
+            result["exit_price"] = liq_price
+
+            result["exit_reason"] = (
+                "LIQUIDATION"
+            )
+
+            gross = total_unrealized_pnl(
+                positions,
+                liq_price,
+            )
+
+            notional = total_notional(
+                positions,
+                liq_price,
+            )
+
+            liquidation_fee = fee_for_notional(
+                notional
+            )
+
+            final_equity = (
+                cash
+                + gross
+                - liquidation_fee
+            )
+
+            result["gross_pnl"] = gross
+
+            result["fees"] = (
+                total_fees
+                + liquidation_fee
+            )
+
+            result["slippage"] = (
+                total_slippage
+            )
+
+            result["funding"] = (
+                total_funding
+            )
+
+            result["net_pnl"] = (
+                final_equity
                 - starting_equity
             )
-            / starting_equity
-            * 100.0
-        )
 
-        if cycle_drawdown < max_drawdown_pct:
-            max_drawdown_pct = (
-                cycle_drawdown
+            result["final_equity"] = (
+                final_equity
             )
 
-        liq_dist = liquidation_distance_pct(
-            cash,
-            positions,
-            current_open,
-            maintenance_rate,
-        )
+            result["hedges_used"] = hedge_count
 
-        if liq_dist is not None:
-            if (
-                min_liquidation_distance
-                is None
-                or liq_dist
-                < min_liquidation_distance
-            ):
-                min_liquidation_distance = (
-                    liq_dist
+            result["liquidation_price"] = (
+                approximate_liquidation_price(
+                    cash,
+                    positions,
+                    maintenance_margin_rate,
+                )
+                or liq_price
+            )
+
+            if direction == "LONG":
+
+                result["max_adverse_pct"] = (
+                    max(
+                        0.0,
+                        (
+                            result["entry_price"]
+                            - result["min_price"]
+                        )
+                        / result["entry_price"]
+                    )
+                    * 100.0
                 )
 
+            else:
+
+                result["max_adverse_pct"] = (
+                    max(
+                        0.0,
+                        (
+                            result["max_price"]
+                            - result["entry_price"]
+                        )
+                        / result["entry_price"]
+                    )
+                    * 100.0
+                )
+
+            result["duration_hours"] = (
+                result["exit_ts"]
+                - result["entry_ts"]
+            ) / 3600.0
+
+            return result, exit_index + 1
+
         # ----------------------------------------------------
-        # OPEN-PRICE LIQUIDATION CHECK
+        # HEDGE LOGIC
         # ----------------------------------------------------
 
-        open_liq_value = liquidation_function(
-            cash,
-            positions,
-            current_open,
-            maintenance_rate,
-        )
+        while hedge_count < MAX_HEDGES:
 
-        if open_liq_value <= 0:
-            exit_reason = "LIQUIDATION"
-            exit_raw_price = current_open
-            exit_timestamp = timestamp
-            liquidation_price = current_open
-            last_index = i
-            break
+            hedge_number = hedge_count + 1
 
-        # ----------------------------------------------------
-        # INTRABAR LIQUIDATION CHECK
-        #
-        # THIS IS DONE BEFORE HEDGES.
-        # ----------------------------------------------------
-
-        net_qty = sum(
-            position["qty"]
-            for position in positions
-        )
-
-        if net_qty > 1e-18:
-            adverse_price = candle["low"]
-        elif net_qty < -1e-18:
-            adverse_price = candle["high"]
-        else:
-            adverse_price = candle["high"]
-
-        adverse_liq_value = liquidation_function(
-            cash,
-            positions,
-            adverse_price,
-            maintenance_rate,
-        )
-
-        if adverse_liq_value <= 0:
-            liq_price = find_liquidation_price(
-                cash,
-                positions,
-                current_open,
-                maintenance_rate,
+            trigger = hedge_trigger_price(
+                result["entry_price"],
+                direction,
+                hedge_number,
             )
 
-            if liq_price is None:
-                liq_price = adverse_price
+            if direction == "LONG":
 
-            exit_reason = "LIQUIDATION"
-            exit_raw_price = liq_price
-            exit_timestamp = timestamp
-            liquidation_price = liq_price
-            last_index = i
-            break
-
-        # ----------------------------------------------------
-        # UPDATE MAX DRAWDOWN USING LOW/HIGH
-        # ----------------------------------------------------
-
-        adverse_equity = portfolio_equity(
-            cash,
-            positions,
-            adverse_price,
-        )
-
-        adverse_drawdown = (
-            (
-                adverse_equity
-                - starting_equity
-            )
-            / starting_equity
-            * 100.0
-        )
-
-        if (
-            adverse_drawdown
-            < max_drawdown_pct
-        ):
-            max_drawdown_pct = (
-                adverse_drawdown
-            )
-
-        # Track adverse excursion.
-        if entry_direction == "LONG":
-            if candle["low"] < max_adverse_price:
-                max_adverse_price = candle["low"]
-        else:
-            if candle["high"] > max_adverse_price:
-                max_adverse_price = candle["high"]
-
-        # ----------------------------------------------------
-        # HEDGE TRIGGERS
-        #
-        # Hedge first, because conservative rule.
-        # Liquidation was already checked above.
-        # ----------------------------------------------------
-
-        while (
-            next_hedge_number
-            <= MAX_HEDGES
-        ):
-            trigger_price = (
-                hedge_trigger_prices[
-                    next_hedge_number - 1
-                ]
-            )
-
-            if entry_direction == "LONG":
                 trigger_hit = (
                     candle["low"]
-                    <= trigger_price
+                    <= trigger
                 )
+
             else:
+
                 trigger_hit = (
                     candle["high"]
-                    >= trigger_price
+                    >= trigger
                 )
 
             if not trigger_hit:
                 break
 
-            hedge_direction = (
-                opposite_direction(
-                    entry_direction
-                )
-            )
-
             hedge_notional = (
-                model["hedge_notional"]
+                INITIAL_NOTIONAL
+                * hedge_fraction
             )
 
-            hedge_exec = execution_price(
-                trigger_price,
-                hedge_direction,
-            )
-
-            hedge_margin = (
+            required_margin = (
                 hedge_notional
                 / LEVERAGE
             )
 
-            current_required_margin = (
-                required_initial_margin(
-                    positions
-                )
-            )
-
-            current_equity = portfolio_equity(
-                cash,
-                positions,
-                trigger_price,
-            )
-
-            # Margin must be available.
-            if (
-                current_required_margin
-                + hedge_margin
-                > current_equity
-            ):
-                blocked_hedges += 1
-
-                hedge_events.append(
-                    {
-                        "number": next_hedge_number,
-                        "status": (
-                            "BLOCKED_MARGIN"
-                        ),
-                        "raw_price": (
-                            trigger_price
-                        ),
-                        "notional": (
-                            hedge_notional
-                        ),
-                    }
-                )
-
-                next_hedge_number += 1
-
-                continue
-
-            hedge_position = {
-                "direction": hedge_direction,
-                "qty": signed_qty(
-                    hedge_direction,
-                    hedge_notional,
-                    hedge_exec,
-                ),
-                "notional": hedge_notional,
-                "entry_raw": trigger_price,
-                "entry_exec": hedge_exec,
-                "entry_time": timestamp,
-                "hedge_number": (
-                    next_hedge_number
-                ),
-            }
-
-            positions.append(
-                hedge_position
-            )
-
-            hedge_fee = order_fee(
+            hedge_fee = fee_for_notional(
                 hedge_notional
             )
 
-            cash -= hedge_fee
-
-            fees_total += hedge_fee
-
-            slippage_total += (
+            # Conservative available margin:
+            # initial + all existing hedge positions
+            # + this new hedge.
+            current_margin = sum(
                 abs(
-                    hedge_position["qty"]
-                )
-                * abs(
-                    hedge_exec
-                    - trigger_price
-                )
+                    p["notional"]
+                ) / LEVERAGE
+                for p in positions
             )
 
-            hedge_events.append(
-                {
-                    "number": next_hedge_number,
-                    "status": "OPENED",
-                    "raw_price": trigger_price,
-                    "exec_price": hedge_exec,
-                    "notional": hedge_notional,
-                    "direction": hedge_direction,
-                    "timestamp": timestamp,
-                }
-            )
-
-            # Re-check liquidation immediately after hedge.
-            post_hedge_equity = (
-                portfolio_equity(
-                    cash,
-                    positions,
-                    hedge_exec,
-                )
-            )
-
-            post_hedge_maintenance = (
-                maintenance_margin(
-                    positions,
-                    hedge_exec,
-                    maintenance_rate,
-                )
-            )
-
-            if (
-                post_hedge_equity
-                <= post_hedge_maintenance
+            if cash < (
+                current_margin
+                + required_margin
+                + hedge_fee
             ):
-                exit_reason = (
-                    "LIQUIDATION_AFTER_HEDGE"
-                )
 
-                exit_raw_price = (
-                    trigger_price
-                )
-
-                exit_timestamp = timestamp
-
-                liquidation_price = (
-                    trigger_price
-                )
-
-                last_index = i
+                result["hedges_blocked"] += 1
 
                 break
 
-            next_hedge_number += 1
-
-        if exit_reason is not None:
-            break
-
-        # ----------------------------------------------------
-        # TARGET CHECK
-        # ----------------------------------------------------
-
-        target_equity = (
-            starting_equity
-            + TARGET_NET_PROFIT
-        )
-
-        target_price = find_target_price(
-            cash,
-            positions,
-            current_open,
-            candle["low"],
-            candle["high"],
-            target_equity,
-        )
-
-        if target_price is not None:
-            exit_reason = "TARGET"
-            exit_raw_price = target_price
-            exit_timestamp = timestamp
-            last_index = i
-            break
-
-        # ----------------------------------------------------
-        # END OF CANDLE
-        # ----------------------------------------------------
-
-        close_equity = portfolio_equity(
-            cash,
-            positions,
-            candle["close"],
-        )
-
-        close_drawdown = (
-            (
-                close_equity
-                - starting_equity
-            )
-            / starting_equity
-            * 100.0
-        )
-
-        if (
-            close_drawdown
-            < max_drawdown_pct
-        ):
-            max_drawdown_pct = (
-                close_drawdown
+            hedge_direction_value = hedge_direction(
+                direction
             )
 
-        # Recalculate liquidation distance.
-        liq_dist = liquidation_distance_pct(
-            cash,
-            positions,
-            candle["close"],
-            maintenance_rate,
-        )
+            cash, hedge_position = open_position(
+                positions=positions,
+                cash=cash,
+                market_price=trigger,
+                direction=hedge_direction_value,
+                notional=hedge_notional,
+                label=f"HEDGE_{hedge_number}",
+                event_ts=candle["ts"],
+            )
 
-        if liq_dist is not None:
-            if (
-                min_liquidation_distance
-                is None
-                or liq_dist
-                < min_liquidation_distance
-            ):
-                min_liquidation_distance = (
-                    liq_dist
+            hedge_count += 1
+
+            total_fees += (
+                hedge_position["fee"]
+            )
+
+            total_slippage += (
+                hedge_position["slippage"]
+            )
+
+            if hedge_number == 1:
+
+                result["hedge1_ts"] = (
+                    candle["ts"]
                 )
 
-        last_processed_timestamp = timestamp
+                result["hedge1_time"] = (
+                    iso_utc(candle["ts"])
+                )
 
-    # --------------------------------------------------------
-    # DATA END
-    # --------------------------------------------------------
+                result["hedge1_price"] = (
+                    hedge_position["entry_price"]
+                )
 
-    if exit_reason is None:
-        last_candle = candles[-1]
+                result["hedge1_size"] = (
+                    hedge_notional
+                )
 
-        exit_reason = "DATA_END"
+            elif hedge_number == 2:
 
-        exit_raw_price = (
-            last_candle["close"]
+                result["hedge2_ts"] = (
+                    candle["ts"]
+                )
+
+                result["hedge2_time"] = (
+                    iso_utc(candle["ts"])
+                )
+
+                result["hedge2_price"] = (
+                    hedge_position["entry_price"]
+                )
+
+                result["hedge2_size"] = (
+                    hedge_notional
+                )
+
+            # Recheck liquidation immediately after hedge.
+            if is_liquidated(
+                cash,
+                positions,
+                trigger,
+                maintenance_margin_rate,
+            ):
+
+                result["exit_ts"] = candle["ts"]
+                result["exit_time"] = iso_utc(
+                    candle["ts"]
+                )
+
+                result["exit_price"] = trigger
+
+                result["exit_reason"] = (
+                    "LIQUIDATION"
+                )
+
+                gross = total_unrealized_pnl(
+                    positions,
+                    trigger,
+                )
+
+                notional = total_notional(
+                    positions,
+                    trigger,
+                )
+
+                liq_fee = fee_for_notional(
+                    notional
+                )
+
+                final_equity = (
+                    cash
+                    + gross
+                    - liq_fee
+                )
+
+                result["gross_pnl"] = gross
+
+                result["fees"] = (
+                    total_fees
+                    + liq_fee
+                )
+
+                result["slippage"] = (
+                    total_slippage
+                )
+
+                result["funding"] = (
+                    total_funding
+                )
+
+                result["net_pnl"] = (
+                    final_equity
+                    - starting_equity
+                )
+
+                result["final_equity"] = (
+                    final_equity
+                )
+
+                result["hedges_used"] = (
+                    hedge_count
+                )
+
+                result["liquidation_price"] = (
+                    approximate_liquidation_price(
+                        cash,
+                        positions,
+                        maintenance_margin_rate,
+                    )
+                    or trigger
+                )
+
+                result["duration_hours"] = (
+                    result["exit_ts"]
+                    - result["entry_ts"]
+                ) / 3600.0
+
+                if direction == "LONG":
+
+                    result["max_adverse_pct"] = (
+                        max(
+                            0.0,
+                            (
+                                result["entry_price"]
+                                - result["min_price"]
+                            )
+                            / result["entry_price"]
+                        )
+                        * 100.0
+                    )
+
+                else:
+
+                    result["max_adverse_pct"] = (
+                        max(
+                            0.0,
+                            (
+                                result["max_price"]
+                                - result["entry_price"]
+                            )
+                            / result["entry_price"]
+                        )
+                        * 100.0
+                    )
+
+                return result, exit_index + 1
+
+            # Continue while-loop in case second hedge
+            # is also reached in the same candle.
+
+        # ----------------------------------------------------
+        # Current equity
+        # ----------------------------------------------------
+
+        mark_price = candle["close"]
+
+        equity = account_equity(
+            cash,
+            positions,
+            mark_price,
         )
 
-        exit_timestamp = (
-            last_candle["timestamp"]
+        update_drawdown(
+            result,
+            equity,
         )
 
-        last_index = (
-            len(candles) - 1
-        )
+        # ----------------------------------------------------
+        # TARGET
+        # ----------------------------------------------------
 
-    # --------------------------------------------------------
-    # FINAL EXIT
-    # --------------------------------------------------------
+        if target_reached(
+            cash,
+            positions,
+            mark_price,
+        ):
 
-    closing_gross_raw = 0.0
-    closing_fees = 0.0
-    closing_slippage = 0.0
-
-    for position in positions:
-        direction = (
-            "LONG"
-            if position["qty"] > 0
-            else "SHORT"
-        )
-
-        close_exec = execution_price(
-            exit_raw_price,
-            direction,
-        )
-
-        # Gross PnL BEFORE fees/slippage,
-        # using raw market prices.
-        closing_gross_raw += (
-            position["qty"]
-            * (
-                exit_raw_price
-                - position["entry_raw"]
+            close_data = close_all_positions(
+                positions,
+                cash,
+                mark_price,
+                candle["ts"],
             )
-        )
 
-        closing_notional = (
-            abs(position["qty"])
-            * close_exec
-        )
-
-        fee = order_fee(
-            closing_notional
-        )
-
-        closing_fees += fee
-
-        closing_slippage += (
-            abs(position["qty"])
-            * abs(
-                close_exec
-                - exit_raw_price
+            final_equity = (
+                close_data["cash_after"]
             )
-        )
 
-    fees_total += closing_fees
-    slippage_total += closing_slippage
+            result["exit_ts"] = (
+                close_data["exit_ts"]
+            )
 
-    exit_exec_price = (
-        exit_raw_price
+            result["exit_time"] = (
+                iso_utc(
+                    close_data["exit_ts"]
+                )
+            )
+
+            result["exit_price"] = (
+                close_data["exit_price"]
+            )
+
+            result["exit_reason"] = (
+                "TARGET"
+            )
+
+            result["gross_pnl"] = (
+                close_data["gross_raw"]
+            )
+
+            result["fees"] = (
+                total_fees
+                + close_data["closing_fees"]
+            )
+
+            result["slippage"] = (
+                total_slippage
+                + close_data["closing_slippage"]
+            )
+
+            result["funding"] = (
+                total_funding
+            )
+
+            result["final_equity"] = (
+                final_equity
+            )
+
+            result["net_pnl"] = (
+                final_equity
+                - starting_equity
+            )
+
+            result["hedges_used"] = (
+                hedge_count
+            )
+
+            result["target_reached"] = True
+
+            result["duration_hours"] = (
+                result["exit_ts"]
+                - result["entry_ts"]
+            ) / 3600.0
+
+            if direction == "LONG":
+
+                result["max_adverse_pct"] = (
+                    max(
+                        0.0,
+                        (
+                            result["entry_price"]
+                            - result["min_price"]
+                        )
+                        / result["entry_price"]
+                    )
+                    * 100.0
+                )
+
+            else:
+
+                result["max_adverse_pct"] = (
+                    max(
+                        0.0,
+                        (
+                            result["max_price"]
+                            - result["entry_price"]
+                        )
+                        / result["entry_price"]
+                    )
+                    * 100.0
+                )
+
+            liq = approximate_liquidation_price(
+                cash,
+                positions,
+                maintenance_margin_rate,
+            )
+
+            result["liquidation_price"] = (
+                liq or 0.0
+            )
+
+            if liq:
+
+                result["liquidation_distance_pct"] = (
+                    abs(
+                        mark_price - liq
+                    )
+                    / mark_price
+                    * 100.0
+                )
+
+            return result, exit_index + 1
+
+    # --------------------------------------------------------
+    # Data ended while position open
+    # --------------------------------------------------------
+
+    last_candle = candles[-1]
+
+    close_data = close_all_positions(
+        positions,
+        cash,
+        last_candle["close"],
+        last_candle["ts"],
     )
 
     final_equity = (
-        starting_equity
-        + closing_gross_raw
-        - fees_total
-        - slippage_total
-        - funding_total
+        close_data["cash_after"]
     )
 
-    net_pnl = (
+    result["exit_ts"] = (
+        close_data["exit_ts"]
+    )
+
+    result["exit_time"] = iso_utc(
+        close_data["exit_ts"]
+    )
+
+    result["exit_price"] = (
+        close_data["exit_price"]
+    )
+
+    result["exit_reason"] = (
+        "DATA_END"
+    )
+
+    result["gross_pnl"] = (
+        close_data["gross_raw"]
+    )
+
+    result["fees"] = (
+        total_fees
+        + close_data["closing_fees"]
+    )
+
+    result["slippage"] = (
+        total_slippage
+        + close_data["closing_slippage"]
+    )
+
+    result["funding"] = (
+        total_funding
+    )
+
+    result["final_equity"] = (
+        final_equity
+    )
+
+    result["net_pnl"] = (
         final_equity
         - starting_equity
     )
 
-    duration_seconds = max(
-        0,
-        exit_timestamp
-        - start_time,
+    result["hedges_used"] = (
+        hedge_count
     )
 
-    duration_hours = (
-        duration_seconds
-        / 3600.0
-    )
+    result["duration_hours"] = (
+        result["exit_ts"]
+        - result["entry_ts"]
+    ) / 3600.0
 
-    max_drawdown_usd = (
-        starting_equity
-        * max_drawdown_pct
-        / 100.0
-    )
+    if direction == "LONG":
 
-    if initial_direction == "LONG":
-        max_adverse_move_pct = (
-            (
-                max_adverse_price
-                / raw_entry_price
-                - 1.0
+        result["max_adverse_pct"] = (
+            max(
+                0.0,
+                (
+                    result["entry_price"]
+                    - result["min_price"]
+                )
+                / result["entry_price"]
             )
             * 100.0
         )
+
     else:
-        max_adverse_move_pct = (
-            (
-                max_adverse_price
-                / raw_entry_price
-                - 1.0
+
+        result["max_adverse_pct"] = (
+            max(
+                0.0,
+                (
+                    result["max_price"]
+                    - result["entry_price"]
+                )
+                / result["entry_price"]
             )
             * 100.0
         )
 
-    hedge_1 = None
-    hedge_2 = None
-
-    for hedge in hedge_events:
-        if hedge["number"] == 1:
-            hedge_1 = hedge
-
-        elif hedge["number"] == 2:
-            hedge_2 = hedge
-
-    cycle_id = (
-        f"{model_name}_"
-        f"{initial_direction}_"
-        f"{start_time}"
+    liq = approximate_liquidation_price(
+        cash,
+        positions,
+        maintenance_margin_rate,
     )
 
-    result = {
-        "cycle_id": cycle_id,
-        "model": model_name,
-        "direction": initial_direction,
-        "entry_time_utc": iso_utc(
-            start_time
-        ),
-        "exit_time_utc": iso_utc(
-            exit_timestamp
-        ),
-        "entry_price": raw_entry_price,
-        "exit_price": exit_raw_price,
-        "exit_reason": exit_reason,
-        "initial_notional": INITIAL_NOTIONAL,
-        "starting_equity": starting_equity,
-        "ending_equity": final_equity,
-        "net_pnl": net_pnl,
-        "net_return_pct": (
-            net_pnl
-            / starting_equity
-            * 100.0
-        ),
-        "gross_pnl": closing_gross_raw,
-        "fees": fees_total,
-        "slippage": slippage_total,
-        "funding": funding_total,
-        "max_drawdown_usd": max_drawdown_usd,
-        "max_drawdown_pct": max_drawdown_pct,
-        "min_liquidation_distance_pct": (
-            min_liquidation_distance
-            if min_liquidation_distance
-            is not None
-            else "",
-        ),
-        "liquidation_price": (
-            liquidation_price
-            if liquidation_price
-            is not None
-            else "",
-        ),
-        "duration_hours": duration_hours,
-        "hedge_1_status": (
-            hedge_1["status"]
-            if hedge_1
-            else "",
-        ),
-        "hedge_1_price": (
-            hedge_1.get("raw_price", "")
-            if hedge_1
-            else "",
-        ),
-        "hedge_1_exec_price": (
-            hedge_1.get("exec_price", "")
-            if hedge_1
-            else "",
-        ),
-        "hedge_1_size": (
-            hedge_1.get("notional", "")
-            if hedge_1
-            else "",
-        ),
-        "hedge_2_status": (
-            hedge_2["status"]
-            if hedge_2
-            else "",
-        ),
-        "hedge_2_price": (
-            hedge_2.get("raw_price", "")
-            if hedge_2
-            else "",
-        ),
-        "hedge_2_exec_price": (
-            hedge_2.get("exec_price", "")
-            if hedge_2
-            else "",
-        ),
-        "hedge_2_size": (
-            hedge_2.get("notional", "")
-            if hedge_2
-            else "",
-        ),
-        "blocked_hedges": blocked_hedges,
-        "success": (
-            1
-            if net_pnl >= TARGET_NET_PROFIT
-            else 0
-        ),
-        "data_end": (
-            1
-            if exit_reason == "DATA_END"
-            else 0
-        ),
-    }
+    result["liquidation_price"] = (
+        liq or 0.0
+    )
 
-    return result, last_index + 1
+    return result, len(candles)
 
 
 # ============================================================
-# RUN ONE MODEL + ONE DIRECTION
+# RUN SCENARIO
 # ============================================================
 
 def run_scenario(
-    candles,
-    funding_events,
     model_name,
-    model,
+    hedge_fraction,
     direction,
-    maintenance_rate,
+    candles,
+    funding,
+    maintenance_margin_rate,
 ):
-    print()
-    print("=" * 70)
-    print(
-        f"RUNNING MODEL {model_name} "
+
+    log("")
+    log("=" * 70)
+
+    log(
+        f"SCENARIO: "
+        f"{model_name} | "
         f"{direction}"
     )
-    print("=" * 70)
 
-    equity = CAPITAL_START
+    log("=" * 70)
 
-    trades = []
+    results = []
 
-    equity_curve = []
+    equity_rows = []
 
-    index = 0
+    starting_equity = CAPITAL_START
 
-    cycle_number = 0
+    start_index = 0
 
-    while index < len(candles) - 1:
-        cycle_number += 1
+    cycle_id = 0
 
-        result, next_index = simulate_cycle(
-            candles=candles,
-            funding_events=funding_events,
-            start_index=index,
+    while (
+        start_index < len(candles) - 1
+    ):
+
+        cycle_id += 1
+
+        result, next_index = run_cycle(
             model_name=model_name,
-            model=model,
-            initial_direction=direction,
-            starting_equity=equity,
-            maintenance_rate=maintenance_rate,
+            hedge_fraction=hedge_fraction,
+            direction=direction,
+            candles=candles,
+            funding=funding,
+            maintenance_margin_rate=(
+                maintenance_margin_rate
+            ),
+            cycle_id=cycle_id,
+            start_index=start_index,
+            starting_equity=starting_equity,
         )
 
         if result is None:
             break
 
-        if result.get("status") == (
-            "INSUFFICIENT_CAPITAL"
-        ):
-            print()
-            print(
-                f"STOPPED: insufficient capital "
-                f"for {model_name} {direction}"
-            )
-            break
+        results.append(result)
 
-        trades.append(result)
+        starting_equity = max(
+            0.0,
+            result["final_equity"],
+        )
 
-        equity = result[
-            "ending_equity"
-        ]
-
-        equity_curve.append(
+        equity_rows.append(
             {
-                "cycle": cycle_number,
                 "model": model_name,
                 "direction": direction,
-                "exit_time_utc": result[
-                    "exit_time_utc"
-                ],
-                "equity": equity,
-                "net_pnl": result[
-                    "net_pnl"
-                ],
+                "cycle_id": cycle_id,
+                "entry_time": result["entry_time"],
+                "exit_time": result["exit_time"],
+                "equity": starting_equity,
+                "net_pnl": result["net_pnl"],
+                "exit_reason": result["exit_reason"],
             }
         )
 
-        print(
-            f"Cycle {cycle_number:4d} | "
-            f"{result['exit_reason']:24s} | "
-            f"PnL ${result['net_pnl']:+.4f} | "
-            f"Equity ${equity:.4f}"
+        if cycle_id % 25 == 0:
+
+            log(
+                f"{model_name} "
+                f"{direction} | "
+                f"cycles={cycle_id} | "
+                f"equity=${starting_equity:.4f}"
+            )
+
+        if starting_equity <= 0:
+
+            log(
+                f"{model_name} "
+                f"{direction} stopped: "
+                f"equity depleted."
+            )
+
+            break
+
+        # Sequential cycles only.
+        start_index = max(
+            next_index,
+            start_index + 1,
         )
 
-        if next_index <= index:
-            raise RuntimeError(
-                "Backtest cycle did not advance."
-            )
-
-        index = next_index
-
-        # If data-end was reached, stop.
-        if result["data_end"] == 1:
-            break
-
-        # If capital is below initial margin,
-        # no new cycle can be opened.
-        if equity < INITIAL_MARGIN:
-            print(
-                "Capital dropped below "
-                "initial margin."
-            )
-            break
-
-    return trades, equity_curve
+    return results, equity_rows
 
 
 # ============================================================
 # SUMMARY
 # ============================================================
 
-def build_summary(
-    trades,
+def summarize(
+    results,
     model_name,
     direction,
-    final_equity,
 ):
-    count = len(trades)
+
+    count = len(results)
 
     if count == 0:
+
         return {
             "model": model_name,
             "direction": direction,
             "cycles": 0,
             "success_count": 0,
             "success_pct": 0.0,
-            "liquidation_count": 0,
+            "liquidations": 0,
             "liquidation_pct": 0.0,
-            "target_count": 0,
-            "target_pct": 0.0,
-            "data_end_count": 0,
-            "margin_blocked_cycles": 0,
-            "average_net_pnl": 0.0,
-            "total_net_pnl": 0.0,
+            "avg_profit": 0.0,
+            "avg_loss": 0.0,
             "max_loss": 0.0,
-            "best_cycle": 0.0,
-            "average_duration_hours": 0.0,
-            "max_drawdown_pct": 0.0,
-            "min_liquidation_distance_pct": "",
-            "final_equity": final_equity,
-            "final_return_pct": (
-                (
-                    final_equity
-                    / CAPITAL_START
-                )
-                - 1.0
-            )
-            * 100.0,
+            "total_net_pnl": 0.0,
+            "final_equity": CAPITAL_START,
+            "final_return_pct": 0.0,
+            "avg_duration_hours": 0.0,
+            "avg_max_drawdown_pct": 0.0,
+            "worst_max_drawdown_pct": 0.0,
+            "avg_funding": 0.0,
+            "avg_fees": 0.0,
+            "avg_slippage": 0.0,
+            "target_profit": TARGET_NET_PROFIT,
+            "target_reached_cycles": 0,
         }
 
-    pnls = [
-        float(t["net_pnl"])
-        for t in trades
+    successes = [
+        r
+        for r in results
+        if r["target_reached"]
     ]
 
-    durations = [
-        float(t["duration_hours"])
-        for t in trades
+    liquidations = [
+        r
+        for r in results
+        if r["exit_reason"]
+        == "LIQUIDATION"
     ]
 
-    dd = [
-        float(t["max_drawdown_pct"])
-        for t in trades
+    profits = [
+        r["net_pnl"]
+        for r in results
+        if r["net_pnl"] > 0
     ]
 
-    liq_distances = []
+    losses = [
+        r["net_pnl"]
+        for r in results
+        if r["net_pnl"] < 0
+    ]
 
-    for t in trades:
-        value = t[
-            "min_liquidation_distance_pct"
-        ]
+    final_equity = results[-1][
+        "final_equity"
+    ]
 
-        if value != "":
-            liq_distances.append(
-                float(value)
-            )
-
-    success_count = sum(
-        1
-        for t in trades
-        if t["success"] == 1
+    total_net_pnl = (
+        final_equity
+        - CAPITAL_START
     )
-
-    liquidation_count = sum(
-        1
-        for t in trades
-        if "LIQUIDATION"
-        in t["exit_reason"]
-    )
-
-    target_count = sum(
-        1
-        for t in trades
-        if t["exit_reason"] == "TARGET"
-    )
-
-    data_end_count = sum(
-        1
-        for t in trades
-        if t["exit_reason"] == "DATA_END"
-    )
-
-    margin_blocked_cycles = sum(
-        1
-        for t in trades
-        if int(
-            t["blocked_hedges"]
-        ) > 0
-    )
-
-    total_net_pnl = sum(pnls)
 
     return {
         "model": model_name,
         "direction": direction,
+
         "cycles": count,
-        "success_count": success_count,
+
+        "success_count": len(successes),
+
         "success_pct": (
-            success_count
+            len(successes)
             / count
             * 100.0
         ),
-        "liquidation_count": liquidation_count,
+
+        "liquidations": len(
+            liquidations
+        ),
+
         "liquidation_pct": (
-            liquidation_count
+            len(liquidations)
             / count
             * 100.0
         ),
-        "target_count": target_count,
-        "target_pct": (
-            target_count
-            / count
-            * 100.0
+
+        "avg_profit": (
+            sum(profits)
+            / len(profits)
+            if profits
+            else 0.0
         ),
-        "data_end_count": data_end_count,
-        "margin_blocked_cycles": (
-            margin_blocked_cycles
+
+        "avg_loss": (
+            sum(losses)
+            / len(losses)
+            if losses
+            else 0.0
         ),
-        "average_net_pnl": (
-            sum(pnls)
-            / count
-        ),
-        "total_net_pnl": total_net_pnl,
-        "max_loss": min(pnls),
-        "best_cycle": max(pnls),
-        "average_duration_hours": (
-            sum(durations)
-            / count
-        ),
-        "max_drawdown_pct": min(dd),
-        "min_liquidation_distance_pct": (
-            min(liq_distances)
-            if liq_distances
-            else ""
-        ),
-        "final_equity": final_equity,
-        "final_return_pct": (
-            (
-                final_equity
-                / CAPITAL_START
+
+        "max_loss": (
+            min(
+                (
+                    r["net_pnl"]
+                    for r in results
+                ),
+                default=0.0,
             )
-            - 1.0
-        )
-        * 100.0,
+        ),
+
+        "total_net_pnl": total_net_pnl,
+
+        "final_equity": final_equity,
+
+        "final_return_pct": (
+            total_net_pnl
+            / CAPITAL_START
+            * 100.0
+        ),
+
+        "avg_duration_hours": (
+            sum(
+                r["duration_hours"]
+                for r in results
+            )
+            / count
+        ),
+
+        "avg_max_drawdown_pct": (
+            sum(
+                r["max_drawdown_pct"]
+                for r in results
+            )
+            / count
+            * 100.0
+        ),
+
+        "worst_max_drawdown_pct": (
+            min(
+                (
+                    r["max_drawdown"]
+                    for r in results
+                ),
+                default=0.0,
+            )
+            * 100.0
+        ),
+
+        "avg_funding": (
+            sum(
+                r["funding"]
+                for r in results
+            )
+            / count
+        ),
+
+        "avg_fees": (
+            sum(
+                r["fees"]
+                for r in results
+            )
+            / count
+        ),
+
+        "avg_slippage": (
+            sum(
+                r["slippage"]
+                for r in results
+            )
+            / count
+        ),
+
+        "target_profit": TARGET_NET_PROFIT,
+
+        "target_reached_cycles": len(
+            successes
+        ),
     }
 
 
@@ -2403,16 +2771,8 @@ def build_summary(
 def write_csv(
     filename,
     rows,
+    fieldnames,
 ):
-    if not rows:
-        print(
-            f"No rows for {filename}"
-        )
-        return
-
-    fieldnames = list(
-        rows[0].keys()
-    )
 
     with open(
         filename,
@@ -2420,19 +2780,18 @@ def write_csv(
         newline="",
         encoding="utf-8",
     ) as f:
+
         writer = csv.DictWriter(
             f,
             fieldnames=fieldnames,
+            extrasaction="ignore",
         )
 
         writer.writeheader()
 
-        writer.writerows(rows)
+        for row in rows:
 
-    print(
-        f"WROTE {filename}: "
-        f"{len(rows):,} rows"
-    )
+            writer.writerow(row)
 
 
 # ============================================================
@@ -2440,283 +2799,331 @@ def write_csv(
 # ============================================================
 
 def main():
-    print()
+
+    print("")
     print("=" * 70)
     print(
-        "KRAKEN FUTURES BTC HEDGE BACKTEST"
-    )
-    print(
+        "BTC FUTURES HEDGE BACKTEST "
         f"VERSION {VERSION}"
     )
     print("=" * 70)
 
-    print(
-        f"Symbol: {SYMBOL}"
-    )
-
+    print("")
+    print("PAPER TRADING ONLY")
     print(
         f"Capital: ${CAPITAL_START:.2f}"
     )
-
     print(
-        f"Leverage: {LEVERAGE:.1f}x"
+        f"Leverage: {LEVERAGE:.0f}x"
     )
-
     print(
         f"Initial notional: "
         f"${INITIAL_NOTIONAL:.2f}"
     )
-
-    print(
-        f"Initial margin: "
-        f"${INITIAL_MARGIN:.2f}"
-    )
-
     print(
         f"Hedge trigger: "
         f"{HEDGE_TRIGGER_PCT * 100:.2f}%"
     )
-
     print(
-        f"Target net: "
-        f"${TARGET_NET_PROFIT:.2f}"
+        f"Max hedges: "
+        f"{MAX_HEDGES}"
     )
-
     print(
-        f"Taker fee: "
+        f"Target: "
+        f"+${TARGET_NET_PROFIT:.2f}"
+    )
+    print(
+        f"Taker fee model: "
         f"{TAKER_FEE_RATE * 100:.4f}%"
     )
-
     print(
-        f"Slippage: "
+        f"Slippage model: "
         f"{SLIPPAGE_RATE * 100:.4f}%"
     )
 
+    print("")
     print(
-        f"Lookback: "
-        f"{LOOKBACK_DAYS} days"
+        "REAL_TRADING = "
+        f"{REAL_TRADING}"
     )
 
-    instrument = get_instrument()
+    if REAL_TRADING:
+        raise RuntimeError(
+            "REAL_TRADING must remain False."
+        )
 
-    maintenance_rate = instrument[
-        "maintenance_margin"
-    ]
+    # --------------------------------------------------------
+    # Instrument
+    # --------------------------------------------------------
+
+    instrument = load_instrument()
+
+    maintenance_margin_rate = (
+        instrument["maintenance_margin"]
+    )
+
+    # --------------------------------------------------------
+    # Candles
+    # --------------------------------------------------------
 
     candles = download_candles()
 
-    start_ms = candles[0][
-        "timestamp"
-    ]
-
-    end_ms = candles[-1][
-        "timestamp"
-    ]
-
-    funding_events = download_funding(
-        start_ms,
-        end_ms,
-    )
-
     # --------------------------------------------------------
-    # Save raw funding used by the backtest.
+    # Funding
     # --------------------------------------------------------
 
-    funding_rows = []
+    funding = download_funding()
 
-    for event in funding_events:
-        funding_rows.append(
-            {
-                "timestamp_utc": iso_utc(
-                    event["timestamp"]
-                ),
-                "funding_rate": event[
-                    "funding_rate"
-                ],
-                "relative_funding_rate": event[
-                    "relative_funding_rate"
-                ],
-            }
-        )
-
-    write_csv(
-        OUTPUT_FUNDING,
-        funding_rows,
-    )
+    # --------------------------------------------------------
+    # Run all scenarios
+    # --------------------------------------------------------
 
     all_trades = []
     all_summaries = []
     all_equity = []
 
-    # --------------------------------------------------------
-    # Run A/B/C independently.
-    #
-    # LONG and SHORT are also run independently.
-    #
-    # This avoids inventing a directional signal.
-    # It tests the hedge mechanism itself.
-    # --------------------------------------------------------
+    for model_name, fraction in (
+        HEDGE_MODELS.items()
+    ):
 
-    for model_name, model in MODELS.items():
-        print()
-        print(
-            "#" * 70
-        )
-
-        print(
-            f"MODEL {model_name}"
-        )
-
-        print(
-            f"Hedge size: "
-            f"${model['hedge_notional']:.2f}"
-        )
-
-        print(
-            "#"
-            * 70
-        )
-
-        for direction in [
+        for direction in (
             "LONG",
             "SHORT",
-        ]:
-            # Important:
-            # Each scenario starts with a fresh $2.
-            #
-            # This makes A LONG, A SHORT, B LONG,
-            # etc. independent tests.
-            #
-            # No overlapping cycles.
-            #
-            # No artificial summing of simultaneous
-            # positions.
+        ):
 
-            trades, equity_curve = (
+            results, equity_rows = (
                 run_scenario(
-                    candles=candles,
-                    funding_events=[
-                        dict(x)
-                        for x in funding_events
-                    ],
                     model_name=model_name,
-                    model=model,
+                    hedge_fraction=fraction,
                     direction=direction,
-                    maintenance_rate=(
-                        maintenance_rate
+                    candles=candles,
+                    funding=funding,
+                    maintenance_margin_rate=(
+                        maintenance_margin_rate
                     ),
                 )
             )
 
             all_trades.extend(
-                trades
+                results
             )
 
             all_equity.extend(
-                equity_curve
+                equity_rows
             )
 
-            final_equity = (
-                trades[-1][
-                    "ending_equity"
-                ]
-                if trades
-                else CAPITAL_START
-            )
-
-            summary = build_summary(
-                trades,
+            summary = summarize(
+                results,
                 model_name,
                 direction,
-                final_equity,
             )
 
             all_summaries.append(
                 summary
             )
 
+            log(
+                f"RESULT "
+                f"{model_name} "
+                f"{direction} | "
+                f"cycles={summary['cycles']} | "
+                f"success="
+                f"{summary['success_pct']:.2f}% | "
+                f"liq="
+                f"{summary['liquidations']} | "
+                f"final="
+                f"${summary['final_equity']:.4f} | "
+                f"return="
+                f"{summary['final_return_pct']:.2f}%"
+            )
+
     # --------------------------------------------------------
-    # OUTPUT
+    # Trades CSV
     # --------------------------------------------------------
+
+    trade_fields = [
+        "cycle_id",
+        "model",
+        "direction",
+
+        "start_equity",
+
+        "entry_ts",
+        "entry_time",
+        "entry_price",
+
+        "hedge1_ts",
+        "hedge1_time",
+        "hedge1_price",
+        "hedge1_size",
+
+        "hedge2_ts",
+        "hedge2_time",
+        "hedge2_price",
+        "hedge2_size",
+
+        "exit_ts",
+        "exit_time",
+        "exit_price",
+        "exit_reason",
+
+        "gross_pnl",
+        "fees",
+        "slippage",
+        "funding",
+        "net_pnl",
+
+        "final_equity",
+
+        "max_drawdown_pct",
+        "max_adverse_pct",
+
+        "liquidation_price",
+        "liquidation_distance_pct",
+
+        "hedges_used",
+        "hedges_blocked",
+
+        "duration_hours",
+
+        "target_reached",
+    ]
 
     write_csv(
         OUTPUT_TRADES,
         all_trades,
+        trade_fields,
     )
+
+    # --------------------------------------------------------
+    # Summary CSV
+    # --------------------------------------------------------
+
+    summary_fields = [
+        "model",
+        "direction",
+        "cycles",
+        "success_count",
+        "success_pct",
+        "liquidations",
+        "liquidation_pct",
+        "avg_profit",
+        "avg_loss",
+        "max_loss",
+        "total_net_pnl",
+        "final_equity",
+        "final_return_pct",
+        "avg_duration_hours",
+        "avg_max_drawdown_pct",
+        "worst_max_drawdown_pct",
+        "avg_funding",
+        "avg_fees",
+        "avg_slippage",
+        "target_profit",
+        "target_reached_cycles",
+    ]
 
     write_csv(
         OUTPUT_SUMMARY,
         all_summaries,
+        summary_fields,
     )
+
+    # --------------------------------------------------------
+    # Equity CSV
+    # --------------------------------------------------------
+
+    equity_fields = [
+        "model",
+        "direction",
+        "cycle_id",
+        "entry_time",
+        "exit_time",
+        "equity",
+        "net_pnl",
+        "exit_reason",
+    ]
 
     write_csv(
         OUTPUT_EQUITY,
         all_equity,
+        equity_fields,
     )
 
     # --------------------------------------------------------
-    # CONSOLE SUMMARY
+    # Funding CSV
     # --------------------------------------------------------
 
-    print()
-    print("=" * 90)
-    print("FINAL SUMMARY")
-    print("=" * 90)
+    funding_rows = []
 
-    print(
-        f"{'MODEL':<8}"
-        f"{'DIR':<8}"
-        f"{'CYCLES':>8}"
-        f"{'SUCCESS':>12}"
-        f"{'LIQ%':>10}"
-        f"{'AVG PNL':>12}"
-        f"{'MAX LOSS':>12}"
-        f"{'FINAL $':>12}"
-        f"{'RETURN':>12}"
-    )
+    for item in funding:
 
-    print("-" * 90)
-
-    for summary in all_summaries:
-        print(
-            f"{summary['model']:<8}"
-            f"{summary['direction']:<8}"
-            f"{summary['cycles']:>8}"
-            f"{summary['success_pct']:>11.2f}%"
-            f"{summary['liquidation_pct']:>9.2f}%"
-            f"${summary['average_net_pnl']:>10.4f}"
-            f"${summary['max_loss']:>10.4f}"
-            f"${summary['final_equity']:>10.4f}"
-            f"{summary['final_return_pct']:>10.2f}%"
+        funding_rows.append(
+            {
+                "funding_ts": item["ts"],
+                "funding_time": iso_utc(
+                    item["ts"]
+                ),
+                "rate": item["rate"],
+            }
         )
 
-    print("=" * 90)
-
-    print()
-    print(
-        "FILES:"
+    write_csv(
+        OUTPUT_FUNDING,
+        funding_rows,
+        [
+            "funding_ts",
+            "funding_time",
+            "rate",
+        ],
     )
 
-    print(
-        f" - {OUTPUT_TRADES}"
-    )
+    # --------------------------------------------------------
+    # Console summary
+    # --------------------------------------------------------
 
-    print(
-        f" - {OUTPUT_SUMMARY}"
-    )
+    print("")
+    print("=" * 70)
+    print("FINAL SUMMARY")
+    print("=" * 70)
 
-    print(
-        f" - {OUTPUT_EQUITY}"
-    )
+    for s in all_summaries:
 
-    print(
-        f" - {OUTPUT_FUNDING}"
-    )
+        print(
+            f"{s['model']:>5} "
+            f"{s['direction']:<5} | "
+            f"cycles={s['cycles']:>5} | "
+            f"success={s['success_pct']:>7.2f}% | "
+            f"liq={s['liquidations']:>4} | "
+            f"avgPnL="
+            f"${s['avg_profit']:>8.4f} | "
+            f"maxLoss="
+            f"${s['max_loss']:>8.4f} | "
+            f"final="
+            f"${s['final_equity']:>8.4f} | "
+            f"return="
+            f"{s['final_return_pct']:>8.2f}%"
+        )
 
-    print()
-    print(
-        "BACKTEST COMPLETE."
-    )
+    print("")
+    print("=" * 70)
+    print("FILES")
+    print("=" * 70)
+
+    for filename in (
+        OUTPUT_TRADES,
+        OUTPUT_SUMMARY,
+        OUTPUT_EQUITY,
+        OUTPUT_FUNDING,
+    ):
+
+        print(
+            f"Created: {filename}"
+        )
+
+    print("")
+    print("BACKTEST COMPLETE.")
+    print("PAPER ONLY. NO REAL ORDERS.")
 
 
 # ============================================================
@@ -2724,25 +3131,30 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     try:
+
         main()
 
     except KeyboardInterrupt:
+
+        print("")
         print(
-            "\nBACKTEST INTERRUPTED."
+            "Interrupted by user."
         )
 
         sys.exit(130)
 
     except Exception as exc:
-        print()
+
+        print("")
         print("=" * 70)
         print("BACKTEST FAILED")
         print("=" * 70)
 
         print(
-            type(exc).__name__,
-            str(exc),
+            f"{type(exc).__name__}: "
+            f"{exc}"
         )
 
         traceback.print_exc()
