@@ -1,12 +1,11 @@
 # ============================================================
 # KRAKEN FUTURES 1H TRENDLINE BREAKOUT PAPER SCANNER
-# VERSION 3.0.1
+# VERSION 3.1.0
 # ============================================================
 #
 # 40 ASSETS
 #
-# ONLY:
-#   1H TRENDLINE BREAKOUT
+# ORIGINAL STRATEGY:
 #
 # LONG:
 #   Descending resistance
@@ -18,26 +17,19 @@
 #   >= 3 touches
 #   Closed 1H candle breaks below support
 #
-# TRADE:
-#   PAPER ONLY
+# NEW:
+#   WHALE FLOW FILTER
 #
-# TP:
-#   LONG  -> nearest valid swing high above entry
-#   SHORT -> nearest valid swing low below entry
+# Whale Flow Proxy uses Kraken public market analytics:
+#   - Aggressor Differential
+#   - CVD
+#   - Trade Volume
+#   - Open Interest
 #
-# SL:
-#   LONG  -> nearest valid swing low below entry
-#   SHORT -> nearest valid swing high above entry
+# Whale filter is ONLY a confirmation filter.
+# Trendline breakout remains the primary strategy.
 #
-# SIGNAL AGE:
-#   <= 2 hours
-#
-# TELEGRAM:
-#   New signal
-#   Chart
-#   Periodic report
-#   Open trades
-#   Performance
+# PAPER ONLY
 #
 # ============================================================
 
@@ -57,7 +49,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "3.0.1"
+VERSION = "3.1.0"
 
 REAL_TRADING = False
 PAPER_TRADING = True
@@ -89,6 +81,29 @@ REPORT_ENABLED = True
 
 
 # ============================================================
+# WHALE FLOW CONFIG
+# ============================================================
+
+WHALE_FILTER_ENABLED = True
+
+WHALE_ANALYTICS_INTERVAL = 3600
+
+WHALE_LOOKBACK_HOURS = 4
+
+WHALE_MIN_SCORE = 2
+
+WHALE_MIN_RVOL = 1.20
+
+WHALE_STRONG_RVOL = 2.00
+
+WHALE_CVD_THRESHOLD = 0.0
+
+WHALE_OI_CONFIRM = True
+
+WHALE_REQUIRE_DATA = True
+
+
+# ============================================================
 # KRAKEN FUTURES CHART API
 # ============================================================
 
@@ -98,17 +113,16 @@ KRAKEN_CHART_URL = (
 
 
 # ============================================================
-# TELEGRAM
+# KRAKEN FUTURES ANALYTICS API
 # ============================================================
-#
-# GitHub Actions must provide:
-#
-# TELEGRAM_BOT_TOKEN
-# TELEGRAM_CHAT_ID
-#
-# IMPORTANT:
-# Never print the actual token.
-#
+
+KRAKEN_ANALYTICS_URL = (
+    "https://futures.kraken.com/api/charts/v1/analytics"
+)
+
+
+# ============================================================
+# TELEGRAM
 # ============================================================
 
 TELEGRAM_BOT_TOKEN = (
@@ -243,7 +257,7 @@ SESSION.headers.update({
 
     "User-Agent":
         "Mozilla/5.0 "
-        "(compatible; Kraken-1H-Trendline/3.0.1)",
+        "(compatible; Kraken-1H-Trendline/3.1.0)",
 
     "Accept":
         "application/json",
@@ -566,6 +580,714 @@ def fetch_ohlc(symbol):
     return candles[
         -CANDLE_COUNT:
     ]
+
+
+# ============================================================
+# CLOSED CANDLES
+# ============================================================
+
+def get_closed_candles(
+    candles
+):
+
+    if not candles:
+        return []
+
+    current_hour = (
+        now_ms()
+        // 3_600_000
+    ) * 3_600_000
+
+    return [
+        c
+        for c in candles
+        if c["time"]
+        < current_hour
+    ]
+
+
+# ============================================================
+# KRAKEN MARKET ANALYTICS
+# ============================================================
+
+def fetch_analytics(
+    symbol,
+    analytics_type,
+    interval=WHALE_ANALYTICS_INTERVAL
+):
+
+    now_sec = int(
+        time.time()
+    )
+
+    since = (
+        now_sec
+        - (
+            WHALE_LOOKBACK_HOURS
+            * 3600
+        )
+    )
+
+    url = (
+        f"{KRAKEN_ANALYTICS_URL}/"
+        f"{symbol}/"
+        f"{analytics_type}"
+    )
+
+    try:
+
+        response = SESSION.get(
+            url,
+            params={
+                "since":
+                    since,
+
+                "interval":
+                    interval,
+
+                "to":
+                    now_sec,
+            },
+            timeout=20
+        )
+
+        response.raise_for_status()
+
+        payload = response.json()
+
+        result = payload.get(
+            "result",
+            {}
+        )
+
+        timestamps = result.get(
+            "timestamp",
+            []
+        )
+
+        data = result.get(
+            "data",
+            []
+        )
+
+        if not timestamps or not data:
+
+            return []
+
+        return list(
+            zip(
+                timestamps,
+                data
+            )
+        )
+
+    except Exception as exc:
+
+        print(
+            f"[WHALE] "
+            f"{symbol} "
+            f"{analytics_type} "
+            f"failed: {exc}"
+        )
+
+        return []
+
+
+# ============================================================
+# GENERIC ANALYTICS VALUE EXTRACTION
+# ============================================================
+
+def analytics_number(value):
+
+    if value is None:
+        return None
+
+    if isinstance(
+        value,
+        (int, float)
+    ):
+
+        return float(value)
+
+    if isinstance(
+        value,
+        str
+    ):
+
+        try:
+            return float(value)
+        except Exception:
+            return None
+
+    return None
+
+
+def extract_scalar_series(
+    rows
+):
+
+    values = []
+
+    for ts, value in rows:
+
+        number = analytics_number(
+            value
+        )
+
+        if number is not None:
+
+            values.append({
+                "time":
+                    int(ts),
+
+                "value":
+                    number
+            })
+
+    return values
+
+
+# ============================================================
+# CVD / AGGRESSOR HELPERS
+# ============================================================
+
+def get_cvd_direction(
+    symbol
+):
+
+    rows = fetch_analytics(
+        symbol,
+        "cvd"
+    )
+
+    values = extract_scalar_series(
+        rows
+    )
+
+    if len(values) < 2:
+        return None
+
+    previous = values[-2]["value"]
+    latest = values[-1]["value"]
+
+    delta = (
+        latest
+        - previous
+    )
+
+    return {
+
+        "value":
+            latest,
+
+        "delta":
+            delta,
+
+        "direction":
+            (
+                "BUY"
+                if delta > WHALE_CVD_THRESHOLD
+                else
+                "SELL"
+                if delta < -WHALE_CVD_THRESHOLD
+                else
+                "NEUTRAL"
+            ),
+    }
+
+
+def get_aggressor_direction(
+    symbol
+):
+
+    rows = fetch_analytics(
+        symbol,
+        "aggressor-differential"
+    )
+
+    values = extract_scalar_series(
+        rows
+    )
+
+    if not values:
+        return None
+
+    latest = values[-1]["value"]
+
+    return {
+
+        "value":
+            latest,
+
+        "direction":
+            (
+                "BUY"
+                if latest > 0
+                else
+                "SELL"
+                if latest < 0
+                else
+                "NEUTRAL"
+            ),
+    }
+
+
+# ============================================================
+# TRADE VOLUME
+# ============================================================
+
+def get_volume_stats(
+    symbol
+):
+
+    rows = fetch_analytics(
+        symbol,
+        "trade-volume"
+    )
+
+    values = extract_scalar_series(
+        rows
+    )
+
+    if len(values) < 2:
+        return None
+
+    latest = values[-1]["value"]
+
+    previous = [
+        x["value"]
+        for x in values[:-1]
+        if x["value"] >= 0
+    ]
+
+    if not previous:
+
+        return {
+
+            "latest":
+                latest,
+
+            "average":
+                0,
+
+            "rvol":
+                0,
+        }
+
+    average = (
+        sum(previous)
+        / len(previous)
+    )
+
+    if average <= 0:
+
+        rvol = 0
+
+    else:
+
+        rvol = (
+            latest
+            / average
+        )
+
+    return {
+
+        "latest":
+            latest,
+
+        "average":
+            average,
+
+        "rvol":
+            rvol,
+    }
+
+
+# ============================================================
+# OPEN INTEREST
+# ============================================================
+
+def get_oi_direction(
+    symbol
+):
+
+    rows = fetch_analytics(
+        symbol,
+        "open-interest"
+    )
+
+    values = extract_scalar_series(
+        rows
+    )
+
+    if len(values) < 2:
+        return None
+
+    previous = values[-2]["value"]
+    latest = values[-1]["value"]
+
+    if previous == 0:
+
+        return {
+
+            "latest":
+                latest,
+
+            "delta":
+                0,
+
+            "direction":
+                "NEUTRAL",
+        }
+
+    delta_percent = (
+        (
+            latest
+            - previous
+        )
+        /
+        abs(previous)
+        * 100
+    )
+
+    return {
+
+        "latest":
+            latest,
+
+        "delta":
+            delta_percent,
+
+        "direction":
+            (
+                "UP"
+                if delta_percent > 0
+                else
+                "DOWN"
+                if delta_percent < 0
+                else
+                "NEUTRAL"
+            ),
+    }
+
+
+# ============================================================
+# WHALE FLOW ANALYSIS
+# ============================================================
+
+def analyze_whale_flow(
+    symbol,
+    direction
+):
+
+    result = {
+
+        "available":
+            False,
+
+        "direction":
+            "NEUTRAL",
+
+        "score":
+            0,
+
+        "cvd":
+            None,
+
+        "aggressor":
+            None,
+
+        "volume":
+            None,
+
+        "oi":
+            None,
+
+        "reason":
+            "NO DATA",
+    }
+
+    if not WHALE_FILTER_ENABLED:
+
+        result["available"] = True
+
+        result["direction"] = "DISABLED"
+
+        result["score"] = 0
+
+        result["reason"] = (
+            "FILTER DISABLED"
+        )
+
+        return result
+
+    cvd = get_cvd_direction(
+        symbol
+    )
+
+    aggressor = get_aggressor_direction(
+        symbol
+    )
+
+    volume = get_volume_stats(
+        symbol
+    )
+
+    oi = get_oi_direction(
+        symbol
+    )
+
+    result["cvd"] = cvd
+    result["aggressor"] = aggressor
+    result["volume"] = volume
+    result["oi"] = oi
+
+    available_count = sum(
+        x is not None
+        for x in (
+            cvd,
+            aggressor,
+            volume,
+            oi
+        )
+    )
+
+    if available_count == 0:
+
+        result["reason"] = (
+            "NO ANALYTICS DATA"
+        )
+
+        return result
+
+    result["available"] = True
+
+    score = 0
+
+    # --------------------------------------------------------
+    # Aggressor differential
+    # --------------------------------------------------------
+
+    if aggressor:
+
+        if direction == "LONG":
+
+            if aggressor["direction"] == "BUY":
+                score += 2
+
+            elif aggressor["direction"] == "SELL":
+                score -= 2
+
+        else:
+
+            if aggressor["direction"] == "SELL":
+                score += 2
+
+            elif aggressor["direction"] == "BUY":
+                score -= 2
+
+    # --------------------------------------------------------
+    # CVD
+    # --------------------------------------------------------
+
+    if cvd:
+
+        if direction == "LONG":
+
+            if cvd["direction"] == "BUY":
+                score += 2
+
+            elif cvd["direction"] == "SELL":
+                score -= 2
+
+        else:
+
+            if cvd["direction"] == "SELL":
+                score += 2
+
+            elif cvd["direction"] == "BUY":
+                score -= 2
+
+    # --------------------------------------------------------
+    # Volume
+    # --------------------------------------------------------
+
+    if volume:
+
+        if (
+            volume["rvol"]
+            >= WHALE_MIN_RVOL
+        ):
+
+            score += 1
+
+        if (
+            volume["rvol"]
+            >= WHALE_STRONG_RVOL
+        ):
+
+            score += 1
+
+    # --------------------------------------------------------
+    # Open Interest
+    # --------------------------------------------------------
+
+    if (
+        WHALE_OI_CONFIRM
+        and oi
+    ):
+
+        # Increasing OI confirms
+        # fresh participation.
+        #
+        # It does NOT determine direction
+        # by itself.
+
+        if oi["direction"] == "UP":
+
+            score += 1
+
+    result["score"] = score
+
+    if score >= WHALE_MIN_SCORE:
+
+        result["direction"] = direction
+
+        result["reason"] = (
+            "WHALE FLOW CONFIRMS"
+        )
+
+    elif score <= -WHALE_MIN_SCORE:
+
+        result["direction"] = (
+            "OPPOSITE"
+        )
+
+        result["reason"] = (
+            "WHALE FLOW OPPOSES"
+        )
+
+    else:
+
+        result["direction"] = (
+            "NEUTRAL"
+        )
+
+        result["reason"] = (
+            "WHALE FLOW WEAK"
+        )
+
+    return result
+
+
+# ============================================================
+# WHALE TEXT
+# ============================================================
+
+def whale_flow_text(
+    whale
+):
+
+    if whale is None:
+
+        return (
+            "🐋 Whale Flow: N/A"
+        )
+
+    if not whale.get(
+        "available",
+        False
+    ):
+
+        return (
+            "🐋 Whale Flow: NO DATA"
+        )
+
+    direction = whale.get(
+        "direction",
+        "NEUTRAL"
+    )
+
+    score = whale.get(
+        "score",
+        0
+    )
+
+    if direction == "LONG":
+
+        flow = "BUY"
+
+    elif direction == "SHORT":
+
+        flow = "SELL"
+
+    elif direction == "OPPOSITE":
+
+        flow = "OPPOSITE"
+
+    elif direction == "DISABLED":
+
+        flow = "DISABLED"
+
+    else:
+
+        flow = "NEUTRAL"
+
+    lines = []
+
+    lines.append(
+        f"🐋 Whale Flow: {flow}"
+    )
+
+    lines.append(
+        f"Whale Score: {score:+d}"
+    )
+
+    cvd = whale.get(
+        "cvd"
+    )
+
+    if cvd:
+
+        lines.append(
+            "CVD: "
+            f"{cvd['direction']}"
+        )
+
+    aggressor = whale.get(
+        "aggressor"
+    )
+
+    if aggressor:
+
+        lines.append(
+            "Aggressor: "
+            f"{aggressor['direction']}"
+        )
+
+    volume = whale.get(
+        "volume"
+    )
+
+    if volume:
+
+        lines.append(
+            "RVOL: "
+            f"{volume['rvol']:.2f}x"
+        )
+
+    oi = whale.get(
+        "oi"
+    )
+
+    if oi:
+
+        lines.append(
+            "OI: "
+            f"{oi['direction']}"
+        )
+
+    return "\n".join(lines)
 
 
 # ============================================================
@@ -2358,6 +3080,10 @@ def signal_message(
     tp = signal["tp_price"]
     sl = signal["sl_price"]
 
+    whale = signal.get(
+        "whale"
+    )
+
     return (
         f"{emoji} NEW 1H SIGNAL\n"
         f"\n"
@@ -2381,6 +3107,8 @@ def signal_message(
         f"{signal['trendline_type']}\n"
         f"Touches: "
         f"{signal['touches']}\n"
+        f"\n"
+        f"{whale_flow_text(whale)}\n"
         f"\n"
         f"Break: "
         f"{format_time(signal['candle_time'])}\n"
@@ -2683,6 +3411,74 @@ def analyze_symbol(
 
     if signal:
 
+        # ----------------------------------------------------
+        # WHALE FLOW FILTER
+        # ----------------------------------------------------
+
+        whale = analyze_whale_flow(
+            symbol,
+            signal["direction"]
+        )
+
+        signal["whale"] = whale
+
+        print(
+            f"[WHALE] "
+            f"{symbol} "
+            f"{signal['direction']} | "
+            f"Score={whale['score']} | "
+            f"{whale['reason']}"
+        )
+
+        if (
+            WHALE_FILTER_ENABLED
+            and WHALE_REQUIRE_DATA
+            and not whale["available"]
+        ):
+
+            print(
+                f"[WHALE BLOCK] "
+                f"{symbol} "
+                f"analytics unavailable"
+            )
+
+            SCAN_RESULTS.append({
+                "symbol":
+                    symbol,
+
+                "status":
+                    "WHALE_DATA_ERROR"
+            })
+
+            return
+
+        if (
+            WHALE_FILTER_ENABLED
+            and whale["direction"]
+            != signal["direction"]
+        ):
+
+            print(
+                f"[WHALE BLOCK] "
+                f"{symbol} "
+                f"{signal['direction']} "
+                f"blocked by whale flow"
+            )
+
+            SCAN_RESULTS.append({
+                "symbol":
+                    symbol,
+
+                "status":
+                    "WHALE_BLOCKED"
+            })
+
+            return
+
+        # ----------------------------------------------------
+        # TP / SL
+        # ----------------------------------------------------
+
         tp, sl = calculate_levels(
             analysis,
             highs,
@@ -2728,21 +3524,29 @@ def analyze_symbol(
 
                 signal["symbol"] = symbol
 
-                inserted = insert_signal(signal)
+                inserted = insert_signal(
+                    signal
+                )
 
                 if inserted:
 
-                    NEW_SIGNALS.append(signal)
+                    NEW_SIGNALS.append(
+                        signal
+                    )
 
                     print(
                         f"[NEW SIGNAL] "
                         f"{symbol} "
-                        f"{signal['direction']}"
+                        f"{signal['direction']} "
+                        f"| Whale Score="
+                        f"{whale['score']}"
                     )
 
                     # Telegram signal
                     send_telegram(
-                        signal_message(signal)
+                        signal_message(
+                            signal
+                        )
                     )
 
                     # Telegram chart
@@ -2763,7 +3567,9 @@ def analyze_symbol(
                             caption = (
                                 f"{symbol} "
                                 f"{signal['direction']} | "
-                                f"1H Trendline Breakout"
+                                f"1H Trendline Breakout | "
+                                f"Whale Score "
+                                f"{whale['score']:+d}"
                             )
 
                             send_telegram_photo(
@@ -2789,6 +3595,20 @@ def analyze_symbol(
                         "[DUPLICATE]",
                         symbol
                     )
+
+            else:
+
+                print(
+                    f"[LEVELS INVALID] "
+                    f"{symbol}"
+                )
+
+        else:
+
+            print(
+                f"[NO VALID TP/SL] "
+                f"{symbol}"
+            )
 
     SCAN_RESULTS.append({
         "symbol":
@@ -2844,6 +3664,16 @@ def run_scan():
 
     print(
         "PAPER_TRADING = True"
+    )
+
+    print(
+        "WHALE_FILTER_ENABLED = "
+        f"{WHALE_FILTER_ENABLED}"
+    )
+
+    print(
+        "WHALE_MIN_SCORE = "
+        f"{WHALE_MIN_SCORE}"
     )
 
     print(
