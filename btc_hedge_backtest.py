@@ -3324,14 +3324,25 @@ def run_scenario(
         f"${account['equity_cash']:.6f}"
     )
 
-    log(
-        f"Return: "
-        f"{(
-            account['equity_cash']
+    # --------------------------------------------------------
+    # FIX:
+    # Do not place a multiline expression directly inside
+    # an f-string format expression.
+    # Compatible with Python 3.11.
+    # --------------------------------------------------------
+
+    scenario_return_pct = (
+        (
+            account["equity_cash"]
             - CAPITAL_START
         )
         / CAPITAL_START
-        * 100.0:.4f}%"
+        * 100.0
+    )
+
+    log(
+        f"Return: "
+        f"{scenario_return_pct:.4f}%"
     )
 
     if account[
