@@ -1,663 +1,787 @@
 # ============================================================
-# KRAKEN FUTURES 1H TRENDLINE BREAKOUT PAPER SCANNER
-# VERSION 3.1.0
+# BTC HEDGE BACKTEST - KRAKEN FUTURES
+# VERSION 2.3
 # ============================================================
-#
-# 40 ASSETS
-#
-# ORIGINAL STRATEGY:
-#
-# LONG:
-#   Descending resistance
-#   >= 3 touches
-#   Closed 1H candle breaks above resistance
-#
-# SHORT:
-#   Ascending support
-#   >= 3 touches
-#   Closed 1H candle breaks below support
-#
-# NEW:
-#   WHALE FLOW FILTER
-#
-# Whale Flow Proxy uses Kraken public market analytics:
-#   - Aggressor Differential
-#   - CVD
-#   - Trade Volume
-#   - Open Interest
-#
-# Whale filter is ONLY a confirmation filter.
-# Trendline breakout remains the primary strategy.
 #
 # PAPER ONLY
 #
+# GOAL:
+#   Start capital = $2
+#   Leverage      = 10x
+#   Initial       = $10 notional
+#
+# HEDGE MODELS:
+#   A_50  = 50% hedge
+#   B_75  = 75% hedge
+#   C_100 = 100% hedge
+#
+# MAX HEDGES:
+#   2
+#
+# HEDGE TRIGGER:
+#   2% adverse movement from the latest hedge reference
+#
+# TARGET:
+#   +$0.20 NET
+#   = +10% of initial $2
+#
+# IMPORTANT:
+#   - Kraken Futures
+#   - PF_XBTUSD
+#   - 5-minute candles
+#   - 6 months
+#   - Sequential cycles
+#   - No overlapping cycles
+#   - LONG and SHORT tested independently
+#   - Real trading disabled
+#   - Funding uses relativeFundingRate
+#   - Multi-leg liquidation is calculated from exact leg PnL
+#   - Kraken minimum lot is enforced
+#   - Intrabar liquidation is conservative
+#   - Intrabar target is supported
+#
 # ============================================================
 
-
 import os
+import io
+import json
 import time
-import sqlite3
+import math
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 import pandas as pd
-import matplotlib.pyplot as plt
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-VERSION = "3.1.0"
+VERSION = "2.3"
 
 REAL_TRADING = False
 PAPER_TRADING = True
 
-DB_FILE = "trendline_1h_breakout_v30.db"
+SYMBOL = "PF_XBTUSD"
+TIMEFRAME = "5m"
 
-TIMEFRAME = "1h"
+LOOKBACK_DAYS = 182
 
-CANDLE_COUNT = 250
+CAPITAL_START = 2.00
 
-LOOKBACK_CANDLES = 200
+LEVERAGE = 10.0
 
-PIVOT_LEFT = 2
-PIVOT_RIGHT = 2
+INITIAL_NOTIONAL = 10.00
 
-MIN_TOUCHES = 3
+HEDGE_TRIGGER_PCT = 0.02
 
-MIN_LINE_LENGTH = 10
+MAX_HEDGES = 2
 
-TOUCH_TOLERANCE = 0.002
+TARGET_NET_PROFIT = 0.20
 
-MIN_SLOPE_PERCENT_PER_CANDLE = 0.01
+# ------------------------------------------------------------
+# Hedge ratios
+# ------------------------------------------------------------
 
-MAX_SIGNAL_AGE_HOURS = 2
+MODELS = {
+    "A_50": 0.50,
+    "B_75": 0.75,
+    "C_100": 1.00,
+}
 
-CHART_CANDLES = 100
+DIRECTIONS = [
+    "LONG",
+    "SHORT",
+]
 
-REPORT_ENABLED = True
+# ------------------------------------------------------------
+# Costs
+#
+# These are configurable assumptions.
+# They are NOT claimed to be the user's actual fee tier.
+# ------------------------------------------------------------
 
+TAKER_FEE_RATE = 0.0005
 
-# ============================================================
-# WHALE FLOW CONFIG
-# ============================================================
+SLIPPAGE_RATE = 0.0002
 
-WHALE_FILTER_ENABLED = True
+# ------------------------------------------------------------
+# Kraken PF_XBTUSD contract constraints
+# ------------------------------------------------------------
 
-WHALE_ANALYTICS_INTERVAL = 3600
+MIN_QTY = 0.0001
 
-WHALE_LOOKBACK_HOURS = 4
+TICK_SIZE = 1.0
 
-WHALE_MIN_SCORE = 2
+# Conservative maintenance-margin assumption.
+#
+# This is intentionally configurable because Kraken margin
+# requirements can vary by contract / account / position.
+#
+# The backtest does NOT pretend this is an exact exchange
+# liquidation engine.
+# ------------------------------------------------------------
 
-WHALE_MIN_RVOL = 1.20
+MAINTENANCE_MARGIN_RATE = 0.005
 
-WHALE_STRONG_RVOL = 2.00
+# ------------------------------------------------------------
+# API
+# ------------------------------------------------------------
 
-WHALE_CVD_THRESHOLD = 0.0
+KRAKEN_FUTURES_BASE = (
+    "https://futures.kraken.com"
+)
 
-WHALE_OI_CONFIRM = True
+KRAKEN_DERIVATIVES_BASE = (
+    "https://futures.kraken.com/derivatives/api/v3"
+)
 
-WHALE_REQUIRE_DATA = True
-
-
-# ============================================================
-# KRAKEN FUTURES CHART API
-# ============================================================
-
-KRAKEN_CHART_URL = (
+KRAKEN_CHARTS_BASE = (
     "https://futures.kraken.com/api/charts/v1"
 )
 
+OHLC_URL = (
+    f"{KRAKEN_CHARTS_BASE}/candles/"
+    f"{SYMBOL}/{TIMEFRAME}"
+)
+
+FUNDING_URL = (
+    f"{KRAKEN_DERIVATIVES_BASE}/"
+    "historical-funding-rates"
+)
+
+INSTRUMENTS_URL = (
+    f"{KRAKEN_DERIVATIVES_BASE}/instruments"
+)
+
+# ------------------------------------------------------------
+# Files
+# ------------------------------------------------------------
+
+TRADES_FILE = "btc_hedge_trades.csv"
+
+SUMMARY_FILE = "btc_hedge_summary.csv"
+
+EQUITY_FILE = "btc_hedge_equity.csv"
+
+FUNDING_FILE = "btc_hedge_funding.csv"
+
+BLOCKED_FILE = "btc_hedge_blocked.csv"
+
+LOG_FILE = "btc_hedge_log.txt"
+
 
 # ============================================================
-# KRAKEN FUTURES ANALYTICS API
+# GLOBAL HTTP SESSION
 # ============================================================
 
-KRAKEN_ANALYTICS_URL = (
-    "https://futures.kraken.com/api/charts/v1/analytics"
+SESSION = requests.Session()
+
+SESSION.headers.update(
+    {
+        "User-Agent": (
+            "Mozilla/5.0 "
+            "BTC-Hedge-Backtest/2.3"
+        ),
+        "Accept": "application/json",
+    }
 )
 
 
 # ============================================================
-# TELEGRAM
+# LOGGING
 # ============================================================
 
-TELEGRAM_BOT_TOKEN = (
-    os.environ.get("TELEGRAM_BOT_TOKEN", "")
-    or os.environ.get("TELEGRAM_TOKEN", "")
-)
+def log(message):
+    timestamp = datetime.now(
+        timezone.utc
+    ).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-TELEGRAM_CHAT_ID = (
-    os.environ.get("TELEGRAM_CHAT_ID", "")
-    or os.environ.get("TELEGRAM_CHAT", "")
-)
+    line = f"[{timestamp}] {message}"
 
+    print(line)
 
-def telegram_config_status():
-
-    token_ok = bool(
-        TELEGRAM_BOT_TOKEN
-        and TELEGRAM_BOT_TOKEN.strip()
-    )
-
-    chat_ok = bool(
-        TELEGRAM_CHAT_ID
-        and TELEGRAM_CHAT_ID.strip()
-    )
-
-    print("")
-    print(
-        "=========================================================="
-    )
-    print(
-        "TELEGRAM CONFIGURATION"
-    )
-    print(
-        "=========================================================="
-    )
-
-    print(
-        "[TELEGRAM] Bot token:",
-        "FOUND" if token_ok else "NOT FOUND"
-    )
-
-    print(
-        "[TELEGRAM] Chat ID:",
-        "FOUND" if chat_ok else "NOT FOUND"
-    )
-
-    if token_ok and chat_ok:
-
-        print(
-            "[TELEGRAM] Configuration: READY"
-        )
-
-    else:
-
-        print(
-            "[TELEGRAM] Configuration: INCOMPLETE"
-        )
-
-        print(
-            "[TELEGRAM] "
-            "Expected environment variables: "
-            "TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID"
-        )
-
-    print(
-        "=========================================================="
-    )
-    print("")
-
-    return token_ok and chat_ok
-
-
-# ============================================================
-# 40 ASSETS
-# ============================================================
-
-SYMBOLS = [
-
-    "PF_XBTUSD",
-    "PF_ETHUSD",
-    "PF_SOLUSD",
-    "PF_XRPUSD",
-    "PF_DOGEUSD",
-    "PF_ADAUSD",
-    "PF_LINKUSD",
-    "PF_AVAXUSD",
-    "PF_DOTUSD",
-    "PF_LTCUSD",
-
-    "PF_BNBUSD",
-    "PF_TRXUSD",
-    "PF_UNIUSD",
-    "PF_AAVEUSD",
-    "PF_SUIUSD",
-    "PF_NEARUSD",
-    "PF_ATOMUSD",
-    "PF_FILUSD",
-    "PF_ARBUSD",
-    "PF_OPUSD",
-
-    "PF_XLMUSD",
-    "PF_BCHUSD",
-    "PF_ETCUSD",
-    "PF_ALGOUSD",
-    "PF_APTUSD",
-    "PF_INJUSD",
-    "PF_SEIUSD",
-    "PF_TAOUSD",
-    "PF_WIFUSD",
-    "PF_PEPEUSD",
-
-    "PF_SHIBUSD",
-    "PF_ZECUSD",
-    "PF_EOSUSD",
-    "PF_QNTUSD",
-    "PF_IMXUSD",
-    "PF_RUNEUSD",
-    "PF_MKRUSD",
-    "PF_CRVUSD",
-    "PF_ENSUSD",
-    "PF_LDOUSD",
-]
+    try:
+        with open(
+            LOG_FILE,
+            "a",
+            encoding="utf-8",
+        ) as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 # ============================================================
 # HTTP
 # ============================================================
 
-SESSION = requests.Session()
+def http_get(
+    url,
+    params=None,
+    timeout=30,
+    retries=4,
+):
+    last_error = None
 
-SESSION.headers.update({
-
-    "User-Agent":
-        "Mozilla/5.0 "
-        "(compatible; Kraken-1H-Trendline/3.1.0)",
-
-    "Accept":
-        "application/json",
-})
-
-
-# ============================================================
-# GLOBAL RESULTS
-# ============================================================
-
-SCAN_RESULTS = []
-
-NEW_SIGNALS = []
-
-ERRORS = []
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-def init_db():
-
-    conn = sqlite3.connect(DB_FILE)
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS signals (
-
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            symbol TEXT NOT NULL,
-
-            direction TEXT NOT NULL,
-
-            candle_time INTEGER NOT NULL,
-
-            entry_time INTEGER NOT NULL,
-
-            entry_price REAL NOT NULL,
-
-            tp_price REAL,
-
-            sl_price REAL,
-
-            tp_source TEXT,
-
-            sl_source TEXT,
-
-            trendline_type TEXT,
-
-            trendline_start_time INTEGER,
-
-            trendline_end_time INTEGER,
-
-            trendline_start_price REAL,
-
-            trendline_end_price REAL,
-
-            trendline_value REAL,
-
-            touches INTEGER,
-
-            status TEXT NOT NULL DEFAULT 'OPEN',
-
-            exit_time INTEGER,
-
-            exit_price REAL,
-
-            exit_reason TEXT,
-
-            pnl_percent REAL,
-
-            created_at INTEGER NOT NULL,
-
-            UNIQUE(
-                symbol,
-                direction,
-                candle_time
+    for attempt in range(retries):
+        try:
+            response = SESSION.get(
+                url,
+                params=params,
+                timeout=timeout,
             )
+
+            if response.status_code == 200:
+                return response.json()
+
+            last_error = (
+                f"HTTP {response.status_code}: "
+                f"{response.text[:500]}"
+            )
+
+            log(
+                f"HTTP error attempt "
+                f"{attempt + 1}/{retries}: "
+                f"{last_error}"
+            )
+
+        except Exception as e:
+            last_error = str(e)
+
+            log(
+                f"Request error attempt "
+                f"{attempt + 1}/{retries}: "
+                f"{e}"
+            )
+
+        time.sleep(1.5 * (attempt + 1))
+
+    raise RuntimeError(
+        f"Request failed after {retries} attempts: "
+        f"{url} | {last_error}"
+    )
+
+
+# ============================================================
+# TIME HELPERS
+# ============================================================
+
+def iso_to_ts(value):
+    if value is None:
+        return None
+
+    if isinstance(value, (int, float)):
+        value = float(value)
+
+        if value > 10_000_000_000:
+            return value / 1000.0
+
+        return value
+
+    text = str(value).strip()
+
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+
+    dt = datetime.fromisoformat(text)
+
+    if dt.tzinfo is None:
+        dt = dt.replace(
+            tzinfo=timezone.utc
         )
-    """)
 
-    conn.execute("""
-        CREATE INDEX IF NOT EXISTS
-        idx_signals_status
-        ON signals(status)
-    """)
-
-    conn.commit()
-    conn.close()
+    return dt.timestamp()
 
 
-# ============================================================
-# DATABASE MIGRATION
-# ============================================================
-
-def ensure_columns():
-
-    conn = sqlite3.connect(DB_FILE)
-
-    columns = {
-        row[1]
-        for row in conn.execute(
-            "PRAGMA table_info(signals)"
-        ).fetchall()
-    }
-
-    required = {
-
-        "tp_price":
-            "REAL",
-
-        "sl_price":
-            "REAL",
-
-        "tp_source":
-            "TEXT",
-
-        "sl_source":
-            "TEXT",
-
-        "exit_time":
-            "INTEGER",
-
-        "exit_price":
-            "REAL",
-
-        "exit_reason":
-            "TEXT",
-
-        "pnl_percent":
-            "REAL",
-    }
-
-    for name, dtype in required.items():
-
-        if name not in columns:
-
-            conn.execute(
-                f"""
-                ALTER TABLE signals
-                ADD COLUMN {name} {dtype}
-                """
-            )
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
-# TIME
-# ============================================================
-
-def now_ms():
-
-    return int(
-        time.time() * 1000
-    )
-
-
-def now_seconds():
-
-    return int(
-        time.time()
-    )
-
-
-def format_time(ts):
-
-    if ts > 10_000_000_000:
-        ts = ts / 1000
-
+def ts_to_iso(ts):
     return datetime.fromtimestamp(
-        ts,
-        timezone.utc
+        float(ts),
+        timezone.utc,
+    ).isoformat()
+
+
+def ts_to_utc_string(ts):
+    return datetime.fromtimestamp(
+        float(ts),
+        timezone.utc,
     ).strftime(
-        "%Y-%m-%d %H:%M UTC"
+        "%Y-%m-%d %H:%M:%S"
     )
 
 
 # ============================================================
-# FETCH 1H CANDLES
+# OHLC PARSING
 # ============================================================
 
-def fetch_ohlc(symbol):
+def parse_ohlc_payload(payload):
+    """
+    Kraken chart API has returned slightly different
+    structures over time.
 
-    url = (
-        f"{KRAKEN_CHART_URL}/"
-        f"trade/"
-        f"{symbol}/"
-        f"1h"
-    )
+    This parser accepts:
+      result.data
+      candles
+      data
+      list-of-dicts
+      list-of-lists
+    """
 
-    try:
+    raw = None
 
-        response = SESSION.get(
-            url,
-            params={
-                "count":
-                    CANDLE_COUNT
-            },
-            timeout=25
-        )
+    if isinstance(payload, dict):
 
-        response.raise_for_status()
+        if "candles" in payload:
+            raw = payload["candles"]
 
-        data = response.json()
+        elif "data" in payload:
+            raw = payload["data"]
 
-    except Exception as exc:
+        elif "result" in payload:
 
-        error = (
-            f"{symbol}: "
-            f"OHLC failed: {exc}"
-        )
+            result = payload["result"]
 
-        print(
-            "[ERROR] "
-            + error
-        )
+            if isinstance(result, dict):
 
-        ERRORS.append(error)
+                if "candles" in result:
+                    raw = result["candles"]
 
+                elif "data" in result:
+                    raw = result["data"]
+
+    elif isinstance(payload, list):
+        raw = payload
+
+    if raw is None:
         return []
 
-    raw = data.get(
-        "candles"
-    )
-
-    if not isinstance(
-        raw,
-        list
-    ):
-
-        error = (
-            f"{symbol}: "
-            f"No candles returned"
-        )
-
-        ERRORS.append(error)
-
-        return []
-
-    candles = []
+    records = []
 
     for row in raw:
 
-        try:
+        # ----------------------------------------------------
+        # Dictionary format
+        # ----------------------------------------------------
 
-            if not isinstance(
-                row,
-                dict
-            ):
-                continue
+        if isinstance(row, dict):
 
-            ts = row.get("time")
-            op = row.get("open")
-            hi = row.get("high")
-            lo = row.get("low")
-            cl = row.get("close")
-
-            if None in (
-                ts,
-                op,
-                hi,
-                lo,
-                cl
-            ):
-                continue
-
-            ts = int(
-                float(ts)
+            timestamp = (
+                row.get("timestamp")
+                or row.get("time")
+                or row.get("t")
             )
 
-            if ts < 10_000_000_000:
-                ts *= 1000
+            open_price = (
+                row.get("open")
+                or row.get("o")
+            )
 
-            candles.append({
+            high_price = (
+                row.get("high")
+                or row.get("h")
+            )
 
-                "time":
-                    ts,
+            low_price = (
+                row.get("low")
+                or row.get("l")
+            )
 
-                "open":
-                    float(op),
+            close_price = (
+                row.get("close")
+                or row.get("c")
+            )
 
-                "high":
-                    float(hi),
+            volume = (
+                row.get("volume")
+                or row.get("v")
+                or 0
+            )
 
-                "low":
-                    float(lo),
+            if (
+                timestamp is None
+                or open_price is None
+                or high_price is None
+                or low_price is None
+                or close_price is None
+            ):
+                continue
 
-                "close":
-                    float(cl),
-            })
+            ts = iso_to_ts(timestamp)
 
+            records.append(
+                {
+                    "timestamp": ts,
+                    "open": float(open_price),
+                    "high": float(high_price),
+                    "low": float(low_price),
+                    "close": float(close_price),
+                    "volume": float(volume),
+                }
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # List format
+        #
+        # Usually:
+        # [timestamp, open, high, low, close, volume]
+        #
+        # ----------------------------------------------------
+
+        if isinstance(row, (list, tuple)):
+
+            if len(row) < 5:
+                continue
+
+            try:
+                ts = iso_to_ts(row[0])
+
+                records.append(
+                    {
+                        "timestamp": ts,
+                        "open": float(row[1]),
+                        "high": float(row[2]),
+                        "low": float(row[3]),
+                        "close": float(row[4]),
+                        "volume": (
+                            float(row[5])
+                            if len(row) > 5
+                            else 0.0
+                        ),
+                    }
+                )
+
+            except Exception:
+                continue
+
+    return records
+
+
+# ============================================================
+# FETCH OHLC
+# ============================================================
+
+def fetch_ohlc(
+    start_ts,
+    end_ts,
+):
+    """
+    Fetch candles in chunks.
+
+    The endpoint supports a `since` parameter.
+    We advance using the latest returned candle.
+    """
+
+    all_rows = []
+
+    current = int(start_ts)
+
+    safety_counter = 0
+
+    while current < end_ts:
+
+        safety_counter += 1
+
+        if safety_counter > 1000:
+            raise RuntimeError(
+                "OHLC pagination safety limit reached."
+            )
+
+        params = {
+            "since": current,
+        }
+
+        payload = http_get(
+            OHLC_URL,
+            params=params,
+        )
+
+        rows = parse_ohlc_payload(
+            payload
+        )
+
+        if not rows:
+            break
+
+        rows = [
+            r
+            for r in rows
+            if start_ts <= r["timestamp"] <= end_ts
+        ]
+
+        if rows:
+            all_rows.extend(rows)
+
+        max_ts = max(
+            r["timestamp"]
+            for r in rows
+        ) if rows else current
+
+        if max_ts <= current:
+            break
+
+        current = int(max_ts) + 300
+
+        log(
+            "OHLC progress: "
+            f"{ts_to_utc_string(current)}"
+        )
+
+        time.sleep(0.15)
+
+    if not all_rows:
+        raise RuntimeError(
+            "No OHLC candles received."
+        )
+
+    df = pd.DataFrame(all_rows)
+
+    df = df.drop_duplicates(
+        subset=["timestamp"]
+    )
+
+    df = df.sort_values(
+        "timestamp"
+    )
+
+    df = df[
+        (df["timestamp"] >= start_ts)
+        & (df["timestamp"] <= end_ts)
+    ]
+
+    df = df.reset_index(drop=True)
+
+    return df
+
+
+# ============================================================
+# FUNDING PARSING
+# ============================================================
+
+def parse_funding_payload(payload):
+    """
+    Preserve BOTH Kraken funding fields.
+
+    fundingRate:
+        absolute funding rate
+
+    relativeFundingRate:
+        relative rate
+
+    IMPORTANT:
+        relativeFundingRate is used for the USD notional
+        funding calculation for the linear contract.
+    """
+
+    raw = None
+
+    if isinstance(payload, dict):
+
+        if "rates" in payload:
+            raw = payload["rates"]
+
+        elif "result" in payload:
+
+            result = payload["result"]
+
+            if isinstance(result, dict):
+                raw = (
+                    result.get("rates")
+                    or result.get("data")
+                )
+
+    if raw is None:
+        return []
+
+    records = []
+
+    for row in raw:
+
+        if not isinstance(row, dict):
+            continue
+
+        timestamp = (
+            row.get("timestamp")
+            or row.get("time")
+            or row.get("ts")
+        )
+
+        if timestamp is None:
+            continue
+
+        try:
+            ts = iso_to_ts(timestamp)
         except Exception:
             continue
 
-    candles.sort(
-        key=lambda x:
-            x["time"]
-    )
-
-    unique = {}
-
-    for candle in candles:
-
-        unique[
-            candle["time"]
-        ] = candle
-
-    candles = list(
-        unique.values()
-    )
-
-    candles.sort(
-        key=lambda x:
-            x["time"]
-    )
-
-    return candles[
-        -CANDLE_COUNT:
-    ]
-
-
-# ============================================================
-# CLOSED CANDLES
-# ============================================================
-
-def get_closed_candles(
-    candles
-):
-
-    if not candles:
-        return []
-
-    current_hour = (
-        now_ms()
-        // 3_600_000
-    ) * 3_600_000
-
-    return [
-        c
-        for c in candles
-        if c["time"]
-        < current_hour
-    ]
-
-
-# ============================================================
-# KRAKEN MARKET ANALYTICS
-# ============================================================
-
-def fetch_analytics(
-    symbol,
-    analytics_type,
-    interval=WHALE_ANALYTICS_INTERVAL
-):
-
-    now_sec = int(
-        time.time()
-    )
-
-    since = (
-        now_sec
-        - (
-            WHALE_LOOKBACK_HOURS
-            * 3600
+        absolute_rate = row.get(
+            "fundingRate"
         )
+
+        relative_rate = row.get(
+            "relativeFundingRate"
+        )
+
+        # Some alternate responses may use snake_case.
+        if relative_rate is None:
+            relative_rate = row.get(
+                "relative_funding_rate"
+            )
+
+        if absolute_rate is None:
+            absolute_rate = row.get(
+                "absoluteFundingRate"
+            )
+
+        try:
+            absolute_rate = (
+                float(absolute_rate)
+                if absolute_rate is not None
+                else None
+            )
+        except Exception:
+            absolute_rate = None
+
+        try:
+            relative_rate = (
+                float(relative_rate)
+                if relative_rate is not None
+                else None
+            )
+        except Exception:
+            relative_rate = None
+
+        records.append(
+            {
+                "timestamp": ts,
+                "funding_rate_absolute": (
+                    absolute_rate
+                ),
+                "funding_rate_relative": (
+                    relative_rate
+                ),
+            }
+        )
+
+    return records
+
+
+# ============================================================
+# FETCH HISTORICAL FUNDING
+# ============================================================
+
+def fetch_historical_funding(
+    start_ts,
+    end_ts,
+):
+    """
+    Fetch historical funding.
+
+    Kraken's historical endpoint is preferred.
+
+    If the endpoint returns a complete historical set,
+    it is filtered locally.
+
+    If it fails, Market Analytics funding is attempted.
+    """
+
+    log(
+        "Downloading Kraken historical funding..."
     )
 
-    url = (
-        f"{KRAKEN_ANALYTICS_URL}/"
-        f"{symbol}/"
-        f"{analytics_type}"
+    rows = []
+
+    try:
+
+        payload = http_get(
+            FUNDING_URL,
+            params={
+                "symbol": SYMBOL,
+            },
+            timeout=45,
+        )
+
+        rows = parse_funding_payload(
+            payload
+        )
+
+        log(
+            f"Historical funding endpoint "
+            f"returned {len(rows)} rows."
+        )
+
+    except Exception as e:
+
+        log(
+            "Historical funding endpoint failed: "
+            f"{e}"
+        )
+
+    if rows:
+
+        filtered = [
+            r
+            for r in rows
+            if start_ts <= r["timestamp"] <= end_ts
+        ]
+
+        if filtered:
+
+            df = pd.DataFrame(
+                filtered
+            )
+
+            df = df.drop_duplicates(
+                subset=["timestamp"]
+            )
+
+            df = df.sort_values(
+                "timestamp"
+            )
+
+            df.reset_index(
+                drop=True,
+                inplace=True,
+            )
+
+            log(
+                "Funding source: "
+                "historical-funding-rates"
+            )
+
+            return df
+
+    # ========================================================
+    # FALLBACK: Market Analytics
+    # ========================================================
+
+    log(
+        "Trying Kraken Market Analytics funding..."
+    )
+
+    analytics_url = (
+        f"{KRAKEN_CHARTS_BASE}/"
+        f"analytics/{SYMBOL}/funding"
     )
 
     try:
 
-        response = SESSION.get(
-            url,
+        payload = http_get(
+            analytics_url,
             params={
-                "since":
-                    since,
-
-                "interval":
-                    interval,
-
-                "to":
-                    now_sec,
+                "since": int(start_ts),
+                "to": int(end_ts),
+                "interval": 3600,
             },
-            timeout=20
+            timeout=45,
         )
 
-        response.raise_for_status()
-
-        payload = response.json()
-
-        result = payload.get(
-            "result",
-            {}
+        result = (
+            payload.get("result", {})
+            if isinstance(payload, dict)
+            else {}
         )
 
         timestamps = result.get(
@@ -667,3118 +791,2368 @@ def fetch_analytics(
 
         data = result.get(
             "data",
+            {}
+        )
+
+        if isinstance(data, dict):
+
+            absolute_rates = (
+                data.get("rate", [])
+            )
+
+            relative_rates = (
+                data.get("relativeRate", [])
+            )
+
+        else:
+            absolute_rates = []
+            relative_rates = []
+
+        count = min(
+            len(timestamps),
+            len(absolute_rates),
+            len(relative_rates),
+        )
+
+        records = []
+
+        for i in range(count):
+
+            try:
+
+                records.append(
+                    {
+                        "timestamp": float(
+                            timestamps[i]
+                        ),
+                        "funding_rate_absolute": (
+                            float(
+                                absolute_rates[i]
+                            )
+                        ),
+                        "funding_rate_relative": (
+                            float(
+                                relative_rates[i]
+                            )
+                        ),
+                    }
+                )
+
+            except Exception:
+                continue
+
+        if records:
+
+            df = pd.DataFrame(
+                records
+            )
+
+            df = df[
+                (df["timestamp"] >= start_ts)
+                & (df["timestamp"] <= end_ts)
+            ]
+
+            df = df.drop_duplicates(
+                subset=["timestamp"]
+            )
+
+            df = df.sort_values(
+                "timestamp"
+            )
+
+            df.reset_index(
+                drop=True,
+                inplace=True,
+            )
+
+            log(
+                "Funding source: "
+                "Market Analytics"
+            )
+
+            return df
+
+    except Exception as e:
+
+        log(
+            "Market Analytics funding failed: "
+            f"{e}"
+        )
+
+    log(
+        "WARNING: No historical funding data."
+    )
+
+    return pd.DataFrame(
+        columns=[
+            "timestamp",
+            "funding_rate_absolute",
+            "funding_rate_relative",
+        ]
+    )
+
+
+# ============================================================
+# INSTRUMENT INFORMATION
+# ============================================================
+
+def fetch_instrument_info():
+    """
+    Attempts to obtain current instrument metadata.
+
+    The hard safety defaults remain:
+      MIN_QTY = 0.0001
+      TICK_SIZE = 1.0
+    """
+
+    info = {
+        "min_qty": MIN_QTY,
+        "tick_size": TICK_SIZE,
+        "maintenance_margin_rate": (
+            MAINTENANCE_MARGIN_RATE
+        ),
+    }
+
+    try:
+
+        payload = http_get(
+            INSTRUMENTS_URL,
+            timeout=30,
+        )
+
+        instruments = payload.get(
+            "instruments",
             []
         )
 
-        if not timestamps or not data:
+        for item in instruments:
 
-            return []
+            if not isinstance(item, dict):
+                continue
 
-        return list(
-            zip(
-                timestamps,
-                data
+            symbol = str(
+                item.get("symbol", "")
+            ).upper()
+
+            if symbol != SYMBOL:
+                continue
+
+            for key in [
+                "contractSize",
+                "minLot",
+                "minOrderSize",
+                "lotSize",
+            ]:
+
+                value = item.get(key)
+
+                if value is not None:
+                    try:
+                        if key in [
+                            "minLot",
+                            "minOrderSize",
+                            "lotSize",
+                        ]:
+                            info["min_qty"] = float(
+                                value
+                            )
+                    except Exception:
+                        pass
+
+            tick = item.get(
+                "tickSize"
             )
+
+            if tick is not None:
+                try:
+                    info["tick_size"] = float(
+                        tick
+                    )
+                except Exception:
+                    pass
+
+            # Try several possible names.
+            mm = (
+                item.get(
+                    "maintenanceMarginRate"
+                )
+                or item.get(
+                    "maintenanceMargin"
+                )
+                or item.get(
+                    "maintenance_margin_rate"
+                )
+            )
+
+            if mm is not None:
+
+                try:
+                    mm = float(mm)
+
+                    if 0 < mm < 1:
+                        info[
+                            "maintenance_margin_rate"
+                        ] = mm
+
+                except Exception:
+                    pass
+
+            break
+
+    except Exception as e:
+
+        log(
+            "Instrument metadata unavailable: "
+            f"{e}"
         )
 
-    except Exception as exc:
-
-        print(
-            f"[WHALE] "
-            f"{symbol} "
-            f"{analytics_type} "
-            f"failed: {exc}"
-        )
-
-        return []
+    return info
 
 
 # ============================================================
-# GENERIC ANALYTICS VALUE EXTRACTION
+# PRICE ROUNDING
 # ============================================================
 
-def analytics_number(value):
-
-    if value is None:
-        return None
-
-    if isinstance(
-        value,
-        (int, float)
-    ):
-
-        return float(value)
-
-    if isinstance(
-        value,
-        str
-    ):
-
-        try:
-            return float(value)
-        except Exception:
-            return None
-
-    return None
-
-
-def extract_scalar_series(
-    rows
+def round_to_tick(
+    price,
+    tick_size,
 ):
+    if not tick_size or tick_size <= 0:
+        return float(price)
 
-    values = []
-
-    for ts, value in rows:
-
-        number = analytics_number(
-            value
-        )
-
-        if number is not None:
-
-            values.append({
-                "time":
-                    int(ts),
-
-                "value":
-                    number
-            })
-
-    return values
+    return round(
+        round(
+            float(price) / tick_size
+        ) * tick_size,
+        10,
+    )
 
 
 # ============================================================
-# CVD / AGGRESSOR HELPERS
+# POSITION HELPERS
 # ============================================================
 
-def get_cvd_direction(
-    symbol
+def clone_positions(
+    positions,
 ):
-
-    rows = fetch_analytics(
-        symbol,
-        "cvd"
-    )
-
-    values = extract_scalar_series(
-        rows
-    )
-
-    if len(values) < 2:
-        return None
-
-    previous = values[-2]["value"]
-    latest = values[-1]["value"]
-
-    delta = (
-        latest
-        - previous
-    )
-
-    return {
-
-        "value":
-            latest,
-
-        "delta":
-            delta,
-
-        "direction":
-            (
-                "BUY"
-                if delta > WHALE_CVD_THRESHOLD
-                else
-                "SELL"
-                if delta < -WHALE_CVD_THRESHOLD
-                else
-                "NEUTRAL"
-            ),
-    }
-
-
-def get_aggressor_direction(
-    symbol
-):
-
-    rows = fetch_analytics(
-        symbol,
-        "aggressor-differential"
-    )
-
-    values = extract_scalar_series(
-        rows
-    )
-
-    if not values:
-        return None
-
-    latest = values[-1]["value"]
-
-    return {
-
-        "value":
-            latest,
-
-        "direction":
-            (
-                "BUY"
-                if latest > 0
-                else
-                "SELL"
-                if latest < 0
-                else
-                "NEUTRAL"
-            ),
-    }
-
-
-# ============================================================
-# TRADE VOLUME
-# ============================================================
-
-def get_volume_stats(
-    symbol
-):
-
-    rows = fetch_analytics(
-        symbol,
-        "trade-volume"
-    )
-
-    values = extract_scalar_series(
-        rows
-    )
-
-    if len(values) < 2:
-        return None
-
-    latest = values[-1]["value"]
-
-    previous = [
-        x["value"]
-        for x in values[:-1]
-        if x["value"] >= 0
-    ]
-
-    if not previous:
-
-        return {
-
-            "latest":
-                latest,
-
-            "average":
-                0,
-
-            "rvol":
-                0,
-        }
-
-    average = (
-        sum(previous)
-        / len(previous)
-    )
-
-    if average <= 0:
-
-        rvol = 0
-
-    else:
-
-        rvol = (
-            latest
-            / average
-        )
-
-    return {
-
-        "latest":
-            latest,
-
-        "average":
-            average,
-
-        "rvol":
-            rvol,
-    }
-
-
-# ============================================================
-# OPEN INTEREST
-# ============================================================
-
-def get_oi_direction(
-    symbol
-):
-
-    rows = fetch_analytics(
-        symbol,
-        "open-interest"
-    )
-
-    values = extract_scalar_series(
-        rows
-    )
-
-    if len(values) < 2:
-        return None
-
-    previous = values[-2]["value"]
-    latest = values[-1]["value"]
-
-    if previous == 0:
-
-        return {
-
-            "latest":
-                latest,
-
-            "delta":
-                0,
-
-            "direction":
-                "NEUTRAL",
-        }
-
-    delta_percent = (
-        (
-            latest
-            - previous
-        )
-        /
-        abs(previous)
-        * 100
-    )
-
-    return {
-
-        "latest":
-            latest,
-
-        "delta":
-            delta_percent,
-
-        "direction":
-            (
-                "UP"
-                if delta_percent > 0
-                else
-                "DOWN"
-                if delta_percent < 0
-                else
-                "NEUTRAL"
-            ),
-    }
-
-
-# ============================================================
-# WHALE FLOW ANALYSIS
-# ============================================================
-
-def analyze_whale_flow(
-    symbol,
-    direction
-):
-
-    result = {
-
-        "available":
-            False,
-
-        "direction":
-            "NEUTRAL",
-
-        "score":
-            0,
-
-        "cvd":
-            None,
-
-        "aggressor":
-            None,
-
-        "volume":
-            None,
-
-        "oi":
-            None,
-
-        "reason":
-            "NO DATA",
-    }
-
-    if not WHALE_FILTER_ENABLED:
-
-        result["available"] = True
-
-        result["direction"] = "DISABLED"
-
-        result["score"] = 0
-
-        result["reason"] = (
-            "FILTER DISABLED"
-        )
-
-        return result
-
-    cvd = get_cvd_direction(
-        symbol
-    )
-
-    aggressor = get_aggressor_direction(
-        symbol
-    )
-
-    volume = get_volume_stats(
-        symbol
-    )
-
-    oi = get_oi_direction(
-        symbol
-    )
-
-    result["cvd"] = cvd
-    result["aggressor"] = aggressor
-    result["volume"] = volume
-    result["oi"] = oi
-
-    available_count = sum(
-        x is not None
-        for x in (
-            cvd,
-            aggressor,
-            volume,
-            oi
-        )
-    )
-
-    if available_count == 0:
-
-        result["reason"] = (
-            "NO ANALYTICS DATA"
-        )
-
-        return result
-
-    result["available"] = True
-
-    score = 0
-
-    # --------------------------------------------------------
-    # Aggressor differential
-    # --------------------------------------------------------
-
-    if aggressor:
-
-        if direction == "LONG":
-
-            if aggressor["direction"] == "BUY":
-                score += 2
-
-            elif aggressor["direction"] == "SELL":
-                score -= 2
-
-        else:
-
-            if aggressor["direction"] == "SELL":
-                score += 2
-
-            elif aggressor["direction"] == "BUY":
-                score -= 2
-
-    # --------------------------------------------------------
-    # CVD
-    # --------------------------------------------------------
-
-    if cvd:
-
-        if direction == "LONG":
-
-            if cvd["direction"] == "BUY":
-                score += 2
-
-            elif cvd["direction"] == "SELL":
-                score -= 2
-
-        else:
-
-            if cvd["direction"] == "SELL":
-                score += 2
-
-            elif cvd["direction"] == "BUY":
-                score -= 2
-
-    # --------------------------------------------------------
-    # Volume
-    # --------------------------------------------------------
-
-    if volume:
-
-        if (
-            volume["rvol"]
-            >= WHALE_MIN_RVOL
-        ):
-
-            score += 1
-
-        if (
-            volume["rvol"]
-            >= WHALE_STRONG_RVOL
-        ):
-
-            score += 1
-
-    # --------------------------------------------------------
-    # Open Interest
-    # --------------------------------------------------------
-
-    if (
-        WHALE_OI_CONFIRM
-        and oi
-    ):
-
-        # Increasing OI confirms
-        # fresh participation.
-        #
-        # It does NOT determine direction
-        # by itself.
-
-        if oi["direction"] == "UP":
-
-            score += 1
-
-    result["score"] = score
-
-    if score >= WHALE_MIN_SCORE:
-
-        result["direction"] = direction
-
-        result["reason"] = (
-            "WHALE FLOW CONFIRMS"
-        )
-
-    elif score <= -WHALE_MIN_SCORE:
-
-        result["direction"] = (
-            "OPPOSITE"
-        )
-
-        result["reason"] = (
-            "WHALE FLOW OPPOSES"
-        )
-
-    else:
-
-        result["direction"] = (
-            "NEUTRAL"
-        )
-
-        result["reason"] = (
-            "WHALE FLOW WEAK"
-        )
-
-    return result
-
-
-# ============================================================
-# WHALE TEXT
-# ============================================================
-
-def whale_flow_text(
-    whale
-):
-
-    if whale is None:
-
-        return (
-            "🐋 Whale Flow: N/A"
-        )
-
-    if not whale.get(
-        "available",
-        False
-    ):
-
-        return (
-            "🐋 Whale Flow: NO DATA"
-        )
-
-    direction = whale.get(
-        "direction",
-        "NEUTRAL"
-    )
-
-    score = whale.get(
-        "score",
-        0
-    )
-
-    if direction == "LONG":
-
-        flow = "BUY"
-
-    elif direction == "SHORT":
-
-        flow = "SELL"
-
-    elif direction == "OPPOSITE":
-
-        flow = "OPPOSITE"
-
-    elif direction == "DISABLED":
-
-        flow = "DISABLED"
-
-    else:
-
-        flow = "NEUTRAL"
-
-    lines = []
-
-    lines.append(
-        f"🐋 Whale Flow: {flow}"
-    )
-
-    lines.append(
-        f"Whale Score: {score:+d}"
-    )
-
-    cvd = whale.get(
-        "cvd"
-    )
-
-    if cvd:
-
-        lines.append(
-            "CVD: "
-            f"{cvd['direction']}"
-        )
-
-    aggressor = whale.get(
-        "aggressor"
-    )
-
-    if aggressor:
-
-        lines.append(
-            "Aggressor: "
-            f"{aggressor['direction']}"
-        )
-
-    volume = whale.get(
-        "volume"
-    )
-
-    if volume:
-
-        lines.append(
-            "RVOL: "
-            f"{volume['rvol']:.2f}x"
-        )
-
-    oi = whale.get(
-        "oi"
-    )
-
-    if oi:
-
-        lines.append(
-            "OI: "
-            f"{oi['direction']}"
-        )
-
-    return "\n".join(lines)
-
-
-# ============================================================
-# CLOSED CANDLES
-# ============================================================
-
-def get_closed_candles(
-    candles
-):
-
-    if not candles:
-        return []
-
-    current_hour = (
-        now_ms()
-        // 3_600_000
-    ) * 3_600_000
-
     return [
-        c
-        for c in candles
-        if c["time"]
-        < current_hour
+        dict(position)
+        for position in positions
     ]
 
 
-# ============================================================
-# PIVOTS
-# ============================================================
-
-def is_pivot_high(
-    candles,
-    i
+def total_qty(
+    positions,
 ):
-
-    if i < PIVOT_LEFT:
-        return False
-
-    if (
-        i + PIVOT_RIGHT
-        >= len(candles)
-    ):
-        return False
-
-    price = candles[i]["high"]
-
-    for j in range(
-        i - PIVOT_LEFT,
-        i
-    ):
-
-        if candles[j]["high"] >= price:
-            return False
-
-    for j in range(
-        i + 1,
-        i + PIVOT_RIGHT + 1
-    ):
-
-        if candles[j]["high"] > price:
-            return False
-
-    return True
-
-
-def is_pivot_low(
-    candles,
-    i
-):
-
-    if i < PIVOT_LEFT:
-        return False
-
-    if (
-        i + PIVOT_RIGHT
-        >= len(candles)
-    ):
-        return False
-
-    price = candles[i]["low"]
-
-    for j in range(
-        i - PIVOT_LEFT,
-        i
-    ):
-
-        if candles[j]["low"] <= price:
-            return False
-
-    for j in range(
-        i + 1,
-        i + PIVOT_RIGHT + 1
-    ):
-
-        if candles[j]["low"] < price:
-            return False
-
-    return True
-
-
-def get_pivots(
-    candles
-):
-
-    highs = []
-    lows = []
-
-    start = max(
-        PIVOT_LEFT,
-        len(candles)
-        - LOOKBACK_CANDLES
+    return sum(
+        p["qty"]
+        for p in positions
     )
 
-    end = (
-        len(candles)
-        - PIVOT_RIGHT
-    )
 
-    for i in range(
-        start,
-        end
-    ):
-
-        if is_pivot_high(
-            candles,
-            i
-        ):
-
-            highs.append({
-
-                "index":
-                    i,
-
-                "time":
-                    candles[i]["time"],
-
-                "price":
-                    candles[i]["high"],
-            })
-
-        if is_pivot_low(
-            candles,
-            i
-        ):
-
-            lows.append({
-
-                "index":
-                    i,
-
-                "time":
-                    candles[i]["time"],
-
-                "price":
-                    candles[i]["low"],
-            })
-
-    return highs, lows
-
-
-# ============================================================
-# LINE
-# ============================================================
-
-def line_value(
-    x,
-    x1,
-    y1,
-    x2,
-    y2
+def total_abs_qty(
+    positions,
 ):
-
-    if x1 == x2:
-        return None
-
-    slope = (
-        y2 - y1
-    ) / (
-        x2 - x1
+    return sum(
+        abs(p["qty"])
+        for p in positions
     )
 
+
+def total_notional(
+    positions,
+    price,
+):
+    return sum(
+        abs(p["qty"]) * price
+        for p in positions
+    )
+
+
+def unrealized_pnl(
+    positions,
+    price,
+):
+    return sum(
+        p["qty"]
+        * (
+            price
+            - p["entry_price"]
+        )
+        for p in positions
+    )
+
+
+def signed_entry_value(
+    positions,
+):
+    return sum(
+        p["qty"]
+        * p["entry_price"]
+        for p in positions
+    )
+
+
+# ============================================================
+# EXECUTION PRICE
+# ============================================================
+
+def market_entry_price(
+    raw_price,
+    side,
+):
+    """
+    Buy/long entry pays slippage upward.
+    Sell/short entry receives downward.
+    """
+
+    raw_price = float(raw_price)
+
+    if side == "LONG":
+        return raw_price * (
+            1.0 + SLIPPAGE_RATE
+        )
+
+    return raw_price * (
+        1.0 - SLIPPAGE_RATE
+    )
+
+
+def market_exit_price(
+    raw_price,
+    net_side,
+):
+    """
+    Closing a net long:
+        sell -> worse by slippage
+
+    Closing a net short:
+        buy -> worse by slippage
+    """
+
+    raw_price = float(raw_price)
+
+    if net_side == "LONG":
+        return raw_price * (
+            1.0 - SLIPPAGE_RATE
+        )
+
+    if net_side == "SHORT":
+        return raw_price * (
+            1.0 + SLIPPAGE_RATE
+        )
+
+    return raw_price
+
+
+# ============================================================
+# FEES
+# ============================================================
+
+def trading_fee(
+    qty,
+    execution_price,
+):
     return (
-        y1
-        + slope * (
-            x - x1
-        )
+        abs(qty)
+        * execution_price
+        * TAKER_FEE_RATE
     )
 
 
-def slope_percent(
-    x1,
-    y1,
-    x2,
-    y2
+# ============================================================
+# MARGIN
+# ============================================================
+
+def margin_required(
+    positions,
+    price,
 ):
+    """
+    Conservative initial-style margin approximation.
 
-    if x1 == x2:
-        return 0
+    Uses total absolute notional / leverage.
+    """
 
-    if y1 == 0:
-        return 0
+    notional = total_notional(
+        positions,
+        price,
+    )
 
+    return notional / LEVERAGE
+
+
+def current_equity(
+    cash,
+    positions,
+    price,
+):
     return (
-        (
-            y2 - y1
+        cash
+        + unrealized_pnl(
+            positions,
+            price,
         )
-        /
-        (
-            x2 - x1
-        )
-        /
-        y1
-        * 100
     )
 
 
-# ============================================================
-# DESCENDING RESISTANCE
-# ============================================================
-
-def find_resistance(
-    candles,
-    pivots
+def maintenance_margin(
+    positions,
+    price,
+    maintenance_rate,
 ):
-
-    if len(pivots) < MIN_TOUCHES:
-        return None
-
-    best = None
-
-    for a in range(
-        len(pivots) - 1
-    ):
-
-        for b in range(
-            a + 1,
-            len(pivots)
-        ):
-
-            p1 = pivots[a]
-            p2 = pivots[b]
-
-            x1 = p1["index"]
-            x2 = p2["index"]
-
-            if (
-                x2 - x1
-                < MIN_LINE_LENGTH
-            ):
-                continue
-
-            y1 = p1["price"]
-            y2 = p2["price"]
-
-            slope = slope_percent(
-                x1,
-                y1,
-                x2,
-                y2
-            )
-
-            if (
-                slope
-                >=
-                -MIN_SLOPE_PERCENT_PER_CANDLE
-            ):
-                continue
-
-            touches = []
-
-            valid = True
-
-            for pivot in pivots:
-
-                x = pivot["index"]
-
-                if (
-                    x < x1
-                    or x > x2
-                ):
-                    continue
-
-                line = line_value(
-                    x,
-                    x1,
-                    y1,
-                    x2,
-                    y2
-                )
-
-                if line is None:
-                    continue
-
-                distance = (
-                    abs(
-                        pivot["price"]
-                        - line
-                    )
-                    / line
-                )
-
-                if (
-                    distance
-                    <= TOUCH_TOLERANCE
-                ):
-
-                    touches.append(
-                        pivot
-                    )
-
-            if len(touches) < MIN_TOUCHES:
-                continue
-
-            for i in range(
-                x1,
-                x2 + 1
-            ):
-
-                line = line_value(
-                    i,
-                    x1,
-                    y1,
-                    x2,
-                    y2
-                )
-
-                if line is None:
-                    continue
-
-                if (
-                    candles[i]["close"]
-                    >
-                    line
-                    * (
-                        1
-                        + TOUCH_TOLERANCE
-                    )
-                ):
-
-                    valid = False
-                    break
-
-            if not valid:
-                continue
-
-            candidate = {
-
-                "type":
-                    "DESCENDING_RESISTANCE",
-
-                "start":
-                    p1,
-
-                "end":
-                    p2,
-
-                "touches":
-                    len(touches),
-
-                "score":
-                    len(touches)
-                    * 10000
-                    + x2,
-            }
-
-            if (
-                best is None
-                or candidate["score"]
-                > best["score"]
-            ):
-
-                best = candidate
-
-    return best
+    return (
+        total_notional(
+            positions,
+            price,
+        )
+        * maintenance_rate
+    )
 
 
 # ============================================================
-# ASCENDING SUPPORT
+# EXACT MULTI-LEG LIQUIDATION
 # ============================================================
 
-def find_support(
-    candles,
-    pivots
+def approximate_liquidation_price(
+    cash,
+    positions,
+    maintenance_rate,
 ):
+    """
+    Solve:
 
-    if len(pivots) < MIN_TOUCHES:
+        equity(P)
+          =
+        maintenance_margin(P)
+
+    equity(P):
+
+        cash
+        + sum(
+            qty_i * (P - entry_i)
+          )
+
+    maintenance:
+
+        maintenance_rate
+        * sum(abs(qty_i) * P)
+
+    Therefore:
+
+        P * (
+            sum(qty)
+            - mm * sum(abs(qty))
+        )
+        =
+        sum(qty * entry)
+        - cash
+
+    This is much more appropriate for opposing
+    hedge legs than a weighted-average entry.
+    """
+
+    if not positions:
         return None
 
-    best = None
+    net_qty = total_qty(
+        positions
+    )
 
-    for a in range(
-        len(pivots) - 1
-    ):
+    abs_qty = total_abs_qty(
+        positions
+    )
 
-        for b in range(
-            a + 1,
-            len(pivots)
-        ):
+    if abs_qty <= 0:
+        return None
 
-            p1 = pivots[a]
-            p2 = pivots[b]
+    numerator = (
+        signed_entry_value(
+            positions
+        )
+        - cash
+    )
 
-            x1 = p1["index"]
-            x2 = p2["index"]
+    denominator = (
+        net_qty
+        - (
+            maintenance_rate
+            * abs_qty
+        )
+    )
 
-            if (
-                x2 - x1
-                < MIN_LINE_LENGTH
-            ):
-                continue
+    if abs(denominator) < 1e-12:
+        return None
 
-            y1 = p1["price"]
-            y2 = p2["price"]
+    price = (
+        numerator
+        / denominator
+    )
 
-            slope = slope_percent(
-                x1,
-                y1,
-                x2,
-                y2
-            )
+    if price <= 0:
+        return None
 
-            if (
-                slope
-                <=
-                MIN_SLOPE_PERCENT_PER_CANDLE
-            ):
-                continue
-
-            touches = []
-
-            valid = True
-
-            for pivot in pivots:
-
-                x = pivot["index"]
-
-                if (
-                    x < x1
-                    or x > x2
-                ):
-                    continue
-
-                line = line_value(
-                    x,
-                    x1,
-                    y1,
-                    x2,
-                    y2
-                )
-
-                if line is None:
-                    continue
-
-                distance = (
-                    abs(
-                        pivot["price"]
-                        - line
-                    )
-                    / line
-                )
-
-                if (
-                    distance
-                    <= TOUCH_TOLERANCE
-                ):
-
-                    touches.append(
-                        pivot
-                    )
-
-            if len(touches) < MIN_TOUCHES:
-                continue
-
-            for i in range(
-                x1,
-                x2 + 1
-            ):
-
-                line = line_value(
-                    i,
-                    x1,
-                    y1,
-                    x2,
-                    y2
-                )
-
-                if line is None:
-                    continue
-
-                if (
-                    candles[i]["close"]
-                    <
-                    line
-                    * (
-                        1
-                        - TOUCH_TOLERANCE
-                    )
-                ):
-
-                    valid = False
-                    break
-
-            if not valid:
-                continue
-
-            candidate = {
-
-                "type":
-                    "ASCENDING_SUPPORT",
-
-                "start":
-                    p1,
-
-                "end":
-                    p2,
-
-                "touches":
-                    len(touches),
-
-                "score":
-                    len(touches)
-                    * 10000
-                    + x2,
-            }
-
-            if (
-                best is None
-                or candidate["score"]
-                > best["score"]
-            ):
-
-                best = candidate
-
-    return best
+    return float(price)
 
 
-# ============================================================
-# VALID TP / SL
-# ============================================================
-
-def calculate_levels(
-    candles,
-    highs,
-    lows,
-    direction,
-    entry_index,
-    entry_price
+def liquidation_relevant(
+    liq_price,
+    current_price,
+    positions,
 ):
+    if liq_price is None:
+        return False
 
-    previous_highs = [
-        p
-        for p in highs
-        if p["index"] < entry_index
-    ]
-
-    previous_lows = [
-        p
-        for p in lows
-        if p["index"] < entry_index
-    ]
-
-    if direction == "LONG":
-
-        targets = [
-            p
-            for p in previous_highs
-            if p["price"] > entry_price
-        ]
-
-        targets.sort(
-            key=lambda p:
-                p["price"]
-        )
-
-        tp = (
-            targets[0]
-            if targets
-            else None
-        )
-
-        stops = [
-            p
-            for p in previous_lows
-            if p["price"] < entry_price
-        ]
-
-        stops.sort(
-            key=lambda p:
-                abs(
-                    entry_price
-                    - p["price"]
-                )
-        )
-
-        sl = (
-            stops[0]
-            if stops
-            else None
-        )
-
-        return tp, sl
-
-    targets = [
-        p
-        for p in previous_lows
-        if p["price"] < entry_price
-    ]
-
-    targets.sort(
-        key=lambda p:
-            p["price"],
-        reverse=True
+    net_qty = total_qty(
+        positions
     )
 
-    tp = (
-        targets[0]
-        if targets
-        else None
-    )
+    if net_qty > 0:
+        return (
+            liq_price < current_price
+        )
 
-    stops = [
-        p
-        for p in previous_highs
-        if p["price"] > entry_price
-    ]
+    if net_qty < 0:
+        return (
+            liq_price > current_price
+        )
 
-    stops.sort(
-        key=lambda p:
-            abs(
-                entry_price
-                - p["price"]
-            )
-    )
-
-    sl = (
-        stops[0]
-        if stops
-        else None
-    )
-
-    return tp, sl
+    return False
 
 
 # ============================================================
-# CHECK BREAKOUT
+# TARGET PRICE
 # ============================================================
 
-def check_breakout(
-    candles,
-    trendline,
-    direction
+def target_raw_price(
+    cash,
+    positions,
+    cycle_start_equity,
 ):
+    """
+    Solve the raw market price at which closing the
+    complete hedged position should produce:
 
-    if trendline is None:
+        cycle_start_equity + TARGET_NET_PROFIT
+
+    including:
+        - exit slippage
+        - closing taker fees
+
+    Funding already sits in cash.
+    """
+
+    if not positions:
         return None
 
-    if len(candles) < 2:
-        return None
-
-    latest_i = len(candles) - 1
-    previous_i = latest_i - 1
-
-    latest = candles[latest_i]
-    previous = candles[previous_i]
-
-    start = trendline["start"]
-    end = trendline["end"]
-
-    previous_line = line_value(
-        previous_i,
-        start["index"],
-        start["price"],
-        end["index"],
-        end["price"]
+    net_qty = total_qty(
+        positions
     )
 
-    latest_line = line_value(
-        latest_i,
-        start["index"],
-        start["price"],
-        end["index"],
-        end["price"]
+    abs_qty = total_abs_qty(
+        positions
     )
 
-    if (
-        previous_line is None
-        or latest_line is None
-    ):
+    if abs(net_qty) < 1e-12:
         return None
 
-    if direction == "LONG":
-
-        previous_ok = (
-            previous["close"]
-            <=
-            previous_line
-            * (
-                1
-                + TOUCH_TOLERANCE
-            )
+    signed_entries = (
+        signed_entry_value(
+            positions
         )
+    )
 
-        broke = (
-            latest["close"]
-            >
-            latest_line
-            * (
-                1
-                + TOUCH_TOLERANCE
+    target_equity = (
+        cycle_start_equity
+        + TARGET_NET_PROFIT
+    )
+
+    # Equity after close:
+    #
+    # cash
+    # + net_qty * exec_price
+    # - signed_entries
+    # - abs_qty * exec_price * fee
+    #
+    # = target equity
+
+    denominator = (
+        net_qty
+        - (
+            abs_qty
+            * TAKER_FEE_RATE
+        )
+    )
+
+    if abs(denominator) < 1e-12:
+        return None
+
+    exec_price = (
+        target_equity
+        - cash
+        + signed_entries
+    ) / denominator
+
+    if exec_price <= 0:
+        return None
+
+    if net_qty > 0:
+
+        raw_price = (
+            exec_price
+            / (
+                1.0
+                - SLIPPAGE_RATE
             )
         )
 
     else:
 
-        previous_ok = (
-            previous["close"]
-            >=
-            previous_line
-            * (
-                1
-                - TOUCH_TOLERANCE
+        raw_price = (
+            exec_price
+            / (
+                1.0
+                + SLIPPAGE_RATE
             )
         )
 
-        broke = (
-            latest["close"]
-            <
-            latest_line
+    return float(raw_price)
+
+
+# ============================================================
+# CLOSE POSITION
+# ============================================================
+
+def close_all_positions(
+    cash,
+    positions,
+    raw_exit_price,
+):
+    if not positions:
+        return {
+            "cash_after": cash,
+            "gross_pnl": 0.0,
+            "fees": 0.0,
+            "slippage_cost": 0.0,
+            "positions": [],
+        }
+
+    net_qty = total_qty(
+        positions
+    )
+
+    if net_qty > 0:
+        net_side = "LONG"
+    elif net_qty < 0:
+        net_side = "SHORT"
+    else:
+        net_side = None
+
+    execution_price = market_exit_price(
+        raw_exit_price,
+        net_side,
+    )
+
+    gross_pnl = 0.0
+
+    fees = 0.0
+
+    for p in positions:
+
+        gross_pnl += (
+            p["qty"]
             * (
-                1
-                - TOUCH_TOLERANCE
+                execution_price
+                - p["entry_price"]
             )
         )
 
-    if not (
-        previous_ok
-        and broke
-    ):
-        return None
+        fees += trading_fee(
+            p["qty"],
+            execution_price,
+        )
+
+    # Slippage cost is calculated against
+    # raw exit price for reporting only.
+    #
+    # PnL itself uses execution price.
+
+    slippage_cost = 0.0
+
+    for p in positions:
+
+        ideal_close = (
+            abs(p["qty"])
+            * raw_exit_price
+        )
+
+        actual_close = (
+            abs(p["qty"])
+            * execution_price
+        )
+
+        # For reporting, take the adverse difference.
+        slippage_cost += abs(
+            actual_close
+            - ideal_close
+        )
+
+    cash_after = (
+        cash
+        + gross_pnl
+        - fees
+    )
 
     return {
-
-        "direction":
-            direction,
-
-        "candle_time":
-            latest["time"],
-
-        "entry_price":
-            latest["close"],
-
-        "open":
-            latest["open"],
-
-        "high":
-            latest["high"],
-
-        "low":
-            latest["low"],
-
-        "close":
-            latest["close"],
-
-        "trendline_type":
-            trendline["type"],
-
-        "trendline_start_time":
-            start["time"],
-
-        "trendline_end_time":
-            end["time"],
-
-        "trendline_start_price":
-            start["price"],
-
-        "trendline_end_price":
-            end["price"],
-
-        "trendline_value":
-            latest_line,
-
-        "touches":
-            trendline["touches"],
-
-        "entry_index":
-            latest_i,
+        "cash_after": cash_after,
+        "gross_pnl": gross_pnl,
+        "fees": fees,
+        "slippage_cost": slippage_cost,
+        "execution_price": execution_price,
+        "positions": [],
     }
 
 
 # ============================================================
-# SIGNAL AGE
+# FUNDING LOOKUP
 # ============================================================
 
-def signal_is_fresh(
-    candle_time
-):
+class FundingBook:
 
-    age_hours = (
-        now_ms()
-        - candle_time
-    ) / (
-        60 * 60 * 1000
-    )
+    def __init__(
+        self,
+        funding_df,
+    ):
+        self.events = []
 
-    return (
-        age_hours
-        <= MAX_SIGNAL_AGE_HOURS
-    )
+        if funding_df is None:
+            return
 
+        if funding_df.empty:
+            return
 
-# ============================================================
-# INSERT SIGNAL
-# ============================================================
+        for _, row in funding_df.iterrows():
 
-def insert_signal(
-    signal
-):
+            relative_rate = row.get(
+                "funding_rate_relative"
+            )
 
-    conn = sqlite3.connect(DB_FILE)
+            absolute_rate = row.get(
+                "funding_rate_absolute"
+            )
 
-    cursor = conn.execute("""
-        INSERT OR IGNORE INTO signals (
+            if pd.isna(
+                relative_rate
+            ):
+                relative_rate = None
+            else:
+                relative_rate = float(
+                    relative_rate
+                )
 
-            symbol,
-            direction,
-            candle_time,
-            entry_time,
-            entry_price,
+            if pd.isna(
+                absolute_rate
+            ):
+                absolute_rate = None
+            else:
+                absolute_rate = float(
+                    absolute_rate
+                )
 
-            tp_price,
-            sl_price,
+            self.events.append(
+                {
+                    "timestamp": float(
+                        row["timestamp"]
+                    ),
+                    "relative_rate": (
+                        relative_rate
+                    ),
+                    "absolute_rate": (
+                        absolute_rate
+                    ),
+                }
+            )
 
-            tp_source,
-            sl_source,
-
-            trendline_type,
-
-            trendline_start_time,
-            trendline_end_time,
-
-            trendline_start_price,
-            trendline_end_price,
-
-            trendline_value,
-            touches,
-
-            status,
-
-            created_at
+        self.events.sort(
+            key=lambda x: x["timestamp"]
         )
-        VALUES (
-            ?, ?, ?, ?, ?,
-            ?, ?,
-            ?, ?,
-            ?,
-            ?, ?,
-            ?, ?,
-            ?, ?,
-            'OPEN',
-            ?
-        )
-    """, (
 
-        signal["symbol"],
-        signal["direction"],
-        signal["candle_time"],
-        signal["candle_time"],
-        signal["entry_price"],
+    def events_between(
+        self,
+        start_ts,
+        end_ts,
+    ):
+        return [
+            e
+            for e in self.events
+            if (
+                e["timestamp"] > start_ts
+                and e["timestamp"] <= end_ts
+            )
+        ]
 
-        signal["tp_price"],
-        signal["sl_price"],
 
-        signal["tp_source"],
-        signal["sl_source"],
+# ============================================================
+# APPLY FUNDING
+# ============================================================
 
-        signal["trendline_type"],
+def apply_funding_events(
+    cash,
+    positions,
+    start_ts,
+    end_ts,
+    funding_book,
+    candles_by_ts,
+):
+    """
+    Kraken linear contract:
 
-        signal["trendline_start_time"],
-        signal["trendline_end_time"],
+      positive funding:
+          long pays short
 
-        signal["trendline_start_price"],
-        signal["trendline_end_price"],
+      negative funding:
+          short pays long
 
-        signal["trendline_value"],
-        signal["touches"],
+    Relative funding payout:
 
-        now_seconds(),
-    ))
+        notional
+        * relativeFundingRate
 
-    inserted = (
-        cursor.rowcount == 1
+    Therefore:
+
+        long payment  = +notional * rate
+        short payment = -notional * rate
+
+    Cash is adjusted by:
+
+        cash -= payment
+    """
+
+    total_funding = 0.0
+
+    applied_events = []
+
+    events = funding_book.events_between(
+        start_ts,
+        end_ts,
     )
 
-    conn.commit()
-    conn.close()
+    for event in events:
 
-    return inserted
+        ts = event["timestamp"]
 
+        relative_rate = (
+            event["relative_rate"]
+        )
 
-# ============================================================
-# CURRENT PRICE
-# ============================================================
+        if relative_rate is None:
+            continue
 
-def current_price(
-    symbol,
-    candles
-):
-
-    if not candles:
-        return None
-
-    return candles[-1]["close"]
-
-
-# ============================================================
-# CHECK OPEN TRADES
-# ============================================================
-
-def update_open_trades(
-    price_map
-):
-
-    conn = sqlite3.connect(DB_FILE)
-
-    rows = conn.execute("""
-        SELECT
-            id,
-            symbol,
-            direction,
-            entry_price,
-            tp_price,
-            sl_price,
-            candle_time
-        FROM signals
-        WHERE status = 'OPEN'
-    """).fetchall()
-
-    closed = []
-
-    for row in rows:
-
-        (
-            trade_id,
-            symbol,
-            direction,
-            entry,
-            tp,
-            sl,
-            candle_time
-        ) = row
-
-        price = price_map.get(symbol)
+        price = price_before_timestamp(
+            candles_by_ts,
+            ts,
+        )
 
         if price is None:
             continue
 
-        exit_reason = None
-        exit_price = None
+        payment = 0.0
 
-        if direction == "LONG":
+        for p in positions:
 
-            if (
-                tp is not None
-                and price >= tp
-            ):
+            notional = (
+                abs(p["qty"])
+                * price
+            )
 
-                exit_reason = "TP"
-                exit_price = tp
+            if p["qty"] > 0:
 
-            elif (
-                sl is not None
-                and price <= sl
-            ):
+                # Long pays when rate positive.
+                payment += (
+                    notional
+                    * relative_rate
+                )
 
-                exit_reason = "SL"
-                exit_price = sl
+            elif p["qty"] < 0:
 
-        else:
+                # Short receives when rate positive.
+                payment -= (
+                    notional
+                    * relative_rate
+                )
 
-            if (
-                tp is not None
-                and price <= tp
-            ):
+        cash -= payment
 
-                exit_reason = "TP"
-                exit_price = tp
+        total_funding += payment
 
-            elif (
-                sl is not None
-                and price >= sl
-            ):
-
-                exit_reason = "SL"
-                exit_price = sl
-
-        if exit_reason:
-
-            if direction == "LONG":
-
-                pnl = (
-                    (
-                        exit_price
-                        - entry
-                    )
-                    / entry
-                ) * 100
-
-            else:
-
-                pnl = (
-                    (
-                        entry
-                        - exit_price
-                    )
-                    / entry
-                ) * 100
-
-            conn.execute("""
-                UPDATE signals
-                SET
-                    status = 'CLOSED',
-                    exit_time = ?,
-                    exit_price = ?,
-                    exit_reason = ?,
-                    pnl_percent = ?
-                WHERE id = ?
-            """, (
-
-                now_seconds(),
-                exit_price,
-                exit_reason,
-                pnl,
-                trade_id,
-            ))
-
-            closed.append({
-
-                "symbol":
-                    symbol,
-
-                "direction":
-                    direction,
-
-                "reason":
-                    exit_reason,
-
-                "pnl":
-                    pnl,
-
-                "entry":
-                    entry,
-
-                "exit":
-                    exit_price,
-            })
-
-    conn.commit()
-    conn.close()
-
-    return closed
-
-
-# ============================================================
-# OPEN TRADES
-# ============================================================
-
-def get_open_trades():
-
-    conn = sqlite3.connect(DB_FILE)
-
-    rows = conn.execute("""
-        SELECT
-            id,
-            symbol,
-            direction,
-            entry_time,
-            entry_price,
-            tp_price,
-            sl_price,
-            touches
-        FROM signals
-        WHERE status = 'OPEN'
-        ORDER BY entry_time DESC
-    """).fetchall()
-
-    conn.close()
-
-    return rows
-
-
-# ============================================================
-# PERFORMANCE
-# ============================================================
-
-def get_performance():
-
-    conn = sqlite3.connect(DB_FILE)
-
-    total = conn.execute("""
-        SELECT COUNT(*)
-        FROM signals
-        WHERE status = 'CLOSED'
-    """).fetchone()[0]
-
-    wins = conn.execute("""
-        SELECT COUNT(*)
-        FROM signals
-        WHERE status = 'CLOSED'
-        AND pnl_percent > 0
-    """).fetchone()[0]
-
-    losses = conn.execute("""
-        SELECT COUNT(*)
-        FROM signals
-        WHERE status = 'CLOSED'
-        AND pnl_percent <= 0
-    """).fetchone()[0]
-
-    pnl = conn.execute("""
-        SELECT COALESCE(
-            SUM(pnl_percent),
-            0
-        )
-        FROM signals
-        WHERE status = 'CLOSED'
-    """).fetchone()[0]
-
-    conn.close()
-
-    if total > 0:
-
-        win_rate = (
-            wins
-            / total
-            * 100
+        applied_events.append(
+            {
+                "timestamp": ts,
+                "price": price,
+                "relative_rate": (
+                    relative_rate
+                ),
+                "absolute_rate": (
+                    event["absolute_rate"]
+                ),
+                "payment": payment,
+            }
         )
 
-        loss_rate = (
-            losses
-            / total
-            * 100
-        )
+    return (
+        cash,
+        total_funding,
+        applied_events,
+    )
 
+
+# ============================================================
+# PRICE AT / BEFORE FUNDING EVENT
+# ============================================================
+
+def price_before_timestamp(
+    candles_by_ts,
+    timestamp,
+):
+    if not candles_by_ts:
+        return None
+
+    eligible = [
+        ts
+        for ts in candles_by_ts.keys()
+        if ts <= timestamp
+    ]
+
+    if not eligible:
+        return None
+
+    ts = max(eligible)
+
+    row = candles_by_ts[ts]
+
+    return float(
+        row["close"]
+    )
+
+
+# ============================================================
+# HEDGE ENTRY
+# ============================================================
+
+def add_hedge(
+    cash,
+    positions,
+    raw_price,
+    original_qty,
+    hedge_ratio,
+    hedge_number,
+    direction,
+):
+    """
+    Hedge is opposite to the original direction.
+
+    Example:
+
+        original LONG
+        50% hedge
+        -> SHORT qty = original_qty * 0.50
+    """
+
+    if direction == "LONG":
+        hedge_side = "SHORT"
+        hedge_sign = -1.0
     else:
+        hedge_side = "LONG"
+        hedge_sign = 1.0
 
-        win_rate = 0
-        loss_rate = 0
+    hedge_qty = (
+        abs(original_qty)
+        * hedge_ratio
+    )
+
+    if hedge_qty < MIN_QTY:
+        return {
+            "success": False,
+            "reason": "HEDGE_BELOW_MIN_LOT",
+            "cash": cash,
+            "positions": positions,
+            "qty": hedge_qty,
+        }
+
+    execution_price = market_entry_price(
+        raw_price,
+        hedge_side,
+    )
+
+    fee = trading_fee(
+        hedge_qty,
+        execution_price,
+    )
+
+    # Fee must be available in cash.
+    if cash < fee:
+        return {
+            "success": False,
+            "reason": "INSUFFICIENT_CASH_FOR_FEE",
+            "cash": cash,
+            "positions": positions,
+            "qty": hedge_qty,
+        }
+
+    cash -= fee
+
+    positions.append(
+        {
+            "leg": (
+                f"HEDGE_{hedge_number}"
+            ),
+            "side": hedge_side,
+            "qty": (
+                hedge_sign
+                * hedge_qty
+            ),
+            "entry_price": (
+                execution_price
+            ),
+            "entry_raw_price": (
+                raw_price
+            ),
+            "fee": fee,
+            "hedge_number": (
+                hedge_number
+            ),
+        }
+    )
 
     return {
-
-        "total":
-            total,
-
-        "wins":
-            wins,
-
-        "losses":
-            losses,
-
-        "win_rate":
-            win_rate,
-
-        "loss_rate":
-            loss_rate,
-
-        "pnl":
-            pnl,
+        "success": True,
+        "reason": "HEDGE_ADDED",
+        "cash": cash,
+        "positions": positions,
+        "qty": hedge_qty,
+        "execution_price": execution_price,
+        "fee": fee,
     }
 
 
 # ============================================================
-# PERCENT TO TP / SL
+# MARGIN CHECK FOR NEW HEDGE
 # ============================================================
 
-def distance_percent(
-    direction,
-    current,
-    level
+def hedge_margin_allowed(
+    cash,
+    positions,
+    new_qty,
+    price,
+    maintenance_rate,
 ):
+    """
+    Conservative availability check.
 
-    if (
-        current is None
-        or level is None
-        or current == 0
-    ):
-        return None
+    Existing total notional + new leg notional
+    must fit within available collateral under
+    the configured leverage approximation.
+    """
 
-    if direction == "LONG":
+    existing_notional = total_notional(
+        positions,
+        price,
+    )
 
-        return (
-            (
-                level
-                - current
-            )
-            / current
-            * 100
-        )
+    new_notional = (
+        abs(new_qty)
+        * price
+    )
+
+    required_margin = (
+        existing_notional
+        + new_notional
+    ) / LEVERAGE
+
+    estimated_fee = trading_fee(
+        new_qty,
+        price,
+    )
 
     return (
-        (
-            current
-            - level
-        )
-        / current
-        * 100
+        required_margin
+        + estimated_fee
+        <= max(cash, 0.0)
     )
 
 
-def current_pnl_percent(
+# ============================================================
+# INITIAL ENTRY
+# ============================================================
+
+def initial_entry(
+    raw_price,
     direction,
-    entry,
-    current
 ):
-
-    if (
-        entry is None
-        or current is None
-        or entry == 0
-    ):
-        return 0
-
-    if direction == "LONG":
-
-        return (
-            (
-                current
-                - entry
-            )
-            / entry
-            * 100
-        )
-
-    return (
-        (
-            entry
-            - current
-        )
-        / entry
-        * 100
-    )
-
-
-# ============================================================
-# TELEGRAM MESSAGE
-# ============================================================
-
-def send_telegram(
-    message
-):
-
-    if not TELEGRAM_BOT_TOKEN:
-        print(
-            "[TELEGRAM] "
-            "Message skipped: bot token missing"
-        )
-        return False
-
-    if not TELEGRAM_CHAT_ID:
-        print(
-            "[TELEGRAM] "
-            "Message skipped: chat ID missing"
-        )
-        return False
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}"
-        "/sendMessage"
-    )
-
-    try:
-
-        r = SESSION.post(
-            url,
-            json={
-                "chat_id":
-                    TELEGRAM_CHAT_ID,
-
-                "text":
-                    message,
-
-                "disable_web_page_preview":
-                    True,
-            },
-            timeout=20
-        )
-
-        if not r.ok:
-
-            print(
-                "[ERROR] Telegram sendMessage:",
-                r.status_code,
-                r.text[:500]
-            )
-
-            return False
-
-        data = r.json()
-
-        if not data.get("ok"):
-
-            print(
-                "[ERROR] Telegram API:",
-                data
-            )
-
-            return False
-
-        print(
-            "[TELEGRAM] Message sent"
-        )
-
-        return True
-
-    except Exception as exc:
-
-        print(
-            "[ERROR] Telegram:",
-            exc
-        )
-
-        return False
-
-
-# ============================================================
-# TELEGRAM PHOTO
-# ============================================================
-
-def send_telegram_photo(
-    path,
-    caption=""
-):
-
-    if not TELEGRAM_BOT_TOKEN:
-
-        print(
-            "[TELEGRAM] "
-            "Photo skipped: bot token missing"
-        )
-
-        return False
-
-    if not TELEGRAM_CHAT_ID:
-
-        print(
-            "[TELEGRAM] "
-            "Photo skipped: chat ID missing"
-        )
-
-        return False
-
-    if not os.path.exists(path):
-
-        print(
-            "[TELEGRAM] "
-            "Photo skipped: file not found"
-        )
-
-        return False
-
-    url = (
-        "https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}"
-        "/sendPhoto"
-    )
-
-    try:
-
-        with open(
-            path,
-            "rb"
-        ) as photo:
-
-            r = SESSION.post(
-                url,
-                data={
-                    "chat_id":
-                        TELEGRAM_CHAT_ID,
-
-                    "caption":
-                        caption,
-                },
-                files={
-                    "photo":
-                        photo
-                },
-                timeout=40
-            )
-
-        if not r.ok:
-
-            print(
-                "[ERROR] Telegram sendPhoto:",
-                r.status_code,
-                r.text[:500]
-            )
-
-            return False
-
-        data = r.json()
-
-        if not data.get("ok"):
-
-            print(
-                "[ERROR] Telegram photo API:",
-                data
-            )
-
-            return False
-
-        print(
-            "[TELEGRAM] Photo sent"
-        )
-
-        return True
-
-    except Exception as exc:
-
-        print(
-            "[ERROR] Telegram photo:",
-            exc
-        )
-
-        return False
-
-
-# ============================================================
-# CHART
-# ============================================================
-
-def create_signal_chart(
-    symbol,
-    candles,
-    highs,
-    lows,
-    signal,
-    tp_price,
-    sl_price
-):
-
-    df = pd.DataFrame(
-        candles[-CHART_CANDLES:]
-    )
-
-    if df.empty:
+    if raw_price <= 0:
         return None
 
-    df["time"] = pd.to_datetime(
-        df["time"],
-        unit="ms",
-        utc=True
+    qty = (
+        INITIAL_NOTIONAL
+        / raw_price
     )
 
-    fig, ax = plt.subplots(
-        figsize=(13, 7)
-    )
+    # IMPORTANT:
+    # Do NOT round up to minimum lot.
+    # That would silently increase the user's $10
+    # initial notional.
 
-    for i, row in df.iterrows():
-
-        x = i
-
-        op = row["open"]
-        hi = row["high"]
-        lo = row["low"]
-        cl = row["close"]
-
-        if cl >= op:
-
-            body_bottom = op
-            body_height = cl - op
-
-        else:
-
-            body_bottom = cl
-            body_height = op - cl
-
-        ax.vlines(
-            x,
-            lo,
-            hi,
-            linewidth=1
-        )
-
-        ax.add_patch(
-            plt.Rectangle(
-                (
-                    x - 0.3,
-                    body_bottom
-                ),
-                0.6,
-                max(
-                    body_height,
-                    abs(cl) * 0.00001
-                ),
-            )
-        )
-
-    chart_start_time = (
-        candles[-CHART_CANDLES]["time"]
-    )
-
-    chart_candles = (
-        candles[-CHART_CANDLES:]
-    )
-
-    for pivot in highs:
-
-        if (
-            pivot["time"]
-            >= chart_start_time
-        ):
-
-            index = next(
-                (
-                    i
-                    for i, c
-                    in enumerate(
-                        chart_candles
-                    )
-                    if c["time"]
-                    == pivot["time"]
-                ),
-                None
-            )
-
-            if index is not None:
-
-                ax.scatter(
-                    index,
-                    pivot["price"],
-                    marker="^",
-                    s=45
-                )
-
-    for pivot in lows:
-
-        if (
-            pivot["time"]
-            >= chart_start_time
-        ):
-
-            index = next(
-                (
-                    i
-                    for i, c
-                    in enumerate(
-                        chart_candles
-                    )
-                    if c["time"]
-                    == pivot["time"]
-                ),
-                None
-            )
-
-            if index is not None:
-
-                ax.scatter(
-                    index,
-                    pivot["price"],
-                    marker="v",
-                    s=45
-                )
-
-    # --------------------------------------------------------
-    # Trendline
-    # --------------------------------------------------------
-
-    start_time = signal[
-        "trendline_start_time"
-    ]
-
-    end_time = signal[
-        "trendline_end_time"
-    ]
-
-    start_price = signal[
-        "trendline_start_price"
-    ]
-
-    end_price = signal[
-        "trendline_end_price"
-    ]
-
-    start_index = None
-    end_index = None
-
-    for i, candle in enumerate(candles):
-
-        if candle["time"] == start_time:
-            start_index = i
-
-        if candle["time"] == end_time:
-            end_index = i
-
-    if (
-        start_index is not None
-        and end_index is not None
-    ):
-
-        line_x = []
-        line_y = []
-
-        chart_offset = (
-            len(candles)
-            - CHART_CANDLES
-        )
-
-        for i in range(
-            max(
-                start_index,
-                chart_offset
+    if qty < MIN_QTY:
+        return {
+            "success": False,
+            "reason": (
+                "INITIAL_NOTIONAL_BELOW_MIN_LOT"
             ),
-            len(candles)
-        ):
+            "qty": qty,
+            "required_notional": (
+                MIN_QTY * raw_price
+            ),
+        }
 
-            value = line_value(
-                i,
-                start_index,
-                start_price,
-                end_index,
-                end_price
-            )
+    side = direction
 
-            if value is not None:
+    execution_price = market_entry_price(
+        raw_price,
+        side,
+    )
 
-                line_x.append(
-                    i - chart_offset
+    fee = trading_fee(
+        qty,
+        execution_price,
+    )
+
+    signed_qty = (
+        qty
+        if direction == "LONG"
+        else -qty
+    )
+
+    position = {
+        "leg": "INITIAL",
+        "side": direction,
+        "qty": signed_qty,
+        "entry_price": execution_price,
+        "entry_raw_price": raw_price,
+        "fee": fee,
+        "hedge_number": 0,
+    }
+
+    return {
+        "success": True,
+        "position": position,
+        "qty": qty,
+        "execution_price": execution_price,
+        "fee": fee,
+    }
+
+
+# ============================================================
+# CANDLE RANGE HIT
+# ============================================================
+
+def price_in_candle(
+    price,
+    candle,
+):
+    if price is None:
+        return False
+
+    return (
+        candle["low"]
+        <= price
+        <= candle["high"]
+    )
+
+
+# ============================================================
+# MAX DRAWDOWN TRACKING
+# ============================================================
+
+def update_drawdown(
+    cycle,
+    equity,
+):
+    if equity > cycle["peak_equity"]:
+        cycle["peak_equity"] = equity
+
+    dd = (
+        equity
+        - cycle["peak_equity"]
+    )
+
+    if dd < cycle["max_drawdown"]:
+        cycle["max_drawdown"] = dd
+
+
+# ============================================================
+# CYCLE SIMULATION
+# ============================================================
+
+def simulate_cycle(
+    candles,
+    start_index,
+    direction,
+    model_name,
+    hedge_ratio,
+    funding_book,
+    candles_by_ts,
+    maintenance_rate,
+    account_start,
+):
+    """
+    One independent sequential cycle.
+
+    Entry occurs at the close of start_index.
+
+    From the next candle onward:
+      1. funding
+      2. liquidation check
+      3. target check
+      4. one hedge maximum per candle
+
+    Conservative rule:
+      if hedge trigger and liquidation are both
+      inside the same candle, liquidation wins.
+    """
+
+    if (
+        start_index < 0
+        or start_index >= len(candles)
+    ):
+        return None
+
+    entry_candle = candles.iloc[
+        start_index
+    ]
+
+    entry_raw_price = float(
+        entry_candle["close"]
+    )
+
+    entry_ts = float(
+        entry_candle["timestamp"]
+    )
+
+    entry_result = initial_entry(
+        entry_raw_price,
+        direction,
+    )
+
+    if not entry_result["success"]:
+
+        return {
+            "status": "BLOCKED",
+            "blocked_reason": (
+                entry_result["reason"]
+            ),
+            "entry_timestamp": entry_ts,
+            "entry_price": entry_raw_price,
+            "direction": direction,
+            "model": model_name,
+            "account_start": account_start,
+            "required_notional": (
+                entry_result.get(
+                    "required_notional"
                 )
+            ),
+        }
 
-                line_y.append(
-                    value
-                )
+    positions = [
+        entry_result["position"]
+    ]
 
-        if line_x:
+    cash = (
+        account_start
+        - entry_result["fee"]
+    )
 
-            ax.plot(
-                line_x,
-                line_y,
-                linewidth=2
-            )
+    initial_qty = (
+        entry_result["qty"]
+    )
+
+    cycle = {
+        "status": "OPEN",
+        "model": model_name,
+        "direction": direction,
+        "hedge_ratio": hedge_ratio,
+        "entry_timestamp": entry_ts,
+        "entry_price": (
+            entry_result[
+                "execution_price"
+            ]
+        ),
+        "entry_raw_price": (
+            entry_raw_price
+        ),
+        "initial_qty": initial_qty,
+        "cash_start": account_start,
+        "cash": cash,
+        "positions": positions,
+        "hedges": [],
+        "hedge_count": 0,
+        "funding": 0.0,
+        "fees": entry_result["fee"],
+        "slippage": 0.0,
+        "gross_pnl": 0.0,
+        "max_drawdown": 0.0,
+        "peak_equity": account_start,
+        "min_equity": account_start,
+        "max_margin": 0.0,
+        "blocked_hedges": 0,
+        "exit_timestamp": None,
+        "exit_price": None,
+        "exit_reason": None,
+        "exit_execution_price": None,
+        "duration_minutes": None,
+        "equity_at_exit": None,
+    }
 
     # --------------------------------------------------------
-    # Breakout
+    # First hedge trigger
+    #
+    # Trigger is measured from initial entry.
+    # After a hedge, the next trigger is measured from
+    # the latest hedge execution price.
     # --------------------------------------------------------
 
-    breakout_index = None
+    reference_price = (
+        entry_result[
+            "execution_price"
+        ]
+    )
 
-    for i, candle in enumerate(
-        chart_candles
+    if direction == "LONG":
+        next_trigger = (
+            reference_price
+            * (
+                1.0
+                - HEDGE_TRIGGER_PCT
+            )
+        )
+    else:
+        next_trigger = (
+            reference_price
+            * (
+                1.0
+                + HEDGE_TRIGGER_PCT
+            )
+        )
+
+    # --------------------------------------------------------
+    # Iterate forward
+    # --------------------------------------------------------
+
+    for i in range(
+        start_index + 1,
+        len(candles),
     ):
 
-        if (
-            candle["time"]
-            == signal["candle_time"]
+        candle = candles.iloc[i]
+
+        ts = float(
+            candle["timestamp"]
+        )
+
+        high = float(
+            candle["high"]
+        )
+
+        low = float(
+            candle["low"]
+        )
+
+        close = float(
+            candle["close"]
+        )
+
+        # ----------------------------------------------------
+        # Apply funding first for events since previous candle.
+        # ----------------------------------------------------
+
+        previous_ts = float(
+            candles.iloc[i - 1]["timestamp"]
+        )
+
+        (
+            cash,
+            funding_payment,
+            funding_events,
+        ) = apply_funding_events(
+            cash,
+            positions,
+            previous_ts,
+            ts,
+            funding_book,
+            candles_by_ts,
+        )
+
+        cycle["cash"] = cash
+
+        cycle["funding"] += (
+            funding_payment
+        )
+
+        # ----------------------------------------------------
+        # Equity at candle close
+        # ----------------------------------------------------
+
+        equity = current_equity(
+            cash,
+            positions,
+            close,
+        )
+
+        cycle["min_equity"] = min(
+            cycle["min_equity"],
+            equity,
+        )
+
+        update_drawdown(
+            cycle,
+            equity,
+        )
+
+        margin = margin_required(
+            positions,
+            close,
+        )
+
+        cycle["max_margin"] = max(
+            cycle["max_margin"],
+            margin,
+        )
+
+        # ----------------------------------------------------
+        # Liquidation price
+        # ----------------------------------------------------
+
+        liq_price = (
+            approximate_liquidation_price(
+                cash,
+                positions,
+                maintenance_rate,
+            )
+        )
+
+        liq_hit = False
+
+        if liquidation_relevant(
+            liq_price,
+            close,
+            positions,
         ):
 
-            breakout_index = i
+            net_qty = total_qty(
+                positions
+            )
+
+            if net_qty > 0:
+                liq_hit = (
+                    low
+                    <= liq_price
+                )
+            elif net_qty < 0:
+                liq_hit = (
+                    high
+                    >= liq_price
+                )
+
+        # ----------------------------------------------------
+        # Target price
+        # ----------------------------------------------------
+
+        target_price = (
+            target_raw_price(
+                cash,
+                positions,
+                cycle["cash_start"],
+            )
+        )
+
+        target_hit = (
+            target_price is not None
+            and price_in_candle(
+                target_price,
+                candle,
+            )
+        )
+
+        # ----------------------------------------------------
+        # Conservative priority:
+        #
+        # Liquidation wins over target if both are
+        # touched in same candle.
+        # ----------------------------------------------------
+
+        if liq_hit:
+
+            exit_raw = (
+                liq_price
+            )
+
+            closed = close_all_positions(
+                cash,
+                positions,
+                exit_raw,
+            )
+
+            cash_after = max(
+                0.0,
+                closed["cash_after"],
+            )
+
+            cycle["cash"] = cash_after
+
+            cycle["gross_pnl"] += (
+                closed["gross_pnl"]
+            )
+
+            cycle["fees"] += (
+                closed["fees"]
+            )
+
+            cycle["slippage"] += (
+                closed["slippage_cost"]
+            )
+
+            cycle["exit_timestamp"] = ts
+
+            cycle["exit_price"] = (
+                exit_raw
+            )
+
+            cycle["exit_execution_price"] = (
+                closed["execution_price"]
+            )
+
+            cycle["exit_reason"] = (
+                "LIQUIDATION"
+            )
+
+            cycle["equity_at_exit"] = (
+                cash_after
+            )
+
+            cycle["positions"] = []
+
+            cycle["duration_minutes"] = (
+                (
+                    ts
+                    - cycle["entry_timestamp"]
+                )
+                / 60.0
+            )
+
+            cycle["status"] = "CLOSED"
+
+            return finalize_cycle(
+                cycle
+            )
+
+        # ----------------------------------------------------
+        # Target hit
+        # ----------------------------------------------------
+
+        if target_hit:
+
+            exit_raw = (
+                target_price
+            )
+
+            closed = close_all_positions(
+                cash,
+                positions,
+                exit_raw,
+            )
+
+            cycle["cash"] = (
+                closed["cash_after"]
+            )
+
+            cycle["gross_pnl"] += (
+                closed["gross_pnl"]
+            )
+
+            cycle["fees"] += (
+                closed["fees"]
+            )
+
+            cycle["slippage"] += (
+                closed["slippage_cost"]
+            )
+
+            cycle["exit_timestamp"] = ts
+
+            cycle["exit_price"] = (
+                exit_raw
+            )
+
+            cycle["exit_execution_price"] = (
+                closed["execution_price"]
+            )
+
+            cycle["exit_reason"] = (
+                "TARGET_+0.20"
+            )
+
+            cycle["equity_at_exit"] = (
+                closed["cash_after"]
+            )
+
+            cycle["positions"] = []
+
+            cycle["duration_minutes"] = (
+                (
+                    ts
+                    - cycle["entry_timestamp"]
+                )
+                / 60.0
+            )
+
+            cycle["status"] = "CLOSED"
+
+            return finalize_cycle(
+                cycle
+            )
+
+        # ----------------------------------------------------
+        # Hedge trigger
+        #
+        # Only ONE hedge per candle.
+        #
+        # This is deliberately conservative because a 5m
+        # OHLC candle does not tell us whether the price
+        # crossed trigger #1 and trigger #2 in which order.
+        # ----------------------------------------------------
+
+        if cycle["hedge_count"] < MAX_HEDGES:
+
+            trigger_hit = False
+
+            if direction == "LONG":
+                trigger_hit = (
+                    low
+                    <= next_trigger
+                )
+            else:
+                trigger_hit = (
+                    high
+                    >= next_trigger
+                )
+
+            if trigger_hit:
+
+                hedge_qty = (
+                    abs(initial_qty)
+                    * hedge_ratio
+                )
+
+                allowed = hedge_margin_allowed(
+                    cash,
+                    positions,
+                    hedge_qty,
+                    next_trigger,
+                    maintenance_rate,
+                )
+
+                if not allowed:
+
+                    cycle[
+                        "blocked_hedges"
+                    ] += 1
+
+                else:
+
+                    hedge_result = add_hedge(
+                        cash,
+                        positions,
+                        next_trigger,
+                        initial_qty,
+                        hedge_ratio,
+                        cycle[
+                            "hedge_count"
+                        ] + 1,
+                        direction,
+                    )
+
+                    if hedge_result[
+                        "success"
+                    ]:
+
+                        cash = (
+                            hedge_result[
+                                "cash"
+                            ]
+                        )
+
+                        positions = (
+                            hedge_result[
+                                "positions"
+                            ]
+                        )
+
+                        cycle[
+                            "hedge_count"
+                        ] += 1
+
+                        cycle["fees"] += (
+                            hedge_result["fee"]
+                        )
+
+                        cycle["hedges"].append(
+                            {
+                                "hedge_number": (
+                                    cycle[
+                                        "hedge_count"
+                                    ]
+                                ),
+                                "raw_price": (
+                                    next_trigger
+                                ),
+                                "execution_price": (
+                                    hedge_result[
+                                        "execution_price"
+                                    ]
+                                ),
+                                "qty": (
+                                    hedge_result[
+                                        "qty"
+                                    ]
+                                ),
+                                "fee": (
+                                    hedge_result[
+                                        "fee"
+                                    ]
+                                ),
+                                "timestamp": ts,
+                            }
+                        )
+
+                        # Next trigger from latest hedge.
+                        reference_price = (
+                            hedge_result[
+                                "execution_price"
+                            ]
+                        )
+
+                        if direction == "LONG":
+                            next_trigger = (
+                                reference_price
+                                * (
+                                    1.0
+                                    - HEDGE_TRIGGER_PCT
+                                )
+                            )
+                        else:
+                            next_trigger = (
+                                reference_price
+                                * (
+                                    1.0
+                                    + HEDGE_TRIGGER_PCT
+                                )
+                            )
+
+        # ----------------------------------------------------
+        # Continue.
+        # ----------------------------------------------------
+
+    # ========================================================
+    # End of data.
+    #
+    # Close at final candle close.
+    # ========================================================
+
+    last_candle = candles.iloc[-1]
+
+    final_ts = float(
+        last_candle["timestamp"]
+    )
+
+    final_raw = float(
+        last_candle["close"]
+    )
+
+    closed = close_all_positions(
+        cash,
+        positions,
+        final_raw,
+    )
+
+    cycle["cash"] = (
+        closed["cash_after"]
+    )
+
+    cycle["gross_pnl"] += (
+        closed["gross_pnl"]
+    )
+
+    cycle["fees"] += (
+        closed["fees"]
+    )
+
+    cycle["slippage"] += (
+        closed["slippage_cost"]
+    )
+
+    cycle["exit_timestamp"] = (
+        final_ts
+    )
+
+    cycle["exit_price"] = (
+        final_raw
+    )
+
+    cycle["exit_execution_price"] = (
+        closed["execution_price"]
+    )
+
+    cycle["exit_reason"] = (
+        "END_OF_DATA"
+    )
+
+    cycle["equity_at_exit"] = (
+        closed["cash_after"]
+    )
+
+    cycle["positions"] = []
+
+    cycle["duration_minutes"] = (
+        (
+            final_ts
+            - cycle["entry_timestamp"]
+        )
+        / 60.0
+    )
+
+    cycle["status"] = "CLOSED"
+
+    return finalize_cycle(
+        cycle
+    )
+
+
+# ============================================================
+# FINALIZE CYCLE
+# ============================================================
+
+def finalize_cycle(
+    cycle,
+):
+    start = (
+        cycle["cash_start"]
+    )
+
+    final_equity = (
+        cycle["equity_at_exit"]
+    )
+
+    net_pnl = (
+        final_equity
+        - start
+    )
+
+    cycle["net_pnl"] = net_pnl
+
+    cycle["return_pct"] = (
+        net_pnl
+        / start
+        * 100.0
+        if start > 0
+        else 0.0
+    )
+
+    cycle["success"] = (
+        net_pnl
+        >= TARGET_NET_PROFIT
+        - 1e-9
+    )
+
+    return cycle
+
+
+# ============================================================
+# SERIALIZE CYCLE
+# ============================================================
+
+def cycle_to_row(
+    cycle,
+    cycle_number,
+):
+    row = {
+        "cycle": cycle_number,
+        "model": cycle.get("model"),
+        "direction": cycle.get(
+            "direction"
+        ),
+        "status": cycle.get(
+            "status"
+        ),
+        "entry_time_utc": (
+            ts_to_iso(
+                cycle["entry_timestamp"]
+            )
+            if cycle.get(
+                "entry_timestamp"
+            )
+            else None
+        ),
+        "exit_time_utc": (
+            ts_to_iso(
+                cycle["exit_timestamp"]
+            )
+            if cycle.get(
+                "exit_timestamp"
+            )
+            else None
+        ),
+        "entry_price": cycle.get(
+            "entry_price"
+        ),
+        "entry_raw_price": cycle.get(
+            "entry_raw_price"
+        ),
+        "initial_qty": cycle.get(
+            "initial_qty"
+        ),
+        "hedge_ratio": cycle.get(
+            "hedge_ratio"
+        ),
+        "hedge_count": cycle.get(
+            "hedge_count"
+        ),
+        "hedge1_price": None,
+        "hedge1_qty": None,
+        "hedge2_price": None,
+        "hedge2_qty": None,
+        "exit_price": cycle.get(
+            "exit_price"
+        ),
+        "exit_execution_price": cycle.get(
+            "exit_execution_price"
+        ),
+        "exit_reason": cycle.get(
+            "exit_reason"
+        ),
+        "duration_minutes": cycle.get(
+            "duration_minutes"
+        ),
+        "gross_pnl": cycle.get(
+            "gross_pnl",
+            0.0,
+        ),
+        "fees": cycle.get(
+            "fees",
+            0.0,
+        ),
+        "slippage": cycle.get(
+            "slippage",
+            0.0,
+        ),
+        "funding": cycle.get(
+            "funding",
+            0.0,
+        ),
+        "net_pnl": cycle.get(
+            "net_pnl",
+            0.0,
+        ),
+        "return_pct": cycle.get(
+            "return_pct",
+            0.0,
+        ),
+        "max_drawdown": cycle.get(
+            "max_drawdown",
+            0.0,
+        ),
+        "min_equity": cycle.get(
+            "min_equity",
+            0.0,
+        ),
+        "max_margin": cycle.get(
+            "max_margin",
+            0.0,
+        ),
+        "blocked_hedges": cycle.get(
+            "blocked_hedges",
+            0,
+        ),
+        "account_start": cycle.get(
+            "cash_start"
+        ),
+        "account_end": cycle.get(
+            "equity_at_exit"
+        ),
+        "success": cycle.get(
+            "success",
+            False,
+        ),
+        "blocked_reason": cycle.get(
+            "blocked_reason"
+        ),
+    }
+
+    hedges = cycle.get(
+        "hedges",
+        []
+    )
+
+    if len(hedges) >= 1:
+
+        row["hedge1_price"] = (
+            hedges[0].get(
+                "execution_price"
+            )
+        )
+
+        row["hedge1_qty"] = (
+            hedges[0].get(
+                "qty"
+            )
+        )
+
+    if len(hedges) >= 2:
+
+        row["hedge2_price"] = (
+            hedges[1].get(
+                "execution_price"
+            )
+        )
+
+        row["hedge2_qty"] = (
+            hedges[1].get(
+                "qty"
+            )
+        )
+
+    return row
+
+
+# ============================================================
+# RUN ONE SCENARIO
+# ============================================================
+
+def run_scenario(
+    candles,
+    funding_book,
+    candles_by_ts,
+    model_name,
+    direction,
+    hedge_ratio,
+    maintenance_rate,
+):
+    """
+    Sequential account simulation.
+
+    IMPORTANT:
+      This does NOT add independent $2 profits together.
+
+    The next cycle starts with the actual account balance
+    produced by the previous cycle.
+
+    Therefore:
+        final_account
+        is a real sequential equity result
+        under this model.
+    """
+
+    account = CAPITAL_START
+
+    cycle_rows = []
+
+    equity_rows = []
+
+    blocked_rows = []
+
+    i = 0
+
+    cycle_number = 0
+
+    while i < len(candles):
+
+        cycle_number += 1
+
+        cycle = simulate_cycle(
+            candles,
+            i,
+            direction,
+            model_name,
+            hedge_ratio,
+            funding_book,
+            candles_by_ts,
+            maintenance_rate,
+            account,
+        )
+
+        if cycle is None:
             break
 
-    if breakout_index is not None:
+        # ----------------------------------------------------
+        # Blocked entry
+        # ----------------------------------------------------
 
-        ax.scatter(
-            breakout_index,
-            signal["entry_price"],
-            s=120,
-            marker="*"
+        if cycle["status"] == "BLOCKED":
+
+            blocked_rows.append(
+                {
+                    "model": model_name,
+                    "direction": direction,
+                    "timestamp": (
+                        cycle.get(
+                            "entry_timestamp"
+                        )
+                    ),
+                    "reason": (
+                        cycle.get(
+                            "blocked_reason"
+                        )
+                    ),
+                    "qty": (
+                        cycle.get(
+                            "qty"
+                        )
+                    ),
+                    "required_notional": (
+                        cycle.get(
+                            "required_notional"
+                        )
+                    ),
+                    "account": account,
+                }
+            )
+
+            # Move one candle forward.
+            i += 1
+
+            continue
+
+        # ----------------------------------------------------
+        # Save cycle
+        # ----------------------------------------------------
+
+        cycle_rows.append(
+            cycle_to_row(
+                cycle,
+                cycle_number,
+            )
         )
 
-        ax.annotate(
-            "BREAKOUT",
+        account = max(
+            0.0,
+            float(
+                cycle[
+                    "equity_at_exit"
+                ]
+            ),
+        )
+
+        # ----------------------------------------------------
+        # Equity point
+        # ----------------------------------------------------
+
+        equity_rows.append(
+            {
+                "model": model_name,
+                "direction": direction,
+                "cycle": cycle_number,
+                "timestamp": (
+                    cycle[
+                        "exit_timestamp"
+                    ]
+                ),
+                "equity": account,
+                "cycle_pnl": (
+                    cycle[
+                        "net_pnl"
+                    ]
+                ),
+            }
+        )
+
+        # ----------------------------------------------------
+        # Advance to candle AFTER exit.
+        #
+        # This prevents overlapping cycles and prevents
+        # using the same candle for multiple new entries.
+        # ----------------------------------------------------
+
+        exit_ts = cycle[
+            "exit_timestamp"
+        ]
+
+        future_indexes = candles.index[
+            candles["timestamp"]
+            > exit_ts
+        ]
+
+        if len(future_indexes) == 0:
+            break
+
+        i = int(
+            future_indexes[0]
+        )
+
+        # ----------------------------------------------------
+        # If account is zero, no more trades.
+        # ----------------------------------------------------
+
+        if account <= 0:
+            break
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
+
+    if cycle_rows:
+
+        trades_df = pd.DataFrame(
+            cycle_rows
+        )
+
+        closed_df = trades_df[
+            trades_df["status"]
+            == "CLOSED"
+        ].copy()
+
+    else:
+
+        trades_df = pd.DataFrame()
+
+        closed_df = pd.DataFrame()
+
+    if not closed_df.empty:
+
+        cycles = len(
+            closed_df
+        )
+
+        successful = int(
+            closed_df[
+                "success"
+            ].sum()
+        )
+
+        success_pct = (
+            successful
+            / cycles
+            * 100.0
+        )
+
+        avg_pnl = float(
+            closed_df[
+                "net_pnl"
+            ].mean()
+        )
+
+        max_loss = float(
+            closed_df[
+                "net_pnl"
+            ].min()
+        )
+
+        max_drawdown = float(
+            closed_df[
+                "max_drawdown"
+            ].min()
+        )
+
+        liquidation_count = int(
             (
-                breakout_index,
-                signal["entry_price"]
-            ),
-            xytext=(
-                10,
-                20
-            ),
-            textcoords="offset points"
+                closed_df[
+                    "exit_reason"
+                ]
+                == "LIQUIDATION"
+            ).sum()
         )
 
-        ax.axhline(
-            signal["entry_price"],
-            linewidth=1,
-            linestyle="--"
-        )
-
-        ax.annotate(
-            f"ENTRY {signal['entry_price']:.8g}",
+        target_count = int(
             (
-                breakout_index,
-                signal["entry_price"]
-            ),
-            xytext=(
-                10,
-                -25
-            ),
-            textcoords="offset points"
+                closed_df[
+                    "exit_reason"
+                ]
+                == "TARGET_+0.20"
+            ).sum()
         )
 
-    # --------------------------------------------------------
-    # TP
-    # --------------------------------------------------------
-
-    if tp_price is not None:
-
-        ax.axhline(
-            tp_price,
-            linewidth=1,
-            linestyle="--"
+        final_account = float(
+            account
         )
 
-        ax.text(
-            0.01,
-            tp_price,
-            f"TP {tp_price:.8g}",
-            transform=ax.get_yaxis_transform()
+        final_return_pct = (
+            (
+                final_account
+                / CAPITAL_START
+            )
+            - 1.0
+        ) * 100.0
+
+        total_net_pnl = float(
+            closed_df[
+                "net_pnl"
+            ].sum()
         )
 
-    # --------------------------------------------------------
-    # SL
-    # --------------------------------------------------------
-
-    if sl_price is not None:
-
-        ax.axhline(
-            sl_price,
-            linewidth=1,
-            linestyle="--"
-        )
-
-        ax.text(
-            0.01,
-            sl_price,
-            f"SL {sl_price:.8g}",
-            transform=ax.get_yaxis_transform()
-        )
-
-    ax.set_title(
-        f"{symbol} | 1H Trendline Breakout"
-    )
-
-    ax.set_ylabel(
-        "Price"
-    )
-
-    ax.grid(
-        alpha=0.25
-    )
-
-    fig.autofmt_xdate()
-
-    plt.tight_layout()
-
-    safe_symbol = (
-        symbol.replace(
-            "/",
-            "_"
-        )
-    )
-
-    path = (
-        f"chart_{safe_symbol}.png"
-    )
-
-    plt.savefig(
-        path,
-        dpi=160
-    )
-
-    plt.close(fig)
-
-    return path
-
-
-# ============================================================
-# SIGNAL MESSAGE
-# ============================================================
-
-def signal_message(
-    signal
-):
-
-    emoji = (
-        "🟢"
-        if signal["direction"] == "LONG"
-        else "🔴"
-    )
-
-    tp = signal["tp_price"]
-    sl = signal["sl_price"]
-
-    whale = signal.get(
-        "whale"
-    )
-
-    return (
-        f"{emoji} NEW 1H SIGNAL\n"
-        f"\n"
-        f"{signal['symbol']}\n"
-        f"Direction: "
-        f"{signal['direction']}\n"
-        f"\n"
-        f"Entry: "
-        f"{signal['entry_price']}\n"
-        f"TP: "
-        f"{tp}\n"
-        f"SL: "
-        f"{sl}\n"
-        f"\n"
-        f"TP source: "
-        f"{signal['tp_source']}\n"
-        f"SL source: "
-        f"{signal['sl_source']}\n"
-        f"\n"
-        f"Trendline: "
-        f"{signal['trendline_type']}\n"
-        f"Touches: "
-        f"{signal['touches']}\n"
-        f"\n"
-        f"{whale_flow_text(whale)}\n"
-        f"\n"
-        f"Break: "
-        f"{format_time(signal['candle_time'])}\n"
-        f"\n"
-        f"⏱ Signal age <= 2H\n"
-        f"📌 PAPER ONLY"
-    )
-
-
-# ============================================================
-# PERIODIC REPORT
-# ============================================================
-
-def periodic_report(
-    price_map
-):
-
-    open_trades = get_open_trades()
-
-    performance = get_performance()
-
-    lines = []
-
-    lines.append(
-        "📊 1H TRENDLINE REPORT"
-    )
-
-    lines.append("")
-
-    lines.append(
-        f"Assets scanned: "
-        f"{len(SYMBOLS)}"
-    )
-
-    lines.append(
-        f"🟢 New LONG: "
-        f"{sum(1 for s in NEW_SIGNALS if s['direction'] == 'LONG')}"
-    )
-
-    lines.append(
-        f"🔴 New SHORT: "
-        f"{sum(1 for s in NEW_SIGNALS if s['direction'] == 'SHORT')}"
-    )
-
-    lines.append("")
-
-    lines.append(
-        f"📌 OPEN TRADES: "
-        f"{len(open_trades)}"
-    )
-
-    lines.append("")
-
-    if not open_trades:
-
-        lines.append(
-            "No open paper trades."
+        avg_duration = float(
+            closed_df[
+                "duration_minutes"
+            ].mean()
         )
 
     else:
 
-        for row in open_trades:
-
+        cycles = 0
+        successful = 0
+        success_pct = 0.0
+        avg_pnl = 0.0
+        max_loss = 0.0
+        max_drawdown = 0.0
+        liquidation_count = 0
+        target_count = 0
+        final_account = account
+        final_return_pct = (
             (
-                trade_id,
-                symbol,
-                direction,
-                entry_time,
-                entry,
-                tp,
-                sl,
-                touches
-            ) = row
-
-            current = price_map.get(
-                symbol
+                account
+                / CAPITAL_START
             )
-
-            pnl = current_pnl_percent(
-                direction,
-                entry,
-                current
-            )
-
-            tp_pct = distance_percent(
-                direction,
-                current,
-                tp
-            )
-
-            sl_pct = distance_percent(
-                direction,
-                current,
-                sl
-            )
-
-            emoji = (
-                "🟢"
-                if direction == "LONG"
-                else "🔴"
-            )
-
-            lines.append(
-                f"{emoji} {symbol} "
-                f"{direction}"
-            )
-
-            lines.append(
-                f"Entry: {entry}"
-            )
-
-            lines.append(
-                f"Current: {current}"
-            )
-
-            lines.append(
-                f"P/L: {pnl:+.2f}%"
-            )
-
-            if tp_pct is not None:
-
-                lines.append(
-                    f"TP distance: "
-                    f"{tp_pct:+.2f}%"
-                )
-
-            else:
-
-                lines.append(
-                    "TP distance: N/A"
-                )
-
-            if sl_pct is not None:
-
-                lines.append(
-                    f"SL distance: "
-                    f"{sl_pct:+.2f}%"
-                )
-
-            else:
-
-                lines.append(
-                    "SL distance: N/A"
-                )
-
-            lines.append(
-                f"TP: {tp}"
-            )
-
-            lines.append(
-                f"SL: {sl}"
-            )
-
-            lines.append(
-                f"Touches: {touches}"
-            )
-
-            lines.append("")
-
-    lines.append(
-        "📈 PERFORMANCE"
-    )
-
-    lines.append("")
-
-    lines.append(
-        f"Closed trades: "
-        f"{performance['total']}"
-    )
-
-    lines.append(
-        f"✅ Wins: "
-        f"{performance['wins']}"
-    )
-
-    lines.append(
-        f"❌ Losses: "
-        f"{performance['losses']}"
-    )
-
-    lines.append(
-        f"Win rate: "
-        f"{performance['win_rate']:.2f}%"
-    )
-
-    lines.append(
-        f"Loss rate: "
-        f"{performance['loss_rate']:.2f}%"
-    )
-
-    lines.append(
-        f"PnL: "
-        f"{performance['pnl']:+.2f}%"
-    )
-
-    lines.append("")
-
-    lines.append(
-        "Mode: PAPER ONLY"
-    )
-
-    return "\n".join(lines)
-
-
-# ============================================================
-# ANALYZE SYMBOL
-# ============================================================
-
-def analyze_symbol(
-    symbol,
-    price_map
-):
-
-    print(
-        f"\n[SCAN] {symbol}"
-    )
-
-    candles = fetch_ohlc(symbol)
-
-    if len(candles) < 50:
-
-        SCAN_RESULTS.append({
-            "symbol":
-                symbol,
-
-            "status":
-                "ERROR"
-        })
-
-        return
-
-    price_map[
-        symbol
-    ] = current_price(
-        symbol,
-        candles
-    )
-
-    closed = get_closed_candles(
-        candles
-    )
-
-    if len(closed) < 50:
-
-        SCAN_RESULTS.append({
-            "symbol":
-                symbol,
-
-            "status":
-                "ERROR"
-        })
-
-        return
-
-    analysis = closed[:-1]
-
-    highs, lows = get_pivots(
-        analysis
-    )
-
-    resistance = find_resistance(
-        analysis,
-        highs
-    )
-
-    support = find_support(
-        analysis,
-        lows
-    )
-
-    signal = None
-
-    long_break = check_breakout(
-        closed,
-        resistance,
-        "LONG"
-    )
-
-    if long_break:
-
-        if signal_is_fresh(
-            long_break["candle_time"]
-        ):
-
-            signal = long_break
-
-    short_break = check_breakout(
-        closed,
-        support,
-        "SHORT"
-    )
-
-    if short_break:
-
-        if signal_is_fresh(
-            short_break["candle_time"]
-        ):
-
-            signal = short_break
-
-    if signal:
-
-        # ----------------------------------------------------
-        # WHALE FLOW FILTER
-        # ----------------------------------------------------
-
-        whale = analyze_whale_flow(
-            symbol,
-            signal["direction"]
-        )
-
-        signal["whale"] = whale
-
-        print(
-            f"[WHALE] "
-            f"{symbol} "
-            f"{signal['direction']} | "
-            f"Score={whale['score']} | "
-            f"{whale['reason']}"
-        )
-
-        if (
-            WHALE_FILTER_ENABLED
-            and WHALE_REQUIRE_DATA
-            and not whale["available"]
-        ):
-
-            print(
-                f"[WHALE BLOCK] "
-                f"{symbol} "
-                f"analytics unavailable"
-            )
-
-            SCAN_RESULTS.append({
-                "symbol":
-                    symbol,
-
-                "status":
-                    "WHALE_DATA_ERROR"
-            })
-
-            return
-
-        if (
-            WHALE_FILTER_ENABLED
-            and whale["direction"]
-            != signal["direction"]
-        ):
-
-            print(
-                f"[WHALE BLOCK] "
-                f"{symbol} "
-                f"{signal['direction']} "
-                f"blocked by whale flow"
-            )
-
-            SCAN_RESULTS.append({
-                "symbol":
-                    symbol,
-
-                "status":
-                    "WHALE_BLOCKED"
-            })
-
-            return
-
-        # ----------------------------------------------------
-        # TP / SL
-        # ----------------------------------------------------
-
-        tp, sl = calculate_levels(
-            analysis,
-            highs,
-            lows,
-            signal["direction"],
-            signal["entry_index"],
-            signal["entry_price"]
-        )
-
-        if tp is not None and sl is not None:
-
-            if signal["direction"] == "LONG":
-
-                valid_levels = (
-                    sl["price"]
-                    < signal["entry_price"]
-                    < tp["price"]
-                )
-
-            else:
-
-                valid_levels = (
-                    tp["price"]
-                    < signal["entry_price"]
-                    < sl["price"]
-                )
-
-            if valid_levels:
-
-                signal["tp_price"] = tp["price"]
-
-                signal["sl_price"] = sl["price"]
-
-                signal["tp_source"] = (
-                    "Valid prior swing "
-                    f"{'HIGH' if signal['direction'] == 'LONG' else 'LOW'}"
-                )
-
-                signal["sl_source"] = (
-                    "Valid prior swing "
-                    f"{'LOW' if signal['direction'] == 'LONG' else 'HIGH'}"
-                )
-
-                signal["symbol"] = symbol
-
-                inserted = insert_signal(
-                    signal
-                )
-
-                if inserted:
-
-                    NEW_SIGNALS.append(
-                        signal
-                    )
-
-                    print(
-                        f"[NEW SIGNAL] "
-                        f"{symbol} "
-                        f"{signal['direction']} "
-                        f"| Whale Score="
-                        f"{whale['score']}"
-                    )
-
-                    # Telegram signal
-                    send_telegram(
-                        signal_message(
-                            signal
-                        )
-                    )
-
-                    # Telegram chart
-                    try:
-
-                        chart = create_signal_chart(
-                            symbol,
-                            closed,
-                            highs,
-                            lows,
-                            signal,
-                            signal["tp_price"],
-                            signal["sl_price"]
-                        )
-
-                        if chart:
-
-                            caption = (
-                                f"{symbol} "
-                                f"{signal['direction']} | "
-                                f"1H Trendline Breakout | "
-                                f"Whale Score "
-                                f"{whale['score']:+d}"
-                            )
-
-                            send_telegram_photo(
-                                chart,
-                                caption
-                            )
-
-                            try:
-                                os.remove(chart)
-                            except Exception:
-                                pass
-
-                    except Exception as exc:
-
-                        print(
-                            "[ERROR] Chart:",
-                            exc
-                        )
-
-                else:
-
-                    print(
-                        "[DUPLICATE]",
-                        symbol
-                    )
-
-            else:
-
-                print(
-                    f"[LEVELS INVALID] "
-                    f"{symbol}"
-                )
-
-        else:
-
-            print(
-                f"[NO VALID TP/SL] "
-                f"{symbol}"
-            )
-
-    SCAN_RESULTS.append({
-        "symbol":
-            symbol,
-
-        "status":
-            "OK"
-    })
-
-
-# ============================================================
-# MAIN SCAN
-# ============================================================
-
-def run_scan():
-
-    global SCAN_RESULTS
-    global NEW_SIGNALS
-    global ERRORS
-
-    SCAN_RESULTS = []
-    NEW_SIGNALS = []
-    ERRORS = []
-
-    price_map = {}
-
-    print(
-        "\n"
-        "=========================================================="
-    )
-
-    print(
-        f"KRAKEN FUTURES "
-        f"1H TRENDLINE SCANNER "
-        f"v{VERSION}"
-    )
-
-    print(
-        datetime.now(
-            timezone.utc
-        ).strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
-        )
-    )
-
-    print(
-        f"Assets: {len(SYMBOLS)}"
-    )
-
-    print(
-        "REAL_TRADING = False"
-    )
-
-    print(
-        "PAPER_TRADING = True"
-    )
-
-    print(
-        "WHALE_FILTER_ENABLED = "
-        f"{WHALE_FILTER_ENABLED}"
-    )
-
-    print(
-        "WHALE_MIN_SCORE = "
-        f"{WHALE_MIN_SCORE}"
-    )
-
-    print(
-        "=========================================================="
-    )
-
-    telegram_config_status()
-
-    # --------------------------------------------------------
-    # Scan 40 assets
-    # --------------------------------------------------------
-
-    for symbol in SYMBOLS:
-
-        try:
-
-            analyze_symbol(
-                symbol,
-                price_map
-            )
-
-        except Exception as exc:
-
-            error = (
-                f"{symbol}: "
-                f"{exc}"
-            )
-
-            print(
-                "[ERROR]",
-                error
-            )
-
-            traceback.print_exc()
-
-            ERRORS.append(error)
-
-            SCAN_RESULTS.append({
-                "symbol":
-                    symbol,
-
-                "status":
-                    "ERROR"
-            })
-
-    # --------------------------------------------------------
-    # Update existing open trades
-    # --------------------------------------------------------
-
-    closed_trades = (
-        update_open_trades(
-            price_map
-        )
-    )
-
-    # --------------------------------------------------------
-    # Close notifications
-    # --------------------------------------------------------
-
-    for trade in closed_trades:
-
-        emoji = (
-            "✅"
-            if trade["reason"] == "TP"
-            else "❌"
-        )
-
-        message = (
-            f"{emoji} TRADE CLOSED\n"
-            f"\n"
-            f"{trade['symbol']} "
-            f"{trade['direction']}\n"
-            f"Reason: "
-            f"{trade['reason']}\n"
-            f"Entry: "
-            f"{trade['entry']}\n"
-            f"Exit: "
-            f"{trade['exit']}\n"
-            f"PnL: "
-            f"{trade['pnl']:+.2f}%\n"
-            f"\n"
-            f"📌 PAPER ONLY"
-        )
-
-        send_telegram(message)
-
-    # --------------------------------------------------------
-    # Periodic report
-    # --------------------------------------------------------
-
-    if REPORT_ENABLED:
-
-        report = periodic_report(
-            price_map
-        )
-
-        print(
-            "\n"
-            + report
-        )
-
-        send_telegram(report)
-
-    print(
-        "\n[SCAN COMPLETE]"
+            - 1.0
+        ) * 100.0
+        total_net_pnl = 0.0
+        avg_duration = 0.0
+
+    summary = {
+        "model": model_name,
+        "direction": direction,
+        "capital_start": CAPITAL_START,
+        "cycles": cycles,
+        "successful_cycles": successful,
+        "success_pct": success_pct,
+        "avg_pnl": avg_pnl,
+        "max_loss": max_loss,
+        "max_drawdown": max_drawdown,
+        "liquidations": liquidation_count,
+        "targets": target_count,
+        "total_net_pnl": total_net_pnl,
+        "final_account": final_account,
+        "final_return_pct": final_return_pct,
+        "avg_duration_minutes": avg_duration,
+        "blocked_entries": len(
+            blocked_rows
+        ),
+    }
+
+    return (
+        trades_df,
+        pd.DataFrame(
+            equity_rows
+        ),
+        pd.DataFrame(
+            blocked_rows
+        ),
+        summary,
     )
 
 
@@ -3788,17 +3162,628 @@ def run_scan():
 
 def main():
 
-    init_db()
+    print()
+    print(
+        "=" * 72
+    )
+    print(
+        "BTC HEDGE BACKTEST - KRAKEN FUTURES"
+    )
+    print(
+        f"VERSION {VERSION}"
+    )
+    print(
+        "=" * 72
+    )
 
-    ensure_columns()
+    if REAL_TRADING:
+        raise RuntimeError(
+            "REAL_TRADING must remain False."
+        )
 
-    run_scan()
+    if not PAPER_TRADING:
+        raise RuntimeError(
+            "PAPER_TRADING must remain True."
+        )
+
+    log(
+        "Starting BTC hedge backtest..."
+    )
+
+    # ========================================================
+    # Date range
+    # ========================================================
+
+    end_dt = datetime.now(
+        timezone.utc
+    )
+
+    start_dt = (
+        end_dt
+        - timedelta(
+            days=LOOKBACK_DAYS
+        )
+    )
+
+    start_ts = start_dt.timestamp()
+    end_ts = end_dt.timestamp()
+
+    log(
+        "Range: "
+        f"{start_dt.isoformat()} "
+        "-> "
+        f"{end_dt.isoformat()}"
+    )
+
+    # ========================================================
+    # Instrument
+    # ========================================================
+
+    instrument = (
+        fetch_instrument_info()
+    )
+
+    actual_min_qty = float(
+        instrument.get(
+            "min_qty",
+            MIN_QTY,
+        )
+    )
+
+    actual_tick_size = float(
+        instrument.get(
+            "tick_size",
+            TICK_SIZE,
+        )
+    )
+
+    maintenance_rate = float(
+        instrument.get(
+            "maintenance_margin_rate",
+            MAINTENANCE_MARGIN_RATE,
+        )
+    )
+
+    # Safety:
+    # Kraken documentation currently lists PF_XBTUSD
+    # min lot = 0.0001 BTC.
+    #
+    # Do not accept a suspiciously lower API value.
+    actual_min_qty = max(
+        actual_min_qty,
+        MIN_QTY,
+    )
+
+    log(
+        "Instrument:"
+    )
+
+    log(
+        f"  symbol={SYMBOL}"
+    )
+
+    log(
+        f"  min_qty={actual_min_qty}"
+    )
+
+    log(
+        f"  tick_size={actual_tick_size}"
+    )
+
+    log(
+        f"  maintenance_rate="
+        f"{maintenance_rate}"
+    )
+
+    # ========================================================
+    # OHLC
+    # ========================================================
+
+    log(
+        "Downloading 5m candles..."
+    )
+
+    candles = fetch_ohlc(
+        start_ts,
+        end_ts,
+    )
+
+    # Enforce closed candles only.
+    #
+    # A candle whose timestamp is still in the future
+    # relative to current time is removed.
+    now_ts = datetime.now(
+        timezone.utc
+    ).timestamp()
+
+    candles = candles[
+        (
+            candles["timestamp"]
+            + 300
+            <= now_ts
+        )
+    ].copy()
+
+    candles = candles.sort_values(
+        "timestamp"
+    )
+
+    candles = candles.drop_duplicates(
+        subset=["timestamp"]
+    )
+
+    candles.reset_index(
+        drop=True,
+        inplace=True,
+    )
+
+    if candles.empty:
+        raise RuntimeError(
+            "No closed candles available."
+        )
+
+    log(
+        f"Downloaded {len(candles):,} "
+        "closed candles."
+    )
+
+    log(
+        "First closed candle: "
+        f"{ts_to_iso(candles.iloc[0]['timestamp'])}"
+    )
+
+    log(
+        "Last closed candle: "
+        f"{ts_to_iso(candles.iloc[-1]['timestamp'])}"
+    )
+
+    # ========================================================
+    # Funding
+    # ========================================================
+
+    funding_df = fetch_historical_funding(
+        start_ts,
+        end_ts,
+    )
+
+    log(
+        f"Funding rows used: "
+        f"{len(funding_df):,}"
+    )
+
+    if not funding_df.empty:
+
+        log(
+            "Funding range: "
+            f"{ts_to_iso(funding_df.iloc[0]['timestamp'])}"
+            " -> "
+            f"{ts_to_iso(funding_df.iloc[-1]['timestamp'])}"
+        )
+
+    funding_book = FundingBook(
+        funding_df
+    )
+
+    # ========================================================
+    # Candle lookup
+    # ========================================================
+
+    candles_by_ts = {}
+
+    for _, row in candles.iterrows():
+
+        candles_by_ts[
+            float(
+                row["timestamp"]
+            )
+        ] = {
+            "open": float(
+                row["open"]
+            ),
+            "high": float(
+                row["high"]
+            ),
+            "low": float(
+                row["low"]
+            ),
+            "close": float(
+                row["close"]
+            ),
+        }
+
+    # ========================================================
+    # Save funding data
+    # ========================================================
+
+    if not funding_df.empty:
+
+        funding_export = (
+            funding_df.copy()
+        )
+
+        funding_export[
+            "timestamp_utc"
+        ] = funding_export[
+            "timestamp"
+        ].apply(
+            ts_to_iso
+        )
+
+        funding_export.to_csv(
+            FUNDING_FILE,
+            index=False,
+        )
+
+    # ========================================================
+    # Run scenarios
+    # ========================================================
+
+    all_trades = []
+
+    all_equity = []
+
+    all_blocked = []
+
+    summaries = []
+
+    print()
+    print(
+        "=" * 72
+    )
+
+    for model_name, hedge_ratio in (
+        MODELS.items()
+    ):
+
+        for direction in DIRECTIONS:
+
+            log(
+                f"Running "
+                f"{model_name} "
+                f"{direction}..."
+            )
+
+            (
+                trades_df,
+                equity_df,
+                blocked_df,
+                summary,
+            ) = run_scenario(
+                candles,
+                funding_book,
+                candles_by_ts,
+                model_name,
+                direction,
+                hedge_ratio,
+                maintenance_rate,
+            )
+
+            if not trades_df.empty:
+                all_trades.append(
+                    trades_df
+                )
+
+            if not equity_df.empty:
+                all_equity.append(
+                    equity_df
+                )
+
+            if not blocked_df.empty:
+                all_blocked.append(
+                    blocked_df
+                )
+
+            summaries.append(
+                summary
+            )
+
+            log(
+                f"Finished "
+                f"{model_name} "
+                f"{direction}: "
+                f"{summary['cycles']} cycles | "
+                f"success "
+                f"{summary['success_pct']:.2f}% | "
+                f"liq "
+                f"{summary['liquidations']} | "
+                f"final "
+                f"${summary['final_account']:.4f}"
+            )
+
+    # ========================================================
+    # Export trades
+    # ========================================================
+
+    if all_trades:
+
+        trades_all = pd.concat(
+            all_trades,
+            ignore_index=True,
+        )
+
+        trades_all.to_csv(
+            TRADES_FILE,
+            index=False,
+        )
+
+    else:
+
+        trades_all = pd.DataFrame()
+
+    # ========================================================
+    # Export equity
+    # ========================================================
+
+    if all_equity:
+
+        equity_all = pd.concat(
+            all_equity,
+            ignore_index=True,
+        )
+
+        equity_all.to_csv(
+            EQUITY_FILE,
+            index=False,
+        )
+
+    else:
+
+        equity_all = pd.DataFrame()
+
+    # ========================================================
+    # Export blocked
+    # ========================================================
+
+    if all_blocked:
+
+        blocked_all = pd.concat(
+            all_blocked,
+            ignore_index=True,
+        )
+
+        blocked_all.to_csv(
+            BLOCKED_FILE,
+            index=False,
+        )
+
+    else:
+
+        blocked_all = pd.DataFrame(
+            columns=[
+                "model",
+                "direction",
+                "timestamp",
+                "reason",
+                "qty",
+                "required_notional",
+                "account",
+            ]
+        )
+
+        blocked_all.to_csv(
+            BLOCKED_FILE,
+            index=False,
+        )
+
+    # ========================================================
+    # Summary
+    # ========================================================
+
+    summary_df = pd.DataFrame(
+        summaries
+    )
+
+    summary_df.to_csv(
+        SUMMARY_FILE,
+        index=False,
+    )
+
+    # ========================================================
+    # Pretty console report
+    # ========================================================
+
+    print()
+    print(
+        "=" * 110
+    )
+
+    print(
+        "FINAL REPORT"
+    )
+
+    print(
+        "=" * 110
+    )
+
+    print(
+        f"{'MODEL':<9}"
+        f"{'DIR':<8}"
+        f"{'CYCLES':>8}"
+        f"{'SUCCESS%':>11}"
+        f"{'AVG PNL':>12}"
+        f"{'MAX LOSS':>12}"
+        f"{'DD':>12}"
+        f"{'LIQ':>8}"
+        f"{'TARGET':>9}"
+        f"{'FINAL $':>12}"
+        f"{'RETURN%':>12}"
+    )
+
+    print(
+        "-" * 110
+    )
+
+    for row in summaries:
+
+        print(
+            f"{row['model']:<9}"
+            f"{row['direction']:<8}"
+            f"{row['cycles']:>8}"
+            f"{row['success_pct']:>11.2f}"
+            f"{row['avg_pnl']:>12.4f}"
+            f"{row['max_loss']:>12.4f}"
+            f"{row['max_drawdown']:>12.4f}"
+            f"{row['liquidations']:>8}"
+            f"{row['targets']:>9}"
+            f"{row['final_account']:>12.4f}"
+            f"{row['final_return_pct']:>12.2f}"
+        )
+
+    print(
+        "=" * 110
+    )
+
+    # ========================================================
+    # Explanation
+    # ========================================================
+
+    print()
+    print(
+        "FILES:"
+    )
+
+    print(
+        f"  {TRADES_FILE}"
+    )
+
+    print(
+        f"  {SUMMARY_FILE}"
+    )
+
+    print(
+        f"  {EQUITY_FILE}"
+    )
+
+    print(
+        f"  {FUNDING_FILE}"
+    )
+
+    print(
+        f"  {BLOCKED_FILE}"
+    )
+
+    print()
+
+    print(
+        "MODEL DEFINITIONS:"
+    )
+
+    print(
+        "  A_50  = 50% hedge per trigger"
+    )
+
+    print(
+        "  B_75  = 75% hedge per trigger"
+    )
+
+    print(
+        "  C_100 = 100% hedge per trigger"
+    )
+
+    print()
+
+    print(
+        "COST MODEL:"
+    )
+
+    print(
+        f"  Taker fee = "
+        f"{TAKER_FEE_RATE * 100:.4f}%"
+    )
+
+    print(
+        f"  Slippage = "
+        f"{SLIPPAGE_RATE * 100:.4f}%"
+    )
+
+    print()
+
+    print(
+        "IMPORTANT:"
+    )
+
+    print(
+        "  Final account is sequential."
+    )
+
+    print(
+        "  Independent $2 cycles are NOT summed."
+    )
+
+    print(
+        "  Funding uses relativeFundingRate."
+    )
+
+    print(
+        "  Liquidation uses exact multi-leg PnL."
+    )
+
+    print(
+        "  One hedge maximum is processed per 5m candle."
+    )
+
+    print(
+        "  If liquidation and target are both inside"
+    )
+
+    print(
+        "  the same candle, liquidation wins."
+    )
+
+    print(
+        "  No real orders are sent."
+    )
+
+    print()
+
+    log(
+        "Backtest completed successfully."
+    )
 
 
 # ============================================================
-# START
+# ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
 
-    main()
+    try:
+        main()
+
+    except Exception as e:
+
+        print()
+        print(
+            "=" * 72
+        )
+        print(
+            "BACKTEST FAILED"
+        )
+        print(
+            "=" * 72
+        )
+
+        print(
+            str(e)
+        )
+
+        print()
+
+        traceback.print_exc()
+
+        try:
+            with open(
+                LOG_FILE,
+                "a",
+                encoding="utf-8",
+            ) as f:
+                f.write(
+                    "\nBACKTEST FAILED\n"
+                )
+                f.write(
+                    traceback.format_exc()
+                )
+        except Exception:
+            pass
+
+        raise
