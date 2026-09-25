@@ -74,6 +74,11 @@ ICH_DISPLACEMENT = 26
 SWING_LEFT = 2
 SWING_RIGHT = 2
 
+# SL-specific confirmed swings
+SL_SWING_LEFT = 3
+SL_SWING_RIGHT = 3
+SL_BUFFER_PCT = 0.002
+
 # Minimum risk/reward
 MIN_RR = 1.50
 
@@ -825,6 +830,85 @@ def confirmed_swings(candles):
 
 
 # ============================================================
+# SL-SPECIFIC CONFIRMED SWINGS
+# ============================================================
+
+def confirmed_sl_swings(candles):
+
+    highs = []
+    lows = []
+
+    n = len(candles)
+
+    for i in range(
+        SL_SWING_LEFT,
+        n - SL_SWING_RIGHT,
+    ):
+
+        current_high = candles[i]["high"]
+        current_low = candles[i]["low"]
+
+        is_high = True
+        is_low = True
+
+        for j in range(
+            i - SL_SWING_LEFT,
+            i,
+        ):
+
+            if (
+                candles[j]["high"]
+                >= current_high
+            ):
+                is_high = False
+
+            if (
+                candles[j]["low"]
+                <= current_low
+            ):
+                is_low = False
+
+        for j in range(
+            i + 1,
+            i + SL_SWING_RIGHT + 1,
+        ):
+
+            if (
+                candles[j]["high"]
+                >= current_high
+            ):
+                is_high = False
+
+            if (
+                candles[j]["low"]
+                <= current_low
+            ):
+                is_low = False
+
+        if is_high:
+
+            highs.append(
+                {
+                    "index": i,
+                    "timestamp": candles[i]["timestamp"],
+                    "price": current_high,
+                }
+            )
+
+        if is_low:
+
+            lows.append(
+                {
+                    "index": i,
+                    "timestamp": candles[i]["timestamp"],
+                    "price": current_low,
+                }
+            )
+
+    return highs, lows
+
+
+# ============================================================
 # TRENDLINE
 # ============================================================
 
@@ -1248,7 +1332,6 @@ def build_level_candidates(
                         f"{format_time(candles[i]['timestamp'])}"
                     ),
                 )
-            )
 
     # --------------------------------------------------------
     # Confirmed swings
@@ -1306,12 +1389,18 @@ def select_sl_tp(
 
     """
     LONG:
-      SL >= 0.40% below entry
+      SL = latest confirmed swing low
+           with 3 candles left/right,
+           then 0.20% below the swing low.
+
       TP >= 0.60% above entry
       RR >= 1.50
 
     SHORT:
-      SL >= 0.40% above entry
+      SL = latest confirmed swing high
+           with 3 candles left/right,
+           then 0.20% above the swing high.
+
       TP >= 0.60% below entry
       RR >= 1.50
     """
@@ -1335,25 +1424,53 @@ def select_sl_tp(
     )
 
     # ========================================================
+    # SL-SPECIFIC CONFIRMED SWINGS
+    # ========================================================
+
+    sl_highs, sl_lows = confirmed_sl_swings(
+        candles
+    )
+
+    # ========================================================
     # LONG
     # ========================================================
 
     if direction == "LONG":
 
-        sl_candidates = [
-            item
-            for item in supports
-            if item[0]
-            <= entry - min_sl_distance
+        valid_sl_swings = [
+            swing
+            for swing in sl_lows
+            if (
+                swing["index"] <= entry_index
+                and swing["price"]
+                <= entry - min_sl_distance
+            )
         ]
 
-        if not sl_candidates:
+        if not valid_sl_swings:
             return None
 
-        # Closest valid support.
-        sl_price, sl_source = max(
-            sl_candidates,
-            key=lambda x: x[0],
+        # Latest valid confirmed swing low.
+        swing_low = max(
+            valid_sl_swings,
+            key=lambda x: x["index"],
+        )
+
+        swing_low_price = swing_low[
+            "price"
+        ]
+
+        # SL slightly below the confirmed swing low.
+        sl_price = (
+            swing_low_price
+            * (1.0 - SL_BUFFER_PCT)
+        )
+
+        sl_source = (
+            "Confirmed Swing Low "
+            f"3x3 @ "
+            f"{format_time(swing_low['timestamp'])} "
+            f"+ {SL_BUFFER_PCT * 100:.2f}% buffer"
         )
 
         tp_candidates = [
@@ -1423,20 +1540,40 @@ def select_sl_tp(
 
     if direction == "SHORT":
 
-        sl_candidates = [
-            item
-            for item in resistances
-            if item[0]
-            >= entry + min_sl_distance
+        valid_sl_swings = [
+            swing
+            for swing in sl_highs
+            if (
+                swing["index"] <= entry_index
+                and swing["price"]
+                >= entry + min_sl_distance
+            )
         ]
 
-        if not sl_candidates:
+        if not valid_sl_swings:
             return None
 
-        # Closest valid resistance.
-        sl_price, sl_source = min(
-            sl_candidates,
-            key=lambda x: x[0],
+        # Latest valid confirmed swing high.
+        swing_high = max(
+            valid_sl_swings,
+            key=lambda x: x["index"],
+        )
+
+        swing_high_price = swing_high[
+            "price"
+        ]
+
+        # SL slightly above the confirmed swing high.
+        sl_price = (
+            swing_high_price
+            * (1.0 + SL_BUFFER_PCT)
+        )
+
+        sl_source = (
+            "Confirmed Swing High "
+            f"3x3 @ "
+            f"{format_time(swing_high['timestamp'])} "
+            f"+ {SL_BUFFER_PCT * 100:.2f}% buffer"
         )
 
         tp_candidates = [
