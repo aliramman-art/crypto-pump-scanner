@@ -77,7 +77,7 @@ SWING_RIGHT = 2
 # SL-specific confirmed swings
 SL_SWING_LEFT = 3
 SL_SWING_RIGHT = 3
-SL_BUFFER_PCT = 0.002
+SL_BUFFER_PCT = 0.001   # 0.10%
 
 # Minimum risk/reward
 MIN_RR = 1.50
@@ -1136,8 +1136,6 @@ def latest_15m_signal(
         + BREAKOUT_TIMEFRAME_SECONDS
     )
 
-    # Do not use 15M candles that existed
-    # before the 1H breakout candle closed.
     if signal_time < breakout_end:
         return None
 
@@ -1332,6 +1330,7 @@ def build_level_candidates(
                         f"{format_time(candles[i]['timestamp'])}"
                     ),
                 )
+            )
 
     # --------------------------------------------------------
     # Confirmed swings
@@ -1391,7 +1390,7 @@ def select_sl_tp(
     LONG:
       SL = latest confirmed swing low
            with 3 candles left/right,
-           then 0.20% below the swing low.
+           then 0.10% below the swing low.
 
       TP >= 0.60% above entry
       RR >= 1.50
@@ -1399,7 +1398,7 @@ def select_sl_tp(
     SHORT:
       SL = latest confirmed swing high
            with 3 candles left/right,
-           then 0.20% above the swing high.
+           then 0.10% above the swing high.
 
       TP >= 0.60% below entry
       RR >= 1.50
@@ -1450,7 +1449,7 @@ def select_sl_tp(
         if not valid_sl_swings:
             return None
 
-        # Latest valid confirmed swing low.
+        # Latest valid confirmed 3x3 swing low.
         swing_low = max(
             valid_sl_swings,
             key=lambda x: x["index"],
@@ -1460,7 +1459,7 @@ def select_sl_tp(
             "price"
         ]
 
-        # SL slightly below the confirmed swing low.
+        # SL 0.10% below confirmed swing low.
         sl_price = (
             swing_low_price
             * (1.0 - SL_BUFFER_PCT)
@@ -1553,7 +1552,7 @@ def select_sl_tp(
         if not valid_sl_swings:
             return None
 
-        # Latest valid confirmed swing high.
+        # Latest valid confirmed 3x3 swing high.
         swing_high = max(
             valid_sl_swings,
             key=lambda x: x["index"],
@@ -1563,7 +1562,7 @@ def select_sl_tp(
             "price"
         ]
 
-        # SL slightly above the confirmed swing high.
+        # SL 0.10% above confirmed swing high.
         sl_price = (
             swing_high_price
             * (1.0 + SL_BUFFER_PCT)
@@ -3090,7 +3089,6 @@ def scan_asset(
     if len(candles_1h) < 80:
         return result
 
-    # ONLY the latest closed 1H candle.
     breakout = (
         detect_1h_trendline_breakout(
             candles_1h
@@ -3166,7 +3164,6 @@ def scan_asset(
     if signal is None:
         return result
 
-    # One open trade per symbol.
     if has_open_trade(
         conn,
         symbol,
