@@ -3,15 +3,19 @@ name: NDS Live Scanner
 on:
   schedule:
     - cron: "*/5 * * * *"
-
   workflow_dispatch:
 
 permissions:
   contents: write
 
+concurrency:
+  group: nds-live-scanner
+  cancel-in-progress: false
+
 jobs:
   nds-scanner:
     runs-on: ubuntu-latest
+
     timeout-minutes: 4
 
     steps:
@@ -25,7 +29,7 @@ jobs:
 
 
       # ======================================================
-      # PYTHON 3.11
+      # PYTHON
       # ======================================================
 
       - name: Setup Python
@@ -48,7 +52,7 @@ jobs:
 
 
       # ======================================================
-      # INSTALL
+      # INSTALL DEPENDENCIES
       # ======================================================
 
       - name: Install dependencies
@@ -58,7 +62,7 @@ jobs:
 
 
       # ======================================================
-      # RUN ONE NDS SCAN
+      # RUN SCANNER
       # ======================================================
 
       - name: Run NDS scanner
@@ -66,7 +70,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python nds_live_scanner_v11.py
+          python nds_live_scanner_v14.py
 
 
       # ======================================================
@@ -74,20 +78,20 @@ jobs:
       # ======================================================
 
       - name: Save NDS database
-        uses: actions/cache/save@v4
         if: always()
+        uses: actions/cache/save@v4
         with:
           path: nds_v11.db
           key: nds-db-${{ github.ref_name }}-${{ github.run_id }}
 
 
       # ======================================================
-      # SAVE CHARTS AS ARTIFACT
+      # UPLOAD CHARTS
       # ======================================================
 
       - name: Upload NDS charts
-        uses: actions/upload-artifact@v4
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: nds-charts-${{ github.run_id }}
           path: charts/
