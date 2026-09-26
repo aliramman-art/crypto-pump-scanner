@@ -1,6 +1,6 @@
 # ============================================================
 # NDS M30 -> M1 LIVE SCANNER
-# VERSION 1.0.0
+# VERSION 1.0.1
 # ============================================================
 #
 # PAPER ONLY
@@ -22,6 +22,14 @@
 #   Entry
 #
 # NO LIVE ORDERS
+#
+# 1.0.1 FIXES:
+#   - Robust Kraken candle fetching
+#   - Retry on incomplete/empty candle response
+#   - Insufficient candle data is SKIPPED, not counted as ERROR
+#   - M30/M1 data validation
+#   - Separate SKIPPED count in report
+#   - Keeps PAPER ONLY mode
 # ============================================================
 
 from __future__ import annotations
@@ -50,7 +58,7 @@ from matplotlib.patches import Rectangle
 # CONFIG
 # ============================================================
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 PAPER_ONLY = True
 
@@ -92,6 +100,29 @@ M1_COUNT = int(
     os.getenv(
         "NDS_M1_COUNT",
         "700"
+    )
+)
+
+# Minimum candles required by strategy.
+MIN_REQUIRED_CANDLES = int(
+    os.getenv(
+        "NDS_MIN_REQUIRED_CANDLES",
+        "20"
+    )
+)
+
+# Retry settings for Kraken candle endpoint.
+CANDLE_FETCH_RETRIES = int(
+    os.getenv(
+        "NDS_CANDLE_FETCH_RETRIES",
+        "3"
+    )
+)
+
+CANDLE_RETRY_DELAY = float(
+    os.getenv(
+        "NDS_CANDLE_RETRY_DELAY",
+        "1.0"
     )
 )
 
@@ -292,8 +323,23 @@ SESSION = requests.Session()
 
 SESSION.headers.update({
     "Accept": "application/json",
-    "User-Agent": "NDS-M30-M1-Scanner/1.0"
+    "User-Agent": "NDS-M30-M1-Scanner/1.0.1"
 })
+
+
+# ============================================================
+# CUSTOM EXCEPTIONS
+# ============================================================
+
+class CandleDataError(Exception):
+    """
+    Expected data-quality problem.
+
+    This is intentionally different from a real unexpected
+    exception. A symbol with insufficient candles is skipped
+    instead of being counted as a scanner failure.
+    """
+    pass
 
 
 # ============================================================
@@ -650,83 +696,240 @@ def fetch_candles(
     resolution: str,
     count: int
 ) -> pd.DataFrame:
+    """
+    Fetch Kraken Futures candles robustly.
+
+    Expected data problems are converted to CandleDataError.
+    The caller can then skip the symbol without counting it
+    as a scanner error.
+
+    Retries are used because Kraken can occasionally return
+    a short/empty response for an otherwise valid contract.
+    """
 
     url = (
         f"{KRAKEN_BASE}/trade/"
         f"{symbol}/{resolution}"
     )
 
-    response = SESSION.get(
-        url,
-        params={"count": count},
-        timeout=20
+    last_problem = ""
+
+    attempts = max(
+        1,
+        CANDLE_FETCH_RETRIES
     )
 
-    response.raise_for_status()
+    for attempt in range(
+        1,
+        attempts + 1
+    ):
 
-    data = response.json()
+        try:
 
-    candles = data.get(
-        "candles",
-        []
-    )
-
-    if not candles:
-        raise ValueError(
-            f"No candles: "
-            f"{symbol} {resolution}"
-        )
-
-    rows = []
-
-    for c in candles:
-
-        rows.append({
-            "time": int(c["time"]),
-            "open": safe_float(c["open"]),
-            "high": safe_float(c["high"]),
-            "low": safe_float(c["low"]),
-            "close": safe_float(c["close"]),
-            "volume": safe_float(
-                c.get("volume", 0)
+            response = SESSION.get(
+                url,
+                params={"count": count},
+                timeout=REQUEST_TIMEOUT
             )
-        })
 
-    df = pd.DataFrame(rows)
+            response.raise_for_status()
 
-    df = (
-        df
-        .sort_values("time")
-        .drop_duplicates("time")
-        .reset_index(drop=True)
-    )
+            data = response.json()
 
-    # Never use the currently forming candle.
-    if len(df) > 3:
+            candles = data.get(
+                "candles",
+                []
+            )
 
-        tf_ms = (
-            60_000
-            if resolution == "1m"
-            else 30 * 60_000
-        )
+            if not candles:
 
-        current_bucket = (
-            now_ms() // tf_ms
-        ) * tf_ms
+                last_problem = (
+                    f"No candles returned: "
+                    f"{symbol} {resolution}"
+                )
 
-        df = df[
-            df["time"] < current_bucket
-        ].copy()
+            else:
 
-    if len(df) < 20:
+                rows = []
 
-        raise ValueError(
-            f"Not enough candles: "
-            f"{symbol} {resolution}"
-        )
+                for c in candles:
 
-    return df.reset_index(
-        drop=True
+                    try:
+
+                        rows.append({
+                            "time": int(
+                                c["time"]
+                            ),
+                            "open": safe_float(
+                                c["open"]
+                            ),
+                            "high": safe_float(
+                                c["high"]
+                            ),
+                            "low": safe_float(
+                                c["low"]
+                            ),
+                            "close": safe_float(
+                                c["close"]
+                            ),
+                            "volume": safe_float(
+                                c.get(
+                                    "volume",
+                                    0
+                                )
+                            )
+                        })
+
+                    except (
+                        KeyError,
+                        TypeError,
+                        ValueError
+                    ):
+
+                        continue
+
+                if rows:
+
+                    df = pd.DataFrame(
+                        rows
+                    )
+
+                    df = (
+                        df
+                        .sort_values("time")
+                        .drop_duplicates(
+                            "time"
+                        )
+                        .reset_index(
+                            drop=True
+                        )
+                    )
+
+                    # ------------------------------------------------
+                    # Never use currently forming candle.
+                    # ------------------------------------------------
+
+                    if len(df) > 3:
+
+                        if resolution == "1m":
+
+                            tf_ms = (
+                                60 * 1000
+                            )
+
+                        elif resolution == "30m":
+
+                            tf_ms = (
+                                30 * 60 * 1000
+                            )
+
+                        else:
+
+                            tf_ms = (
+                                60 * 1000
+                            )
+
+                        current_bucket = (
+                            now_ms() // tf_ms
+                        ) * tf_ms
+
+                        df = df[
+                            df["time"]
+                            <
+                            current_bucket
+                        ].copy()
+
+                    # ------------------------------------------------
+                    # Remove invalid numeric rows.
+                    # ------------------------------------------------
+
+                    numeric_columns = [
+                        "open",
+                        "high",
+                        "low",
+                        "close",
+                        "volume"
+                    ]
+
+                    for column in numeric_columns:
+
+                        df[column] = pd.to_numeric(
+                            df[column],
+                            errors="coerce"
+                        )
+
+                    df = df.dropna(
+                        subset=[
+                            "time",
+                            "open",
+                            "high",
+                            "low",
+                            "close"
+                        ]
+                    )
+
+                    df = df.reset_index(
+                        drop=True
+                    )
+
+                    if len(df) >= MIN_REQUIRED_CANDLES:
+
+                        return df
+
+                    last_problem = (
+                        f"Not enough candles: "
+                        f"{symbol} {resolution} "
+                        f"({len(df)}/"
+                        f"{MIN_REQUIRED_CANDLES})"
+                    )
+
+                else:
+
+                    last_problem = (
+                        f"Invalid candle data: "
+                        f"{symbol} {resolution}"
+                    )
+
+        except requests.RequestException as exc:
+
+            last_problem = (
+                f"HTTP error: "
+                f"{symbol} {resolution}: "
+                f"{exc}"
+            )
+
+        except ValueError as exc:
+
+            last_problem = (
+                f"Invalid response: "
+                f"{symbol} {resolution}: "
+                f"{exc}"
+            )
+
+        except Exception as exc:
+
+            # Unexpected programming/data issue.
+            # Retry first, then propagate as real error.
+            last_problem = (
+                f"Unexpected candle error: "
+                f"{symbol} {resolution}: "
+                f"{exc}"
+            )
+
+        if attempt < attempts:
+
+            time.sleep(
+                CANDLE_RETRY_DELAY
+                *
+                attempt
+            )
+
+    # ------------------------------------------------------------
+    # After all retries, classify a data problem as expected.
+    # ------------------------------------------------------------
+
+    raise CandleDataError(
+        last_problem
     )
 
 
@@ -915,16 +1118,6 @@ def detect_m30_trend(
     h1, h2, h3 = highs
     l1, l2, l3 = lows
 
-    # --------------------------------------------------------
-    # NDS structural mode
-    #
-    # Downtrend:
-    #   N1 -> N2 -> N3
-    #   S1 -> S2 -> S3
-    #
-    # with expansion / directional structure.
-    # --------------------------------------------------------
-
     bearish_highs = (
         h2.price > h1.price
         and
@@ -986,10 +1179,6 @@ def detect_m30_trend(
                 "S3": l3
             }
         )
-
-    # --------------------------------------------------------
-    # Conventional fallback
-    # --------------------------------------------------------
 
     if (
         h3.price > h2.price > h1.price
@@ -1074,8 +1263,6 @@ def find_bearish_flag(
         if p3.index < min_index:
             continue
 
-        # P3 cannot make a significantly
-        # higher high than P1.
         if (
             p3.price
             >
@@ -1086,7 +1273,6 @@ def find_bearish_flag(
 
             continue
 
-        # P2 must be below both highs.
         if (
             p2.price
             >=
@@ -1163,8 +1349,6 @@ def find_bullish_flag(
         if p3.index < min_index:
             continue
 
-        # P3 cannot make a significantly
-        # lower low than P1.
         if (
             p3.price
             <
@@ -1317,10 +1501,6 @@ def detect_hooks(
 
         p1, q1, p2, q2, p3, q3 = six
 
-        # ----------------------------------------------------
-        # SHORT HOOK
-        # ----------------------------------------------------
-
         if direction == "SHORT":
 
             valid = (
@@ -1335,10 +1515,6 @@ def detect_hooks(
 
             if not valid:
                 continue
-
-        # ----------------------------------------------------
-        # LONG HOOK
-        # ----------------------------------------------------
 
         else:
 
@@ -1428,8 +1604,6 @@ def choose_two_hooks(
     if len(hooks) < 2:
         return None
 
-    # hooks are newest first.
-
     for i in range(
         len(hooks) - 1
     ):
@@ -1437,7 +1611,6 @@ def choose_two_hooks(
         newer = hooks[i]
         older = hooks[i + 1]
 
-        # They must not overlap.
         if (
             older.end_index
             >=
@@ -1446,7 +1619,6 @@ def choose_two_hooks(
 
             continue
 
-        # Minimum separation.
         if (
             newer.end_index
             -
@@ -1652,10 +1824,6 @@ def build_setup(
         else "SHORT"
     )
 
-    # --------------------------------------------------------
-    # 123 FLAG
-    # --------------------------------------------------------
-
     if direction == "SHORT":
 
         flag = find_bearish_flag(
@@ -1674,10 +1842,6 @@ def build_setup(
         return None
 
     flag_p1, flag_p2, flag_p3 = flag
-
-    # --------------------------------------------------------
-    # HOOKS
-    # --------------------------------------------------------
 
     hooks = detect_hooks(
         pivots,
@@ -1702,10 +1866,6 @@ def build_setup(
 
         return None
 
-    # --------------------------------------------------------
-    # RALLY
-    # --------------------------------------------------------
-
     rally = find_rally(
         pivots,
         hook2,
@@ -1725,10 +1885,6 @@ def build_setup(
     ):
 
         return None
-
-    # --------------------------------------------------------
-    # AGE
-    # --------------------------------------------------------
 
     if (
         last_index
@@ -1841,7 +1997,6 @@ def build_setup(
                 FINAL_R * risk
             )
 
-        # Entry became stale.
         if (
             current
             >
@@ -2270,6 +2425,16 @@ def manage_open_trades() -> List[str]:
 
             con.commit()
             con.close()
+
+        except CandleDataError as exc:
+
+            # Missing/insufficient candle data is expected.
+            # Do not treat it as scanner failure.
+            print(
+                f"[SKIP TRADE PRICE] "
+                f"{trade['symbol']}: "
+                f"{exc}"
+            )
 
         except Exception as exc:
 
@@ -2711,7 +2876,8 @@ def performance_summary():
 def report(
     scanned: int,
     new_setups: List[Setup],
-    errors: int
+    errors: int,
+    skipped: int
 ) -> str:
 
     closed, wins, losses, pnl = (
@@ -2755,6 +2921,7 @@ def report(
         f"PnL: "
         f"<b>{pnl:.2f}%</b>\n"
 
+        f"Skipped: {skipped}\n"
         f"Errors: {errors}\n\n"
 
         f"Version: "
@@ -2828,6 +2995,7 @@ def run_once():
 
     scanned = 0
     errors = 0
+    skipped = 0
 
     new_setups = []
 
@@ -2937,6 +3105,31 @@ def run_once():
                 SLEEP_BETWEEN_SYMBOLS
             )
 
+        except CandleDataError as exc:
+
+            # ------------------------------------------------
+            # EXPECTED DATA PROBLEM
+            #
+            # Example:
+            # PF_MKRUSD 30m has insufficient candles.
+            #
+            # This is NOT a scanner error.
+            # ------------------------------------------------
+
+            skipped += 1
+
+            print(
+                f"[SKIP] "
+                f"{symbol}: "
+                f"{exc}"
+            )
+
+            time.sleep(
+                SLEEP_BETWEEN_SYMBOLS
+            )
+
+            continue
+
         except Exception as exc:
 
             errors += 1
@@ -2950,6 +3143,12 @@ def run_once():
             print(
                 traceback.format_exc()
             )
+
+            time.sleep(
+                SLEEP_BETWEEN_SYMBOLS
+            )
+
+            continue
 
     # --------------------------------------------------------
     # Scanner run
@@ -2986,7 +3185,8 @@ def run_once():
     text = report(
         scanned,
         new_setups,
-        errors
+        errors,
+        skipped
     )
 
     print(
