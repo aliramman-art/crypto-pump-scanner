@@ -1,0 +1,108 @@
+name: NDS Live Scanner
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  nds-scanner:
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 4
+
+    steps:
+
+      # ======================================================
+      # CHECKOUT
+      # ======================================================
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+
+      # ======================================================
+      # PYTHON
+      # ======================================================
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+
+      # ======================================================
+      # INSTALL DEPENDENCIES
+      # ======================================================
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests matplotlib
+
+
+      # ======================================================
+      # RESTORE NDS DATABASE
+      # ======================================================
+
+      - name: Restore NDS database
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: nds-database
+          path: .
+
+
+      # ======================================================
+      # RUN NDS SCANNER
+      #
+      # The Python scanner normally loops forever.
+      # We allow it to run for 3 minutes.
+      #
+      # It performs an immediate scan when started.
+      # Then the runner is stopped before another cycle.
+      #
+      # The next GitHub schedule starts another scan.
+      # ======================================================
+
+      - name: Run NDS scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          timeout 180s python nds_live_scanner_v11.py || true
+
+
+      # ======================================================
+      # SAVE NDS DATABASE
+      # ======================================================
+
+      - name: Save NDS database
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nds-database
+          path: nds_v11.db
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
+
+
+      # ======================================================
+      # SAVE CHARTS
+      # ======================================================
+
+      - name: Save NDS charts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nds-charts
+          path: charts/
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true
