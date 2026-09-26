@@ -1,6 +1,6 @@
 # ============================================================
 # NDS 5M LIVE SCANNER
-# VERSION 2.2.1
+# VERSION 2.2.2
 # ============================================================
 # PAPER ONLY
 #
@@ -12,6 +12,16 @@
 #
 # Database:
 #   nds_5m_v20.db
+#
+# VERSION 2.2.2 CHANGES:
+#
+#   1. Best Candidate Chart
+#   2. Automatic Candidate Chart -> Telegram
+#   3. Candidate survives BEFORE breakout
+#   4. Candidate NEVER opens a trade before breakout
+#   5. Candidate persistence in database
+#   6. Candidate duplicate notification protection
+#   7. Safe DB migration
 #
 # IMPORTANT:
 #   REAL_TRADING is permanently False.
@@ -34,7 +44,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "2.2.1"
+VERSION = "2.2.2"
 
 REAL_TRADING = False
 
@@ -47,6 +57,7 @@ API_URL = (
     "https://futures.kraken.com/api/charts/v1/trade/"
     "{symbol}/5m"
 )
+
 
 # ------------------------------------------------------------
 # 40 Kraken Futures assets
@@ -95,6 +106,7 @@ ASSETS = [
     "PF_RUNEUSD",
 ]
 
+
 CANDLES = 250
 LOOKBACK = 200
 
@@ -122,6 +134,21 @@ MIN_RR = 1.0
 MIN_STOP_PCT = 0.15
 MAX_STOP_PCT = 8.0
 
+# ------------------------------------------------------------
+# Candidate settings
+# ------------------------------------------------------------
+
+# A candidate can remain in the database while waiting
+# for a valid breakout.
+CANDIDATE_MAX_AGE_HOURS = 24
+
+# Do not send the exact same candidate chart repeatedly
+# on every scanner cycle.
+CANDIDATE_NOTIFY_COOLDOWN_MIN = 30
+
+# Candidate chart lookback.
+CANDIDATE_CHART_BARS = 100
+
 
 # ============================================================
 # TELEGRAM
@@ -148,7 +175,7 @@ SESSION = requests.Session()
 
 SESSION.headers.update(
     {
-        "User-Agent": "NDS-5M-Scanner/2.2.1"
+        "User-Agent": "NDS-5M-Scanner/2.2.2"
     }
 )
 
@@ -166,6 +193,7 @@ def fmt_dt(ts):
         return "-"
 
     try:
+
         if isinstance(
             ts,
             (
@@ -175,11 +203,14 @@ def fmt_dt(ts):
                 np.floating,
             ),
         ):
+
             dt = datetime.fromtimestamp(
                 float(ts),
                 tz=timezone.utc,
             )
+
         else:
+
             dt = (
                 pd.to_datetime(
                     ts,
@@ -193,10 +224,12 @@ def fmt_dt(ts):
         )
 
     except Exception:
+
         return str(ts)
 
 
 def pct(a, b):
+
     if a is None:
         return 0.0
 
@@ -207,7 +240,9 @@ def pct(a, b):
 
 
 def safe_float(value):
+
     try:
+
         x = float(value)
 
         if math.isfinite(x):
@@ -216,6 +251,7 @@ def safe_float(value):
         return None
 
     except Exception:
+
         return None
 
 
@@ -223,21 +259,36 @@ def safe_float(value):
 # TELEGRAM SEND
 # ============================================================
 
-def send_telegram(text, photo_path=None):
+def send_telegram(
+    text,
+    photo_path=None,
+):
 
     if not TELEGRAM_BOT_TOKEN:
-        print("[TELEGRAM] Bot token not configured")
+
+        print(
+            "[TELEGRAM] "
+            "Bot token not configured"
+        )
+
         return False
 
     if not TELEGRAM_CHAT_ID:
-        print("[TELEGRAM] Chat ID not configured")
+
+        print(
+            "[TELEGRAM] "
+            "Chat ID not configured"
+        )
+
         return False
 
     try:
 
         if (
             photo_path
-            and os.path.exists(photo_path)
+            and os.path.exists(
+                photo_path
+            )
         ):
 
             url = (
@@ -285,6 +336,7 @@ def send_telegram(text, photo_path=None):
             )
 
         if response.ok:
+
             return True
 
         print(
@@ -305,10 +357,37 @@ def send_telegram(text, photo_path=None):
 
 
 # ============================================================
-# DATABASE
+# DATABASE UTILITIES
 # ============================================================
 
-def table_columns(conn, table):
+def table_exists(
+    conn,
+    table,
+):
+
+    row = conn.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+        AND name = ?
+        """,
+        (table,),
+    ).fetchone()
+
+    return row is not None
+
+
+def table_columns(
+    conn,
+    table,
+):
+
+    if not table_exists(
+        conn,
+        table,
+    ):
+        return set()
 
     rows = conn.execute(
         f"PRAGMA table_info({table})"
@@ -348,9 +427,15 @@ def ensure_column(
         )
 
 
+# ============================================================
+# DATABASE INITIALIZATION
+# ============================================================
+
 def init_db():
 
-    print("[DB] Opening database...")
+    print(
+        "[DB] Opening database..."
+    )
 
     conn = sqlite3.connect(
         DB_FILE
@@ -364,9 +449,9 @@ def init_db():
         "PRAGMA busy_timeout=10000"
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # TRADES
-    # --------------------------------------------------------
+    # ========================================================
 
     conn.execute(
         """
@@ -408,9 +493,9 @@ def init_db():
         """
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SIGNALS
-    # --------------------------------------------------------
+    # ========================================================
 
     conn.execute(
         """
@@ -444,9 +529,9 @@ def init_db():
         """
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # SCANNER RUNS
-    # --------------------------------------------------------
+    # ========================================================
 
     conn.execute(
         """
@@ -487,221 +572,523 @@ def init_db():
     )
 
     # ========================================================
-    # AUTOMATIC MIGRATION
+    # CANDIDATES
+    #
+    # Persistent pre-breakout NDS candidates.
     #
     # IMPORTANT:
-    # Old database is NOT deleted.
-    # Existing trades/signals remain intact.
+    # Candidate rows are NOT trades.
     # ========================================================
 
-    print("[DB] Checking schema...")
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidates (
+
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            symbol TEXT NOT NULL,
+
+            side TEXT NOT NULL,
+
+            candidate_key TEXT UNIQUE,
+
+            status TEXT DEFAULT 'WAITING',
+
+            structure_time TEXT,
+
+            rally_start INTEGER,
+
+            rally_end INTEGER,
+
+            hook1_p1_idx INTEGER,
+            hook1_p2_idx INTEGER,
+
+            hook2_p1_idx INTEGER,
+            hook2_p2_idx INTEGER,
+
+            hook1_p1_price REAL,
+            hook1_p2_price REAL,
+
+            hook2_p1_price REAL,
+            hook2_p2_price REAL,
+
+            retrace1 REAL,
+            retrace2 REAL,
+
+            symmetry REAL,
+
+            hook_score REAL,
+
+            last_price REAL,
+
+            last_candle_time TEXT,
+
+            first_seen TEXT,
+
+            last_seen TEXT,
+
+            last_notified TEXT,
+
+            chart_path TEXT,
+
+            breakout_time TEXT,
+
+            signal_id INTEGER,
+
+            invalidated_time TEXT,
+
+            created_at TEXT,
+
+            updated_at TEXT
+
+        )
+        """
+    )
+
+    # ========================================================
+    # SAFE MIGRATIONS
+    # ========================================================
+
+    print(
+        "[DB] Checking schema..."
+    )
 
     migrations = [
 
+        # ----------------------------------------------------
         # TRADES
+        # ----------------------------------------------------
+
         (
             "trades",
             "symbol",
             "TEXT",
         ),
+
         (
             "trades",
             "side",
             "TEXT",
         ),
+
         (
             "trades",
             "entry",
             "REAL",
         ),
+
         (
             "trades",
             "sl",
             "REAL",
         ),
+
         (
             "trades",
             "tp",
             "REAL",
         ),
+
         (
             "trades",
             "entry_time",
             "TEXT",
         ),
+
         (
             "trades",
             "exit_time",
             "TEXT",
         ),
+
         (
             "trades",
             "exit_price",
             "REAL",
         ),
+
         (
             "trades",
             "pnl_pct",
             "REAL",
         ),
+
         (
             "trades",
             "status",
             "TEXT DEFAULT 'OPEN'",
         ),
+
         (
             "trades",
             "exit_reason",
             "TEXT",
         ),
+
         (
             "trades",
             "touches",
             "INTEGER",
         ),
+
         (
             "trades",
             "hook_score",
             "REAL",
         ),
+
         (
             "trades",
             "recency_score",
             "REAL",
         ),
+
         (
             "trades",
             "created_at",
             "TEXT",
         ),
 
+        # ----------------------------------------------------
         # SIGNALS
+        # ----------------------------------------------------
+
         (
             "signals",
             "symbol",
             "TEXT",
         ),
+
         (
             "signals",
             "side",
             "TEXT",
         ),
+
         (
             "signals",
             "entry",
             "REAL",
         ),
+
         (
             "signals",
             "sl",
             "REAL",
         ),
+
         (
             "signals",
             "tp",
             "REAL",
         ),
+
         (
             "signals",
             "signal_time",
             "TEXT",
         ),
+
         (
             "signals",
             "touches",
             "INTEGER",
         ),
+
         (
             "signals",
             "hook_score",
             "REAL",
         ),
+
         (
             "signals",
             "recency_score",
             "REAL",
         ),
+
         (
             "signals",
             "notified",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "signals",
             "created_at",
             "TEXT",
         ),
 
+        # ----------------------------------------------------
         # SCANNER RUNS
+        # ----------------------------------------------------
+
         (
             "scanner_runs",
             "run_time",
             "TEXT",
         ),
+
         (
             "scanner_runs",
             "version",
             "TEXT",
         ),
+
         (
             "scanner_runs",
             "configured",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "fetched",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "analyzed",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "data_errors",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "analysis_errors",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "new_signals",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "open_trades",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "closed_trades",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "wins",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "losses",
             "INTEGER DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "total_pnl",
             "REAL DEFAULT 0",
         ),
+
         (
             "scanner_runs",
             "errors",
             "INTEGER DEFAULT 0",
+        ),
+
+        # ----------------------------------------------------
+        # CANDIDATES
+        # ----------------------------------------------------
+
+        (
+            "candidates",
+            "symbol",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "side",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "candidate_key",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "status",
+            "TEXT DEFAULT 'WAITING'",
+        ),
+
+        (
+            "candidates",
+            "structure_time",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "rally_start",
+            "INTEGER",
+        ),
+
+        (
+            "candidates",
+            "rally_end",
+            "INTEGER",
+        ),
+
+        (
+            "candidates",
+            "hook1_p1_idx",
+            "INTEGER",
+        ),
+
+        (
+            "candidates",
+            "hook1_p2_idx",
+            "INTEGER",
+        ),
+
+        (
+            "candidates",
+            "hook2_p1_idx",
+            "INTEGER",
+        ),
+
+        (
+            "candidates",
+            "hook2_p2_idx",
+            "INTEGER",
+        ),
+
+        (
+            "candidates",
+            "hook1_p1_price",
+            "REAL",
+        ),
+
+        (
+            "candidates",
+            "hook1_p2_price",
+            "REAL",
+        ),
+
+        (
+            "candidates",
+            "hook2_p1_price",
+            "REAL",
+        ),
+
+        (
+            "candidates",
+            "hook2_p2_price",
+            "REAL",
+        ),
+
+        (
+            "candidates",
+            "retrace1",
+            "REAL",
+        ),
+
+        (
+            "candidates",
+            "retrace2",
+            "REAL",
+        ),
+
+        (
+            "candidates",
+            "symmetry",
+            "REAL",
+        ),
+
+        (
+            "candidates",
+            "hook_score",
+            "REAL",
+        ),
+
+        (
+            "candidates",
+            "last_price",
+            "REAL",
+        ),
+
+        (
+            "candidates",
+            "last_candle_time",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "first_seen",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "last_seen",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "last_notified",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "chart_path",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "breakout_time",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "signal_id",
+            "INTEGER",
+        ),
+
+        (
+            "candidates",
+            "invalidated_time",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "created_at",
+            "TEXT",
+        ),
+
+        (
+            "candidates",
+            "updated_at",
+            "TEXT",
         ),
     ]
 
@@ -718,10 +1105,45 @@ def init_db():
             definition,
         )
 
+    # --------------------------------------------------------
+    # Candidate unique index.
+    #
+    # Old DB may already contain the table without index.
+    # --------------------------------------------------------
+
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS
+        idx_candidates_key
+        ON candidates(candidate_key)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_candidates_status
+        ON candidates(status)
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS
+        idx_candidates_symbol_side
+        ON candidates(symbol, side)
+        """
+    )
+
     conn.commit()
 
-    print("[DB] Schema migration complete")
-    print("[DB] Schema OK")
+    print(
+        "[DB] Schema migration complete"
+    )
+
+    print(
+        "[DB] Schema OK"
+    )
 
     return conn
 
@@ -732,10 +1154,16 @@ def init_db():
 
 def extract_candle_list(obj):
 
-    if isinstance(obj, list):
+    if isinstance(
+        obj,
+        list,
+    ):
         return obj
 
-    if not isinstance(obj, dict):
+    if not isinstance(
+        obj,
+        dict,
+    ):
         return []
 
     possible_keys = [
@@ -749,10 +1177,16 @@ def extract_candle_list(obj):
 
         value = obj.get(key)
 
-        if isinstance(value, list):
+        if isinstance(
+            value,
+            list,
+        ):
             return value
 
-        if isinstance(value, dict):
+        if isinstance(
+            value,
+            dict,
+        ):
 
             nested = extract_candle_list(
                 value
@@ -812,7 +1246,10 @@ def parse_candles(raw):
                 )
 
             elif (
-                isinstance(item, (list, tuple))
+                isinstance(
+                    item,
+                    (list, tuple),
+                )
                 and len(item) >= 5
             ):
 
@@ -829,6 +1266,7 @@ def parse_candles(raw):
                 )
 
             else:
+
                 continue
 
             timestamp = safe_float(
@@ -865,8 +1303,15 @@ def parse_candles(raw):
             ):
                 continue
 
+            # ------------------------------------------------
             # Protect against millisecond timestamps.
-            if timestamp > 10_000_000_000:
+            # ------------------------------------------------
+
+            if (
+                timestamp
+                > 10_000_000_000
+            ):
+
                 timestamp /= 1000.0
 
             parsed.append(
@@ -881,9 +1326,11 @@ def parse_candles(raw):
             )
 
         except Exception:
+
             continue
 
     if not parsed:
+
         return pd.DataFrame()
 
     df = pd.DataFrame(
@@ -925,7 +1372,9 @@ def parse_candles(raw):
     return (
         df
         .tail(CANDLES)
-        .reset_index(drop=True)
+        .reset_index(
+            drop=True
+        )
     )
 
 
@@ -944,9 +1393,12 @@ def fetch_data(symbol):
 
     raw = response.json()
 
-    df = parse_candles(raw)
+    df = parse_candles(
+        raw
+    )
 
     if len(df) < 30:
+
         raise ValueError(
             f"only {len(df)} closed candles"
         )
@@ -1006,20 +1458,30 @@ def find_pivots(df):
 
         if (
             high_values[i]
-            > np.max(left_highs)
+            > np.max(
+                left_highs
+            )
             and
             high_values[i]
-            >= np.max(right_highs)
+            >= np.max(
+                right_highs
+            )
         ):
+
             highs.append(i)
 
         if (
             low_values[i]
-            < np.min(left_lows)
+            < np.min(
+                left_lows
+            )
             and
             low_values[i]
-            <= np.min(right_lows)
+            <= np.min(
+                right_lows
+            )
         ):
+
             lows.append(i)
 
     return highs, lows
@@ -1038,6 +1500,7 @@ def line_value(
 ):
 
     if p2_idx == p1_idx:
+
         return p2_price
 
     slope = (
@@ -1063,6 +1526,7 @@ def touch_points(
 ):
 
     if p2 <= p1:
+
         return []
 
     column = (
@@ -1110,8 +1574,14 @@ def touch_points(
             )
         )
 
-        if distance <= LINE_TOLERANCE:
-            points.append(index)
+        if (
+            distance
+            <= LINE_TOLERANCE
+        ):
+
+            points.append(
+                index
+            )
 
     return points
 
@@ -1124,7 +1594,10 @@ def build_trendline_candidates(
 
     candidates = []
 
-    if len(pivot_indices) < 2:
+    if len(
+        pivot_indices
+    ) < 2:
+
         return candidates
 
     start = max(
@@ -1176,6 +1649,7 @@ def build_trendline_candidates(
                 kind == "resistance"
                 and not y2 < y1
             ):
+
                 continue
 
             # SHORT:
@@ -1184,6 +1658,7 @@ def build_trendline_candidates(
                 kind == "support"
                 and not y2 > y1
             ):
+
                 continue
 
             touches = touch_points(
@@ -1198,6 +1673,7 @@ def build_trendline_candidates(
                 len(touches)
                 < MIN_TOUCHES
             ):
+
                 continue
 
             candidates.append(
@@ -1213,7 +1689,9 @@ def build_trendline_candidates(
 
     candidates.sort(
         key=lambda x: (
-            len(x["touches"]),
+            len(
+                x["touches"]
+            ),
             x["p2"],
         ),
         reverse=True,
@@ -1234,19 +1712,26 @@ def retracement_ratio(
 ):
 
     move = abs(
-        rally_end - rally_start
+        rally_end
+        - rally_start
     )
 
     if move <= 0:
+
         return None
 
     if side == "LONG":
+
         retrace = (
-            rally_end - hook_end
+            rally_end
+            - hook_end
         )
+
     else:
+
         retrace = (
-            hook_end - rally_end
+            hook_end
+            - rally_end
         )
 
     return (
@@ -1287,7 +1772,10 @@ def price_time_symmetry(
     )
 
     price_ratio = (
-        min(price1, price2)
+        min(
+            price1,
+            price2,
+        )
         /
         max(
             price1,
@@ -1297,9 +1785,15 @@ def price_time_symmetry(
     )
 
     time_ratio = (
-        min(time1, time2)
+        min(
+            time1,
+            time2,
+        )
         /
-        max(time1, time2)
+        max(
+            time1,
+            time2,
+        )
     )
 
     return (
@@ -1331,7 +1825,11 @@ def hook_quality(
         side,
     )
 
-    if r1 is None or r2 is None:
+    if (
+        r1 is None
+        or r2 is None
+    ):
+
         return None
 
     if not (
@@ -1339,6 +1837,7 @@ def hook_quality(
         <= r1
         <= MAX_HOOK_RETRACE
     ):
+
         return None
 
     if not (
@@ -1346,11 +1845,11 @@ def hook_quality(
         <= r2
         <= MAX_HOOK_RETRACE
     ):
+
         return None
 
     # --------------------------------------------------------
-    # 86.4% is a soft quality reference.
-    # It is NOT treated as an exact mandatory Fib.
+    # 86.4% soft quality reference.
     # --------------------------------------------------------
 
     fib_distance_1 = min(
@@ -1399,10 +1898,17 @@ def hook_quality(
     )
 
     return {
-        "score": float(score),
-        "retrace1": float(r1),
-        "retrace2": float(r2),
-        "symmetry": float(symmetry),
+        "score":
+            float(score),
+
+        "retrace1":
+            float(r1),
+
+        "retrace2":
+            float(r2),
+
+        "symmetry":
+            float(symmetry),
     }
 
 
@@ -1420,7 +1926,7 @@ def find_hook_pair(
         n - LOOKBACK,
     )
 
-    # --------------------------------------------------------
+    # ========================================================
     # LONG
     #
     # Rally:
@@ -1431,12 +1937,17 @@ def find_hook_pair(
     #
     # Hook 2:
     #   Low -> High
-    # --------------------------------------------------------
+    # ========================================================
 
     if side == "LONG":
 
-        highs_set = set(highs)
-        lows_set = set(lows)
+        highs_set = set(
+            highs
+        )
+
+        lows_set = set(
+            lows
+        )
 
         for i in range(
             start_index,
@@ -1477,7 +1988,9 @@ def find_hook_pair(
             if not hook1_low:
                 continue
 
-            h1_p1 = hook1_low[0]
+            h1_p1 = (
+                hook1_low[0]
+            )
 
             hook1_high = [
                 x
@@ -1491,7 +2004,9 @@ def find_hook_pair(
             if not hook1_high:
                 continue
 
-            h1_p2 = hook1_high[0]
+            h1_p2 = (
+                hook1_high[0]
+            )
 
             hook2_low = [
                 x
@@ -1505,7 +2020,9 @@ def find_hook_pair(
             if not hook2_low:
                 continue
 
-            h2_p1 = hook2_low[0]
+            h2_p1 = (
+                hook2_low[0]
+            )
 
             hook2_high = [
                 x
@@ -1519,28 +2036,52 @@ def find_hook_pair(
             if not hook2_high:
                 continue
 
-            h2_p2 = hook2_high[0]
+            h2_p2 = (
+                hook2_high[0]
+            )
 
             hook1 = {
-                "p1_idx": h1_p1,
-                "p1_price": float(
-                    df.iloc[h1_p1]["low"]
-                ),
-                "p2_idx": h1_p2,
-                "p2_price": float(
-                    df.iloc[h1_p2]["high"]
-                ),
+                "p1_idx":
+                    h1_p1,
+
+                "p1_price":
+                    float(
+                        df.iloc[
+                            h1_p1
+                        ]["low"]
+                    ),
+
+                "p2_idx":
+                    h1_p2,
+
+                "p2_price":
+                    float(
+                        df.iloc[
+                            h1_p2
+                        ]["high"]
+                    ),
             }
 
             hook2 = {
-                "p1_idx": h2_p1,
-                "p1_price": float(
-                    df.iloc[h2_p1]["low"]
-                ),
-                "p2_idx": h2_p2,
-                "p2_price": float(
-                    df.iloc[h2_p2]["high"]
-                ),
+                "p1_idx":
+                    h2_p1,
+
+                "p1_price":
+                    float(
+                        df.iloc[
+                            h2_p1
+                        ]["low"]
+                    ),
+
+                "p2_idx":
+                    h2_p2,
+
+                "p2_price":
+                    float(
+                        df.iloc[
+                            h2_p2
+                        ]["high"]
+                    ),
             }
 
             quality = hook_quality(
@@ -1548,7 +2089,9 @@ def find_hook_pair(
                     df.iloc[i]["low"]
                 ),
                 float(
-                    df.iloc[rally_end]["high"]
+                    df.iloc[
+                        rally_end
+                    ]["high"]
                 ),
                 hook1,
                 hook2,
@@ -1559,15 +2102,25 @@ def find_hook_pair(
                 continue
 
             return {
-                "side": side,
-                "rally_start": i,
-                "rally_end": rally_end,
-                "hook1": hook1,
-                "hook2": hook2,
+                "side":
+                    side,
+
+                "rally_start":
+                    i,
+
+                "rally_end":
+                    rally_end,
+
+                "hook1":
+                    hook1,
+
+                "hook2":
+                    hook2,
+
                 **quality,
             }
 
-    # --------------------------------------------------------
+    # ========================================================
     # SHORT
     #
     # Rally:
@@ -1578,12 +2131,17 @@ def find_hook_pair(
     #
     # Hook 2:
     #   High -> Low
-    # --------------------------------------------------------
+    # ========================================================
 
     else:
 
-        highs_set = set(highs)
-        lows_set = set(lows)
+        highs_set = set(
+            highs
+        )
+
+        lows_set = set(
+            lows
+        )
 
         for i in range(
             start_index,
@@ -1624,7 +2182,9 @@ def find_hook_pair(
             if not hook1_high:
                 continue
 
-            h1_p1 = hook1_high[0]
+            h1_p1 = (
+                hook1_high[0]
+            )
 
             hook1_low = [
                 x
@@ -1638,7 +2198,9 @@ def find_hook_pair(
             if not hook1_low:
                 continue
 
-            h1_p2 = hook1_low[0]
+            h1_p2 = (
+                hook1_low[0]
+            )
 
             hook2_high = [
                 x
@@ -1652,7 +2214,9 @@ def find_hook_pair(
             if not hook2_high:
                 continue
 
-            h2_p1 = hook2_high[0]
+            h2_p1 = (
+                hook2_high[0]
+            )
 
             hook2_low = [
                 x
@@ -1666,28 +2230,52 @@ def find_hook_pair(
             if not hook2_low:
                 continue
 
-            h2_p2 = hook2_low[0]
+            h2_p2 = (
+                hook2_low[0]
+            )
 
             hook1 = {
-                "p1_idx": h1_p1,
-                "p1_price": float(
-                    df.iloc[h1_p1]["high"]
-                ),
-                "p2_idx": h1_p2,
-                "p2_price": float(
-                    df.iloc[h1_p2]["low"]
-                ),
+                "p1_idx":
+                    h1_p1,
+
+                "p1_price":
+                    float(
+                        df.iloc[
+                            h1_p1
+                        ]["high"]
+                    ),
+
+                "p2_idx":
+                    h1_p2,
+
+                "p2_price":
+                    float(
+                        df.iloc[
+                            h1_p2
+                        ]["low"]
+                    ),
             }
 
             hook2 = {
-                "p1_idx": h2_p1,
-                "p1_price": float(
-                    df.iloc[h2_p1]["high"]
-                ),
-                "p2_idx": h2_p2,
-                "p2_price": float(
-                    df.iloc[h2_p2]["low"]
-                ),
+                "p1_idx":
+                    h2_p1,
+
+                "p1_price":
+                    float(
+                        df.iloc[
+                            h2_p1
+                        ]["high"]
+                    ),
+
+                "p2_idx":
+                    h2_p2,
+
+                "p2_price":
+                    float(
+                        df.iloc[
+                            h2_p2
+                        ]["low"]
+                    ),
             }
 
             quality = hook_quality(
@@ -1695,7 +2283,9 @@ def find_hook_pair(
                     df.iloc[i]["high"]
                 ),
                 float(
-                    df.iloc[rally_end]["low"]
+                    df.iloc[
+                        rally_end
+                    ]["low"]
                 ),
                 hook1,
                 hook2,
@@ -1706,11 +2296,21 @@ def find_hook_pair(
                 continue
 
             return {
-                "side": side,
-                "rally_start": i,
-                "rally_end": rally_end,
-                "hook1": hook1,
-                "hook2": hook2,
+                "side":
+                    side,
+
+                "rally_start":
+                    i,
+
+                "rally_end":
+                    rally_end,
+
+                "hook1":
+                    hook1,
+
+                "hook2":
+                    hook2,
+
                 **quality,
             }
 
@@ -1740,9 +2340,13 @@ def find_breakout(
     end = len(df) - 1
 
     if start > end:
+
         return None
 
-    # Only inspect the latest breakout window.
+    # --------------------------------------------------------
+    # Only inspect latest breakout window.
+    # --------------------------------------------------------
+
     start = max(
         start,
         end
@@ -1769,9 +2373,9 @@ def find_breakout(
 
             previous_close = (
                 float(
-                    df.iloc[i - 1][
-                        "close"
-                    ]
+                    df.iloc[
+                        i - 1
+                    ]["close"]
                 )
                 if i > 0
                 else close
@@ -1784,9 +2388,15 @@ def find_breakout(
             ):
 
                 return {
-                    "index": i,
-                    "entry": close,
-                    "level": level,
+                    "index":
+                        i,
+
+                    "entry":
+                        close,
+
+                    "level":
+                        level,
+
                     "signal_time":
                         float(
                             df.iloc[i][
@@ -1808,9 +2418,9 @@ def find_breakout(
 
             previous_close = (
                 float(
-                    df.iloc[i - 1][
-                        "close"
-                    ]
+                    df.iloc[
+                        i - 1
+                    ]["close"]
                 )
                 if i > 0
                 else close
@@ -1823,9 +2433,15 @@ def find_breakout(
             ):
 
                 return {
-                    "index": i,
-                    "entry": close,
-                    "level": level,
+                    "index":
+                        i,
+
+                    "entry":
+                        close,
+
+                    "level":
+                        level,
+
                     "signal_time":
                         float(
                             df.iloc[i][
@@ -1871,7 +2487,6 @@ def calculate_levels(
 
     if side == "LONG":
 
-        # Nearest previous swing HIGH above entry = TP.
         for index in reversed(
             [
                 x
@@ -1890,7 +2505,6 @@ def calculate_levels(
                 tp_idx = index
                 break
 
-        # Nearest previous swing LOW below entry = SL.
         for index in reversed(
             [
                 x
@@ -1915,7 +2529,6 @@ def calculate_levels(
 
     else:
 
-        # Nearest previous swing LOW below entry = TP.
         for index in reversed(
             [
                 x
@@ -1934,7 +2547,6 @@ def calculate_levels(
                 tp_idx = index
                 break
 
-        # Nearest previous swing HIGH above entry = SL.
         for index in reversed(
             [
                 x
@@ -1953,7 +2565,11 @@ def calculate_levels(
                 sl_idx = index
                 break
 
-    if sl is None or tp is None:
+    if (
+        sl is None
+        or tp is None
+    ):
+
         return None
 
     # --------------------------------------------------------
@@ -2010,18 +2626,29 @@ def calculate_levels(
         return None
 
     return {
-        "entry": entry,
-        "sl": float(sl),
-        "tp": float(tp),
-        "rr": float(rr),
-        "stop_pct": float(
-            stop_pct
-        ),
-        "tp_pct": float(
-            tp_pct
-        ),
-        "sl_idx": sl_idx,
-        "tp_idx": tp_idx,
+        "entry":
+            entry,
+
+        "sl":
+            float(sl),
+
+        "tp":
+            float(tp),
+
+        "rr":
+            float(rr),
+
+        "stop_pct":
+            float(stop_pct),
+
+        "tp_pct":
+            float(tp_pct),
+
+        "sl_idx":
+            sl_idx,
+
+        "tp_idx":
+            tp_idx,
     }
 
 
@@ -2045,6 +2672,1032 @@ def signal_fresh(
         MAX_SIGNAL_AGE_MIN * 60
         + 10
     )
+
+
+# ============================================================
+# CANDIDATE KEY
+# ============================================================
+
+def make_candidate_key(
+    symbol,
+    side,
+    structure,
+):
+
+    return (
+        f"{symbol}|"
+        f"{side}|"
+        f"{structure['rally_start']}|"
+        f"{structure['rally_end']}|"
+        f"{structure['hook1']['p1_idx']}|"
+        f"{structure['hook1']['p2_idx']}|"
+        f"{structure['hook2']['p1_idx']}|"
+        f"{structure['hook2']['p2_idx']}"
+    )
+
+
+# ============================================================
+# CANDIDATE STRUCTURE
+# ============================================================
+
+def candidate_from_structure(
+    symbol,
+    df,
+    highs,
+    lows,
+    structure,
+):
+
+    last_price = float(
+        df.iloc[-1]["close"]
+    )
+
+    last_time = float(
+        df.iloc[-1]["timestamp"]
+    )
+
+    candidate_key = (
+        make_candidate_key(
+            symbol,
+            structure["side"],
+            structure,
+        )
+    )
+
+    return {
+        "symbol":
+            symbol,
+
+        "side":
+            structure["side"],
+
+        "candidate_key":
+            candidate_key,
+
+        "df":
+            df,
+
+        "highs":
+            highs,
+
+        "lows":
+            lows,
+
+        "structure":
+            structure,
+
+        "score":
+            structure["score"],
+
+        "recency_score":
+            0.0,
+
+        "candidate_only":
+            True,
+
+        "last_price":
+            last_price,
+
+        "last_candle_time":
+            last_time,
+    }
+
+
+# ============================================================
+# CANDIDATE DB SAVE / UPDATE
+# ============================================================
+
+def save_candidate(
+    conn,
+    candidate,
+):
+
+    structure = (
+        candidate["structure"]
+    )
+
+    symbol = candidate[
+        "symbol"
+    ]
+
+    side = candidate[
+        "side"
+    ]
+
+    candidate_key = candidate[
+        "candidate_key"
+    ]
+
+    current_time = time.time()
+
+    now_text = fmt_dt(
+        current_time
+    )
+
+    structure_time = fmt_dt(
+        candidate[
+            "last_candle_time"
+        ]
+    )
+
+    row = conn.execute(
+        """
+        SELECT
+            id,
+            status,
+            last_notified,
+            first_seen
+        FROM candidates
+        WHERE candidate_key = ?
+        LIMIT 1
+        """,
+        (
+            candidate_key,
+        ),
+    ).fetchone()
+
+    if row:
+
+        candidate_id = row[0]
+
+        old_status = row[1]
+
+        last_notified = row[2]
+
+        first_seen = (
+            row[3]
+            or now_text
+        )
+
+        # A previously invalidated candidate can return.
+        # Re-open it as WAITING if the exact structure appears
+        # again.
+        status = "WAITING"
+
+        conn.execute(
+            """
+            UPDATE candidates
+            SET
+                symbol = ?,
+                side = ?,
+                status = ?,
+                structure_time = ?,
+
+                rally_start = ?,
+                rally_end = ?,
+
+                hook1_p1_idx = ?,
+                hook1_p2_idx = ?,
+                hook2_p1_idx = ?,
+                hook2_p2_idx = ?,
+
+                hook1_p1_price = ?,
+                hook1_p2_price = ?,
+                hook2_p1_price = ?,
+                hook2_p2_price = ?,
+
+                retrace1 = ?,
+                retrace2 = ?,
+                symmetry = ?,
+                hook_score = ?,
+
+                last_price = ?,
+                last_candle_time = ?,
+                first_seen = ?,
+                last_seen = ?,
+
+                updated_at = ?
+
+            WHERE id = ?
+            """,
+            (
+                symbol,
+                side,
+                status,
+                structure_time,
+
+                structure[
+                    "rally_start"
+                ],
+
+                structure[
+                    "rally_end"
+                ],
+
+                structure[
+                    "hook1"
+                ]["p1_idx"],
+
+                structure[
+                    "hook1"
+                ]["p2_idx"],
+
+                structure[
+                    "hook2"
+                ]["p1_idx"],
+
+                structure[
+                    "hook2"
+                ]["p2_idx"],
+
+                structure[
+                    "hook1"
+                ]["p1_price"],
+
+                structure[
+                    "hook1"
+                ]["p2_price"],
+
+                structure[
+                    "hook2"
+                ]["p1_price"],
+
+                structure[
+                    "hook2"
+                ]["p2_price"],
+
+                structure[
+                    "retrace1"
+                ],
+
+                structure[
+                    "retrace2"
+                ],
+
+                structure[
+                    "symmetry"
+                ],
+
+                structure[
+                    "score"
+                ],
+
+                candidate[
+                    "last_price"
+                ],
+
+                structure_time,
+
+                first_seen,
+
+                now_text,
+
+                now_text,
+
+                candidate_id,
+            ),
+        )
+
+    else:
+
+        last_notified = None
+
+        cursor = conn.execute(
+            """
+            INSERT INTO candidates (
+
+                symbol,
+                side,
+                candidate_key,
+                status,
+                structure_time,
+
+                rally_start,
+                rally_end,
+
+                hook1_p1_idx,
+                hook1_p2_idx,
+                hook2_p1_idx,
+                hook2_p2_idx,
+
+                hook1_p1_price,
+                hook1_p2_price,
+                hook2_p1_price,
+                hook2_p2_price,
+
+                retrace1,
+                retrace2,
+                symmetry,
+                hook_score,
+
+                last_price,
+                last_candle_time,
+
+                first_seen,
+                last_seen,
+
+                created_at,
+                updated_at
+
+            )
+            VALUES (
+                ?, ?, ?, ?,
+                ?,
+                ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?, ?, ?,
+                ?, ?,
+                ?, ?,
+                ?, ?
+            )
+            """,
+            (
+                symbol,
+                side,
+                candidate_key,
+                "WAITING",
+
+                structure_time,
+
+                structure[
+                    "rally_start"
+                ],
+
+                structure[
+                    "rally_end"
+                ],
+
+                structure[
+                    "hook1"
+                ]["p1_idx"],
+
+                structure[
+                    "hook1"
+                ]["p2_idx"],
+
+                structure[
+                    "hook2"
+                ]["p1_idx"],
+
+                structure[
+                    "hook2"
+                ]["p2_idx"],
+
+                structure[
+                    "hook1"
+                ]["p1_price"],
+
+                structure[
+                    "hook1"
+                ]["p2_price"],
+
+                structure[
+                    "hook2"
+                ]["p1_price"],
+
+                structure[
+                    "hook2"
+                ]["p2_price"],
+
+                structure[
+                    "retrace1"
+                ],
+
+                structure[
+                    "retrace2"
+                ],
+
+                structure[
+                    "symmetry"
+                ],
+
+                structure[
+                    "score"
+                ],
+
+                candidate[
+                    "last_price"
+                ],
+
+                structure_time,
+
+                now_text,
+                now_text,
+
+                now_text,
+                now_text,
+            ),
+        )
+
+        candidate_id = (
+            cursor.lastrowid
+        )
+
+    conn.commit()
+
+    return {
+        "id":
+            candidate_id,
+
+        "last_notified":
+            last_notified,
+    }
+
+
+# ============================================================
+# CANDIDATE NOTIFICATION CHECK
+# ============================================================
+
+def candidate_should_notify(
+    last_notified,
+):
+
+    if not last_notified:
+
+        return True
+
+    try:
+
+        parsed = pd.to_datetime(
+            last_notified,
+            utc=True,
+        )
+
+        last_timestamp = (
+            parsed.timestamp()
+        )
+
+        age_minutes = (
+            time.time()
+            -
+            last_timestamp
+        ) / 60.0
+
+        return (
+            age_minutes
+            >=
+            CANDIDATE_NOTIFY_COOLDOWN_MIN
+        )
+
+    except Exception:
+
+        return True
+
+
+# ============================================================
+# MARK CANDIDATE NOTIFIED
+# ============================================================
+
+def mark_candidate_notified(
+    conn,
+    candidate_id,
+    chart_path,
+):
+
+    conn.execute(
+        """
+        UPDATE candidates
+        SET
+            last_notified = ?,
+            chart_path = ?,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            fmt_dt(
+                time.time()
+            ),
+
+            chart_path,
+
+            fmt_dt(
+                time.time()
+            ),
+
+            candidate_id,
+        ),
+    )
+
+    conn.commit()
+
+
+# ============================================================
+# INVALIDATE OLD CANDIDATES
+# ============================================================
+
+def invalidate_old_candidates(
+    conn,
+):
+
+    cutoff = (
+        time.time()
+        -
+        CANDIDATE_MAX_AGE_HOURS
+        * 3600
+    )
+
+    rows = conn.execute(
+        """
+        SELECT
+            id,
+            last_seen
+        FROM candidates
+        WHERE status = 'WAITING'
+        """
+    ).fetchall()
+
+    count = 0
+
+    for row in rows:
+
+        candidate_id = row[0]
+        last_seen = row[1]
+
+        try:
+
+            dt = pd.to_datetime(
+                last_seen,
+                utc=True,
+            )
+
+            timestamp = (
+                dt.timestamp()
+            )
+
+            if timestamp < cutoff:
+
+                conn.execute(
+                    """
+                    UPDATE candidates
+                    SET
+                        status = 'EXPIRED',
+                        invalidated_time = ?,
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        fmt_dt(
+                            time.time()
+                        ),
+                        fmt_dt(
+                            time.time()
+                        ),
+                        candidate_id,
+                    ),
+                )
+
+                count += 1
+
+        except Exception:
+
+            continue
+
+    if count:
+
+        conn.commit()
+
+        print(
+            f"[CANDIDATE] "
+            f"Expired {count} old candidates"
+        )
+
+
+# ============================================================
+# CANDIDATE MESSAGE
+# ============================================================
+
+def candidate_message(
+    candidate,
+):
+
+    if not candidate:
+
+        return (
+            "⭐ *Best Candidate:* NONE"
+        )
+
+    structure = (
+        candidate["structure"]
+    )
+
+    side = candidate[
+        "side"
+    ]
+
+    emoji = (
+        "🟢"
+        if side == "LONG"
+        else "🔴"
+    )
+
+    return (
+        f"⭐ *BEST CANDIDATE*\n\n"
+
+        f"{emoji} "
+        f"`{candidate['symbol']}` "
+        f"*{side}*\n"
+
+        f"Status: "
+        f"*WAITING FOR BREAKOUT*\n\n"
+
+        f"Hook score: "
+        f"`{candidate['score']:.1f}`\n"
+
+        f"Hook 1 retrace: "
+        f"`{structure['retrace1']*100:.1f}%`\n"
+
+        f"Hook 2 retrace: "
+        f"`{structure['retrace2']*100:.1f}%`\n"
+
+        f"Symmetry: "
+        f"`{structure['symmetry']*100:.1f}%`\n"
+
+        f"Current: "
+        f"`{candidate['last_price']:.8g}`\n\n"
+
+        f"Breakout: "
+        f"*NOT CONFIRMED*\n"
+
+        f"Trade: "
+        f"*NONE*\n\n"
+
+        f"🧪 *PAPER ONLY*"
+    )
+
+
+# ============================================================
+# CANDIDATE CHART
+# ============================================================
+
+def make_candidate_chart(
+    candidate,
+    filename_prefix,
+):
+
+    os.makedirs(
+        CHART_DIR,
+        exist_ok=True,
+    )
+
+    df = candidate[
+        "df"
+    ]
+
+    structure = candidate[
+        "structure"
+    ]
+
+    side = candidate[
+        "side"
+    ]
+
+    left = max(
+        0,
+        len(df)
+        -
+        CANDIDATE_CHART_BARS,
+    )
+
+    plot_df = (
+        df.iloc[left:]
+        .copy()
+    )
+
+    fig, ax = plt.subplots(
+        figsize=(12, 7)
+    )
+
+    # --------------------------------------------------------
+    # Close
+    # --------------------------------------------------------
+
+    ax.plot(
+        plot_df.index,
+        plot_df["close"],
+        linewidth=1.3,
+        label="Close",
+    )
+
+    # --------------------------------------------------------
+    # NDS nodes
+    # --------------------------------------------------------
+
+    nodes = [
+        (
+            "R1",
+            structure[
+                "rally_start"
+            ],
+        ),
+
+        (
+            "R2",
+            structure[
+                "rally_end"
+            ],
+        ),
+
+        (
+            "H1-P1",
+            structure[
+                "hook1"
+            ]["p1_idx"],
+        ),
+
+        (
+            "H1-P2",
+            structure[
+                "hook1"
+            ]["p2_idx"],
+        ),
+
+        (
+            "H2-P1",
+            structure[
+                "hook2"
+            ]["p1_idx"],
+        ),
+
+        (
+            "H2-P2",
+            structure[
+                "hook2"
+            ]["p2_idx"],
+        ),
+    ]
+
+    for label, index in nodes:
+
+        if (
+            left
+            <= index
+            <
+            len(df)
+        ):
+
+            # Use actual pivot price rather than close.
+            if label in (
+                "R1",
+                "H1-P1",
+                "H2-P1",
+            ):
+
+                y = float(
+                    df.iloc[index][
+                        "low"
+                        if side == "LONG"
+                        else "high"
+                    ]
+                )
+
+            else:
+
+                y = float(
+                    df.iloc[index][
+                        "high"
+                        if side == "LONG"
+                        else "low"
+                    ]
+                )
+
+            ax.scatter(
+                [index],
+                [y],
+                s=40,
+            )
+
+            ax.annotate(
+                label,
+                (index, y),
+                xytext=(4, 6),
+                textcoords=(
+                    "offset points"
+                ),
+            )
+
+    # --------------------------------------------------------
+    # Hook 2 trigger
+    # --------------------------------------------------------
+
+    h2_p1 = (
+        structure[
+            "hook2"
+        ]["p1_price"]
+    )
+
+    h2_p2 = (
+        structure[
+            "hook2"
+        ]["p2_price"]
+    )
+
+    fib864 = (
+        h2_p1
+        +
+        (
+            h2_p2
+            - h2_p1
+        )
+        *
+        TARGET_FIB
+    )
+
+    ax.axhline(
+        h2_p2,
+        linestyle="--",
+        linewidth=1.1,
+        label="Breakout trigger",
+    )
+
+    ax.axhline(
+        fib864,
+        linestyle=":",
+        linewidth=0.9,
+        label="86.4% reference",
+    )
+
+    # --------------------------------------------------------
+    # Hook path
+    # --------------------------------------------------------
+
+    ax.plot(
+        [
+            structure[
+                "hook1"
+            ]["p1_idx"],
+
+            structure[
+                "hook2"
+            ]["p1_idx"],
+        ],
+
+        [
+            structure[
+                "hook1"
+            ]["p1_price"],
+
+            structure[
+                "hook2"
+            ]["p1_price"],
+        ],
+
+        linewidth=1.0,
+        label="Hook path",
+    )
+
+    # --------------------------------------------------------
+    # Candidate current price
+    # --------------------------------------------------------
+
+    current_price = float(
+        candidate[
+            "last_price"
+        ]
+    )
+
+    ax.axhline(
+        current_price,
+        linestyle="-.",
+        linewidth=1.0,
+        label="Current price",
+    )
+
+    # --------------------------------------------------------
+    # Candidate status annotation
+    # --------------------------------------------------------
+
+    ax.text(
+        0.01,
+        0.97,
+        (
+            "CANDIDATE\n"
+            "WAITING FOR BREAKOUT\n"
+            "NO TRADE"
+        ),
+        transform=ax.transAxes,
+        verticalalignment="top",
+        fontsize=10,
+    )
+
+    # --------------------------------------------------------
+    # Title
+    # --------------------------------------------------------
+
+    ax.set_title(
+        (
+            f"NDS 5M CANDIDATE | "
+            f"{candidate['symbol']} | "
+            f"{side} | "
+            f"Score "
+            f"{candidate['score']:.1f}"
+        )
+    )
+
+    ax.set_xlabel(
+        "Candle index"
+    )
+
+    ax.set_ylabel(
+        "Price"
+    )
+
+    ax.grid(
+        alpha=0.2
+    )
+
+    ax.legend(
+        loc="best",
+        fontsize=8,
+    )
+
+    path = os.path.join(
+        CHART_DIR,
+        (
+            f"{filename_prefix}_"
+            f"{candidate['symbol']}_"
+            f"{side}.png"
+        ),
+    )
+
+    fig.tight_layout()
+
+    fig.savefig(
+        path,
+        dpi=130,
+    )
+
+    plt.close(fig)
+
+    return path
+
+
+# ============================================================
+# SEND BEST CANDIDATE
+# ============================================================
+
+def send_candidate_chart(
+    conn,
+    candidate,
+    candidate_id,
+    force=False,
+):
+
+    row = conn.execute(
+        """
+        SELECT
+            last_notified
+        FROM candidates
+        WHERE id = ?
+        """,
+        (
+            candidate_id,
+        ),
+    ).fetchone()
+
+    last_notified = (
+        row[0]
+        if row
+        else None
+    )
+
+    if (
+        not force
+        and
+        not candidate_should_notify(
+            last_notified
+        )
+    ):
+
+        print(
+            "[CANDIDATE] "
+            "Notification cooldown active"
+        )
+
+        return False
+
+    chart = make_candidate_chart(
+        candidate,
+        f"candidate_{candidate_id}",
+    )
+
+    message = candidate_message(
+        candidate
+    )
+
+    sent = send_telegram(
+        message,
+        chart,
+    )
+
+    if sent:
+
+        mark_candidate_notified(
+            conn,
+            candidate_id,
+            chart,
+        )
+
+        print(
+            "[CANDIDATE] "
+            f"Chart sent: "
+            f"{candidate['symbol']} "
+            f"{candidate['side']}"
+        )
+
+        return True
+
+    return False
 
 
 # ============================================================
@@ -2076,22 +3729,21 @@ def analyze_asset(
         )
 
         if not structure:
+
             continue
 
-        # Candidate exists even before breakout.
+        candidate = (
+            candidate_from_structure(
+                symbol,
+                df,
+                highs,
+                lows,
+                structure,
+            )
+        )
+
         candidates.append(
-            {
-                "symbol": symbol,
-                "side": side,
-                "df": df,
-                "highs": highs,
-                "lows": lows,
-                "structure": structure,
-                "score":
-                    structure["score"],
-                "recency_score": 0.0,
-                "candidate_only": True,
-            }
+            candidate
         )
 
         breakout = find_breakout(
@@ -2099,7 +3751,17 @@ def analyze_asset(
             structure,
         )
 
+        # ----------------------------------------------------
+        # IMPORTANT:
+        #
+        # Candidate exists regardless of breakout.
+        #
+        # No breakout = candidate only.
+        # No trade.
+        # ----------------------------------------------------
+
         if not breakout:
+
             continue
 
         levels = calculate_levels(
@@ -2111,19 +3773,39 @@ def analyze_asset(
         )
 
         if not levels:
+
             continue
 
         result = {
-            "symbol": symbol,
-            "side": side,
-            "df": df,
-            "highs": highs,
-            "lows": lows,
-            "structure": structure,
-            "breakout": breakout,
-            "levels": levels,
+            "symbol":
+                symbol,
+
+            "side":
+                side,
+
+            "df":
+                df,
+
+            "highs":
+                highs,
+
+            "lows":
+                lows,
+
+            "structure":
+                structure,
+
+            "breakout":
+                breakout,
+
+            "levels":
+                levels,
+
             "score":
-                structure["score"],
+                structure[
+                    "score"
+                ],
+
             "recency_score":
                 max(
                     0.0,
@@ -2138,18 +3820,23 @@ def analyze_asset(
                     )
                     / 60.0,
                 ),
-            "candidate_only": False,
+
+            "candidate_only":
+                False,
         }
 
         results.append(
             result
         )
 
-    return results, candidates
+    return (
+        results,
+        candidates,
+    )
 
 
 # ============================================================
-# CHART
+# CHART FOR CONFIRMED SIGNAL
 # ============================================================
 
 def make_chart(
@@ -2210,30 +3897,35 @@ def make_chart(
                 "rally_start"
             ],
         ),
+
         (
             "R2",
             structure[
                 "rally_end"
             ],
         ),
+
         (
             "H1-P1",
             structure[
                 "hook1"
             ]["p1_idx"],
         ),
+
         (
             "H1-P2",
             structure[
                 "hook1"
             ]["p2_idx"],
         ),
+
         (
             "H2-P1",
             structure[
                 "hook2"
             ]["p1_idx"],
         ),
+
         (
             "H2-P2",
             structure[
@@ -2251,11 +3943,29 @@ def make_chart(
             len(df)
         ):
 
-            y = float(
-                df.iloc[index][
-                    "close"
-                ]
-            )
+            if label in (
+                "R1",
+                "H1-P1",
+                "H2-P1",
+            ):
+
+                y = float(
+                    df.iloc[index][
+                        "low"
+                        if side == "LONG"
+                        else "high"
+                    ]
+                )
+
+            else:
+
+                y = float(
+                    df.iloc[index][
+                        "high"
+                        if side == "LONG"
+                        else "low"
+                    ]
+                )
 
             ax.scatter(
                 [index],
@@ -2292,7 +4002,8 @@ def make_chart(
         h2_p1
         +
         (
-            h2_p2 - h2_p1
+            h2_p2
+            - h2_p1
         )
         *
         TARGET_FIB
@@ -2321,18 +4032,22 @@ def make_chart(
             structure[
                 "hook1"
             ]["p1_idx"],
+
             structure[
                 "hook2"
             ]["p1_idx"],
         ],
+
         [
             structure[
                 "hook1"
             ]["p1_price"],
+
             structure[
                 "hook2"
             ]["p1_price"],
         ],
+
         linewidth=1.0,
         label="Hook path",
     )
@@ -2514,6 +4229,7 @@ def insert_signal(
             "signal_time"
         ],
     ):
+
         return None
 
     cursor = conn.execute(
@@ -2595,6 +4311,7 @@ def insert_trade(
         open_trade_count(conn)
         >= MAX_OPEN_TRADES
     ):
+
         return None
 
     breakout = (
@@ -2655,6 +4372,51 @@ def insert_trade(
 
 
 # ============================================================
+# MARK CANDIDATE AS BROKEN OUT
+# ============================================================
+
+def mark_candidate_breakout(
+    conn,
+    candidate,
+    signal_id,
+    breakout_time,
+):
+
+    candidate_key = (
+        candidate[
+            "candidate_key"
+        ]
+    )
+
+    conn.execute(
+        """
+        UPDATE candidates
+        SET
+            status = 'TRIGGERED',
+            breakout_time = ?,
+            signal_id = ?,
+            updated_at = ?
+        WHERE candidate_key = ?
+        """,
+        (
+            fmt_dt(
+                breakout_time
+            ),
+
+            signal_id,
+
+            fmt_dt(
+                time.time()
+            ),
+
+            candidate_key,
+        ),
+    )
+
+    conn.commit()
+
+
+# ============================================================
 # PNL
 # ============================================================
 
@@ -2700,10 +4462,14 @@ def close_trade(
     ).fetchone()
 
     if not row:
+
         return
 
     side = row[0]
-    entry = float(row[1])
+
+    entry = float(
+        row[1]
+    )
 
     pnl = pnl_for_trade(
         side,
@@ -2726,9 +4492,13 @@ def close_trade(
             fmt_dt(
                 time.time()
             ),
+
             current,
+
             pnl,
+
             reason,
+
             trade_id,
         ),
     )
@@ -2749,11 +4519,21 @@ def close_trade(
 
     message = (
         f"🔔 *NDS 5M CLOSED*\n\n"
+
         f"{emoji} {side}\n"
-        f"Trade ID: `{trade_id}`\n"
-        f"Exit: `{current:.8g}`\n"
-        f"P/L: *{sign}{pnl:.2f}%*\n"
-        f"Reason: `{reason}`\n\n"
+
+        f"Trade ID: "
+        f"`{trade_id}`\n"
+
+        f"Exit: "
+        f"`{current:.8g}`\n"
+
+        f"P/L: "
+        f"*{sign}{pnl:.2f}%*\n"
+
+        f"Reason: "
+        f"`{reason}`\n\n"
+
         f"🧪 PAPER ONLY"
     )
 
@@ -2807,32 +4587,45 @@ def monitor_open_trades(
             df is None
             or df.empty
         ):
+
             continue
 
         current = float(
             df.iloc[-1]["close"]
         )
 
-        entry = float(entry)
-        sl = float(sl)
-        tp = float(tp)
+        entry = float(
+            entry
+        )
+
+        sl = float(
+            sl
+        )
+
+        tp = float(
+            tp
+        )
 
         reason = None
 
         if side == "LONG":
 
             if current <= sl:
+
                 reason = "SL"
 
             elif current >= tp:
+
                 reason = "TP"
 
         else:
 
             if current >= sl:
+
                 reason = "SL"
 
             elif current <= tp:
+
                 reason = "TP"
 
         if reason:
@@ -2849,7 +4642,9 @@ def monitor_open_trades(
 # STATISTICS
 # ============================================================
 
-def stats(conn):
+def stats(
+    conn
+):
 
     row = conn.execute(
         """
@@ -2890,19 +4685,33 @@ def stats(conn):
 
     return {
         "closed":
-            int(row[0] or 0),
+            int(
+                row[0]
+                or 0
+            ),
 
         "wins":
-            int(row[1] or 0),
+            int(
+                row[1]
+                or 0
+            ),
 
         "losses":
-            int(row[2] or 0),
+            int(
+                row[2]
+                or 0
+            ),
 
         "pnl":
-            float(row[3] or 0),
+            float(
+                row[3]
+                or 0
+            ),
 
         "open":
-            open_trade_count(conn),
+            open_trade_count(
+                conn
+            ),
     }
 
 
@@ -3014,55 +4823,13 @@ def save_run(
 
 
 # ============================================================
-# BEST CANDIDATE MESSAGE
-# ============================================================
-
-def candidate_message(
-    candidate
-):
-
-    if not candidate:
-
-        return (
-            "⭐ *Best Candidate:* NONE"
-        )
-
-    structure = (
-        candidate["structure"]
-    )
-
-    side = candidate["side"]
-
-    emoji = (
-        "🟢"
-        if side == "LONG"
-        else "🔴"
-    )
-
-    return (
-        f"⭐ *Best Candidate*\n"
-        f"{emoji} `{candidate['symbol']}` "
-        f"{side}\n"
-        f"Hook score: "
-        f"`{candidate['score']:.1f}`\n"
-        f"Hook 1 retrace: "
-        f"`{structure['retrace1']*100:.1f}%`\n"
-        f"Hook 2 retrace: "
-        f"`{structure['retrace2']*100:.1f}%`\n"
-        f"Symmetry: "
-        f"`{structure['symmetry']*100:.1f}%`\n"
-        f"⚠️ Candidate only, "
-        f"no trade"
-    )
-
-
-# ============================================================
 # SEND NEW SIGNAL
 # ============================================================
 
 def send_new_signal(
     conn,
     result,
+    candidate=None,
 ):
 
     signal_id = insert_signal(
@@ -3071,6 +4838,7 @@ def send_new_signal(
     )
 
     if signal_id is None:
+
         return False
 
     trade_id = insert_trade(
@@ -3143,21 +4911,43 @@ def send_new_signal(
         f"🧪 *PAPER ONLY*"
     )
 
-    send_telegram(
+    sent = send_telegram(
         message,
         chart,
     )
 
-    conn.execute(
-        """
-        UPDATE signals
-        SET notified = 1
-        WHERE id = ?
-        """,
-        (signal_id,),
-    )
+    if sent:
 
-    conn.commit()
+        conn.execute(
+            """
+            UPDATE signals
+            SET notified = 1
+            WHERE id = ?
+            """,
+            (
+                signal_id,
+            ),
+        )
+
+        conn.commit()
+
+    # --------------------------------------------------------
+    # If this signal came from a persistent candidate,
+    # transition that candidate to TRIGGERED.
+    # --------------------------------------------------------
+
+    if candidate:
+
+        mark_candidate_breakout(
+            conn,
+            candidate,
+            signal_id,
+            result[
+                "breakout"
+            ][
+                "signal_time"
+            ],
+        )
 
     return True
 
@@ -3168,7 +4958,10 @@ def send_new_signal(
 
 def main():
 
+    # --------------------------------------------------------
     # Absolute safety.
+    # --------------------------------------------------------
+
     if REAL_TRADING:
 
         raise RuntimeError(
@@ -3183,7 +4976,15 @@ def main():
     conn = init_db()
 
     # --------------------------------------------------------
-    # IMPORTANT COUNTERS
+    # Expire very old candidates.
+    # --------------------------------------------------------
+
+    invalidate_old_candidates(
+        conn
+    )
+
+    # --------------------------------------------------------
+    # Counters
     # --------------------------------------------------------
 
     counters = {
@@ -3210,12 +5011,14 @@ def main():
 
     all_candidates = []
 
-    # --------------------------------------------------------
+    # ========================================================
     # START
-    # --------------------------------------------------------
+    # ========================================================
 
     print()
-    print("=" * 70)
+    print(
+        "=" * 70
+    )
 
     print(
         f"NDS 5M LIVE SCANNER "
@@ -3231,7 +5034,20 @@ def main():
         f"{len(ASSETS)}"
     )
 
-    print("=" * 70)
+    print(
+        "Candidate persistence: "
+        "ENABLED"
+    )
+
+    print(
+        "Candidate chart: "
+        "ENABLED"
+    )
+
+    print(
+        "=" * 70
+    )
+
     print()
 
     # ========================================================
@@ -3304,11 +5120,62 @@ def main():
                 "analyzed"
             ] += 1
 
+            # ------------------------------------------------
+            # Save every detected candidate.
+            #
+            # This happens BEFORE breakout handling.
+            # ------------------------------------------------
+
             for candidate in candidates:
 
                 all_candidates.append(
                     candidate
                 )
+
+                try:
+
+                    db_info = (
+                        save_candidate(
+                            conn,
+                            candidate,
+                        )
+                    )
+
+                    candidate[
+                        "db_id"
+                    ] = db_info[
+                        "id"
+                    ]
+
+                    candidate[
+                        "last_notified"
+                    ] = db_info[
+                        "last_notified"
+                    ]
+
+                    print(
+                        f"[CANDIDATE] "
+                        f"{symbol} "
+                        f"{candidate['side']} "
+                        f"score="
+                        f"{candidate['score']:.1f}"
+                    )
+
+                except Exception as exc:
+
+                    counters[
+                        "analysis_errors"
+                    ] += 1
+
+                    print(
+                        f"[CANDIDATE DB ERROR] "
+                        f"{symbol}: "
+                        f"{exc}"
+                    )
+
+            # ------------------------------------------------
+            # Confirmed breakout results.
+            # ------------------------------------------------
 
             for result in results:
 
@@ -3367,10 +5234,74 @@ def main():
             )
 
     # ========================================================
+    # BEST CANDIDATE
+    # ========================================================
+
+    best_candidate = None
+
+    if all_candidates:
+
+        best_candidate = max(
+            all_candidates,
+            key=lambda item: (
+                item.get(
+                    "score",
+                    0,
+                ),
+
+                item.get(
+                    "recency_score",
+                    0,
+                ),
+
+                item.get(
+                    "last_candle_time",
+                    0,
+                ),
+            ),
+        )
+
+        # ----------------------------------------------------
+        # Send Best Candidate Chart.
+        #
+        # IMPORTANT:
+        # This does NOT open a trade.
+        # ----------------------------------------------------
+
+        try:
+
+            candidate_id = (
+                best_candidate.get(
+                    "db_id"
+                )
+            )
+
+            if candidate_id:
+
+                send_candidate_chart(
+                    conn,
+                    best_candidate,
+                    candidate_id,
+                    force=False,
+                )
+
+        except Exception as exc:
+
+            counters[
+                "analysis_errors"
+            ] += 1
+
+            print(
+                f"[BEST CANDIDATE CHART ERROR] "
+                f"{exc}"
+            )
+
+    # ========================================================
     # MONITOR EXISTING PAPER TRADES
     # ========================================================
 
     print()
+
     print(
         "[TRADES] Monitoring "
         "open trades..."
@@ -3419,9 +5350,49 @@ def main():
 
         try:
 
+            # ------------------------------------------------
+            # Find corresponding persistent candidate.
+            # ------------------------------------------------
+
+            candidate = None
+
+            for item in all_candidates:
+
+                if (
+                    item["symbol"]
+                    ==
+                    result["symbol"]
+                    and
+                    item["side"]
+                    ==
+                    result["side"]
+                ):
+
+                    if (
+                        item[
+                            "structure"
+                        ][
+                            "hook2"
+                        ][
+                            "p2_idx"
+                        ]
+                        ==
+                        result[
+                            "structure"
+                        ][
+                            "hook2"
+                        ][
+                            "p2_idx"
+                        ]
+                    ):
+
+                        candidate = item
+                        break
+
             if send_new_signal(
                 conn,
                 result,
+                candidate,
             ):
 
                 new_count += 1
@@ -3439,28 +5410,6 @@ def main():
             )
 
     # ========================================================
-    # BEST CANDIDATE
-    # ========================================================
-
-    best_candidate = None
-
-    if all_candidates:
-
-        best_candidate = max(
-            all_candidates,
-            key=lambda item: (
-                item.get(
-                    "score",
-                    0,
-                ),
-                item.get(
-                    "recency_score",
-                    0,
-                ),
-            ),
-        )
-
-    # ========================================================
     # FINAL STATISTICS
     # ========================================================
 
@@ -3468,7 +5417,10 @@ def main():
         conn
     )
 
+    # --------------------------------------------------------
     # Save scanner run.
+    # --------------------------------------------------------
+
     save_run(
         conn,
         counters,
@@ -3485,6 +5437,26 @@ def main():
         if statistics["closed"]
         else 0.0
     )
+
+    # --------------------------------------------------------
+    # Candidate counts
+    # --------------------------------------------------------
+
+    waiting_candidates = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM candidates
+        WHERE status = 'WAITING'
+        """
+    ).fetchone()[0]
+
+    triggered_candidates = conn.execute(
+        """
+        SELECT COUNT(*)
+        FROM candidates
+        WHERE status = 'TRIGGERED'
+        """
+    ).fetchone()[0]
 
     # ========================================================
     # REPORT
@@ -3507,6 +5479,15 @@ def main():
 
         f"Analysis errors: "
         f"*{counters['analysis_errors']}*\n\n"
+
+        f"🎯 Candidates detected: "
+        f"*{len(all_candidates)}*\n"
+
+        f"⏳ Waiting candidates: "
+        f"*{waiting_candidates}*\n"
+
+        f"✅ Triggered candidates: "
+        f"*{triggered_candidates}*\n\n"
 
         f"New signals: "
         f"*{new_count}*\n"
@@ -3537,23 +5518,30 @@ def main():
         f"{VERSION}"
     )
 
-    # --------------------------------------------------------
-    # Console
-    # --------------------------------------------------------
+    # ========================================================
+    # CONSOLE
+    # ========================================================
 
     print()
-    print("=" * 70)
+
+    print(
+        "=" * 70
+    )
+
     print(
         report.replace(
             "*",
             "",
         )
     )
-    print("=" * 70)
 
-    # --------------------------------------------------------
-    # Telegram
-    # --------------------------------------------------------
+    print(
+        "=" * 70
+    )
+
+    # ========================================================
+    # TELEGRAM REPORT
+    # ========================================================
 
     send_telegram(
         report
@@ -3575,6 +5563,7 @@ if __name__ == "__main__":
     except Exception as exc:
 
         print()
+
         print(
             "[FATAL ERROR]"
         )
@@ -3584,7 +5573,9 @@ if __name__ == "__main__":
         send_telegram(
             (
                 "🚨 *NDS 5M SCANNER ERROR*\n\n"
+
                 f"`{str(exc)[:700]}`\n\n"
+
                 f"Version: {VERSION}"
             )
         )
