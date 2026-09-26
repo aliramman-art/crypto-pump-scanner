@@ -7,13 +7,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  actions: write
+  contents: write
 
 jobs:
   nds-scanner:
     runs-on: ubuntu-latest
-
     timeout-minutes: 4
 
     steps:
@@ -27,7 +25,7 @@ jobs:
 
 
       # ======================================================
-      # PYTHON
+      # PYTHON 3.11
       # ======================================================
 
       - name: Setup Python
@@ -37,7 +35,20 @@ jobs:
 
 
       # ======================================================
-      # INSTALL DEPENDENCIES
+      # RESTORE DATABASE
+      # ======================================================
+
+      - name: Restore NDS database
+        uses: actions/cache/restore@v4
+        with:
+          path: nds_v11.db
+          key: nds-db-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            nds-db-${{ github.ref_name }}-
+
+
+      # ======================================================
+      # INSTALL
       # ======================================================
 
       - name: Install dependencies
@@ -47,27 +58,7 @@ jobs:
 
 
       # ======================================================
-      # RESTORE NDS DATABASE
-      # ======================================================
-
-      - name: Restore NDS database
-        uses: actions/download-artifact@v4
-        continue-on-error: true
-        with:
-          name: nds-database
-          path: .
-
-
-      # ======================================================
-      # RUN NDS SCANNER
-      #
-      # The Python scanner normally loops forever.
-      # We allow it to run for 3 minutes.
-      #
-      # It performs an immediate scan when started.
-      # Then the runner is stopped before another cycle.
-      #
-      # The next GitHub schedule starts another scan.
+      # RUN ONE NDS SCAN
       # ======================================================
 
       - name: Run NDS scanner
@@ -75,34 +66,30 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          timeout 180s python nds_live_scanner_v11.py || true
+          python nds_live_scanner_v11.py
 
 
       # ======================================================
-      # SAVE NDS DATABASE
+      # SAVE DATABASE
       # ======================================================
 
       - name: Save NDS database
+        uses: actions/cache/save@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: nds-database
           path: nds_v11.db
-          if-no-files-found: ignore
-          retention-days: 7
-          overwrite: true
+          key: nds-db-${{ github.ref_name }}-${{ github.run_id }}
 
 
       # ======================================================
-      # SAVE CHARTS
+      # SAVE CHARTS AS ARTIFACT
       # ======================================================
 
-      - name: Save NDS charts
-        if: always()
+      - name: Upload NDS charts
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: nds-charts
+          name: nds-charts-${{ github.run_id }}
           path: charts/
           if-no-files-found: ignore
           retention-days: 7
-          overwrite: true
