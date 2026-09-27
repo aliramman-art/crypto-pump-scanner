@@ -1,6 +1,6 @@
 # ============================================================
 # NDS M30 -> M1 LIVE SCANNER
-# VERSION 4.0.0
+# VERSION 4.1.0
 # ============================================================
 #
 # PAPER ONLY
@@ -30,22 +30,21 @@
 # After H3:
 #   monitor M1 for an upward corrective structure.
 #
+#
 # M1 POSITIVE CORRECTION:
 #
 #   H1 -> L1 -> H2 -> L2 -> H3 -> L3 -> F
 #
-# Simplified structural requirement:
-#
 #   H1 < H2 < H3 < F
 #
-#   and each high has a confirmed swing low between it.
+# F = newest confirmed M1 HIGH
 #
 # When F is confirmed:
 #
 #   SHORT
 #
 # SL:
-#   slightly above the relevant M1 highs
+#   slightly above previous M1 highs
 #
 # TP:
 #   previous M30 low
@@ -74,23 +73,25 @@
 # After L3:
 #   monitor M1 for a downward corrective structure.
 #
+#
 # M1 NEGATIVE CORRECTION:
 #
 #   L1 -> H1 -> L2 -> H2 -> L3 -> H3 -> F
 #
-# Simplified structural requirement:
-#
 #   L1 > L2 > L3 > F
+#
+# F = newest confirmed M1 LOW
 #
 # When F is confirmed:
 #
 #   LONG
 #
 # SL:
-#   slightly below relevant M1 lows
+#   slightly below previous M1 lows
 #
 # TP:
 #   previous M30 high
+#
 #
 # ============================================================
 # IMPORTANT
@@ -98,7 +99,9 @@
 #
 # F is a CONFIRMED M1 pivot.
 #
-# Therefore entry happens only after F is confirmed.
+# Entry happens only after F is confirmed.
+#
+# F must also be fresh.
 #
 # No Kraken order API is used.
 # PAPER ONLY.
@@ -122,7 +125,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 
 PAPER_ONLY = True
 
@@ -180,6 +183,10 @@ M1_SCAN_SECONDS = 60
 
 M1_TIMEFRAME_MS = 60 * 1000
 
+# F is confirmed after PIVOT_RIGHT candles.
+# This prevents old structures from producing late signals.
+M1_F_MAX_AGE_MINUTES = 5
+
 
 # ============================================================
 # PIVOTS
@@ -209,18 +216,6 @@ M1_MAX_STRUCTURE_DISTANCE_PCT = 3.0
 
 
 # ============================================================
-# ENTRY
-# ============================================================
-
-# Entry happens at confirmed F.
-#
-# No additional breakout percentage is required because
-# F itself is the final confirmed pivot of the M1 correction.
-#
-# ============================================================
-
-
-# ============================================================
 # TRADE MANAGEMENT
 # ============================================================
 
@@ -229,6 +224,13 @@ MAX_OPEN_TRADES = 3
 SIGNAL_COOLDOWN_MINUTES = 60
 
 SL_BUFFER_PCT = 0.15
+
+
+# ============================================================
+# REPORT
+# ============================================================
+
+REPORT_INTERVAL_SECONDS = 900
 
 
 # ============================================================
@@ -259,10 +261,10 @@ session = requests.Session()
 
 session.headers.update(
     {
-        "User-Agent": (
-            "NDS-M30-M1-Scanner/4.0.0"
-        ),
-        "Accept": "application/json",
+        "User-Agent":
+            "NDS-M30-M1-Scanner/4.1.0",
+        "Accept":
+            "application/json",
     }
 )
 
@@ -284,6 +286,7 @@ LAST_M1_SCAN = 0
 # ============================================================
 
 def db_connect():
+
     conn = sqlite3.connect(
         DB_FILE,
         timeout=30,
@@ -376,21 +379,28 @@ def init_db():
 # HTTP
 # ============================================================
 
-def get_json(url, params=None):
+def get_json(
+    url,
+    params=None,
+):
 
     try:
 
-        r = session.get(
+        response = session.get(
             url,
             params=params,
             timeout=HTTP_TIMEOUT,
         )
 
-        r.raise_for_status()
+        response.raise_for_status()
 
-        return r.json()
+        return response.json()
 
-    except Exception:
+    except Exception as exc:
+
+        print(
+            f"[HTTP ERROR] {url}: {exc}"
+        )
 
         return None
 
@@ -400,6 +410,7 @@ def get_json(url, params=None):
 # ============================================================
 
 def now_ms():
+
     return int(
         time.time() * 1000
     )
@@ -468,7 +479,8 @@ def telegram_send(
                             text[:1024],
                     },
                     files={
-                        "photo": photo,
+                        "photo":
+                            photo,
                     },
                     timeout=20,
                 )
@@ -553,14 +565,19 @@ def fetch_candles(
                 {
                     "time":
                         int(c["time"]),
+
                     "open":
                         float(c["open"]),
+
                     "high":
                         float(c["high"]),
+
                     "low":
                         float(c["low"]),
+
                     "close":
                         float(c["close"]),
+
                     "volume":
                         float(
                             c.get(
@@ -576,7 +593,8 @@ def fetch_candles(
             continue
 
     result.sort(
-        key=lambda x: x["time"]
+        key=lambda x:
+            x["time"]
     )
 
     return result
@@ -776,7 +794,8 @@ def discover_assets():
         )
 
     ranked.sort(
-        key=lambda x: x[0],
+        key=lambda x:
+            x[0],
         reverse=True,
     )
 
@@ -866,6 +885,7 @@ def closed_candles(
 def find_pivots(candles):
 
     highs = []
+
     lows = []
 
     n = len(candles)
@@ -907,10 +927,15 @@ def find_pivots(candles):
 
             highs.append(
                 {
-                    "kind": "H",
-                    "index": i,
+                    "kind":
+                        "H",
+
+                    "index":
+                        i,
+
                     "time":
                         center["time"],
+
                     "price":
                         center["high"],
                 }
@@ -937,10 +962,15 @@ def find_pivots(candles):
 
             lows.append(
                 {
-                    "kind": "L",
-                    "index": i,
+                    "kind":
+                        "L",
+
+                    "index":
+                        i,
+
                     "time":
                         center["time"],
+
                     "price":
                         center["low"],
                 }
@@ -964,7 +994,8 @@ def combined_pivots(
     )
 
     pivots.sort(
-        key=lambda x: x["time"]
+        key=lambda x:
+            x["time"]
     )
 
     cleaned = []
@@ -988,9 +1019,8 @@ def combined_pivots(
 
             continue
 
-        # Same kind.
-        #
-        # Keep the more extreme one.
+        # Same type.
+        # Keep the more extreme pivot.
 
         if p["kind"] == "H":
 
@@ -1042,15 +1072,11 @@ def detect_positive_hook(
 ):
 
     """
-    Positive Hook:
+    H1 -> L1 -> H2 -> L2 -> H3
 
-        H1 -> L1 -> H2 -> L2 -> H3
-
-    Conditions:
-
-        H2 > H1
-        L2 < L1
-        H3 > H2
+    H2 > H1
+    L2 < L1
+    H3 > H2
     """
 
     if len(pivots) < 5:
@@ -1082,32 +1108,17 @@ def detect_positive_hook(
 
         h1, l1, h2, l2, h3 = seq
 
-        # ----------------------------------------------------
-        # H2 must be above H1
-        # ----------------------------------------------------
-
         if (
             h2["price"]
             <= h1["price"]
         ):
             continue
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # The low of the second upward movement
-        # must be below L1.
-        # ----------------------------------------------------
-
         if (
             l2["price"]
             >= l1["price"]
         ):
             continue
-
-        # ----------------------------------------------------
-        # H3 above H2
-        # ----------------------------------------------------
 
         if (
             h3["price"]
@@ -1148,7 +1159,6 @@ def detect_positive_hook(
             "hook_time":
                 h3["time"],
 
-            # The previous M30 low.
             "target_price":
                 l2["price"],
         }
@@ -1165,15 +1175,11 @@ def detect_negative_hook(
 ):
 
     """
-    Negative Hook:
+    L1 -> H1 -> L2 -> H2 -> L3
 
-        L1 -> H1 -> L2 -> H2 -> L3
-
-    Conditions:
-
-        L2 < L1
-        H2 > H1
-        L3 < L2
+    L2 < L1
+    H2 > H1
+    L3 < L2
     """
 
     if len(pivots) < 5:
@@ -1256,7 +1262,6 @@ def detect_negative_hook(
             "hook_time":
                 l3["time"],
 
-            # Previous M30 high.
             "target_price":
                 h2["price"],
         }
@@ -1324,11 +1329,11 @@ def determine_active_hook(
     hook = candidates[0]
 
     # --------------------------------------------------------
-    # Positive:
+    # POSITIVE
     #
-    # H3 opens the window.
+    # H3 opens the M1 correction window.
     #
-    # The window stays valid until the next confirmed L.
+    # Next confirmed LOW invalidates it.
     # --------------------------------------------------------
 
     if hook["type"] == "POSITIVE":
@@ -1355,11 +1360,11 @@ def determine_active_hook(
         ] = None
 
     # --------------------------------------------------------
-    # Negative:
+    # NEGATIVE
     #
-    # L3 opens the window.
+    # L3 opens the M1 correction window.
     #
-    # The window stays valid until the next confirmed H.
+    # Next confirmed HIGH invalidates it.
     # --------------------------------------------------------
 
     else:
@@ -1389,7 +1394,7 @@ def determine_active_hook(
 
 
 # ============================================================
-# M1 PIVOT HELPERS
+# M1 PIVOTS
 # ============================================================
 
 def get_m1_pivots(
@@ -1414,6 +1419,29 @@ def get_m1_pivots(
 
 
 # ============================================================
+# M1 FRESHNESS
+# ============================================================
+
+def is_fresh_f(
+    f_time,
+):
+
+    age_ms = (
+        now_ms()
+        - f_time
+    )
+
+    return (
+        0
+        <= age_ms
+        <=
+        M1_F_MAX_AGE_MINUTES
+        * 60
+        * 1000
+    )
+
+
+# ============================================================
 # M1 POSITIVE CORRECTION
 # ============================================================
 
@@ -1423,34 +1451,21 @@ def detect_positive_m1_correction(
 ):
 
     """
-    Positive M30 Hook -> SHORT.
+    Positive M30 Hook -> SHORT
 
-    After H3 the market should temporarily move UP
-    on M1.
+    Search:
 
-    We search for:
+        H1 -> L1 -> H2 -> L2
+        -> H3 -> L3 -> F
 
-        H1
-         \
-          L1
-           \
-            H2
-             \
-              L2
-               \
-                H3
-                 \
-                  L3
-                   \
-                    F
-
-    Main condition:
+    Required:
 
         H1 < H2 < H3 < F
 
-    F is the newest confirmed high.
+    F must be the newest confirmed HIGH.
 
-    Entry = F.
+    No requirement is imposed on the exact size
+    of each intermediate pullback.
     """
 
     if not hook:
@@ -1473,13 +1488,10 @@ def detect_positive_m1_correction(
     if len(pivots) < 7:
         return None
 
-    # --------------------------------------------------------
-    # Search from newest possible F backward.
-    # --------------------------------------------------------
-
+    # Search newest possible F first.
     for end in range(
         len(pivots) - 1,
-        6 - 1,
+        5,
         -1,
     ):
 
@@ -1488,11 +1500,11 @@ def detect_positive_m1_correction(
         if f["kind"] != "H":
             continue
 
-        # Need alternating:
-        #
-        # H L H L H L H
-        #
-        # = H1 L1 H2 L2 H3 L3 F
+        # F must be fresh.
+        if not is_fresh_f(
+            f["time"]
+        ):
+            continue
 
         seq = pivots[
             end - 6:
@@ -1519,7 +1531,9 @@ def detect_positive_m1_correction(
         h1, l1, h2, l2, h3, l3, fp = seq
 
         # ----------------------------------------------------
-        # Higher highs.
+        # Four ascending highs:
+        #
+        # 1 < 2 < 3 < F
         # ----------------------------------------------------
 
         if not (
@@ -1532,25 +1546,11 @@ def detect_positive_m1_correction(
             continue
 
         # ----------------------------------------------------
-        # Higher lows.
-        #
-        # This confirms that the move is genuinely
-        # an upward corrective structure.
-        # ----------------------------------------------------
-
-        if not (
-            l2["price"] > l1["price"]
-            and
-            l3["price"] > l2["price"]
-        ):
-            continue
-
-        # ----------------------------------------------------
-        # Minimum movement.
+        # Minimum total correction.
         # ----------------------------------------------------
 
         swing_pct = pct_distance(
-            l1["price"],
+            h1["price"],
             fp["price"],
         )
 
@@ -1561,7 +1561,7 @@ def detect_positive_m1_correction(
             continue
 
         # ----------------------------------------------------
-        # F must be reasonably close to the structure.
+        # F should not be absurdly far from H3.
         # ----------------------------------------------------
 
         distance = pct_distance(
@@ -1574,14 +1574,6 @@ def detect_positive_m1_correction(
             > M1_MAX_STRUCTURE_DISTANCE_PCT
         ):
             continue
-
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # F is already confirmed because it is a pivot.
-        #
-        # Therefore the entry is now valid.
-        # ----------------------------------------------------
 
         return {
             "type":
@@ -1617,12 +1609,11 @@ def detect_positive_m1_correction(
             "f_price":
                 fp["price"],
 
-            # Relevant M1 highs for SL.
+            # F excluded.
             "sl_highs": [
                 h1,
                 h2,
                 h3,
-                fp,
             ],
         }
 
@@ -1639,22 +1630,18 @@ def detect_negative_m1_correction(
 ):
 
     """
-    Negative M30 Hook -> LONG.
+    Negative M30 Hook -> LONG
 
-    After L3 the market should temporarily move DOWN
-    on M1.
+    Search:
 
-    Search for:
+        L1 -> H1 -> L2 -> H2
+        -> L3 -> H3 -> F
 
-        L1 H1 L2 H2 L3 H3 F
-
-    Main condition:
+    Required:
 
         L1 > L2 > L3 > F
 
-    F is the newest confirmed low.
-
-    Entry = F.
+    F must be the newest confirmed LOW.
     """
 
     if not hook:
@@ -1679,13 +1666,19 @@ def detect_negative_m1_correction(
 
     for end in range(
         len(pivots) - 1,
-        6 - 1,
+        5,
         -1,
     ):
 
         f = pivots[end]
 
         if f["kind"] != "L":
+            continue
+
+        # F must be fresh.
+        if not is_fresh_f(
+            f["time"]
+        ):
             continue
 
         seq = pivots[
@@ -1713,7 +1706,9 @@ def detect_negative_m1_correction(
         l1, h1, l2, h2, l3, h3, fp = seq
 
         # ----------------------------------------------------
-        # Lower lows.
+        # Four descending lows:
+        #
+        # 1 > 2 > 3 > F
         # ----------------------------------------------------
 
         if not (
@@ -1726,18 +1721,11 @@ def detect_negative_m1_correction(
             continue
 
         # ----------------------------------------------------
-        # Lower highs.
+        # Minimum total correction.
         # ----------------------------------------------------
 
-        if not (
-            h2["price"] < h1["price"]
-            and
-            h3["price"] < h2["price"]
-        ):
-            continue
-
         swing_pct = pct_distance(
-            h1["price"],
+            l1["price"],
             fp["price"],
         )
 
@@ -1746,6 +1734,10 @@ def detect_negative_m1_correction(
             < M1_MIN_SWING_PCT
         ):
             continue
+
+        # ----------------------------------------------------
+        # F should not be absurdly far from L3.
+        # ----------------------------------------------------
 
         distance = pct_distance(
             l3["price"],
@@ -1792,11 +1784,11 @@ def detect_negative_m1_correction(
             "f_price":
                 fp["price"],
 
+            # F excluded.
             "sl_lows": [
                 l1,
                 l2,
                 l3,
-                fp,
             ],
         }
 
@@ -1815,15 +1807,13 @@ def calculate_trade_levels(
 ):
 
     """
-    NEW NDS LEVEL LOGIC
+    SHORT:
+        SL above previous M1 highs.
+        TP = previous M30 low.
 
     LONG:
-        SL below M1 lows.
+        SL below previous M1 lows.
         TP = previous M30 high.
-
-    SHORT:
-        SL above M1 highs.
-        TP = previous M30 low.
     """
 
     # ========================================================
@@ -1847,9 +1837,11 @@ def calculate_trade_levels(
 
         sl = (
             highest_high
-            * (
+            *
+            (
                 1.0
-                + SL_BUFFER_PCT / 100.0
+                +
+                SL_BUFFER_PCT / 100.0
             )
         )
 
@@ -1859,15 +1851,26 @@ def calculate_trade_levels(
 
         if (
             tp >= entry
-            or sl <= entry
+            or
+            sl <= entry
         ):
             return None
 
         return {
-            "sl": sl,
-            "tp1": tp,
-            "tp2": tp,
-            "tp3": tp,
+            "entry":
+                float(entry),
+
+            "sl":
+                sl,
+
+            "tp1":
+                tp,
+
+            "tp2":
+                tp,
+
+            "tp3":
+                tp,
         }
 
     # ========================================================
@@ -1889,9 +1892,11 @@ def calculate_trade_levels(
 
     sl = (
         lowest_low
-        * (
+        *
+        (
             1.0
-            - SL_BUFFER_PCT / 100.0
+            -
+            SL_BUFFER_PCT / 100.0
         )
     )
 
@@ -1901,15 +1906,26 @@ def calculate_trade_levels(
 
     if (
         tp <= entry
-        or sl >= entry
+        or
+        sl >= entry
     ):
         return None
 
     return {
-        "sl": sl,
-        "tp1": tp,
-        "tp2": tp,
-        "tp3": tp,
+        "entry":
+            float(entry),
+
+        "sl":
+            sl,
+
+        "tp1":
+            tp,
+
+        "tp2":
+            tp,
+
+        "tp3":
+            tp,
     }
 
 
@@ -2005,15 +2021,18 @@ def cooldown_active(
 
     age_ms = (
         now_ms()
-        - int(row["created_at"])
+        -
+        int(row["created_at"])
     )
 
     return (
         age_ms
         <
         SIGNAL_COOLDOWN_MINUTES
-        * 60
-        * 1000
+        *
+        60
+        *
+        1000
     )
 
 
@@ -2041,7 +2060,29 @@ def open_trade_count():
 
 
 # ============================================================
-# SAVE HOOK
+# GET OPEN TRADES
+# ============================================================
+
+def get_open_trades():
+
+    conn = db_connect()
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM signals
+        WHERE status = 'OPEN'
+        ORDER BY created_at ASC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    return rows
+
+
+# ============================================================
+# SAVE ACTIVE HOOK
 # ============================================================
 
 def save_active_hook(
@@ -2122,6 +2163,34 @@ def save_active_hook(
 
 
 # ============================================================
+# MARK HOOK INACTIVE
+# ============================================================
+
+def mark_hook_inactive(
+    symbol,
+):
+
+    conn = db_connect()
+
+    conn.execute(
+        """
+        UPDATE hooks
+        SET active = 0,
+            updated_at = ?
+        WHERE symbol = ?
+        """,
+        (
+            now_ms(),
+            symbol,
+        ),
+    )
+
+    conn.commit()
+
+    conn.close()
+
+
+# ============================================================
 # INSERT SIGNAL
 # ============================================================
 
@@ -2138,7 +2207,9 @@ def insert_signal(
         setup["f_price"]
     )
 
-    side = setup["side"]
+    side = setup[
+        "side"
+    ]
 
     hook_time = hook[
         "hook_time"
@@ -2241,7 +2312,8 @@ def save_signal_chart(
             -
             (
                 CHART_CANDLES
-                * M1_TIMEFRAME_MS
+                *
+                M1_TIMEFRAME_MS
             )
         ]
 
@@ -2250,6 +2322,9 @@ def save_signal_chart(
             data = candles[
                 -CHART_CANDLES:
             ]
+
+        if not data:
+            return None
 
         fig, ax = plt.subplots(
             figsize=(16, 9)
@@ -2291,15 +2366,15 @@ def save_signal_chart(
             l = c["low"]
             cl = c["close"]
 
-            if cl >= o:
+            body_low = min(
+                o,
+                cl,
+            )
 
-                body_low = o
-                body_high = cl
-
-            else:
-
-                body_low = cl
-                body_high = o
+            body_high = max(
+                o,
+                cl,
+            )
 
             ax.plot(
                 [x, x],
@@ -2317,10 +2392,10 @@ def save_signal_chart(
             )
 
         # ----------------------------------------------------
-        # M1 structure
+        # M1 STRUCTURE
         # ----------------------------------------------------
 
-        point_names = [
+        structure_keys = [
             "h1",
             "l1",
             "h2",
@@ -2329,7 +2404,9 @@ def save_signal_chart(
             "l3",
         ]
 
-        for key in point_names:
+        structure_points = []
+
+        for key in structure_keys:
 
             p = setup.get(
                 key
@@ -2345,6 +2422,13 @@ def save_signal_chart(
             )
 
             y = p["price"]
+
+            structure_points.append(
+                (
+                    x,
+                    y,
+                )
+            )
 
             ax.scatter(
                 [x],
@@ -2363,7 +2447,8 @@ def save_signal_chart(
                     5,
                     8,
                 ),
-                textcoords="offset points",
+                textcoords=
+                    "offset points",
                 fontsize=9,
             )
 
@@ -2384,7 +2469,7 @@ def save_signal_chart(
         ax.scatter(
             [fx],
             [fy],
-            s=140,
+            s=150,
             marker="*",
             zorder=7,
         )
@@ -2399,13 +2484,74 @@ def save_signal_chart(
                 8,
                 12,
             ),
-            textcoords="offset points",
+            textcoords=
+                "offset points",
             fontsize=13,
             fontweight="bold",
         )
 
         # ----------------------------------------------------
-        # M30 Hook levels
+        # Connect the same-direction pivots.
+        # ----------------------------------------------------
+
+        if setup["side"] == "SHORT":
+
+            highs = [
+                setup["h1"],
+                setup["h2"],
+                setup["h3"],
+                setup["f"],
+            ]
+
+            hx = [
+                p["time"]
+                / 1000
+                / 60
+                for p in highs
+            ]
+
+            hy = [
+                p["price"]
+                for p in highs
+            ]
+
+            ax.plot(
+                hx,
+                hy,
+                linestyle="--",
+                linewidth=1.0,
+            )
+
+        else:
+
+            lows = [
+                setup["l1"],
+                setup["l2"],
+                setup["l3"],
+                setup["f"],
+            ]
+
+            lx = [
+                p["time"]
+                / 1000
+                / 60
+                for p in lows
+            ]
+
+            ly = [
+                p["price"]
+                for p in lows
+            ]
+
+            ax.plot(
+                lx,
+                ly,
+                linestyle="--",
+                linewidth=1.0,
+            )
+
+        # ----------------------------------------------------
+        # M30 HOOK
         # ----------------------------------------------------
 
         m30_points = []
@@ -2460,7 +2606,19 @@ def save_signal_chart(
                 ),
             ]
 
+        # Only display M30 points that fall inside
+        # the visible M1 chart area.
+        first_time = data[0]["time"]
+        last_time = data[-1]["time"]
+
         for label, p in m30_points:
+
+            if (
+                p["time"] < first_time
+                or
+                p["time"] > last_time
+            ):
+                continue
 
             x = (
                 p["time"]
@@ -2488,7 +2646,8 @@ def save_signal_chart(
                     5,
                     -12,
                 ),
-                textcoords="offset points",
+                textcoords=
+                    "offset points",
                 fontsize=8,
             )
 
@@ -2533,6 +2692,10 @@ def save_signal_chart(
                 f"{levels['tp1']:.8g}"
             ),
         )
+
+        # ----------------------------------------------------
+        # Title
+        # ----------------------------------------------------
 
         ax.set_title(
             (
@@ -2590,6 +2753,11 @@ def save_signal_chart(
             exc,
         )
 
+        try:
+            plt.close("all")
+        except Exception:
+            pass
+
         return None
 
 
@@ -2610,25 +2778,45 @@ def signal_message(
         else "🔴"
     )
 
+    pattern = (
+        "H1-H2-H3-F"
+        if setup["side"]
+        == "SHORT"
+        else
+        "L1-L2-L3-F"
+    )
+
     return (
         f"{emoji} "
         f"<b>{setup['side']}</b>\n"
         f"<b>{symbol}</b>\n\n"
-        f"Strategy: NDS M30 → M1\n"
-        f"Hook: {hook['type']}\n"
-        f"Pattern: "
-        f"{setup['type']}\n\n"
+
+        f"Strategy: "
+        f"NDS M30 → M1\n"
+
+        f"Hook: "
+        f"{hook['type']}\n"
+
+        f"M1 Pattern: "
+        f"{pattern}\n\n"
+
         f"Entry: "
         f"<b>{levels['entry']:.8g}</b>\n"
+
         f"SL: "
         f"{levels['sl']:.8g}\n"
+
         f"TP: "
         f"{levels['tp1']:.8g}\n\n"
+
         f"F: "
         f"{fmt_time(setup['f_time'])}\n"
+
         f"Hook: "
         f"{fmt_time(hook['hook_time'])}\n"
-        f"Mode: PAPER ONLY"
+
+        f"Mode: "
+        f"PAPER ONLY"
     )
 
 
@@ -2645,6 +2833,7 @@ def refresh_active_hooks():
     )
 
     assets_scanned = 0
+
     active_count = 0
 
     new_hooks = {}
@@ -2694,11 +2883,11 @@ def refresh_active_hooks():
                     ),
                 )
 
-    # --------------------------------------------------------
-    # Replace current active hooks.
-    # --------------------------------------------------------
-
             else:
+
+                mark_hook_inactive(
+                    symbol
+                )
 
                 print(
                     "[NO ACTIVE HOOK]",
@@ -2711,6 +2900,10 @@ def refresh_active_hooks():
                 f"[M30 ERROR] "
                 f"{symbol}: {exc}"
             )
+
+    # --------------------------------------------------------
+    # Replace current active hooks.
+    # --------------------------------------------------------
 
     ACTIVE_HOOKS.clear()
 
@@ -2729,6 +2922,29 @@ def refresh_active_hooks():
         f"Active hooks: "
         f"{active_count}"
     )
+
+    if new_hooks:
+
+        print(
+            "ACTIVE HOOK SYMBOLS:"
+        )
+
+        for symbol, hook in (
+            new_hooks.items()
+        ):
+
+            direction = (
+                "SHORT"
+                if hook["type"]
+                == "POSITIVE"
+                else "LONG"
+            )
+
+            print(
+                f"  {symbol} "
+                f"| {hook['type']} "
+                f"| {direction}"
+            )
 
 
 # ============================================================
@@ -2795,6 +3011,10 @@ def scan_active_hooks():
                     None,
                 )
 
+                mark_hook_inactive(
+                    symbol
+                )
+
                 continue
 
             hook = current_hook
@@ -2821,7 +3041,7 @@ def scan_active_hooks():
                 continue
 
             # ------------------------------------------------
-            # Positive Hook -> SHORT
+            # Positive -> SHORT
             # ------------------------------------------------
 
             if (
@@ -2837,7 +3057,7 @@ def scan_active_hooks():
                 )
 
             # ------------------------------------------------
-            # Negative Hook -> LONG
+            # Negative -> LONG
             # ------------------------------------------------
 
             else:
@@ -2865,6 +3085,7 @@ def scan_active_hooks():
                 symbol,
                 event_key,
             ):
+
                 continue
 
             if cooldown_active(
@@ -2884,6 +3105,11 @@ def scan_active_hooks():
                 open_trade_count()
                 >= MAX_OPEN_TRADES
             ):
+
+                print(
+                    "Max open trades reached."
+                )
+
                 break
 
             # ------------------------------------------------
@@ -2909,12 +3135,8 @@ def scan_active_hooks():
 
                 continue
 
-            levels["entry"] = (
-                setup["f_price"]
-            )
-
             # ------------------------------------------------
-            # Insert
+            # Insert signal
             # ------------------------------------------------
 
             signal_id = insert_signal(
@@ -3015,18 +3237,24 @@ def calculate_pnl(
 
         return (
             (
-                current - entry
+                current
+                - entry
             )
-            / entry
-            * 100
+            /
+            entry
+            *
+            100
         )
 
     return (
         (
-            entry - current
+            entry
+            - current
         )
-        / entry
-        * 100
+        /
+        entry
+        *
+        100
     )
 
 
@@ -3243,15 +3471,21 @@ def close_trade(
     msg = (
         f"{emoji} "
         f"<b>NDS TRADE CLOSED</b>\n\n"
+
         f"{row['symbol']} "
         f"{row['side']}\n"
+
         f"Entry: "
         f"{float(row['entry']):.8g}\n"
+
         f"Exit: "
         f"{exit_price:.8g}\n"
+
         f"P/L: "
         f"<b>{pnl:+.2f}%</b>\n"
-        f"Reason: {reason}"
+
+        f"Reason: "
+        f"{reason}"
     )
 
     telegram_send(
@@ -3341,6 +3575,139 @@ def performance():
 
 
 # ============================================================
+# ACTIVE HOOK REPORT SECTION
+# ============================================================
+
+def active_hooks_report():
+
+    if not ACTIVE_HOOKS:
+
+        return (
+            "📌 "
+            "<b>ACTIVE HOOKS</b>\n"
+            "None"
+        )
+
+    lines = [
+        "📌 <b>ACTIVE HOOKS</b>"
+    ]
+
+    for symbol, hook in sorted(
+        ACTIVE_HOOKS.items()
+    ):
+
+        if hook["type"] == "POSITIVE":
+
+            direction = "🔴 SHORT"
+
+            key_point = (
+                hook["h3"]["price"]
+            )
+
+            label = "H3"
+
+        else:
+
+            direction = "🟢 LONG"
+
+            key_point = (
+                hook["l3"]["price"]
+            )
+
+            label = "L3"
+
+        lines.append(
+            (
+                f"{direction} "
+                f"<b>{symbol}</b> "
+                f"| {label}: "
+                f"{key_point:.8g}"
+            )
+        )
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
+# OPEN TRADES REPORT SECTION
+# ============================================================
+
+def open_trades_report():
+
+    rows = get_open_trades()
+
+    if not rows:
+
+        return (
+            "📂 "
+            "<b>OPEN TRADES</b>\n"
+            "None"
+        )
+
+    lines = [
+        "📂 <b>OPEN TRADES</b>"
+    ]
+
+    for row in rows:
+
+        symbol = row[
+            "symbol"
+        ]
+
+        side = row[
+            "side"
+        ]
+
+        entry = float(
+            row["entry"]
+        )
+
+        current = row[
+            "current_price"
+        ]
+
+        pnl = row[
+            "pnl_pct"
+        ]
+
+        if current is None:
+            current = entry
+
+        if pnl is None:
+            pnl = calculate_pnl(
+                side,
+                entry,
+                float(current),
+            )
+
+        emoji = (
+            "🟢"
+            if side == "LONG"
+            else "🔴"
+        )
+
+        lines.append(
+            (
+                f"{emoji} "
+                f"<b>{symbol}</b> "
+                f"| {side}\n"
+                f"Entry: "
+                f"{entry:.8g} | "
+                f"Current: "
+                f"{float(current):.8g}\n"
+                f"P/L: "
+                f"<b>{float(pnl):+.2f}%</b>"
+            )
+        )
+
+    return "\n".join(
+        lines
+    )
+
+
+# ============================================================
 # REPORT
 # ============================================================
 
@@ -3350,27 +3717,53 @@ def send_report(
 
     stats = performance()
 
+    hooks_text = (
+        active_hooks_report()
+    )
+
+    trades_text = (
+        open_trades_report()
+    )
+
     text = (
         "📊 "
         "<b>NDS M30 → M1 REPORT</b>\n\n"
-        f"Version: {VERSION}\n"
-        f"Assets: "
+
+        f"Version: "
+        f"{VERSION}\n"
+
+        f"Assets Scanned: "
         f"{len(ACTIVE_ASSETS)}\n"
+
         f"Active Hooks: "
-        f"{len(ACTIVE_HOOKS)}\n"
+        f"<b>{len(ACTIVE_HOOKS)}</b>\n"
+
         f"New Signals: "
         f"{new_signals}\n\n"
+
+        f"{hooks_text}\n\n"
+
+        f"{trades_text}\n\n"
+
+        f"📈 <b>PERFORMANCE</b>\n"
+
         f"Open Trades: "
         f"{stats['open']}\n"
+
         f"Closed: "
         f"{stats['closed']}\n"
+
         f"Wins: "
         f"{stats['wins']}\n"
+
         f"Losses: "
         f"{stats['losses']}\n"
+
         f"PnL: "
         f"<b>{stats['pnl']:+.2f}%</b>\n\n"
-        f"Mode: PAPER ONLY"
+
+        f"Mode: "
+        f"PAPER ONLY"
     )
 
     telegram_send(
@@ -3398,16 +3791,33 @@ def send_startup():
     msg = (
         "🟢 "
         "<b>NDS M30 → M1 STARTED</b>\n\n"
-        f"Version: {VERSION}\n"
+
+        f"Version: "
+        f"{VERSION}\n"
+
         f"Assets: "
         f"{len(ACTIVE_ASSETS)}\n\n"
-        f"M30: "
-        f"1 → 2 → 3 Hook\n"
-        f"M1: "
-        f"1 → 2 → 3 → F\n"
+
+        f"M30 Positive: "
+        f"H1-L1-H2-L2-H3\n"
+
+        f"M30 Negative: "
+        f"L1-H1-L2-H2-L3\n\n"
+
+        f"M1 Positive: "
+        f"H1-L1-H2-L2-H3-L3-F\n"
+
+        f"M1 Negative: "
+        f"L1-H1-L2-H2-L3-H3-F\n\n"
+
         f"Max Open: "
         f"{MAX_OPEN_TRADES}\n"
-        f"Mode: PAPER ONLY"
+
+        f"F Max Age: "
+        f"{M1_F_MAX_AGE_MINUTES} min\n"
+
+        f"Mode: "
+        f"PAPER ONLY"
     )
 
     telegram_send(
@@ -3468,12 +3878,24 @@ def main():
     send_startup()
 
     # --------------------------------------------------------
-    # Initial M30
+    # Initial M30 scan
     # --------------------------------------------------------
 
     refresh_active_hooks()
 
     LAST_M30_SCAN = (
+        time.time()
+    )
+
+    # --------------------------------------------------------
+    # Initial report
+    # --------------------------------------------------------
+
+    send_report(
+        new_signals=0
+    )
+
+    LAST_REPORT_TIME = (
         time.time()
     )
 
@@ -3495,8 +3917,10 @@ def main():
 
             if (
                 current_time
-                - LAST_ASSET_REFRESH
-                >= ASSET_REFRESH_SECONDS
+                -
+                LAST_ASSET_REFRESH
+                >=
+                ASSET_REFRESH_SECONDS
             ):
 
                 discover_assets()
@@ -3513,8 +3937,10 @@ def main():
 
             if (
                 current_time
-                - LAST_M30_SCAN
-                >= M30_SCAN_SECONDS
+                -
+                LAST_M30_SCAN
+                >=
+                M30_SCAN_SECONDS
             ):
 
                 refresh_active_hooks()
@@ -3525,8 +3951,10 @@ def main():
 
             if (
                 current_time
-                - LAST_M1_SCAN
-                >= M1_SCAN_SECONDS
+                -
+                LAST_M1_SCAN
+                >=
+                M1_SCAN_SECONDS
             ):
 
                 new_signals = (
@@ -3553,8 +3981,10 @@ def main():
 
             if (
                 current_time
-                - LAST_REPORT_TIME
-                >= 900
+                -
+                LAST_REPORT_TIME
+                >=
+                REPORT_INTERVAL_SECONDS
             ):
 
                 send_report(
@@ -3595,4 +4025,5 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+
     main()
