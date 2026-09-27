@@ -12,13 +12,10 @@ concurrency:
 
 jobs:
   scanner:
-
     runs-on: ubuntu-latest
-
     timeout-minutes: 350
 
     steps:
-
       - name: Checkout repository
         uses: actions/checkout@v4
 
@@ -37,4 +34,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python nds_5m_live_scanner.py
+          python nds_m30_m1_live_scanner.py
