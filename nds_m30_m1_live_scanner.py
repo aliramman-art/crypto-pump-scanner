@@ -1,6 +1,6 @@
 # ============================================================
 # NDS M30 -> M1 LIVE SCANNER
-# VERSION 4.1.0
+# VERSION 4.2.0
 # ============================================================
 #
 # PAPER ONLY
@@ -27,7 +27,7 @@
 #   L2 < L1
 #   H3 > H2
 #
-# After H3:
+# AFTER H3:
 #   monitor M1 for an upward corrective structure.
 #
 #
@@ -39,7 +39,7 @@
 #
 # F = newest confirmed M1 HIGH
 #
-# When F is confirmed:
+# WHEN F IS CONFIRMED:
 #
 #   SHORT
 #
@@ -70,7 +70,7 @@
 #   H2 > H1
 #   L3 < L2
 #
-# After L3:
+# AFTER L3:
 #   monitor M1 for a downward corrective structure.
 #
 #
@@ -82,7 +82,7 @@
 #
 # F = newest confirmed M1 LOW
 #
-# When F is confirmed:
+# WHEN F IS CONFIRMED:
 #
 #   LONG
 #
@@ -102,6 +102,24 @@
 # Entry happens only after F is confirmed.
 #
 # F must also be fresh.
+#
+# ACTIVE HOOK CHART:
+#
+# Every NEW/CHANGED active M30 hook gets a chart.
+#
+# POSITIVE:
+#   1 = H1
+#   2 = L1
+#   3 = H2
+#   4 = L2
+#   5 = H3
+#
+# NEGATIVE:
+#   1 = L1
+#   2 = H1
+#   3 = L2
+#   4 = H2
+#   5 = L3
 #
 # No Kraken order API is used.
 # PAPER ONLY.
@@ -125,7 +143,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 
 PAPER_ONLY = True
 
@@ -183,8 +201,6 @@ M1_SCAN_SECONDS = 60
 
 M1_TIMEFRAME_MS = 60 * 1000
 
-# F is confirmed after PIVOT_RIGHT candles.
-# This prevents old structures from producing late signals.
 M1_F_MAX_AGE_MINUTES = 5
 
 
@@ -252,6 +268,8 @@ CHART_ENABLED = True
 
 CHART_CANDLES = 240
 
+ACTIVE_HOOK_CHART_CANDLES = 100
+
 
 # ============================================================
 # GLOBALS
@@ -262,7 +280,7 @@ session = requests.Session()
 session.headers.update(
     {
         "User-Agent":
-            "NDS-M30-M1-Scanner/4.1.0",
+            "NDS-M30-M1-Scanner/4.2.0",
         "Accept":
             "application/json",
     }
@@ -1330,10 +1348,6 @@ def determine_active_hook(
 
     # --------------------------------------------------------
     # POSITIVE
-    #
-    # H3 opens the M1 correction window.
-    #
-    # Next confirmed LOW invalidates it.
     # --------------------------------------------------------
 
     if hook["type"] == "POSITIVE":
@@ -1361,10 +1375,6 @@ def determine_active_hook(
 
     # --------------------------------------------------------
     # NEGATIVE
-    #
-    # L3 opens the M1 correction window.
-    #
-    # Next confirmed HIGH invalidates it.
     # --------------------------------------------------------
 
     else:
@@ -1453,19 +1463,10 @@ def detect_positive_m1_correction(
     """
     Positive M30 Hook -> SHORT
 
-    Search:
+    H1 -> L1 -> H2 -> L2
+    -> H3 -> L3 -> F
 
-        H1 -> L1 -> H2 -> L2
-        -> H3 -> L3 -> F
-
-    Required:
-
-        H1 < H2 < H3 < F
-
-    F must be the newest confirmed HIGH.
-
-    No requirement is imposed on the exact size
-    of each intermediate pullback.
+    H1 < H2 < H3 < F
     """
 
     if not hook:
@@ -1488,7 +1489,6 @@ def detect_positive_m1_correction(
     if len(pivots) < 7:
         return None
 
-    # Search newest possible F first.
     for end in range(
         len(pivots) - 1,
         5,
@@ -1500,7 +1500,6 @@ def detect_positive_m1_correction(
         if f["kind"] != "H":
             continue
 
-        # F must be fresh.
         if not is_fresh_f(
             f["time"]
         ):
@@ -1530,12 +1529,6 @@ def detect_positive_m1_correction(
 
         h1, l1, h2, l2, h3, l3, fp = seq
 
-        # ----------------------------------------------------
-        # Four ascending highs:
-        #
-        # 1 < 2 < 3 < F
-        # ----------------------------------------------------
-
         if not (
             h2["price"] > h1["price"]
             and
@@ -1544,10 +1537,6 @@ def detect_positive_m1_correction(
             fp["price"] > h3["price"]
         ):
             continue
-
-        # ----------------------------------------------------
-        # Minimum total correction.
-        # ----------------------------------------------------
 
         swing_pct = pct_distance(
             h1["price"],
@@ -1559,10 +1548,6 @@ def detect_positive_m1_correction(
             < M1_MIN_SWING_PCT
         ):
             continue
-
-        # ----------------------------------------------------
-        # F should not be absurdly far from H3.
-        # ----------------------------------------------------
 
         distance = pct_distance(
             h3["price"],
@@ -1609,7 +1594,6 @@ def detect_positive_m1_correction(
             "f_price":
                 fp["price"],
 
-            # F excluded.
             "sl_highs": [
                 h1,
                 h2,
@@ -1632,16 +1616,10 @@ def detect_negative_m1_correction(
     """
     Negative M30 Hook -> LONG
 
-    Search:
+    L1 -> H1 -> L2 -> H2
+    -> L3 -> H3 -> F
 
-        L1 -> H1 -> L2 -> H2
-        -> L3 -> H3 -> F
-
-    Required:
-
-        L1 > L2 > L3 > F
-
-    F must be the newest confirmed LOW.
+    L1 > L2 > L3 > F
     """
 
     if not hook:
@@ -1675,7 +1653,6 @@ def detect_negative_m1_correction(
         if f["kind"] != "L":
             continue
 
-        # F must be fresh.
         if not is_fresh_f(
             f["time"]
         ):
@@ -1705,12 +1682,6 @@ def detect_negative_m1_correction(
 
         l1, h1, l2, h2, l3, h3, fp = seq
 
-        # ----------------------------------------------------
-        # Four descending lows:
-        #
-        # 1 > 2 > 3 > F
-        # ----------------------------------------------------
-
         if not (
             l2["price"] < l1["price"]
             and
@@ -1719,10 +1690,6 @@ def detect_negative_m1_correction(
             fp["price"] < l3["price"]
         ):
             continue
-
-        # ----------------------------------------------------
-        # Minimum total correction.
-        # ----------------------------------------------------
 
         swing_pct = pct_distance(
             l1["price"],
@@ -1734,10 +1701,6 @@ def detect_negative_m1_correction(
             < M1_MIN_SWING_PCT
         ):
             continue
-
-        # ----------------------------------------------------
-        # F should not be absurdly far from L3.
-        # ----------------------------------------------------
 
         distance = pct_distance(
             l3["price"],
@@ -1784,7 +1747,6 @@ def detect_negative_m1_correction(
             "f_price":
                 fp["price"],
 
-            # F excluded.
             "sl_lows": [
                 l1,
                 l2,
@@ -1805,20 +1767,6 @@ def calculate_trade_levels(
     setup,
     hook,
 ):
-
-    """
-    SHORT:
-        SL above previous M1 highs.
-        TP = previous M30 low.
-
-    LONG:
-        SL below previous M1 lows.
-        TP = previous M30 high.
-    """
-
-    # ========================================================
-    # SHORT
-    # ========================================================
 
     if side == "SHORT":
 
@@ -1872,10 +1820,6 @@ def calculate_trade_levels(
             "tp3":
                 tp,
         }
-
-    # ========================================================
-    # LONG
-    # ========================================================
 
     lows = setup.get(
         "sl_lows",
@@ -2191,6 +2135,582 @@ def mark_hook_inactive(
 
 
 # ============================================================
+# HOOK EVENT KEY
+# ============================================================
+
+def hook_event_key(
+    symbol,
+    hook,
+):
+
+    return (
+        f"HOOK_"
+        f"{hook['type']}_"
+        f"{hook['hook_time']}"
+    )
+
+
+# ============================================================
+# ACTIVE HOOK CHART
+# ============================================================
+
+def save_active_hook_chart(
+    symbol,
+    hook,
+    candles,
+):
+
+    """
+    Creates an M30 chart for the ACTIVE HOOK.
+
+    Positive:
+        1 = H1
+        2 = L1
+        3 = H2
+        4 = L2
+        5 = H3
+
+    Negative:
+        1 = L1
+        2 = H1
+        3 = L2
+        4 = H2
+        5 = L3
+    """
+
+    if not CHART_ENABLED:
+        return None
+
+    try:
+
+        os.makedirs(
+            CHART_DIR,
+            exist_ok=True,
+        )
+
+        data = closed_candles(
+            candles,
+            M30_TIMEFRAME_MS,
+        )
+
+        if not data:
+            return None
+
+        # ----------------------------------------------------
+        # Keep the latest candles while ensuring all Hook
+        # points are visible.
+        # ----------------------------------------------------
+
+        hook_points = []
+
+        if hook["type"] == "POSITIVE":
+
+            hook_points = [
+                hook["h1"],
+                hook["l1"],
+                hook["h2"],
+                hook["l2"],
+                hook["h3"],
+            ]
+
+        else:
+
+            hook_points = [
+                hook["l1"],
+                hook["h1"],
+                hook["l2"],
+                hook["h2"],
+                hook["l3"],
+            ]
+
+        first_hook_time = min(
+            p["time"]
+            for p in hook_points
+        )
+
+        last_hook_time = max(
+            p["time"]
+            for p in hook_points
+        )
+
+        start_time = min(
+            first_hook_time
+            -
+            30
+            *
+            M30_TIMEFRAME_MS,
+            data[-1]["time"]
+            -
+            ACTIVE_HOOK_CHART_CANDLES
+            *
+            M30_TIMEFRAME_MS,
+        )
+
+        end_time = max(
+            last_hook_time
+            +
+            10
+            *
+            M30_TIMEFRAME_MS,
+            data[-1]["time"],
+        )
+
+        chart_data = [
+            c
+            for c in data
+            if (
+                c["time"] >= start_time
+                and
+                c["time"] <= end_time
+            )
+        ]
+
+        if len(chart_data) < 20:
+
+            chart_data = data[
+                -ACTIVE_HOOK_CHART_CANDLES:
+            ]
+
+        if not chart_data:
+            return None
+
+        fig, ax = plt.subplots(
+            figsize=(16, 9)
+        )
+
+        # ----------------------------------------------------
+        # Candle width
+        # ----------------------------------------------------
+
+        if len(chart_data) >= 2:
+
+            spacing = (
+                chart_data[-1]["time"]
+                -
+                chart_data[-2]["time"]
+            )
+
+            width = (
+                spacing
+                / 1000
+                / 60
+                * 0.65
+            )
+
+        else:
+
+            width = 15.0
+
+        # ----------------------------------------------------
+        # Candles
+        # ----------------------------------------------------
+
+        for c in chart_data:
+
+            x = (
+                c["time"]
+                / 1000
+                / 60
+            )
+
+            o = c["open"]
+            h = c["high"]
+            l = c["low"]
+            cl = c["close"]
+
+            body_low = min(
+                o,
+                cl,
+            )
+
+            body_high = max(
+                o,
+                cl,
+            )
+
+            body_height = (
+                body_high
+                -
+                body_low
+            )
+
+            # Prevent invisible zero-height bodies.
+            if body_height == 0:
+
+                body_height = (
+                    max(
+                        abs(h - l),
+                        abs(c["close"]) * 0.00001,
+                    )
+                )
+
+            ax.plot(
+                [x, x],
+                [l, h],
+                linewidth=0.9,
+                alpha=0.8,
+            )
+
+            ax.bar(
+                x,
+                body_height,
+                bottom=body_low,
+                width=width,
+                align="center",
+                alpha=0.70,
+            )
+
+        # ----------------------------------------------------
+        # NUMBERED HOOK POINTS
+        # ----------------------------------------------------
+
+        if hook["type"] == "POSITIVE":
+
+            numbered_points = [
+                (
+                    1,
+                    "H1",
+                    hook["h1"],
+                ),
+                (
+                    2,
+                    "L1",
+                    hook["l1"],
+                ),
+                (
+                    3,
+                    "H2",
+                    hook["h2"],
+                ),
+                (
+                    4,
+                    "L2",
+                    hook["l2"],
+                ),
+                (
+                    5,
+                    "H3",
+                    hook["h3"],
+                ),
+            ]
+
+            direction = "SHORT"
+
+        else:
+
+            numbered_points = [
+                (
+                    1,
+                    "L1",
+                    hook["l1"],
+                ),
+                (
+                    2,
+                    "H1",
+                    hook["h1"],
+                ),
+                (
+                    3,
+                    "L2",
+                    hook["l2"],
+                ),
+                (
+                    4,
+                    "H2",
+                    hook["h2"],
+                ),
+                (
+                    5,
+                    "L3",
+                    hook["l3"],
+                ),
+            ]
+
+            direction = "LONG"
+
+        line_x = []
+        line_y = []
+
+        for number, label, p in numbered_points:
+
+            x = (
+                p["time"]
+                / 1000
+                / 60
+            )
+
+            y = p["price"]
+
+            line_x.append(x)
+            line_y.append(y)
+
+            ax.scatter(
+                [x],
+                [y],
+                s=100,
+                zorder=8,
+            )
+
+            # Large visible number.
+            ax.annotate(
+                str(number),
+                (
+                    x,
+                    y,
+                ),
+                xytext=(
+                    0,
+                    18,
+                ),
+                textcoords=
+                    "offset points",
+                ha="center",
+                va="bottom",
+                fontsize=15,
+                fontweight="bold",
+                zorder=10,
+            )
+
+            # Pivot name below/above the number.
+            ax.annotate(
+                label,
+                (
+                    x,
+                    y,
+                ),
+                xytext=(
+                    7,
+                    -18,
+                ),
+                textcoords=
+                    "offset points",
+                fontsize=9,
+                zorder=10,
+            )
+
+        # ----------------------------------------------------
+        # Connect Hook structure
+        # ----------------------------------------------------
+
+        ax.plot(
+            line_x,
+            line_y,
+            linestyle="--",
+            linewidth=2.0,
+            marker="o",
+            markersize=4,
+            zorder=6,
+        )
+
+        # ----------------------------------------------------
+        # Direction arrow / label
+        # ----------------------------------------------------
+
+        last_point = numbered_points[-1][2]
+
+        last_x = (
+            last_point["time"]
+            / 1000
+            / 60
+        )
+
+        last_y = last_point["price"]
+
+        ax.annotate(
+            (
+                f"ACTIVE HOOK\n"
+                f"#{5} {numbered_points[-1][1]}\n"
+                f"NEXT: {direction}"
+            ),
+            (
+                last_x,
+                last_y,
+            ),
+            xytext=(
+                35,
+                45,
+            ),
+            textcoords=
+                "offset points",
+            fontsize=10,
+            fontweight="bold",
+            arrowprops={
+                "arrowstyle":
+                    "->",
+                "linewidth":
+                    1.2,
+            },
+            bbox={
+                "boxstyle":
+                    "round,pad=0.4",
+                "alpha":
+                    0.85,
+            },
+            zorder=11,
+        )
+
+        # ----------------------------------------------------
+        # Target level
+        # ----------------------------------------------------
+
+        target = float(
+            hook["target_price"]
+        )
+
+        ax.axhline(
+            target,
+            linestyle=":",
+            linewidth=1.4,
+            label=(
+                f"Previous M30 "
+                f"Target {target:.8g}"
+            ),
+        )
+
+        # ----------------------------------------------------
+        # Title
+        # ----------------------------------------------------
+
+        hook_name = (
+            "POSITIVE HOOK"
+            if hook["type"]
+            == "POSITIVE"
+            else
+            "NEGATIVE HOOK"
+        )
+
+        ax.set_title(
+            (
+                f"NDS M30 ACTIVE HOOK "
+                f"| {symbol} "
+                f"| {hook_name} "
+                f"| NEXT: {direction}"
+            ),
+            fontsize=14,
+            fontweight="bold",
+        )
+
+        ax.set_xlabel(
+            "Time (UTC)"
+        )
+
+        ax.set_ylabel(
+            "Price"
+        )
+
+        ax.legend(
+            loc="best",
+            fontsize=8,
+        )
+
+        ax.grid(
+            alpha=0.2
+        )
+
+        fig.tight_layout()
+
+        filename = (
+            f"ACTIVE_HOOK_"
+            f"{symbol}_"
+            f"{hook['type']}_"
+            f"{hook['hook_time']}.png"
+        )
+
+        path = os.path.join(
+            CHART_DIR,
+            filename,
+        )
+
+        fig.savefig(
+            path,
+            dpi=140,
+        )
+
+        plt.close(fig)
+
+        return path
+
+    except Exception as exc:
+
+        print(
+            "Active hook chart error:",
+            exc,
+        )
+
+        try:
+            plt.close("all")
+        except Exception:
+            pass
+
+        return None
+
+
+# ============================================================
+# ACTIVE HOOK MESSAGE
+# ============================================================
+
+def active_hook_message(
+    symbol,
+    hook,
+):
+
+    if hook["type"] == "POSITIVE":
+
+        direction = "🔴 SHORT"
+
+        structure = (
+            "1=H1 → "
+            "2=L1 → "
+            "3=H2 → "
+            "4=L2 → "
+            "5=H3"
+        )
+
+        last_label = "H3"
+
+    else:
+
+        direction = "🟢 LONG"
+
+        structure = (
+            "1=L1 → "
+            "2=H1 → "
+            "3=L2 → "
+            "4=H2 → "
+            "5=L3"
+        )
+
+        last_label = "L3"
+
+    return (
+        f"📌 "
+        f"<b>ACTIVE HOOK</b>\n\n"
+
+        f"<b>{symbol}</b>\n"
+
+        f"Type: "
+        f"{hook['type']}\n"
+
+        f"Next: "
+        f"<b>{direction}</b>\n\n"
+
+        f"Structure:\n"
+        f"{structure}\n\n"
+
+        f"{last_label}: "
+        f"<b>{hook['target_price']:.8g}</b>\n"
+
+        f"Hook Time: "
+        f"{fmt_time(hook['hook_time'])}\n\n"
+
+        f"Waiting for M1 correction.\n"
+
+        f"Mode: "
+        f"PAPER ONLY"
+    )
+
+
+# ============================================================
 # INSERT SIGNAL
 # ============================================================
 
@@ -2281,7 +2801,7 @@ def insert_signal(
 
 
 # ============================================================
-# CHART
+# SIGNAL CHART
 # ============================================================
 
 def save_signal_chart(
@@ -2376,6 +2896,21 @@ def save_signal_chart(
                 cl,
             )
 
+            body_height = (
+                body_high
+                -
+                body_low
+            )
+
+            if body_height == 0:
+
+                body_height = (
+                    max(
+                        abs(h - l),
+                        abs(cl) * 0.00001,
+                    )
+                )
+
             ax.plot(
                 [x, x],
                 [l, h],
@@ -2384,7 +2919,7 @@ def save_signal_chart(
 
             ax.bar(
                 x,
-                body_high - body_low,
+                body_height,
                 bottom=body_low,
                 width=width,
                 align="center",
@@ -2491,7 +3026,7 @@ def save_signal_chart(
         )
 
         # ----------------------------------------------------
-        # Connect the same-direction pivots.
+        # Connect same-direction pivots
         # ----------------------------------------------------
 
         if setup["side"] == "SHORT":
@@ -2606,8 +3141,6 @@ def save_signal_chart(
                 ),
             ]
 
-        # Only display M30 points that fall inside
-        # the visible M1 chart area.
         first_time = data[0]["time"]
         last_time = data[-1]["time"]
 
@@ -2749,7 +3282,7 @@ def save_signal_chart(
     except Exception as exc:
 
         print(
-            "Chart error:",
+            "Signal chart error:",
             exc,
         )
 
@@ -2882,6 +3415,86 @@ def refresh_active_hooks():
                         hook["hook_time"]
                     ),
                 )
+
+                # ------------------------------------------------
+                # SEND ACTIVE HOOK CHART ONLY FOR A NEW/CHANGED
+                # HOOK. This prevents duplicate chart spam.
+                # ------------------------------------------------
+
+                old_hook = ACTIVE_HOOKS.get(
+                    symbol
+                )
+
+                is_new_hook = (
+                    old_hook is None
+                )
+
+                is_changed_hook = False
+
+                if old_hook:
+
+                    is_changed_hook = (
+                        old_hook.get(
+                            "type"
+                        )
+                        !=
+                        hook.get(
+                            "type"
+                        )
+                        or
+                        old_hook.get(
+                            "hook_time"
+                        )
+                        !=
+                        hook.get(
+                            "hook_time"
+                        )
+                    )
+
+                if (
+                    is_new_hook
+                    or
+                    is_changed_hook
+                ):
+
+                    event_key = hook_event_key(
+                        symbol,
+                        hook,
+                    )
+
+                    if not already_processed(
+                        symbol,
+                        event_key,
+                    ):
+
+                        chart_path = (
+                            save_active_hook_chart(
+                                symbol,
+                                hook,
+                                candles,
+                            )
+                        )
+
+                        msg = active_hook_message(
+                            symbol,
+                            hook,
+                        )
+
+                        telegram_send(
+                            msg,
+                            chart_path,
+                        )
+
+                        mark_processed(
+                            symbol,
+                            event_key,
+                        )
+
+                        print(
+                            "[ACTIVE HOOK CHART SENT]",
+                            symbol,
+                            hook["type"],
+                        )
 
             else:
 
@@ -3017,11 +3630,73 @@ def scan_active_hooks():
 
                 continue
 
+            # ------------------------------------------------
+            # If M30 Hook changed while M1 scanner is running,
+            # update it.
+            # ------------------------------------------------
+
+            old_hook = ACTIVE_HOOKS.get(
+                symbol
+            )
+
+            hook_changed = False
+
+            if old_hook:
+
+                hook_changed = (
+                    old_hook.get("type")
+                    !=
+                    current_hook.get("type")
+                    or
+                    old_hook.get("hook_time")
+                    !=
+                    current_hook.get("hook_time")
+                )
+
             hook = current_hook
 
             ACTIVE_HOOKS[
                 symbol
             ] = hook
+
+            # ------------------------------------------------
+            # Send chart for a changed hook if needed.
+            # ------------------------------------------------
+
+            if hook_changed:
+
+                event_key = hook_event_key(
+                    symbol,
+                    hook,
+                )
+
+                if not already_processed(
+                    symbol,
+                    event_key,
+                ):
+
+                    chart_path = (
+                        save_active_hook_chart(
+                            symbol,
+                            hook,
+                            m30,
+                        )
+                    )
+
+                    msg = active_hook_message(
+                        symbol,
+                        hook,
+                    )
+
+                    telegram_send(
+                        msg,
+                        chart_path,
+                    )
+
+                    mark_processed(
+                        symbol,
+                        event_key,
+                    )
 
             # ------------------------------------------------
             # M1
@@ -3575,7 +4250,7 @@ def performance():
 
 
 # ============================================================
-# ACTIVE HOOK REPORT SECTION
+# ACTIVE HOOK REPORT
 # ============================================================
 
 def active_hooks_report():
@@ -3631,7 +4306,7 @@ def active_hooks_report():
 
 
 # ============================================================
-# OPEN TRADES REPORT SECTION
+# OPEN TRADES REPORT
 # ============================================================
 
 def open_trades_report():
@@ -3809,6 +4484,9 @@ def send_startup():
 
         f"M1 Negative: "
         f"L1-H1-L2-H2-L3-H3-F\n\n"
+
+        f"Active Hook Chart: "
+        f"ON\n"
 
         f"Max Open: "
         f"{MAX_OPEN_TRADES}\n"
