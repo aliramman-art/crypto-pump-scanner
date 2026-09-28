@@ -1,6 +1,6 @@
 # ============================================================
 # NDS M30 -> M1 LIVE SCANNER
-# VERSION 4.4.5
+# VERSION 4.4.6
 # ============================================================
 # PAPER ONLY: this script NEVER submits exchange orders.
 # M30 detects the NDS Hook; M1 searches for 1-2-3-F structure.
@@ -22,7 +22,7 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 
-VERSION = '4.4.5'
+VERSION = '4.4.6'
 PAPER_ONLY = True
 DB_FILE = os.getenv('NDS_DB_FILE', 'nds_m30_m1_v44.db')
 CHART_DIR = Path(os.getenv('NDS_CHART_DIR', 'nds_charts'))
@@ -187,7 +187,9 @@ def build_hooks(df: pd.DataFrame, pivots: List[Pivot]) -> List[Hook]:
         direction = None
         if kinds == 'LHLHLH':
             start,h1,l1,h2,l2,h3 = q
-            if h2.price > h1.price and l2.price < l1.price and h3.price > h2.price:
+            if (h2.price > h1.price and l2.price < l1.price and h3.price > h2.price
+                    and start.price < l1.price and start.price < l2.price):
+                # START must be the lowest low in this SHORT hook.
                 direction = 'SHORT'
                 span = h3.price-start.price
                 if span <= 0: continue
