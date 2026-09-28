@@ -1,2533 +1,449 @@
 # ============================================================
 # NDS M30 -> M1 LIVE SCANNER
-# VERSION 4.4.4
+# VERSION 4.4.5
 # ============================================================
-#
-# PAPER ONLY
-#
-# NDS LOGIC
-#
-# M30:
-#   Detect NDS Hook
-#
-# SHORT:
-#   START -> H1 -> L1 -> H2 -> L2 -> H3
-#   H2 > H1
-#   L2 < L1
-#   H3 > H2
-#
-# LONG:
-#   START -> L1 -> H1 -> L2 -> H2 -> L3
-#   L2 < L1
-#   H2 > H1
-#   L3 < L2
-#
-# IMPORTANT:
-#   H3 / L3 = M1 TRADE ACTIVATOR
-#   H3 / L3 IS NOT ENTRY
-#
-# M1:
-#   123F = FOUR CONSECUTIVE PIVOT HIGHS
-#
-# SHORT:
-#   1 < 2 < 3 < F
-#
-# LONG:
-#   1 > 2 > 3 > F
-#
-# F = ENTRY
-#
-# M30:
-#   86.4% = FINAL TP
-#
-# SHORT:
-#   TP = H3 - 86.4% of START -> H3 movement
-#
-# LONG:
-#   TP = L3 + 86.4% of START -> L3 movement
-#
-# NO REAL ORDERS
+# PAPER ONLY: this script NEVER submits exchange orders.
+# M30 detects the NDS Hook; M1 searches for 1-2-3-F structure.
+# Best Hook candidate + chart are reported even before F confirms.
 # ============================================================
-
 from __future__ import annotations
 
-import os
-import sqlite3
-import time
-import traceback
-import io
+import os, time, math, sqlite3, traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Tuple, Any
 
 import requests
 import pandas as pd
-import numpy as np
-
 import matplotlib
-matplotlib.use("Agg")
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+from matplotlib.patches import Rectangle
 
-
-# ============================================================
-# CONFIG
-# ============================================================
-
-VERSION = "4.4.4"
-
+VERSION = '4.4.5'
 PAPER_ONLY = True
-
-DB_FILE = os.getenv(
-    "NDS_DB_FILE",
-    "nds_m30_m1_v44.db"
-)
-
-CHART_DIR = Path(
-    os.getenv(
-        "NDS_CHART_DIR",
-        "nds_charts"
-    )
-)
-
-CHART_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
-
-KRAKEN_BASE = (
-    "https://futures.kraken.com/api/charts/v1"
-)
-
+DB_FILE = os.getenv('NDS_DB_FILE', 'nds_m30_m1_v44.db')
+CHART_DIR = Path(os.getenv('NDS_CHART_DIR', 'nds_charts'))
+CHART_DIR.mkdir(parents=True, exist_ok=True)
+BASE_URL = 'https://futures.kraken.com/api/charts/v1/trade'
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN') or os.getenv('TELEGRAM_TOKEN', '')
+TELEGRAM_CHAT = os.getenv('TELEGRAM_CHAT_ID') or os.getenv('TELEGRAM_CHAT', '')
+M30_COUNT = int(os.getenv('NDS_M30_COUNT', '250'))
+M1_COUNT = int(os.getenv('NDS_M1_COUNT', '700'))
+PIVOT_LEFT = int(os.getenv('NDS_PIVOT_LEFT', '2'))
+PIVOT_RIGHT = int(os.getenv('NDS_PIVOT_RIGHT', '2'))
+PRICE_TOL = float(os.getenv('NDS_PRICE_TOL', '0.002'))
+MIN_SWING_PCT = float(os.getenv('NDS_MIN_SWING_PCT', '0.001'))
+MAX_HOOK_AGE_MIN = int(os.getenv('NDS_MAX_HOOK_AGE_MIN', '240'))
+MAX_SETUP_AGE_MIN = int(os.getenv('NDS_MAX_SETUP_AGE_MIN', '10'))
+CANDIDATE_REPEAT_MIN = int(os.getenv('NDS_CANDIDATE_REPEAT_MIN', '180'))
 REQUEST_TIMEOUT = 20
-
-M30_COUNT = int(
-    os.getenv(
-        "NDS_M30_COUNT",
-        "250"
-    )
-)
-
-M1_COUNT = int(
-    os.getenv(
-        "NDS_M1_COUNT",
-        "700"
-    )
-)
-
-PIVOT_LEFT = int(
-    os.getenv(
-        "NDS_PIVOT_LEFT",
-        "2"
-    )
-)
-
-PIVOT_RIGHT = int(
-    os.getenv(
-        "NDS_PIVOT_RIGHT",
-        "2"
-    )
-)
-
-# Minimum swing distance
-MIN_SWING_PCT = float(
-    os.getenv(
-        "NDS_MIN_SWING_PCT",
-        "0.0005"
-    )
-)
-
-# Maximum age of M1 F
-MAX_F_AGE_MIN = int(
-    os.getenv(
-        "NDS_MAX_F_AGE_MIN",
-        "5"
-    )
-)
-
-# Minimum distance of each 123F leg
-MIN_123F_LEG_PCT = float(
-    os.getenv(
-        "NDS_MIN_123F_LEG_PCT",
-        "0.0003"
-    )
-)
-
-# 86.4%
-RETRACE_864 = 0.864
-
-# Maximum open paper trades
-MAX_OPEN_TRADES = int(
-    os.getenv(
-        "NDS_MAX_OPEN_TRADES",
-        "5"
-    )
-)
-
-# Telegram
-TELEGRAM_BOT_TOKEN = (
-    os.getenv("TELEGRAM_BOT_TOKEN")
-    or os.getenv("TELEGRAM_TOKEN")
-    or ""
-)
-
-TELEGRAM_CHAT_ID = (
-    os.getenv("TELEGRAM_CHAT_ID")
-    or os.getenv("TELEGRAM_CHAT")
-    or ""
-)
-
-
-# ============================================================
-# KRAKEN UNIVERSE
-# ============================================================
-
-DEFAULT_SYMBOLS = [
-    "PF_XBTUSD",
-    "PF_ETHUSD",
-    "PF_SOLUSD",
-    "PF_XRPUSD",
-    "PF_DOGEUSD",
-    "PF_ADAUSD",
-    "PF_AVAXUSD",
-    "PF_LINKUSD",
-    "PF_DOTUSD",
-    "PF_LTCUSD",
-    "PF_BCHUSD",
-    "PF_UNIUSD",
-    "PF_ATOMUSD",
-    "PF_AAVEUSD",
-    "PF_FILUSD",
-    "PF_INJUSD",
-    "PF_ARBUSD",
-    "PF_OPUSD",
-    "PF_NEARUSD",
-    "PF_SUIUSD",
-    "PF_APTUSD",
-    "PF_SEIUSD",
-    "PF_TAOUSD",
-    "PF_TIAUSD",
-    "PF_WIFUSD",
-    "PF_PEPEUSD",
-    "PF_TRXUSD",
-    "PF_VETUSD",
-    "PF_ETCUSD",
-    "PF_XLMUSD",
-    "PF_ALGOUSD",
-    "PF_MKRUSD",
-    "PF_RUNEUSD",
-    "PF_IMXUSD",
-    "PF_STXUSD",
-    "PF_LDOUSD",
-    "PF_ENSUSD",
-    "PF_GRTUSD",
-    "PF_RENDERUSD",
-    "PF_FLOKIUSD",
-]
-
-SYMBOLS = [
-    x.strip().upper()
-    for x in os.getenv(
-        "KRAKEN_SYMBOLS",
-        ",".join(DEFAULT_SYMBOLS)
-    ).split(",")
-    if x.strip()
-]
-
-# Explicitly remove SNXX
-SYMBOLS = [
-    x for x in SYMBOLS
-    if "SNXX" not in x
-]
-
-
-# ============================================================
-# DIAGNOSTICS
-# ============================================================
-
-DIAG = {
-    "m30_requests": 0,
-    "m30_ok": 0,
-    "m30_short": 0,
-
-    "m30_pivot_highs": 0,
-    "m30_pivot_lows": 0,
-
-    "hook_candidates": 0,
-    "hook_structure_valid": 0,
-    "hook_incomplete": 0,
-    "hook_confirmed": 0,
-    "hook_confirmed_current": 0,
-
-    "m1_symbols_selected": 0,
-    "m1_requests": 0,
-    "m1_ok": 0,
-    "m1_short": 0,
-
-    "m1_123f_candidates": 0,
-    "m1_123f_short": 0,
-    "m1_123f_long": 0,
-
-    "new_signals": 0,
-    "open_trades": 0,
-    "closed": 0,
-    "wins": 0,
-    "losses": 0,
-    "pnl": 0.0,
-
-    "charts": 0,
-    "errors": 0,
-}
-
-
-# ============================================================
-# DATA CLASSES
-# ============================================================
+SYMBOLS = [s.strip() for s in os.getenv('NDS_SYMBOLS', ','.join([
+    'PF_XBTUSD','PF_ETHUSD','PF_SOLUSD','PF_XRPUSD','PF_DOGEUSD','PF_ADAUSD','PF_LINKUSD','PF_AVAXUSD',
+    'PF_DOTUSD','PF_LTCUSD','PF_BCHUSD','PF_TRXUSD','PF_UNIUSD','PF_ATOMUSD','PF_NEARUSD','PF_APTUSD',
+    'PF_ARBUSD','PF_OPUSD','PF_INJUSD','PF_SUIUSD','PF_SEIUSD','PF_TIAUSD','PF_FILUSD','PF_ETCUSD',
+    'PF_AAVEUSD','PF_ALGOUSD','PF_FTMUSD','PF_GALAUSD','PF_SANDUSD','PF_MANAUSD','PF_CRVUSD','PF_SNXXUSD',
+    'PF_LDOUSD','PF_RUNEUSD','PF_EOSUSD','PF_XLMUSD','PF_PEPEUSD','PF_WIFUSD','PF_BONKUSD','PF_ENSUSD'
+])).split(',') if s.strip()]
+# Remove SNXX and ensure LDO is included, per scanner configuration.
+SYMBOLS = [s for s in SYMBOLS if 'SNXX' not in s]
+if 'PF_LDOUSD' not in SYMBOLS: SYMBOLS.append('PF_LDOUSD')
 
 @dataclass
 class Pivot:
     index: int
-    time: int
-    kind: str
+    time: pd.Timestamp
     price: float
-
+    kind: str
 
 @dataclass
 class Hook:
-    symbol: str
     direction: str
-
     start: Pivot
-
-    p1: Pivot
-    q1: Pivot
-    p2: Pivot
-    q2: Pivot
-    p3: Pivot
-    q3: Pivot
-
-    activator: Pivot
-
-    tp_864: float
-
-
-@dataclass
-class Setup:
-    symbol: str
-    direction: str
-
-    hook: Hook
-
     p1: Pivot
     p2: Pivot
     p3: Pivot
-    f: Pivot
-
-    entry: float
-    sl: float
-    tp: float
-
-    created_at: int
+    p4: Pivot
+    end: Pivot
+    tp864: float
+    score: float
+    fingerprint: str
 
 
-# ============================================================
-# TIME
-# ============================================================
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
 
-def now_ms() -> int:
-    return int(
-        datetime.now(
-            timezone.utc
-        ).timestamp() * 1000
-    )
+def fmt_price(x: Optional[float]) -> str:
+    if x is None or not math.isfinite(float(x)): return 'N/A'
+    x = float(x)
+    if abs(x) >= 1000: return f'{x:.2f}'
+    if abs(x) >= 1: return f'{x:.5f}'.rstrip('0').rstrip('.')
+    return f'{x:.8f}'.rstrip('0').rstrip('.')
 
-
-def format_time(ms: int) -> str:
-    try:
-        return datetime.fromtimestamp(
-            ms / 1000,
-            tz=timezone.utc
-        ).strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
-        )
-    except Exception:
-        return str(ms)
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def safe_float(
-    value: Any,
-    default: float = 0.0
-) -> float:
-
-    try:
-        return float(value)
-    except Exception:
-        return default
-
-
-def pct_distance(
-    a: float,
-    b: float
-) -> float:
-
-    if not a:
-        return 999.0
-
-    return abs(a - b) / abs(a)
-
-
-def pct_move(
-    a: float,
-    b: float
-) -> float:
-
-    if not a:
-        return 0.0
-
-    return (
-        (b - a) / a
-    ) * 100.0
-
-
-# ============================================================
-# TELEGRAM
-# ============================================================
-
-def telegram_send(
-    message: str,
-    image_bytes: Optional[bytes] = None
-) -> bool:
-
-    if not TELEGRAM_BOT_TOKEN:
-        print(
-            "[WARN] TELEGRAM_BOT_TOKEN missing"
-        )
+def telegram_send(text: str, photo: Optional[Path] = None) -> bool:
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
+        print('Telegram credentials missing; message not sent.')
         return False
-
-    if not TELEGRAM_CHAT_ID:
-        print(
-            "[WARN] TELEGRAM_CHAT_ID missing"
-        )
-        return False
-
     try:
-
-        if image_bytes:
-
-            response = requests.post(
-                f"https://api.telegram.org/"
-                f"bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
-                data={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "caption": message,
-                },
-                files={
-                    "photo": (
-                        "nds_signal.png",
-                        image_bytes,
-                        "image/png"
-                    )
-                },
-                timeout=REQUEST_TIMEOUT
-            )
-
+        if photo and photo.exists():
+            with photo.open('rb') as f:
+                r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto',
+                    data={'chat_id': TELEGRAM_CHAT, 'caption': text[:1024], 'parse_mode':'HTML'},
+                    files={'photo': f}, timeout=35)
         else:
-
-            response = requests.post(
-                f"https://api.telegram.org/"
-                f"bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "text": message,
-                    "disable_web_page_preview": True
-                },
-                timeout=REQUEST_TIMEOUT
-            )
-
-        return response.ok
-
+            r = requests.post(f'https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage',
+                data={'chat_id': TELEGRAM_CHAT, 'text': text[:4000], 'parse_mode':'HTML', 'disable_web_page_preview':True}, timeout=25)
+        if not r.ok: print('Telegram error:', r.status_code, r.text[:300])
+        return r.ok
     except Exception as e:
-
-        print(
-            f"[WARN] Telegram error: {e}"
-        )
-
-        return False
-
-
-# ============================================================
-# DATABASE
-# ============================================================
-
-def db_connect():
-
-    con = sqlite3.connect(
-        DB_FILE,
-        timeout=30
-    )
-
-    con.row_factory = sqlite3.Row
-
-    return con
-
+        print('Telegram exception:', repr(e)); return False
 
 def init_db():
-
-    con = db_connect()
-
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS signals (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            symbol TEXT,
-            direction TEXT,
-            entry REAL,
-            sl REAL,
-            tp REAL,
-            hook_start REAL,
-            hook_activator REAL,
-            setup_time INTEGER,
-            created_at INTEGER,
-            status TEXT DEFAULT 'OPEN',
-            exit_price REAL,
-            exit_time INTEGER,
-            exit_reason TEXT,
-            pnl_pct REAL
-        )
-        """
-    )
-
-    con.execute(
-        """
-        CREATE TABLE IF NOT EXISTS scanner_runs (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            run_time INTEGER,
-            version TEXT,
-            assets_scanned INTEGER,
-            new_signals INTEGER,
-            open_trades INTEGER,
-            errors INTEGER
-        )
-        """
-    )
-
-    con.commit()
-    con.close()
-
-
-# ============================================================
-# KRAKEN DATA
-# ============================================================
-
-def fetch_candles(
-    symbol: str,
-    resolution: str,
-    count: int
-) -> pd.DataFrame:
-
-    url = (
-        f"{KRAKEN_BASE}/trade/"
-        f"{symbol}/{resolution}"
-    )
-
-    response = requests.get(
-        url,
-        params={"count": count},
-        timeout=REQUEST_TIMEOUT
-    )
-
-    response.raise_for_status()
-
-    data = response.json()
-
-    candles = data.get(
-        "candles",
-        []
-    )
-
-    if not candles:
-        return pd.DataFrame()
-
-    rows = []
-
-    for c in candles:
-
-        try:
-
-            rows.append({
-                "time": int(c["time"]),
-                "open": safe_float(
-                    c["open"]
-                ),
-                "high": safe_float(
-                    c["high"]
-                ),
-                "low": safe_float(
-                    c["low"]
-                ),
-                "close": safe_float(
-                    c["close"]
-                ),
-                "volume": safe_float(
-                    c.get(
-                        "volume",
-                        0
-                    )
-                )
-            })
-
-        except Exception:
-            continue
-
-    df = pd.DataFrame(rows)
-
-    if df.empty:
-        return df
-
-    df = (
-        df
-        .sort_values("time")
-        .drop_duplicates("time")
-        .reset_index(drop=True)
-    )
-
-    # Remove currently forming candle
-    if resolution == "30m":
-        tf = 30 * 60 * 1000
-    else:
-        tf = 60 * 1000
-
-    current_bucket = (
-        now_ms() // tf
-    ) * tf
-
-    df = df[
-        df["time"] < current_bucket
-    ].reset_index(drop=True)
-
-    return df
-
-
-# ============================================================
-# PIVOTS
-# ============================================================
-
-def find_pivots(
-    df: pd.DataFrame
-) -> List[Pivot]:
-
-    if df.empty:
-        return []
-
-    highs = df["high"].to_numpy(
-        dtype=float
-    )
-
-    lows = df["low"].to_numpy(
-        dtype=float
-    )
-
-    times = df["time"].to_numpy(
-        dtype=np.int64
-    )
-
-    raw: List[Pivot] = []
-
-    for i in range(
-        PIVOT_LEFT,
-        len(df) - PIVOT_RIGHT
-    ):
-
-        h = highs[i]
-        l = lows[i]
-
-        left_h = highs[
-            i - PIVOT_LEFT:i
-        ]
-
-        right_h = highs[
-            i + 1:
-            i + PIVOT_RIGHT + 1
-        ]
-
-        left_l = lows[
-            i - PIVOT_LEFT:i
-        ]
-
-        right_l = lows[
-            i + 1:
-            i + PIVOT_RIGHT + 1
-        ]
-
-        is_high = (
-            h >= np.max(left_h)
-            and
-            h > np.max(right_h)
-        )
-
-        is_low = (
-            l <= np.min(left_l)
-            and
-            l < np.min(right_l)
-        )
-
-        if is_high:
-
-            raw.append(
-                Pivot(
-                    index=i,
-                    time=int(times[i]),
-                    kind="H",
-                    price=float(h)
-                )
-            )
-
-        if is_low:
-
-            raw.append(
-                Pivot(
-                    index=i,
-                    time=int(times[i]),
-                    kind="L",
-                    price=float(l)
-                )
-            )
-
-    raw.sort(
-        key=lambda x: x.index
-    )
-
-    # Alternating pivot series
-    pivots: List[Pivot] = []
-
-    for p in raw:
-
-        if not pivots:
-            pivots.append(p)
-            continue
-
-        last = pivots[-1]
-
-        if p.kind == last.kind:
-
-            if (
-                p.kind == "H"
-                and p.price > last.price
-            ):
-                pivots[-1] = p
-
-            elif (
-                p.kind == "L"
-                and p.price < last.price
-            ):
-                pivots[-1] = p
-
-            continue
-
-        if (
-            pct_distance(
-                last.price,
-                p.price
-            ) < MIN_SWING_PCT
-        ):
-            continue
-
-        pivots.append(p)
-
-    return pivots
-
-
-# ============================================================
-# M30 HOOK
-# ============================================================
-
-def short_hook_candidates(
-    symbol: str,
-    pivots: List[Pivot]
-) -> List[Hook]:
-
-    result = []
-
-    for i in range(
-        0,
-        len(pivots) - 5
-    ):
-
-        seq = pivots[
-            i:i + 6
-        ]
-
-        if len(seq) < 6:
-            continue
-
-        if [
-            p.kind for p in seq
-        ] != [
-            "H",
-            "L",
-            "H",
-            "L",
-            "H",
-            "L"
-        ]:
-            continue
-
-        DIAG[
-            "hook_candidates"
-        ] += 1
-
-        start, l1, h2, l2, h3, l3 = seq
-
-        # NDS SHORT Hook
-        if not (
-            h2.price > start.price
-            and
-            l2.price < l1.price
-            and
-            h3.price > h2.price
-        ):
-            continue
-
-        DIAG[
-            "hook_structure_valid"
-        ] += 1
-
-        # H3 is the activator.
-        #
-        # 86.4% is calculated from START
-        # to H3 and is the FINAL TP.
-
-        tp = (
-            h3.price
-            -
-            RETRACE_864
-            *
-            (
-                h3.price
-                -
-                start.price
-            )
-        )
-
-        # For a valid SHORT TP
-        if tp >= h3.price:
-            continue
-
-        result.append(
-            Hook(
-                symbol=symbol,
-                direction="SHORT",
-                start=start,
-                p1=start,
-                q1=l1,
-                p2=h2,
-                q2=l2,
-                p3=h3,
-                q3=l3,
-                activator=h3,
-                tp_864=tp
-            )
-        )
-
-    return result
-
-
-def long_hook_candidates(
-    symbol: str,
-    pivots: List[Pivot]
-) -> List[Hook]:
-
-    result = []
-
-    for i in range(
-        0,
-        len(pivots) - 5
-    ):
-
-        seq = pivots[
-            i:i + 6
-        ]
-
-        if len(seq) < 6:
-            continue
-
-        if [
-            p.kind for p in seq
-        ] != [
-            "L",
-            "H",
-            "L",
-            "H",
-            "L",
-            "H"
-        ]:
-            continue
-
-        DIAG[
-            "hook_candidates"
-        ] += 1
-
-        start, h1, l2, h2, l3, h3 = seq
-
-        # NDS LONG Hook
-        if not (
-            l2.price < start.price
-            and
-            h2.price > h1.price
-            and
-            l3.price < l2.price
-        ):
-            continue
-
-        DIAG[
-            "hook_structure_valid"
-        ] += 1
-
-        tp = (
-            l3.price
-            +
-            RETRACE_864
-            *
-            (
-                start.price
-                -
-                l3.price
-            )
-        )
-
-        if tp <= l3.price:
-            continue
-
-        result.append(
-            Hook(
-                symbol=symbol,
-                direction="LONG",
-                start=start,
-                p1=start,
-                q1=h1,
-                p2=l2,
-                q2=h2,
-                p3=l3,
-                q3=h3,
-                activator=l3,
-                tp_864=tp
-            )
-        )
-
-    return result
-
-
-def latest_confirmed_hook(
-    symbol: str,
-    df: pd.DataFrame
-) -> Optional[Hook]:
-
-    pivots = find_pivots(df)
-
-    DIAG[
-        "m30_pivot_highs"
-    ] += sum(
-        p.kind == "H"
-        for p in pivots
-    )
-
-    DIAG[
-        "m30_pivot_lows"
-    ] += sum(
-        p.kind == "L"
-        for p in pivots
-    )
-
-    shorts = short_hook_candidates(
-        symbol,
-        pivots
-    )
-
-    longs = long_hook_candidates(
-        symbol,
-        pivots
-    )
-
-    candidates = (
-        shorts + longs
-    )
-
-    if not candidates:
-        return None
-
-    # Newest H3/L3
-    candidates.sort(
-        key=lambda x:
-        x.activator.time
-    )
-
-    hook = candidates[-1]
-
-    DIAG[
-        "hook_confirmed"
-    ] += 1
-
-    return hook
-
-
-# ============================================================
-# M1 123F
-# ============================================================
-#
-# IMPORTANT:
-#
-# 123F consists of FOUR CONSECUTIVE
-# PIVOT HIGHS.
-#
-# SHORT:
-#     1 < 2 < 3 < F
-#
-# LONG:
-#     1 > 2 > 3 > F
-#
-# F = ENTRY
-# ============================================================
-
-def detect_m1_123f(
-    df: pd.DataFrame,
-    hook: Hook
-) -> Optional[Dict[str, Any]]:
-
-    pivots = find_pivots(df)
-
-    # Only pivots after H3/L3
-    pivots = [
-        p for p in pivots
-        if p.time > hook.activator.time
-    ]
-
-    highs = [
-        p for p in pivots
-        if p.kind == "H"
-    ]
-
-    if len(highs) < 4:
-        return None
-
-    DIAG[
-        "m1_123f_candidates"
-    ] += 1
-
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # Use the LATEST FOUR CONSECUTIVE PIVOT HIGHS.
-    #
-    # They are exactly:
-    #
-    #       1 -> 2 -> 3 -> F
-    #
-    # No alternating low pivot is inserted between them.
-    # --------------------------------------------------------
-
-    for i in range(
-        len(highs) - 4,
-        -1,
-        -1
-    ):
-
-        p1 = highs[i]
-        p2 = highs[i + 1]
-        p3 = highs[i + 2]
-        pf = highs[i + 3]
-
-        # F must be recent
-        age_minutes = (
-            now_ms()
-            -
-            pf.time
-        ) / 60000.0
-
-        if age_minutes < 0:
-            continue
-
-        if (
-            age_minutes
-            >
-            MAX_F_AGE_MIN
-        ):
-            continue
-
-        # ----------------------------------------------------
-        # SHORT
-        # Four rising highs
-        # 1 < 2 < 3 < F
-        # ----------------------------------------------------
-
-        short_ok = (
-            p1.price
-            <
-            p2.price
-            <
-            p3.price
-            <
-            pf.price
-        )
-
-        # ----------------------------------------------------
-        # LONG
-        # Four falling highs
-        # 1 > 2 > 3 > F
-        # ----------------------------------------------------
-
-        long_ok = (
-            p1.price
-            >
-            p2.price
-            >
-            p3.price
-            >
-            pf.price
-        )
-
-        # Leg size
-        legs_ok = (
-            pct_distance(
-                p1.price,
-                p2.price
-            )
-            >=
-            MIN_123F_LEG_PCT
-            and
-            pct_distance(
-                p2.price,
-                p3.price
-            )
-            >=
-            MIN_123F_LEG_PCT
-            and
-            pct_distance(
-                p3.price,
-                pf.price
-            )
-            >=
-            MIN_123F_LEG_PCT
-        )
-
-        if not legs_ok:
-            continue
-
-        if hook.direction == "SHORT":
-
-            if not short_ok:
-                continue
-
-            DIAG[
-                "m1_123f_short"
-            ] += 1
-
-            return {
-                "direction": "SHORT",
-                "p1": p1,
-                "p2": p2,
-                "p3": p3,
-                "f": pf
-            }
-
-        if hook.direction == "LONG":
-
-            if not long_ok:
-                continue
-
-            DIAG[
-                "m1_123f_long"
-            ] += 1
-
-            return {
-                "direction": "LONG",
-                "p1": p1,
-                "p2": p2,
-                "p3": p3,
-                "f": pf
-            }
-
-    return None
-
-
-# ============================================================
-# STOP LOSS
-# ============================================================
-
-def calculate_sl(
-    df: pd.DataFrame,
-    direction: str,
-    entry: float
-) -> float:
-
-    pivots = find_pivots(df)
-
-    if direction == "SHORT":
-
-        lows = [
-            p for p in pivots
-            if (
-                p.kind == "L"
-                and
-                p.price < entry
-            )
-        ]
-
-        highs = [
-            p for p in pivots
-            if (
-                p.kind == "H"
-                and
-                p.price > entry
-            )
-        ]
-
-        if highs:
-            return highs[-1].price
-
-        if lows:
-            return entry + (
-                entry * 0.01
-            )
-
-        return entry * 1.01
-
-    else:
-
-        lows = [
-            p for p in pivots
-            if (
-                p.kind == "L"
-                and
-                p.price < entry
-            )
-        ]
-
-        highs = [
-            p for p in pivots
-            if (
-                p.kind == "H"
-                and
-                p.price > entry
-            )
-        ]
-
-        if lows:
-            return lows[-1].price
-
-        if highs:
-            return entry * 0.99
-
-        return entry * 0.99
-
-
-# ============================================================
-# BUILD SETUP
-# ============================================================
-
-def build_setup(
-    df: pd.DataFrame,
-    hook: Hook,
-    pattern: Dict[str, Any]
-) -> Optional[Setup]:
-
-    entry = float(
-        pattern["f"].price
-    )
-
-    tp = float(
-        hook.tp_864
-    )
-
-    sl = calculate_sl(
-        df,
-        hook.direction,
-        entry
-    )
-
-    # TP direction validation
-    if hook.direction == "SHORT":
-
-        if not (
-            tp < entry
-        ):
-            return None
-
-        if not (
-            sl > entry
-        ):
-            sl = entry * 1.01
-
-    else:
-
-        if not (
-            tp > entry
-        ):
-            return None
-
-        if not (
-            sl < entry
-        ):
-            sl = entry * 0.99
-
-    return Setup(
-        symbol=hook.symbol,
-        direction=hook.direction,
-        hook=hook,
-
-        p1=pattern["p1"],
-        p2=pattern["p2"],
-        p3=pattern["p3"],
-        f=pattern["f"],
-
-        entry=entry,
-        sl=float(sl),
-        tp=tp,
-
-        created_at=now_ms()
-    )
-
-
-# ============================================================
-# DATABASE - SIGNALS
-# ============================================================
-
-def has_duplicate_signal(
-    setup: Setup
-) -> bool:
-
-    con = db_connect()
-
-    row = con.execute(
-        """
-        SELECT id
-        FROM signals
-        WHERE symbol=?
-          AND direction=?
-          AND setup_time=?
-        LIMIT 1
-        """,
-        (
-            setup.symbol,
-            setup.direction,
-            setup.f.time
-        )
-    ).fetchone()
-
-    con.close()
-
-    return row is not None
-
-
-def insert_signal(
-    setup: Setup
-) -> int:
-
-    con = db_connect()
-
-    cur = con.execute(
-        """
-        INSERT INTO signals (
-            symbol,
-            direction,
-            entry,
-            sl,
-            tp,
-            hook_start,
-            hook_activator,
-            setup_time,
-            created_at,
-            status
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN')
-        """,
-        (
-            setup.symbol,
-            setup.direction,
-            setup.entry,
-            setup.sl,
-            setup.tp,
-            setup.hook.start.price,
-            setup.hook.activator.price,
-            setup.f.time,
-            now_ms()
-        )
-    )
-
-    con.commit()
-
-    signal_id = cur.lastrowid
-
-    con.close()
-
-    return int(
-        signal_id
-        or
-        0
-    )
-
-
-# ============================================================
-# OPEN TRADES
-# ============================================================
-
-def get_open_trades():
-
-    con = db_connect()
-
-    rows = con.execute(
-        """
-        SELECT *
-        FROM signals
-        WHERE status='OPEN'
-        ORDER BY id DESC
-        """
-    ).fetchall()
-
-    con.close()
-
-    return rows
-
-
-def count_open_trades() -> int:
-
-    con = db_connect()
-
-    row = con.execute(
-        """
-        SELECT COUNT(*)
-        FROM signals
-        WHERE status='OPEN'
-        """
-    ).fetchone()
-
-    con.close()
-
-    return int(
-        row[0]
-    )
-
-
-# ============================================================
-# CURRENT PRICE
-# ============================================================
-
-def current_price(
-    symbol: str
-) -> Optional[float]:
-
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute('''CREATE TABLE IF NOT EXISTS signals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, symbol TEXT, direction TEXT, status TEXT,
+            entry REAL, sl REAL, tp REAL, current_price REAL, pnl_pct REAL DEFAULT 0,
+            hook_fingerprint TEXT, created_at TEXT, closed_at TEXT, exit_price REAL,
+            exit_reason TEXT, chart_path TEXT)''')
+        con.execute('''CREATE TABLE IF NOT EXISTS scanner_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, run_time TEXT, scanned INTEGER, data_ok INTEGER,
+            hooks INTEGER, m1_requests INTEGER, m1_ok INTEGER, candidates INTEGER, signals INTEGER,
+            errors INTEGER, best_symbol TEXT, best_direction TEXT)''')
+        con.execute('''CREATE TABLE IF NOT EXISTS candidate_notices (
+            fingerprint TEXT PRIMARY KEY, last_sent TEXT, symbol TEXT, direction TEXT)''')
+        # Safe schema migration for databases created by older versions.
+        cols = {r[1] for r in con.execute('PRAGMA table_info(signals)').fetchall()}
+        for name, typ in [('hook_fingerprint','TEXT'),('chart_path','TEXT'),('current_price','REAL'),('pnl_pct','REAL DEFAULT 0')]:
+            if name not in cols: con.execute(f'ALTER TABLE signals ADD COLUMN {name} {typ}')
+
+def fetch_candles(symbol: str, resolution: str, count: int) -> Optional[pd.DataFrame]:
+    url = f'{BASE_URL}/{symbol}/{resolution}'
     try:
-
-        df = fetch_candles(
-            symbol,
-            "1m",
-            5
-        )
-
-        if df.empty:
-            return None
-
-        return float(
-            df.iloc[-1]["close"]
-        )
-
-    except Exception:
-
+        r = requests.get(url, params={'count': count}, timeout=REQUEST_TIMEOUT)
+        if not r.ok: return None
+        payload = r.json()
+        rows = payload.get('candles') or payload.get('data') or payload.get('results') or []
+        if isinstance(rows, dict): rows = rows.get('candles') or rows.get('data') or []
+        if not rows: return None
+        df = pd.DataFrame(rows)
+        # Kraken normally uses time/open/high/low/close/volume; tolerate common aliases.
+        aliases = {'t':'time','timestamp':'time','o':'open','h':'high','l':'low','c':'close','v':'volume'}
+        df = df.rename(columns={k:v for k,v in aliases.items() if k in df.columns and v not in df.columns})
+        required = ['time','open','high','low','close']
+        if not all(c in df.columns for c in required): return None
+        for c in ['open','high','low','close']:
+            df[c] = pd.to_numeric(df[c], errors='coerce')
+        # API time can be ISO string or Unix seconds/milliseconds.
+        if pd.api.types.is_numeric_dtype(df['time']):
+            raw = pd.to_numeric(df['time'], errors='coerce')
+            unit = 'ms' if raw.dropna().median() > 1e12 else 's'
+            df['time'] = pd.to_datetime(raw, unit=unit, utc=True, errors='coerce')
+        else: df['time'] = pd.to_datetime(df['time'], utc=True, errors='coerce')
+        df = df.dropna(subset=required).sort_values('time').drop_duplicates('time').reset_index(drop=True)
+        if len(df) > count: df = df.iloc[-count:].reset_index(drop=True)
+        if len(df) < 30: return None
+        # Ignore the still-forming latest candle to avoid unstable pivots.
+        return df.iloc[:-1].reset_index(drop=True)
+    except Exception as e:
+        print(f'Fetch error {symbol} {resolution}: {e}')
         return None
 
-
-# ============================================================
-# MONITOR OPEN TRADES
-# ============================================================
-
-def monitor_open_trades():
-
-    rows = get_open_trades()
-
-    for row in rows:
-
-        symbol = row["symbol"]
-
-        price = current_price(
-            symbol
-        )
-
-        if price is None:
-            continue
-
-        direction = row["direction"]
-
-        entry = float(
-            row["entry"]
-        )
-
-        sl = float(
-            row["sl"]
-        )
-
-        tp = float(
-            row["tp"]
-        )
-
-        exit_reason = None
-
-        if direction == "SHORT":
-
-            if price <= tp:
-                exit_reason = "TP_86.4"
-
-            elif price >= sl:
-                exit_reason = "SL"
-
+def find_pivots(df: pd.DataFrame, left: int = PIVOT_LEFT, right: int = PIVOT_RIGHT,
+                alternating: bool = True) -> List[Pivot]:
+    raw: List[Pivot] = []
+    if df is None or len(df) < left + right + 5: return raw
+    highs = df['high'].to_numpy(); lows = df['low'].to_numpy()
+    for i in range(left, len(df)-right):
+        win_h = highs[i-left:i+right+1]; win_l = lows[i-left:i+right+1]
+        is_h = highs[i] >= max(win_h) and (highs[i] > max(win_h[:left]) or highs[i] > max(win_h[left+1:]))
+        is_l = lows[i] <= min(win_l) and (lows[i] < min(win_l[:left]) or lows[i] < min(win_l[left+1:]))
+        if is_h: raw.append(Pivot(i, df.iloc[i]['time'], float(highs[i]), 'H'))
+        if is_l: raw.append(Pivot(i, df.iloc[i]['time'], float(lows[i]), 'L'))
+    raw.sort(key=lambda p: (p.index, 0 if p.kind == 'H' else 1))
+    if not alternating: return raw
+    out: List[Pivot] = []
+    for p in raw:
+        if not out:
+            out.append(p); continue
+        last = out[-1]
+        if p.kind == last.kind:
+            if (p.kind == 'H' and p.price >= last.price) or (p.kind == 'L' and p.price <= last.price): out[-1] = p
         else:
-
-            if price >= tp:
-                exit_reason = "TP_86.4"
-
-            elif price <= sl:
-                exit_reason = "SL"
-
-        if exit_reason is None:
-            continue
-
-        if direction == "SHORT":
-
-            pnl = (
-                (entry - price)
-                /
-                entry
-            ) * 100
-
-        else:
-
-            pnl = (
-                (price - entry)
-                /
-                entry
-            ) * 100
-
-        con = db_connect()
-
-        con.execute(
-            """
-            UPDATE signals
-            SET
-                status='CLOSED',
-                exit_price=?,
-                exit_time=?,
-                exit_reason=?,
-                pnl_pct=?
-            WHERE id=?
-            """,
-            (
-                price,
-                now_ms(),
-                exit_reason,
-                pnl,
-                row["id"]
-            )
-        )
-
-        con.commit()
-        con.close()
-
-        DIAG["closed"] += 1
-
-        if pnl > 0:
-            DIAG["wins"] += 1
-        else:
-            DIAG["losses"] += 1
-
-        DIAG["pnl"] += pnl
-
-        message = (
-            "🔔 NDS CLOSE\n\n"
-            f"{'🟢' if direction == 'LONG' else '🔴'} "
-            f"{direction} {symbol}\n\n"
-            f"Entry: {entry:.8g}\n"
-            f"Exit: {price:.8g}\n"
-            f"Result: {pnl:+.2f}%\n"
-            f"Reason: {exit_reason}\n"
-            f"TP: {tp:.8g}\n"
-            f"SL: {sl:.8g}"
-        )
-
-        telegram_send(
-            message
-        )
-
-
-# ============================================================
-# CHART
-# ============================================================
-
-def draw_candles(
-    ax,
-    df: pd.DataFrame
-):
-
-    for i, row in df.iterrows():
-
-        o = float(row["open"])
-        h = float(row["high"])
-        l = float(row["low"])
-        c = float(row["close"])
-
-        ax.vlines(
-            i,
-            l,
-            h,
-            linewidth=0.7
-        )
-
-        bottom = min(
-            o,
-            c
-        )
-
-        height = max(
-            abs(c - o),
-            abs(c) * 0.00001
-        )
-
-        ax.add_patch(
-            plt.Rectangle(
-                (
-                    i - 0.30,
-                    bottom
-                ),
-                0.60,
-                height,
-                fill=False,
-                linewidth=0.7
-            )
-        )
-
-
-def create_chart(
-    symbol: str,
-    m30: pd.DataFrame,
-    m1: pd.DataFrame,
-    setup: Setup
-) -> bytes:
-
-    fig, axes = plt.subplots(
-        2,
-        1,
-        figsize=(16, 11)
-    )
-
-    ax30 = axes[0]
-    ax1 = axes[1]
-
-    # --------------------------------------------------------
-    # M30
-    # --------------------------------------------------------
-
-    d30 = m30.tail(100).reset_index(
-        drop=True
-    )
-
-    draw_candles(
-        ax30,
-        d30
-    )
-
-    def x30(t):
-
-        arr = d30[
-            "time"
-        ].to_numpy()
-
-        if len(arr) == 0:
-            return None
-
-        return int(
-            np.argmin(
-                np.abs(
-                    arr - t
-                )
-            )
-        )
-
-    hook_points = [
-        (
-            "START",
-            setup.hook.start
-        ),
-        (
-            "H1",
-            setup.hook.p1
-        ),
-        (
-            "L1",
-            setup.hook.q1
-        ),
-        (
-            "H2",
-            setup.hook.p2
-        ),
-        (
-            "L2",
-            setup.hook.q2
-        ),
-        (
-            "H3"
-            if setup.direction == "SHORT"
-            else "L3",
-            setup.hook.activator
-        ),
-    ]
-
-    for label, p in hook_points:
-
-        x = x30(
-            p.time
-        )
-
-        if x is None:
-            continue
-
-        ax30.scatter(
-            [x],
-            [p.price],
-            s=45
-        )
-
-        ax30.annotate(
-            label,
-            (
-                x,
-                p.price
-            ),
-            xytext=(
-                5,
-                8
-            ),
-            textcoords="offset points",
-            fontsize=9,
-            fontweight="bold"
-        )
-
-    ax30.axhline(
-        setup.tp,
-        linestyle="--",
-        linewidth=1.5,
-        label="86.4% FINAL TP"
-    )
-
-    ax30.set_title(
-        f"M30 NDS HOOK | "
-        f"{symbol} | "
-        f"{setup.direction}"
-    )
-
-    ax30.set_ylabel(
-        "Price"
-    )
-
-    ax30.grid(
-        alpha=0.15
-    )
-
-    ax30.legend(
-        loc="best"
-    )
-
-    # --------------------------------------------------------
-    # M1
-    # --------------------------------------------------------
-
-    d1 = m1.tail(180).reset_index(
-        drop=True
-    )
-
-    draw_candles(
-        ax1,
-        d1
-    )
-
-    def x1(t):
-
-        arr = d1[
-            "time"
-        ].to_numpy()
-
-        if len(arr) == 0:
-            return None
-
-        return int(
-            np.argmin(
-                np.abs(
-                    arr - t
-                )
-            )
-        )
-
-    m1_points = [
-        (
-            "1",
-            setup.p1
-        ),
-        (
-            "2",
-            setup.p2
-        ),
-        (
-            "3",
-            setup.p3
-        ),
-        (
-            "F = ENTRY",
-            setup.f
-        ),
-    ]
-
-    for label, p in m1_points:
-
-        x = x1(
-            p.time
-        )
-
-        if x is None:
-            continue
-
-        ax1.scatter(
-            [x],
-            [p.price],
-            s=55
-        )
-
-        ax1.annotate(
-            label,
-            (
-                x,
-                p.price
-            ),
-            xytext=(
-                5,
-                8
-            ),
-            textcoords="offset points",
-            fontsize=10,
-            fontweight="bold"
-        )
-
-    ax1.axhline(
-        setup.entry,
-        linestyle="--",
-        linewidth=1.3,
-        label="F = ENTRY"
-    )
-
-    ax1.axhline(
-        setup.tp,
-        linestyle="--",
-        linewidth=1.3,
-        label="M30 86.4% FINAL TP"
-    )
-
-    ax1.axhline(
-        setup.sl,
-        linestyle=":",
-        linewidth=1.3,
-        label="SL"
-    )
-
-    ax1.set_title(
-        f"M1 123F | "
-        f"1 → 2 → 3 → F | "
-        f"F = ENTRY"
-    )
-
-    ax1.set_xlabel(
-        "1M Closed Candles"
-    )
-
-    ax1.set_ylabel(
-        "Price"
-    )
-
-    ax1.grid(
-        alpha=0.15
-    )
-
-    ax1.legend(
-        loc="best"
-    )
-
-    fig.suptitle(
-        f"NDS M30 → M1 | "
-        f"{symbol} | "
-        f"{setup.direction}",
-        fontsize=14,
-        fontweight="bold"
-    )
-
-    plt.tight_layout()
-
-    image = io.BytesIO()
-
-    plt.savefig(
-        image,
-        format="png",
-        dpi=140,
-        bbox_inches="tight"
-    )
-
-    plt.close(fig)
-
-    image.seek(0)
-
-    return image.getvalue()
-
-
-# ============================================================
-# SIGNAL MESSAGE
-# ============================================================
-
-def signal_message(
-    setup: Setup
-) -> str:
-
-    hook = setup.hook
-
-    return (
-        "🚨 NDS NEW SIGNAL\n\n"
-
-        f"{'🟢' if setup.direction == 'LONG' else '🔴'} "
-        f"{setup.direction} "
-        f"{setup.symbol}\n\n"
-
-        f"Entry F: {setup.entry:.8g}\n"
-        f"SL: {setup.sl:.8g}\n"
-        f"TP 86.4%: {setup.tp:.8g}\n\n"
-
-        "M30 HOOK\n"
-        f"START: {hook.start.price:.8g}\n"
-        f"Activator: "
-        f"{hook.activator.price:.8g}\n\n"
-
-        "M1 123F\n"
-        f"1: {setup.p1.price:.8g}\n"
-        f"2: {setup.p2.price:.8g}\n"
-        f"3: {setup.p3.price:.8g}\n"
-        f"F: {setup.f.price:.8g}\n\n"
-
-        "F = ENTRY\n"
-        "86.4% M30 = FINAL TP\n\n"
-
-        "🧪 PAPER ONLY"
-    )
-
-
-# ============================================================
-# SCAN ONE SYMBOL
-# ============================================================
-
-def scan_symbol(
-    symbol: str
-) -> Optional[Setup]:
-
-    # --------------------------------------------------------
-    # M30
-    # --------------------------------------------------------
-
-    DIAG[
-        "m30_requests"
-    ] += 1
-
-    m30 = fetch_candles(
-        symbol,
-        "30m",
-        M30_COUNT
-    )
-
-    if m30.empty:
-
-        DIAG[
-            "m30_short"
-        ] += 1
-
-        return None
-
-    DIAG[
-        "m30_ok"
-    ] += 1
-
-    hook = latest_confirmed_hook(
-        symbol,
-        m30
-    )
-
-    if hook is None:
-        return None
-
-    DIAG[
-        "hook_confirmed_current"
-    ] += 1
-
-    # --------------------------------------------------------
-    # M1
-    # --------------------------------------------------------
-
-    DIAG[
-        "m1_requests"
-    ] += 1
-
-    m1 = fetch_candles(
-        symbol,
-        "1m",
-        M1_COUNT
-    )
-
-    if m1.empty:
-
-        DIAG[
-            "m1_short"
-        ] += 1
-
-        return None
-
-    DIAG[
-        "m1_ok"
-    ] += 1
-
-    pattern = detect_m1_123f(
-        m1,
-        hook
-    )
-
-    if pattern is None:
-        return None
-
-    setup = build_setup(
-        m1,
-        hook,
-        pattern
-    )
-
-    return setup
-
-
-# ============================================================
-# REPORT
-# ============================================================
-
-def print_diagnostic():
-
-    print()
-    print(
-        "🔎 NDS DIAGNOSTIC"
-    )
-
-    print(
-        f"Version: {VERSION}"
-    )
-
-    print(
-        f"Time: "
-        f"{format_time(now_ms())}"
-    )
-
-    print()
-
-    print("M30")
-
-    print(
-        f"Requests: "
-        f"{DIAG['m30_requests']}"
-    )
-
-    print(
-        f"Data OK: "
-        f"{DIAG['m30_ok']}"
-    )
-
-    print(
-        f"Short data: "
-        f"{DIAG['m30_short']}"
-    )
-
-    print(
-        f"Pivot Highs: "
-        f"{DIAG['m30_pivot_highs']}"
-    )
-
-    print(
-        f"Pivot Lows: "
-        f"{DIAG['m30_pivot_lows']}"
-    )
-
-    print(
-        f"Hook Candidates: "
-        f"{DIAG['hook_candidates']}"
-    )
-
-    print(
-        f"Structure Valid: "
-        f"{DIAG['hook_structure_valid']}"
-    )
-
-    print(
-        f"Confirmed Hooks: "
-        f"{DIAG['hook_confirmed']}"
-    )
-
-    print(
-        f"Confirmed This Cycle: "
-        f"{DIAG['hook_confirmed_current']}"
-    )
-
-    print()
-
-    print(
-        "M1 PIPELINE"
-    )
-
-    print(
-        f"Symbols Selected: "
-        f"{DIAG['hook_confirmed_current']}"
-    )
-
-    print(
-        f"Requests: "
-        f"{DIAG['m1_requests']}"
-    )
-
-    print(
-        f"Data OK: "
-        f"{DIAG['m1_ok']}"
-    )
-
-    print(
-        f"Short data: "
-        f"{DIAG['m1_short']}"
-    )
-
-    print(
-        f"123F Candidates: "
-        f"{DIAG['m1_123f_candidates']}"
-    )
-
-    print(
-        f"123F SHORT: "
-        f"{DIAG['m1_123f_short']}"
-    )
-
-    print(
-        f"123F LONG: "
-        f"{DIAG['m1_123f_long']}"
-    )
-
-    print()
-
-    print("TRADES")
-
-    print(
-        f"New Signals: "
-        f"{DIAG['new_signals']}"
-    )
-
-    print(
-        f"Open Trades: "
-        f"{count_open_trades()}"
-    )
-
-    print(
-        f"Closed: "
-        f"{DIAG['closed']}"
-    )
-
-    print(
-        f"Wins: "
-        f"{DIAG['wins']}"
-    )
-
-    print(
-        f"Losses: "
-        f"{DIAG['losses']}"
-    )
-
-    print(
-        f"PnL: "
-        f"{DIAG['pnl']:+.2f}%"
-    )
-
-    print()
-
-    print(
-        f"Charts: "
-        f"{DIAG['charts']}"
-    )
-
-    print(
-        f"Errors: "
-        f"{DIAG['errors']}"
-    )
-
-
-def telegram_report():
-
-    text = (
-        "🔎 NDS DIAGNOSTIC\n\n"
-
-        f"Version: {VERSION}\n\n"
-
-        "M30\n"
-        f"Requests: {DIAG['m30_requests']}\n"
-        f"Data OK: {DIAG['m30_ok']}\n"
-        f"Hook Candidates: "
-        f"{DIAG['hook_candidates']}\n"
-        f"Structure Valid: "
-        f"{DIAG['hook_structure_valid']}\n"
-        f"Confirmed Hooks: "
-        f"{DIAG['hook_confirmed_current']}\n\n"
-
-        "M1 PIPELINE\n"
-        f"Symbols Selected: "
-        f"{DIAG['hook_confirmed_current']}\n"
-        f"Requests: "
-        f"{DIAG['m1_requests']}\n"
-        f"Data OK: "
-        f"{DIAG['m1_ok']}\n"
-        f"123F Candidates: "
-        f"{DIAG['m1_123f_candidates']}\n"
-        f"123F SHORT: "
-        f"{DIAG['m1_123f_short']}\n"
-        f"123F LONG: "
-        f"{DIAG['m1_123f_long']}\n\n"
-
-        "TRADES\n"
-        f"New Signals: "
-        f"{DIAG['new_signals']}\n"
-        f"Open Trades: "
-        f"{count_open_trades()}\n"
-        f"Closed: "
-        f"{DIAG['closed']}\n"
-        f"PnL: "
-        f"{DIAG['pnl']:+.2f}%\n\n"
-
-        "Mode: PAPER ONLY"
-    )
-
-    telegram_send(
-        text
-    )
-
-
-# ============================================================
-# MAIN
-# ============================================================
+            if abs(p.price-last.price)/max(abs(last.price), 1e-12) >= MIN_SWING_PCT: out.append(p)
+    return out
+
+def pct(a: float, b: float) -> float:
+    return abs(a-b)/max(abs(a), 1e-12)
+
+def build_hooks(df: pd.DataFrame, pivots: List[Pivot]) -> List[Hook]:
+    hooks: List[Hook] = []
+    # SHORT: START low -> H1 high -> L1 low -> H2 high -> L2 low -> H3 high.
+    # LONG: START high -> L1 low -> H1 high -> L2 low -> H2 high -> L3 low.
+    for i in range(max(0, len(pivots)-5)):
+        q = pivots[i:i+6]
+        kinds = ''.join(p.kind for p in q)
+        direction = None
+        if kinds == 'LHLHLH':
+            start,h1,l1,h2,l2,h3 = q
+            if h2.price > h1.price and l2.price < l1.price and h3.price > h2.price:
+                direction = 'SHORT'
+                span = h3.price-start.price
+                if span <= 0: continue
+                tp = h3.price - 0.864*(h3.price-start.price)
+                # A completed SHORT hook's last point is H3; ensure enough movement.
+                if pct(start.price, h3.price) < MIN_SWING_PCT: continue
+                age = max(0.0, (df.iloc[-1]['time']-h3.time).total_seconds()/60)
+                score = max(0, 100-age/3) + min(30, pct(start.price,h3.price)*1000)
+                fp = f'{direction}:{int(start.time.timestamp())}:{int(h3.time.timestamp())}:{h3.price:.8f}'
+                hooks.append(Hook(direction,start,h1,l1,h2,l2,h3,tp,score,fp))
+        elif kinds == 'HLHLHL':
+            start,l1,h1,l2,h2,l3 = q
+            if l2.price < l1.price and h2.price > h1.price and l3.price < l2.price:
+                direction = 'LONG'
+                span = start.price-l3.price
+                if span <= 0: continue
+                tp = l3.price + 0.864*(start.price-l3.price)
+                if pct(start.price,l3.price) < MIN_SWING_PCT: continue
+                age = max(0.0, (df.iloc[-1]['time']-l3.time).total_seconds()/60)
+                score = max(0, 100-age/3) + min(30, pct(start.price,l3.price)*1000)
+                fp = f'{direction}:{int(start.time.timestamp())}:{int(l3.time.timestamp())}:{l3.price:.8f}'
+                hooks.append(Hook(direction,start,l1,h1,l2,h2,l3,tp,score,fp))
+    # Keep only recent hooks; sort newest/best first.
+    now = df.iloc[-1]['time']
+    hooks = [h for h in hooks if (now-h.end.time).total_seconds()/60 <= MAX_HOOK_AGE_MIN]
+    hooks.sort(key=lambda h: (h.score, h.end.time.value), reverse=True)
+    # Deduplicate same fingerprint.
+    unique = {}
+    for h in hooks: unique[h.fingerprint] = h
+    return list(unique.values())
+
+def m1_structure(df: pd.DataFrame, direction: str, hook_time: pd.Timestamp) -> Dict[str, Any]:
+    # Build swing highs and lows independently. Four highs may have intervening lows;
+    # they must NOT be required to be adjacent in the alternating pivot list.
+    piv = find_pivots(df, alternating=False)
+    piv = [p for p in piv if p.time >= hook_time]
+    highs = [p for p in piv if p.kind == 'H']
+    lows = [p for p in piv if p.kind == 'L']
+    result = {'points': [], 'confirmed': False, 'status': 'WAITING FOR 1M STRUCTURE', 'entry': None, 'sl': None}
+    if direction == 'SHORT':
+        # 1,2,3,F are successive swing highs with ascending prices; F is the last high.
+        candidates = []
+        for i in range(3, len(highs)):
+            p1,p2,p3,pf = highs[i-3:i+1]
+            if p1.price < p2.price < p3.price < pf.price:
+                # Reject a sequence with huge gaps or stale F.
+                if (df.iloc[-1]['time']-pf.time).total_seconds()/60 <= MAX_SETUP_AGE_MIN:
+                    candidates.append((p1,p2,p3,pf))
+        if candidates:
+            seq = candidates[-1]; result['points'] = list(seq); result['status'] = '123F CONFIRMED'
+            result['confirmed'] = True; result['entry'] = seq[-1].price
+            prior_lows = [p for p in lows if p.index > seq[0].index and p.index < seq[-1].index]
+            result['sl'] = max([p.price for p in prior_lows], default=seq[-1].price*1.01)
+        elif highs:
+            result['points'] = highs[-3:]; result['status'] = f'BUILDING SHORT: {len(result["points"])}/4 HIGHS'
+    else:
+        # Mirror for LONG: four successive swing lows descending, with F as the last low.
+        candidates = []
+        for i in range(3, len(lows)):
+            p1,p2,p3,pf = lows[i-3:i+1]
+            if p1.price > p2.price > p3.price > pf.price:
+                if (df.iloc[-1]['time']-pf.time).total_seconds()/60 <= MAX_SETUP_AGE_MIN:
+                    candidates.append((p1,p2,p3,pf))
+        if candidates:
+            seq = candidates[-1]; result['points'] = list(seq); result['status'] = '123F CONFIRMED'
+            result['confirmed'] = True; result['entry'] = seq[-1].price
+            prior_highs = [p for p in highs if p.index > seq[0].index and p.index < seq[-1].index]
+            result['sl'] = min([p.price for p in prior_highs], default=seq[-1].price*0.99)
+        elif lows:
+            result['points'] = lows[-3:]; result['status'] = f'BUILDING LONG: {len(result["points"])}/4 LOWS'
+    return result
+
+def make_chart(symbol: str, m30: pd.DataFrame, m1: Optional[pd.DataFrame], hook: Hook,
+               structure: Optional[Dict[str, Any]], current: float, candidate: bool = True) -> Path:
+    fig, axes = plt.subplots(2, 1, figsize=(15, 10), gridspec_kw={'height_ratios':[1.15,1]})
+    ax = axes[0]
+    view = m30.tail(100).reset_index(drop=True)
+    for i,row in view.iterrows():
+        x = mdates.date2num(row['time'].to_pydatetime()); o,h,l,c = row['open'],row['high'],row['low'],row['close']
+        ax.vlines(x,l,h,color='black',linewidth=.7)
+        color = '#159447' if c >= o else '#cf3030'
+        ax.add_patch(Rectangle((x-.008, min(o,c)), .016, max(abs(c-o), max(abs(c),1)*.00001), facecolor=color, edgecolor=color, linewidth=.5))
+    point_map = [('START',hook.start), ('H1/L1',hook.p1), ('L1/H1',hook.p2), ('H2/L2',hook.p3), ('L2/H2',hook.p4), ('H3/L3',hook.end)]
+    # Labels follow actual sequence names by direction.
+    if hook.direction == 'SHORT': labels = [('START',hook.start),('H1',hook.p1),('L1',hook.p2),('H2',hook.p3),('L2',hook.p4),('H3',hook.end)]
+    else: labels = [('START',hook.start),('L1',hook.p1),('H1',hook.p2),('L2',hook.p3),('H2',hook.p4),('L3',hook.end)]
+    for label,p in labels:
+        ax.scatter(mdates.date2num(p.time.to_pydatetime()),p.price,s=45,zorder=5)
+        ax.annotate(f'{label}\n{fmt_price(p.price)}',(mdates.date2num(p.time.to_pydatetime()),p.price),xytext=(3,8),textcoords='offset points',fontsize=8)
+    ax.axhline(hook.tp864,linestyle='--',linewidth=1.3,label=f'86.4% TP {fmt_price(hook.tp864)}')
+    ax.axhline(current,linestyle=':',linewidth=1,label=f'Current {fmt_price(current)}')
+    ax.set_title(f'{symbol} | M30 NDS {hook.direction} HOOK | CANDIDATE' if candidate else f'{symbol} | M30 NDS {hook.direction} SIGNAL')
+    ax.grid(alpha=.2); ax.legend(loc='best',fontsize=8); ax.xaxis_date(); ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M', tz=timezone.utc))
+    ax2 = axes[1]
+    if m1 is not None and len(m1):
+        view1 = m1.tail(180).reset_index(drop=True)
+        for i,row in view1.iterrows():
+            x = mdates.date2num(row['time'].to_pydatetime()); o,h,l,c = row['open'],row['high'],row['low'],row['close']
+            ax2.vlines(x,l,h,color='black',linewidth=.55)
+            color = '#159447' if c >= o else '#cf3030'
+            ax2.add_patch(Rectangle((x-.00025,min(o,c)),.0005,max(abs(c-o),max(abs(c),1)*.00001),facecolor=color,edgecolor=color,linewidth=.4))
+        if structure:
+            for n,p in enumerate(structure.get('points',[]), start=1):
+                label = 'F' if structure.get('confirmed') and n == len(structure['points']) else str(n)
+                ax2.scatter(mdates.date2num(p.time.to_pydatetime()),p.price,s=45,zorder=5)
+                ax2.annotate(f'{label}\n{fmt_price(p.price)}',(mdates.date2num(p.time.to_pydatetime()),p.price),xytext=(2,7),textcoords='offset points',fontsize=8)
+        ax2.axhline(current,linestyle=':',linewidth=1,label=f'Current {fmt_price(current)}')
+        ax2.set_title(f'M1 | {structure.get("status","WAITING") if structure else "WAITING"}')
+        ax2.xaxis_date(); ax2.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M', tz=timezone.utc))
+    else: ax2.text(.5,.5,'M1 DATA UNAVAILABLE',ha='center',va='center',transform=ax2.transAxes)
+    ax2.grid(alpha=.2); ax2.legend(loc='best',fontsize=8)
+    fig.tight_layout()
+    path = CHART_DIR / f'{symbol}_{hook.direction}_{int(time.time())}.png'
+    fig.savefig(path,dpi=130); plt.close(fig)
+    return path
+
+def candidate_was_sent(fp: str) -> bool:
+    with sqlite3.connect(DB_FILE) as con:
+        row = con.execute('SELECT last_sent FROM candidate_notices WHERE fingerprint=?',(fp,)).fetchone()
+    if not row: return False
+    try: return (utc_now()-datetime.fromisoformat(row[0])).total_seconds() < CANDIDATE_REPEAT_MIN*60
+    except Exception: return False
+
+def mark_candidate_sent(hook: Hook, symbol: str):
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute('INSERT INTO candidate_notices(fingerprint,last_sent,symbol,direction) VALUES(?,?,?,?) ON CONFLICT(fingerprint) DO UPDATE SET last_sent=excluded.last_sent,symbol=excluded.symbol,direction=excluded.direction',
+                    (hook.fingerprint,utc_now().isoformat(),symbol,hook.direction))
+
+def create_signal(symbol: str, hook: Hook, structure: Dict[str,Any], current: float, chart: Path):
+    entry = float(structure['entry'])
+    sl = float(structure['sl'])
+    # TP is the M30 86.4% cycle level. If it lies on the wrong side of entry, retain it as the cycle target but don't open a paper trade.
+    tp = float(hook.tp864)
+    valid = (sl > entry and tp < entry) if hook.direction == 'SHORT' else (sl < entry and tp > entry)
+    if not valid:
+        print(f'Invalid entry geometry {symbol} {hook.direction}: entry={entry}, sl={sl}, tp={tp}')
+        return False
+    with sqlite3.connect(DB_FILE) as con:
+        recent = con.execute('SELECT id FROM signals WHERE symbol=? AND direction=? AND hook_fingerprint=? AND created_at>? LIMIT 1',
+            (symbol,hook.direction,hook.fingerprint,datetime.fromtimestamp(utc_now().timestamp()-3600, timezone.utc).isoformat())).fetchone()
+        if recent: return False
+        con.execute('INSERT INTO signals(symbol,direction,status,entry,sl,tp,current_price,pnl_pct,hook_fingerprint,created_at,chart_path) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+            (symbol,hook.direction,'OPEN',entry,sl,tp,current,0,hook.fingerprint,utc_now().isoformat(),str(chart)))
+    emoji = '🔴' if hook.direction == 'SHORT' else '🟢'
+    msg = (f'🚨 <b>NDS PAPER SIGNAL v{VERSION}</b>\n{emoji} <b>{symbol} {hook.direction}</b>\n'
+           f'Entry (F): <code>{fmt_price(entry)}</code>\nSL: <code>{fmt_price(sl)}</code>\n'
+           f'TP 86.4%: <code>{fmt_price(tp)}</code>\nCurrent: <code>{fmt_price(current)}</code>\n'
+           f'M30 Hook: confirmed | M1: 1-2-3-F confirmed\n<b>PAPER ONLY - no live orders</b>')
+    telegram_send(msg, chart)
+    return True
+
+def monitor_open_trades(prices: Dict[str,float]):
+    with sqlite3.connect(DB_FILE) as con:
+        con.row_factory = sqlite3.Row
+        rows = con.execute("SELECT * FROM signals WHERE status='OPEN'").fetchall()
+        for tr in rows:
+            symbol=tr['symbol']; direction=tr['direction']; current=prices.get(symbol)
+            if current is None: continue
+            entry=float(tr['entry']); sl=float(tr['sl']); tp=float(tr['tp'])
+            pnl=((entry-current)/entry*100) if direction=='SHORT' else ((current-entry)/entry*100)
+            reason=None; exit_price=None
+            if direction=='SHORT':
+                if current <= tp: reason='TP'; exit_price=tp
+                elif current >= sl: reason='SL'; exit_price=sl
+            else:
+                if current >= tp: reason='TP'; exit_price=tp
+                elif current <= sl: reason='SL'; exit_price=sl
+            if reason:
+                con.execute("UPDATE signals SET status='CLOSED',closed_at=?,exit_price=?,exit_reason=?,current_price=?,pnl_pct=? WHERE id=?",
+                    (utc_now().isoformat(),exit_price,reason,current,pnl,tr['id']))
+                emoji='✅' if reason=='TP' else '❌'
+                telegram_send(f'{emoji} <b>NDS PAPER TRADE CLOSED</b>\n{symbol} {direction}\nReason: {reason}\nEntry: <code>{fmt_price(entry)}</code>\nExit: <code>{fmt_price(exit_price)}</code>\nPnL: <b>{pnl:+.2f}%</b>')
+            else:
+                con.execute('UPDATE signals SET current_price=?,pnl_pct=? WHERE id=?',(current,pnl,tr['id']))
+
+def hook_message(symbol: str, hook: Hook, current: float, structure: Dict[str,Any], age_min: float) -> str:
+    if hook.direction == 'SHORT':
+        names = [('START',hook.start),('H1',hook.p1),('L1',hook.p2),('H2',hook.p3),('L2',hook.p4),('H3 / ACTIVATOR',hook.end)]
+        emoji='🔴'
+    else:
+        names = [('START',hook.start),('L1',hook.p1),('H1',hook.p2),('L2',hook.p3),('H2',hook.p4),('L3 / ACTIVATOR',hook.end)]
+        emoji='🟢'
+    points='\n'.join(f'{name}: <code>{fmt_price(p.price)}</code>' for name,p in names)
+    s = structure.get('status','M1 pending')
+    m1_points = structure.get('points',[])
+    if m1_points:
+        m1_text='\n'.join(f'{"F" if structure.get("confirmed") and i==len(m1_points)-1 else str(i+1)}: <code>{fmt_price(p.price)}</code>' for i,p in enumerate(m1_points))
+    else: m1_text='No confirmed 1M swing points after Hook yet'
+    return (f'🔎 <b>NDS BEST CANDIDATE v{VERSION}</b>\n{emoji} <b>{symbol} {hook.direction}</b>\n'
+            f'Status: <b>{s}</b>\nHook age: {age_min:.0f} min\n\n<b>M30 HOOK POINTS</b>\n{points}\n'
+            f'86.4% TP: <code>{fmt_price(hook.tp864)}</code>\nCurrent: <code>{fmt_price(current)}</code>\n\n'
+            f'<b>M1 STRUCTURE</b>\n{m1_text}\n\n<b>PAPER ONLY</b>')
 
 def run_once():
-
-    if not PAPER_ONLY:
-
-        raise RuntimeError(
-            "PAPER_ONLY must remain True"
-        )
-
     init_db()
-
-    print(
-        "=" * 65
-    )
-
-    print(
-        f"NDS M30 -> M1 LIVE SCANNER "
-        f"V{VERSION}"
-    )
-
-    print(
-        "PAPER ONLY"
-    )
-
-    print(
-        "M30 Hook -> M1 123F -> F ENTRY -> "
-        "86.4% FINAL TP"
-    )
-
-    print(
-        "=" * 65
-    )
-
-    # --------------------------------------------------------
-    # Existing trades
-    # --------------------------------------------------------
-
-    monitor_open_trades()
-
-    # --------------------------------------------------------
-    # Current-cycle confirmed Hooks
-    #
-    # IMPORTANT:
-    # Every confirmed Hook goes directly to M1.
-    # No global/single-symbol queue.
-    # --------------------------------------------------------
-
-    confirmed_hooks = {}
-
+    stats={'scanned':0,'data_ok':0,'hooks':0,'m1_requests':0,'m1_ok':0,'candidates':0,'signals':0,'errors':0}
+    all_candidates=[]; prices={}; best_for_signal=[]
     for symbol in SYMBOLS:
-
+        stats['scanned'] += 1
         try:
-
-            DIAG[
-                "m30_requests"
-            ] += 0
-
-            m30 = fetch_candles(
-                symbol,
-                "30m",
-                M30_COUNT
-            )
-
-            if m30.empty:
-
-                DIAG[
-                    "m30_short"
-                ] += 1
-
-                continue
-
-            DIAG[
-                "m30_requests"
-            ] += 1
-
-            DIAG[
-                "m30_ok"
-            ] += 1
-
-            hook = latest_confirmed_hook(
-                symbol,
-                m30
-            )
-
-            if hook is None:
-                continue
-
-            confirmed_hooks[
-                symbol
-            ] = (
-                hook,
-                m30
-            )
-
+            m30=fetch_candles(symbol,'30m',M30_COUNT)
+            if m30 is None: continue
+            stats['data_ok'] += 1
+            current=float(m30.iloc[-1]['close']); prices[symbol]=current
+            piv30=find_pivots(m30, alternating=True)
+            hooks=build_hooks(m30,piv30)
+            if not hooks: continue
+            stats['hooks'] += len(hooks)
+            # M1 is requested for each recent Hook, not just one global winner.
+            for hook in hooks[:2]:
+                stats['m1_requests'] += 1
+                m1=fetch_candles(symbol,'1m',M1_COUNT)
+                if m1 is None: continue
+                stats['m1_ok'] += 1
+                current=float(m1.iloc[-1]['close']); prices[symbol]=current
+                structure=m1_structure(m1,hook.direction,hook.end.time)
+                age=max(0,(m30.iloc[-1]['time']-hook.end.time).total_seconds()/60)
+                score=hook.score + (25 if structure.get('confirmed') else min(12,len(structure.get('points',[]))*3))
+                all_candidates.append((score,symbol,m30,m1,hook,structure,current,age))
+                if structure.get('confirmed'): best_for_signal.append((score,symbol,m30,m1,hook,structure,current,age))
         except Exception as e:
+            stats['errors'] += 1; print('Scan error',symbol,repr(e)); traceback.print_exc(limit=1)
+    monitor_open_trades(prices)
+    all_candidates.sort(key=lambda x:(x[0],x[7]),reverse=True)
+    # Create signals for confirmed setups; candidate report is independent of signal confirmation.
+    for item in sorted(best_for_signal,key=lambda x:x[0],reverse=True):
+        score,symbol,m30,m1,hook,structure,current,age=item
+        chart=make_chart(symbol,m30,m1,hook,structure,current,candidate=False)
+        if create_signal(symbol,hook,structure,current,chart): stats['signals'] += 1
+    if all_candidates:
+        best=all_candidates[0]
+        score,symbol,m30,m1,hook,structure,current,age=best
+        stats['candidates']=len(all_candidates)
+        if not candidate_was_sent(hook.fingerprint):
+            chart=make_chart(symbol,m30,m1,hook,structure,current,candidate=not structure.get('confirmed',False))
+            telegram_send(hook_message(symbol,hook,current,structure,age),chart)
+            mark_candidate_sent(hook,symbol)
+    with sqlite3.connect(DB_FILE) as con:
+        con.execute('INSERT INTO scanner_runs(run_time,scanned,data_ok,hooks,m1_requests,m1_ok,candidates,signals,errors,best_symbol,best_direction) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+            (utc_now().isoformat(),stats['scanned'],stats['data_ok'],stats['hooks'],stats['m1_requests'],stats['m1_ok'],stats['candidates'],stats['signals'],stats['errors'],all_candidates[0][1] if all_candidates else None,all_candidates[0][4].direction if all_candidates else None))
+    with sqlite3.connect(DB_FILE) as con:
+        open_rows=con.execute("SELECT symbol,direction,entry,sl,tp,current_price,pnl_pct FROM signals WHERE status='OPEN' ORDER BY created_at DESC").fetchall()
+        closed=con.execute("SELECT COUNT(*),SUM(CASE WHEN pnl_pct>0 THEN 1 ELSE 0 END),SUM(CASE WHEN pnl_pct<=0 THEN 1 ELSE 0 END),COALESCE(SUM(pnl_pct),0) FROM signals WHERE status='CLOSED'").fetchone()
+    report=(f'📊 <b>NDS DIAGNOSTIC v{VERSION}</b>\nTime: {utc_now().strftime("%Y-%m-%d %H:%M UTC")}\n\n'
+            f'M30 requests: {stats["scanned"]} | Data OK: {stats["data_ok"]}\nHooks: {stats["hooks"]}\n'
+            f'M1 requests: {stats["m1_requests"]} | Data OK: {stats["m1_ok"]}\nCandidates: {stats["candidates"]}\n'
+            f'New signals: {stats["signals"]} | Errors: {stats["errors"]}\n\n'
+            f'Open trades: {len(open_rows)}\nClosed: {closed[0] or 0} | Wins: {closed[1] or 0} | Losses: {closed[2] or 0} | Realized PnL: {closed[3] or 0:+.2f}%\n'
+            f'<b>PAPER ONLY</b>')
+    telegram_send(report)
+    print(report.replace('<b>','').replace('</b>','').replace('<code>','').replace('</code>',''))
 
-            DIAG["errors"] += 1
+def main():
+    print(f'NDS M30->M1 Scanner v{VERSION} | PAPER_ONLY={PAPER_ONLY} | symbols={len(SYMBOLS)}')
+    if not PAPER_ONLY: raise RuntimeError('Safety lock: this scanner must remain PAPER ONLY.')
+    run_once()
 
-            print(
-                f"[M30 ERROR] "
-                f"{symbol}: {e}"
-            )
-
-    DIAG[
-        "hook_confirmed_current"
-    ] = len(
-        confirmed_hooks
-    )
-
-    DIAG[
-        "m1_symbols_selected"
-    ] = len(
-        confirmed_hooks
-    )
-
-    print()
-    print(
-        f"M30 confirmed Hooks: "
-        f"{len(confirmed_hooks)}"
-    )
-
-    # --------------------------------------------------------
-    # M1 for EVERY confirmed Hook
-    # --------------------------------------------------------
-
-    for symbol, item in (
-        confirmed_hooks.items()
-    ):
-
-        hook, m30 = item
-
-        try:
-
-            DIAG[
-                "m1_requests"
-            ] += 1
-
-            m1 = fetch_candles(
-                symbol,
-                "1m",
-                M1_COUNT
-            )
-
-            if m1.empty:
-
-                DIAG[
-                    "m1_short"
-                ] += 1
-
-                continue
-
-            DIAG[
-                "m1_ok"
-            ] += 1
-
-            pattern = detect_m1_123f(
-                m1,
-                hook
-            )
-
-            if pattern is None:
-                continue
-
-            setup = build_setup(
-                m1,
-                hook,
-                pattern
-            )
-
-            if setup is None:
-                continue
-
-            if has_duplicate_signal(
-                setup
-            ):
-                continue
-
-            if (
-                count_open_trades()
-                >=
-                MAX_OPEN_TRADES
-            ):
-                continue
-
-            signal_id = insert_signal(
-                setup
-            )
-
-            if not signal_id:
-                continue
-
-            DIAG[
-                "new_signals"
-            ] += 1
-
-            # ------------------------------------------------
-            # Chart
-            # ------------------------------------------------
-
-            try:
-
-                image = create_chart(
-                    symbol,
-                    m30,
-                    m1,
-                    setup
-                )
-
-                DIAG[
-                    "charts"
-                ] += 1
-
-            except Exception as e:
-
-                image = None
-
-                print(
-                    f"[CHART ERROR] "
-                    f"{symbol}: {e}"
-                )
-
-            # ------------------------------------------------
-            # Telegram
-            # ------------------------------------------------
-
-            telegram_send(
-                signal_message(
-                    setup
-                ),
-                image
-            )
-
-        except Exception as e:
-
-            DIAG[
-                "errors"
-            ] += 1
-
-            print(
-                f"[M1 ERROR] "
-                f"{symbol}: {e}"
-            )
-
-            traceback.print_exc()
-
-    # --------------------------------------------------------
-    # Scanner run DB
-    # --------------------------------------------------------
-
-    con = db_connect()
-
-    con.execute(
-        """
-        INSERT INTO scanner_runs (
-            run_time,
-            version,
-            assets_scanned,
-            new_signals,
-            open_trades,
-            errors
-        )
-        VALUES (?, ?, ?, ?, ?, ?)
-        """,
-        (
-            now_ms(),
-            VERSION,
-            len(SYMBOLS),
-            DIAG["new_signals"],
-            count_open_trades(),
-            DIAG["errors"]
-        )
-    )
-
-    con.commit()
-    con.close()
-
-    # --------------------------------------------------------
-    # Diagnostic
-    # --------------------------------------------------------
-
-    print_diagnostic()
-
-    telegram_report()
-
-
-# ============================================================
-# ENTRY POINT
-# ============================================================
-
-if __name__ == "__main__":
-
-    try:
-
-        run_once()
-
-    except Exception as e:
-
-        DIAG[
-            "errors"
-        ] += 1
-
-        print(
-            "\n[FATAL ERROR]"
-        )
-
-        print(
-            str(e)
-        )
-
-        traceback.print_exc()
+if __name__ == '__main__':
+    main()
