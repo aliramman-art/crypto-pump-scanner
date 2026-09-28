@@ -1,18 +1,18 @@
 # ============================================================
 # NDS M30 -> M1 LIVE SCANNER
-# VERSION 4.3.2
+# VERSION 4.3.3
 # ============================================================
 #
 # PAPER ONLY
 #
 # M30:
-#   POSITIVE / SHORT:
+#   SHORT:
 #       H1 -> L1 -> H2 -> L2 -> H3
 #       H2 > H1
 #       L2 < L1
 #       H3 > H2
 #
-#   NEGATIVE / LONG:
+#   LONG:
 #       L1 -> H1 -> L2 -> H2 -> L3
 #       L2 < L1
 #       H2 > H1
@@ -30,15 +30,14 @@
 #       ALL ARE HIGHS
 #       1 > 2 > 3 > F
 #
-#   IMPORTANT:
-#       M1 intermediate LOWS do NOT have to make
-#       higher lows / lower lows.
+#   Intermediate M1 LOWS are irrelevant.
 #
+# VERSION 4.3.3
+#   Added detailed diagnostic Telegram report.
 # ============================================================
 
 import os
 import time
-import math
 import sqlite3
 import traceback
 from datetime import datetime, timezone
@@ -58,7 +57,7 @@ from matplotlib.patches import Rectangle
 # CONFIG
 # ============================================================
 
-VERSION = "4.3.2"
+VERSION = "4.3.3"
 
 PAPER_ONLY = True
 
@@ -124,6 +123,65 @@ REQUEST_SESSION = requests.Session()
 latest_price_map = {}
 
 signals_since_last_report = 0
+
+
+# ============================================================
+# DIAGNOSTICS
+# ============================================================
+
+diagnostics = {
+    "m30_requests": 0,
+    "m30_data_ok": 0,
+    "m30_data_empty": 0,
+    "m30_data_short": 0,
+
+    "m30_pivots_high": 0,
+    "m30_pivots_low": 0,
+
+    "m30_short_candidates": 0,
+    "m30_long_candidates": 0,
+
+    "m30_short_saved": 0,
+    "m30_long_saved": 0,
+
+    "m30_expired": 0,
+    "m30_errors": 0,
+
+    "m1_hooks_seen": 0,
+    "m1_requests": 0,
+    "m1_data_ok": 0,
+    "m1_data_empty": 0,
+    "m1_data_short": 0,
+
+    "m1_pivots_high": 0,
+    "m1_pivots_low": 0,
+
+    "m1_123f_candidates": 0,
+
+    "m1_f_too_old": 0,
+    "m1_structure_distance_rejected": 0,
+    "m1_swing_rejected": 0,
+
+    "m1_no_123f": 0,
+
+    "m1_hook_invalidated": 0,
+
+    "m1_blocked_max_trades": 0,
+    "m1_blocked_cooldown": 0,
+
+    "m1_level_error": 0,
+    "m1_duplicate_signal": 0,
+
+    "signals_created": 0,
+
+    "price_errors": 0,
+    "errors": 0,
+}
+
+
+def reset_diagnostics():
+    for key in diagnostics:
+        diagnostics[key] = 0
 
 
 # ============================================================
@@ -215,12 +273,19 @@ def db():
 
 
 def ensure_column(conn, table, column, definition):
-    cur = conn.execute(f"PRAGMA table_info({table})")
-    columns = {row["name"] for row in cur.fetchall()}
+    cur = conn.execute(
+        f"PRAGMA table_info({table})"
+    )
+
+    columns = {
+        row["name"]
+        for row in cur.fetchall()
+    }
 
     if column not in columns:
         conn.execute(
-            f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            f"ALTER TABLE {table} "
+            f"ADD COLUMN {column} {definition}"
         )
 
 
@@ -228,9 +293,6 @@ def migrate_db():
     conn = db()
 
     try:
-        # ----------------------------------------------------
-        # scanner_runs
-        # ----------------------------------------------------
         ensure_column(
             conn,
             "scanner_runs",
@@ -238,9 +300,6 @@ def migrate_db():
             "INTEGER DEFAULT 1"
         )
 
-        # ----------------------------------------------------
-        # signals
-        # ----------------------------------------------------
         signal_columns = [
             ("chart_path", "TEXT"),
             ("hook_time", "INTEGER"),
@@ -257,9 +316,6 @@ def migrate_db():
                 definition
             )
 
-        # ----------------------------------------------------
-        # hooks
-        # ----------------------------------------------------
         hook_time_columns = [
             ("h1_time", "INTEGER"),
             ("l1_time", "INTEGER"),
@@ -438,6 +494,87 @@ def send_telegram_photo(photo_path, caption=""):
 
 
 # ============================================================
+# DIAGNOSTIC REPORT
+# ============================================================
+
+def send_diagnostic_report(assets_scanned):
+    hooks = load_active_hooks()
+
+    open_count = open_trade_count()
+
+    d = diagnostics
+
+    text = (
+        f"<b>🔎 NDS DIAGNOSTIC</b>\n"
+        f"Version: <b>{VERSION}</b>\n"
+        f"Time: {utc_text()}\n\n"
+
+        f"<b>ASSETS</b>\n"
+        f"Scanned: <b>{assets_scanned}</b>\n\n"
+
+        f"<b>30M DATA</b>\n"
+        f"Requests: {d['m30_requests']}\n"
+        f"Data OK: {d['m30_data_ok']}\n"
+        f"Empty: {d['m30_data_empty']}\n"
+        f"Short data: {d['m30_data_short']}\n"
+        f"Pivot Highs: {d['m30_pivots_high']}\n"
+        f"Pivot Lows: {d['m30_pivots_low']}\n\n"
+
+        f"<b>30M HOOK DETECTION</b>\n"
+        f"SHORT candidates: "
+        f"<b>{d['m30_short_candidates']}</b>\n"
+        f"LONG candidates: "
+        f"<b>{d['m30_long_candidates']}</b>\n"
+        f"SHORT saved: {d['m30_short_saved']}\n"
+        f"LONG saved: {d['m30_long_saved']}\n"
+        f"Expired: {d['m30_expired']}\n\n"
+
+        f"<b>ACTIVE HOOKS</b>\n"
+        f"Current: <b>{len(hooks)}</b>\n\n"
+
+        f"<b>1M DATA</b>\n"
+        f"Hook scans: {d['m1_hooks_seen']}\n"
+        f"Requests: {d['m1_requests']}\n"
+        f"Data OK: {d['m1_data_ok']}\n"
+        f"Empty: {d['m1_data_empty']}\n"
+        f"Short data: {d['m1_data_short']}\n"
+        f"Pivot Highs: {d['m1_pivots_high']}\n"
+        f"Pivot Lows: {d['m1_pivots_low']}\n\n"
+
+        f"<b>123F FILTERS</b>\n"
+        f"123F candidates: "
+        f"<b>{d['m1_123f_candidates']}</b>\n"
+        f"F too old: {d['m1_f_too_old']}\n"
+        f"Structure distance rejected: "
+        f"{d['m1_structure_distance_rejected']}\n"
+        f"Swing rejected: "
+        f"{d['m1_swing_rejected']}\n"
+        f"No 123F: {d['m1_no_123f']}\n\n"
+
+        f"<b>ENTRY FILTERS</b>\n"
+        f"Hook invalidated: "
+        f"{d['m1_hook_invalidated']}\n"
+        f"Max open trades: "
+        f"{d['m1_blocked_max_trades']}\n"
+        f"Cooldown: "
+        f"{d['m1_blocked_cooldown']}\n"
+        f"Level error: "
+        f"{d['m1_level_error']}\n"
+        f"Duplicate signal: "
+        f"{d['m1_duplicate_signal']}\n\n"
+
+        f"<b>RESULT</b>\n"
+        f"Signals created: "
+        f"<b>{d['signals_created']}</b>\n"
+        f"Current OPEN trades: "
+        f"<b>{open_count}</b>\n"
+        f"Errors: {d['errors']}\n"
+    )
+
+    send_telegram(text)
+
+
+# ============================================================
 # KRAKEN API
 # ============================================================
 
@@ -465,7 +602,9 @@ def fetch_candles(symbol, interval, count):
         rows = []
 
         for item in candles:
+
             if isinstance(item, dict):
+
                 ts = (
                     item.get("time")
                     or item.get("timestamp")
@@ -483,7 +622,11 @@ def fetch_candles(symbol, interval, count):
                     ),
                 })
 
-            elif isinstance(item, list) and len(item) >= 5:
+            elif (
+                isinstance(item, list)
+                and len(item) >= 5
+            ):
+
                 rows.append({
                     "time": safe_int(item[0]),
                     "open": safe_float(item[1]),
@@ -524,10 +667,12 @@ def fetch_candles(symbol, interval, count):
         return df
 
     except Exception as exc:
+
         print(
             f"fetch_candles error "
             f"{symbol} {interval}: {exc}"
         )
+
         return pd.DataFrame()
 
 
@@ -559,18 +704,22 @@ def fetch_current_price(symbol):
 
         data = response.json()
 
-        tickers = data.get("tickers", [])
+        for item in data.get("tickers", []):
 
-        for item in tickers:
-            if item.get("symbol") == symbol:
-                value = (
-                    item.get("last")
-                    or item.get("lastPrice")
-                )
+            if item.get("symbol") != symbol:
+                continue
 
-                return safe_float(value)
+            value = (
+                item.get("last")
+                or item.get("lastPrice")
+            )
+
+            return safe_float(value)
 
     except Exception as exc:
+
+        diagnostics["price_errors"] += 1
+
         print(
             f"fetch_current_price error "
             f"{symbol}: {exc}"
@@ -602,6 +751,7 @@ def fetch_price_map(symbols):
         wanted = set(symbols)
 
         for item in data.get("tickers", []):
+
             symbol = item.get("symbol")
 
             if symbol not in wanted:
@@ -618,7 +768,13 @@ def fetch_price_map(symbols):
                 result[symbol] = value
 
     except Exception as exc:
-        print("fetch_price_map error:", exc)
+
+        diagnostics["price_errors"] += 1
+
+        print(
+            "fetch_price_map error:",
+            exc
+        )
 
     return result
 
@@ -641,6 +797,7 @@ def discover_assets():
         candidates = []
 
         for item in data.get("tickers", []):
+
             symbol = item.get("symbol")
 
             if not symbol:
@@ -659,7 +816,10 @@ def discover_assets():
                 or 0
             )
 
-            volume = safe_float(volume, 0)
+            volume = safe_float(
+                volume,
+                0
+            )
 
             candidates.append(
                 (symbol, volume)
@@ -682,7 +842,14 @@ def discover_assets():
         return assets
 
     except Exception as exc:
-        print("discover_assets error:", exc)
+
+        diagnostics["errors"] += 1
+
+        print(
+            "discover_assets error:",
+            exc
+        )
+
         return []
 
 
@@ -706,6 +873,7 @@ def detect_pivots(df):
         PIVOT_LEFT,
         len(df) - PIVOT_RIGHT
     ):
+
         left_h = high_values[
             i - PIVOT_LEFT:i
         ]
@@ -720,6 +888,7 @@ def detect_pivots(df):
             center_h > np.max(left_h)
             and center_h >= np.max(right_h)
         ):
+
             highs.append({
                 "index": i,
                 "time": int(df.iloc[i]["time"]),
@@ -741,6 +910,7 @@ def detect_pivots(df):
             center_l < np.min(left_l)
             and center_l <= np.min(right_l)
         ):
+
             lows.append({
                 "index": i,
                 "time": int(df.iloc[i]["time"]),
@@ -769,19 +939,9 @@ def combined_pivots(df):
 
 def detect_m30_positive_hook(df):
     """
-    POSITIVE HOOK / SHORT
+    SHORT:
 
-        H1
-         \
-          L1
-            \
-             H2
-               \
-                L2
-                  \
-                   H3
-
-    Conditions:
+        H1 -> L1 -> H2 -> L2 -> H3
 
         H2 > H1
         L2 < L1
@@ -793,24 +953,30 @@ def detect_m30_positive_hook(df):
 
     highs, lows = detect_pivots(df)
 
+    diagnostics["m30_pivots_high"] += len(highs)
+    diagnostics["m30_pivots_low"] += len(lows)
+
     if len(highs) < 3 or len(lows) < 2:
         return None
 
     pivots = combined_pivots(df)
 
     for i in range(len(pivots)):
+
         if pivots[i]["type"] != "H":
             continue
 
         H1 = pivots[i]
 
         for j in range(i + 1, len(pivots)):
+
             if pivots[j]["type"] != "L":
                 continue
 
             L1 = pivots[j]
 
             for k in range(j + 1, len(pivots)):
+
                 if pivots[k]["type"] != "H":
                     continue
 
@@ -820,6 +986,7 @@ def detect_m30_positive_hook(df):
                     continue
 
                 for m in range(k + 1, len(pivots)):
+
                     if pivots[m]["type"] != "L":
                         continue
 
@@ -829,6 +996,7 @@ def detect_m30_positive_hook(df):
                         continue
 
                     for n in range(m + 1, len(pivots)):
+
                         if pivots[n]["type"] != "H":
                             continue
 
@@ -846,6 +1014,10 @@ def detect_m30_positive_hook(df):
                             < M30_MIN_HOOK_RANGE_PCT
                         ):
                             continue
+
+                        diagnostics[
+                            "m30_short_candidates"
+                        ] += 1
 
                         return {
                             "side": "SHORT",
@@ -871,19 +1043,9 @@ def detect_m30_positive_hook(df):
 
 def detect_m30_negative_hook(df):
     """
-    NEGATIVE HOOK / LONG
+    LONG:
 
-        L1
-         \
-          H1
-            \
-             L2
-               \
-                H2
-                  \
-                   L3
-
-    Conditions:
+        L1 -> H1 -> L2 -> H2 -> L3
 
         L2 < L1
         H2 > H1
@@ -895,24 +1057,30 @@ def detect_m30_negative_hook(df):
 
     highs, lows = detect_pivots(df)
 
+    diagnostics["m30_pivots_high"] += len(highs)
+    diagnostics["m30_pivots_low"] += len(lows)
+
     if len(highs) < 2 or len(lows) < 3:
         return None
 
     pivots = combined_pivots(df)
 
     for i in range(len(pivots)):
+
         if pivots[i]["type"] != "L":
             continue
 
         L1 = pivots[i]
 
         for j in range(i + 1, len(pivots)):
+
             if pivots[j]["type"] != "H":
                 continue
 
             H1 = pivots[j]
 
             for k in range(j + 1, len(pivots)):
+
                 if pivots[k]["type"] != "L":
                     continue
 
@@ -922,6 +1090,7 @@ def detect_m30_negative_hook(df):
                     continue
 
                 for m in range(k + 1, len(pivots)):
+
                     if pivots[m]["type"] != "H":
                         continue
 
@@ -931,6 +1100,7 @@ def detect_m30_negative_hook(df):
                         continue
 
                     for n in range(m + 1, len(pivots)):
+
                         if pivots[n]["type"] != "L":
                             continue
 
@@ -948,6 +1118,10 @@ def detect_m30_negative_hook(df):
                             < M30_MIN_HOOK_RANGE_PCT
                         ):
                             continue
+
+                        diagnostics[
+                            "m30_long_candidates"
+                        ] += 1
 
                         return {
                             "side": "LONG",
@@ -982,7 +1156,9 @@ def hook_is_invalidated(hook, df):
     if df is None or df.empty:
         return False
 
-    hook_time = int(hook["hook_time"])
+    hook_time = int(
+        hook["hook_time"]
+    )
 
     future = df[
         df["time"] > hook_time
@@ -994,26 +1170,20 @@ def hook_is_invalidated(hook, df):
     side = hook["side"]
 
     if side == "SHORT":
-        # After H3, a new confirmed HIGH is not
-        # the invalidation we use here.
-        #
-        # A new LOW can invalidate the hook because
-        # the expected M1 short sequence has already
-        # been overtaken.
-        _, lows = detect_pivots(
-            df
-        )
+
+        _, lows = detect_pivots(df)
 
         for p in lows:
+
             if p["time"] > hook_time:
                 return True
 
     else:
-        highs, _ = detect_pivots(
-            df
-        )
+
+        highs, _ = detect_pivots(df)
 
         for p in highs:
+
             if p["time"] > hook_time:
                 return True
 
@@ -1028,7 +1198,7 @@ def save_hook(symbol, hook):
     conn = db()
 
     try:
-        # Only one active Hook per symbol.
+
         conn.execute("""
             UPDATE hooks
             SET status = 'EXPIRED'
@@ -1046,21 +1216,31 @@ def save_hook(symbol, hook):
         }
 
         if hook.get("pivots"):
+
             labels = (
-                ["h1_time", "l1_time",
-                 "h2_time", "l2_time",
-                 "h3_time"]
+                [
+                    "h1_time",
+                    "l1_time",
+                    "h2_time",
+                    "l2_time",
+                    "h3_time"
+                ]
                 if hook["side"] == "SHORT"
                 else
-                ["l1_time", "h1_time",
-                 "l2_time", "h2_time",
-                 "l3_time"]
+                [
+                    "l1_time",
+                    "h1_time",
+                    "l2_time",
+                    "h2_time",
+                    "l3_time"
+                ]
             )
 
             for label, pivot in zip(
                 labels,
                 hook["pivots"]
             ):
+
                 times[label] = pivot["time"]
 
         conn.execute("""
@@ -1119,6 +1299,7 @@ def load_active_hooks():
     conn = db()
 
     try:
+
         rows = conn.execute("""
             SELECT *
             FROM hooks
@@ -1129,14 +1310,18 @@ def load_active_hooks():
         result = []
 
         for row in rows:
+
             hook = dict(row)
 
             if hook_is_expired(hook):
+
                 conn.execute("""
                     UPDATE hooks
                     SET status = 'EXPIRED'
                     WHERE id = ?
-                """, (hook["id"],))
+                """, (
+                    hook["id"],
+                ))
 
                 continue
 
@@ -1157,6 +1342,8 @@ def load_active_hooks():
 def find_m1_highs_after(df, start_time):
     highs, _ = detect_pivots(df)
 
+    diagnostics["m1_pivots_high"] += len(highs)
+
     return [
         p for p in highs
         if p["time"] > start_time
@@ -1165,13 +1352,11 @@ def find_m1_highs_after(df, start_time):
 
 def detect_m1_short_123f(df, hook):
     """
-    M1 SHORT 123F
-
-    ALL 1,2,3,F ARE HIGHS.
+    SHORT:
 
         1 < 2 < 3 < F
 
-    Intermediate lows are irrelevant.
+    ALL points are M1 HIGH pivots.
     """
 
     if df is None or df.empty:
@@ -1185,8 +1370,11 @@ def detect_m1_short_123f(df, hook):
     if len(highs) < 4:
         return None
 
-    # Search from the newest possible 4-high sequence.
-    for i in range(len(highs) - 4, -1, -1):
+    for i in range(
+        len(highs) - 4,
+        -1,
+        -1
+    ):
 
         p1 = highs[i]
         p2 = highs[i + 1]
@@ -1202,14 +1390,29 @@ def detect_m1_short_123f(df, hook):
         ):
             continue
 
-        age = now_ts() - pf["time"]
+        diagnostics[
+            "m1_123f_candidates"
+        ] += 1
+
+        age = (
+            now_ts() - pf["time"]
+        )
 
         if age < 0 or age > M1_F_MAX_AGE_SECONDS:
+
+            diagnostics[
+                "m1_f_too_old"
+            ] += 1
+
             continue
 
         structure_distance = (
-            abs(pf["price"] - hook["h3"])
-            / hook["h3"] * 100
+            abs(
+                pf["price"]
+                - hook["h3"]
+            )
+            / hook["h3"]
+            * 100
             if hook.get("h3")
             else 0
         )
@@ -1218,14 +1421,28 @@ def detect_m1_short_123f(df, hook):
             structure_distance
             > M1_MAX_STRUCTURE_DISTANCE_PCT
         ):
+
+            diagnostics[
+                "m1_structure_distance_rejected"
+            ] += 1
+
             continue
 
         swing_pct = (
-            (pf["price"] - p1["price"])
-            / p1["price"] * 100
+            (
+                pf["price"]
+                - p1["price"]
+            )
+            / p1["price"]
+            * 100
         )
 
         if swing_pct < M1_MIN_SWING_PCT:
+
+            diagnostics[
+                "m1_swing_rejected"
+            ] += 1
+
             continue
 
         return {
@@ -1242,13 +1459,11 @@ def detect_m1_short_123f(df, hook):
 
 def detect_m1_long_123f(df, hook):
     """
-    M1 LONG 123F
-
-    ALL 1,2,3,F ARE HIGHS.
+    LONG:
 
         1 > 2 > 3 > F
 
-    Intermediate lows are irrelevant.
+    ALL points are M1 HIGH pivots.
     """
 
     if df is None or df.empty:
@@ -1262,7 +1477,11 @@ def detect_m1_long_123f(df, hook):
     if len(highs) < 4:
         return None
 
-    for i in range(len(highs) - 4, -1, -1):
+    for i in range(
+        len(highs) - 4,
+        -1,
+        -1
+    ):
 
         p1 = highs[i]
         p2 = highs[i + 1]
@@ -1278,14 +1497,29 @@ def detect_m1_long_123f(df, hook):
         ):
             continue
 
-        age = now_ts() - pf["time"]
+        diagnostics[
+            "m1_123f_candidates"
+        ] += 1
+
+        age = (
+            now_ts() - pf["time"]
+        )
 
         if age < 0 or age > M1_F_MAX_AGE_SECONDS:
+
+            diagnostics[
+                "m1_f_too_old"
+            ] += 1
+
             continue
 
         structure_distance = (
-            abs(pf["price"] - hook["l3"])
-            / hook["l3"] * 100
+            abs(
+                pf["price"]
+                - hook["l3"]
+            )
+            / hook["l3"]
+            * 100
             if hook.get("l3")
             else 0
         )
@@ -1294,14 +1528,28 @@ def detect_m1_long_123f(df, hook):
             structure_distance
             > M1_MAX_STRUCTURE_DISTANCE_PCT
         ):
+
+            diagnostics[
+                "m1_structure_distance_rejected"
+            ] += 1
+
             continue
 
         swing_pct = (
-            (p1["price"] - pf["price"])
-            / p1["price"] * 100
+            (
+                p1["price"]
+                - pf["price"]
+            )
+            / p1["price"]
+            * 100
         )
 
         if swing_pct < M1_MIN_SWING_PCT:
+
+            diagnostics[
+                "m1_swing_rejected"
+            ] += 1
+
             continue
 
         return {
@@ -1330,6 +1578,7 @@ def calculate_trade_levels(
         return None
 
     if side == "LONG":
+
         candidates = [
             hook.get("l1"),
             hook.get("l2"),
@@ -1399,6 +1648,7 @@ def open_trade_count():
     conn = db()
 
     try:
+
         row = conn.execute("""
             SELECT COUNT(*) AS c
             FROM signals
@@ -1411,10 +1661,14 @@ def open_trade_count():
         conn.close()
 
 
-def signal_on_cooldown(symbol, side):
+def signal_on_cooldown(
+    symbol,
+    side
+):
     conn = db()
 
     try:
+
         row = conn.execute("""
             SELECT signal_time
             FROM signals
@@ -1431,7 +1685,8 @@ def signal_on_cooldown(symbol, side):
             return False
 
         return (
-            now_ts() - int(row["signal_time"])
+            now_ts()
+            - int(row["signal_time"])
             < SIGNAL_COOLDOWN_SECONDS
         )
 
@@ -1450,6 +1705,7 @@ def insert_signal(
     conn = db()
 
     try:
+
         event_key = (
             f"{symbol}|{side}|"
             f"{hook['hook_time']}|"
@@ -1460,9 +1716,16 @@ def insert_signal(
             SELECT id
             FROM processed_events
             WHERE event_key = ?
-        """, (event_key,)).fetchone()
+        """, (
+            event_key,
+        )).fetchone()
 
         if existing:
+
+            diagnostics[
+                "m1_duplicate_signal"
+            ] += 1
+
             return None
 
         signal_time = now_ts()
@@ -1522,6 +1785,10 @@ def insert_signal(
 
         conn.commit()
 
+        diagnostics[
+            "signals_created"
+        ] += 1
+
         return cur.lastrowid
 
     finally:
@@ -1529,14 +1796,19 @@ def insert_signal(
 
 
 # ============================================================
-# PERCENTAGE CALCULATIONS
+# PERCENTAGE
 # ============================================================
 
-def calculate_pnl(side, entry, current):
+def calculate_pnl(
+    side,
+    entry,
+    current
+):
     if not entry or not current:
         return None
 
     if side == "LONG":
+
         return (
             (current - entry)
             / entry
@@ -1561,24 +1833,8 @@ def level_distance_pct(
 
     if side == "LONG":
 
-        if level_type == "TP":
-            return (
-                (level - current)
-                / current
-                * 100
-            )
-
         return (
             (level - current)
-            / current
-            * 100
-        )
-
-    # SHORT
-
-    if level_type == "TP":
-        return (
-            (current - level)
             / current
             * 100
         )
@@ -1599,6 +1855,7 @@ def target_distance_pct(
         return None
 
     if side == "LONG":
+
         return (
             (target - current)
             / current
@@ -1613,44 +1870,79 @@ def target_distance_pct(
 
 
 # ============================================================
-# CHART HELPERS
+# CHART
 # ============================================================
 
-def get_hook_points(hook, df=None):
-    """
-    Returns exact M30 Hook points.
-
-    Existing old DB rows may not have pivot timestamps.
-    In that case, the current M30 structure is reconstructed.
-    """
-
+def get_hook_points(
+    hook,
+    df=None
+):
     side = hook["side"]
 
     if side == "SHORT":
 
         points = [
-            ("H1", hook.get("h1"), hook.get("h1_time")),
-            ("L1", hook.get("l1"), hook.get("l1_time")),
-            ("H2", hook.get("h2"), hook.get("h2_time")),
-            ("L2", hook.get("l2"), hook.get("l2_time")),
-            ("H3", hook.get("h3"), hook.get("h3_time")),
+            (
+                "H1",
+                hook.get("h1"),
+                hook.get("h1_time")
+            ),
+            (
+                "L1",
+                hook.get("l1"),
+                hook.get("l1_time")
+            ),
+            (
+                "H2",
+                hook.get("h2"),
+                hook.get("h2_time")
+            ),
+            (
+                "L2",
+                hook.get("l2"),
+                hook.get("l2_time")
+            ),
+            (
+                "H3",
+                hook.get("h3"),
+                hook.get("h3_time")
+            ),
         ]
 
     else:
 
         points = [
-            ("L1", hook.get("l1"), hook.get("l1_time")),
-            ("H1", hook.get("h1"), hook.get("h1_time")),
-            ("L2", hook.get("l2"), hook.get("l2_time")),
-            ("H2", hook.get("h2"), hook.get("h2_time")),
-            ("L3", hook.get("l3"), hook.get("l3_time")),
+            (
+                "L1",
+                hook.get("l1"),
+                hook.get("l1_time")
+            ),
+            (
+                "H1",
+                hook.get("h1"),
+                hook.get("h1_time")
+            ),
+            (
+                "L2",
+                hook.get("l2"),
+                hook.get("l2_time")
+            ),
+            (
+                "H2",
+                hook.get("h2"),
+                hook.get("h2_time")
+            ),
+            (
+                "L3",
+                hook.get("l3"),
+                hook.get("l3_time")
+            ),
         ]
 
-    # Old database fallback
-    if any(
-        x[2] is None
-        for x in points
-    ) and df is not None:
+    if (
+        any(x[2] is None for x in points)
+        and df is not None
+    ):
 
         if side == "SHORT":
             detected = detect_m30_positive_hook(df)
@@ -1658,7 +1950,6 @@ def get_hook_points(hook, df=None):
             detected = detect_m30_negative_hook(df)
 
         if detected:
-            points = []
 
             labels = (
                 ["H1", "L1", "H2", "L2", "H3"]
@@ -1666,15 +1957,20 @@ def get_hook_points(hook, df=None):
                 else ["L1", "H1", "L2", "H2", "L3"]
             )
 
+            points = []
+
             for label, pivot in zip(
                 labels,
                 detected["pivots"]
             ):
-                points.append((
-                    label,
-                    pivot["price"],
-                    pivot["time"]
-                ))
+
+                points.append(
+                    (
+                        label,
+                        pivot["price"],
+                        pivot["time"]
+                    )
+                )
 
     return points
 
@@ -1716,10 +2012,6 @@ def save_m30_hook_chart(
         figsize=(15, 8)
     )
 
-    # --------------------------------------------------------
-    # Candlesticks
-    # --------------------------------------------------------
-
     candle_width = 0.65
 
     for i, row in plot_df.iterrows():
@@ -1729,10 +2021,11 @@ def save_m30_hook_chart(
         l = float(row["low"])
         c = float(row["close"])
 
-        if c >= o:
-            candle_color = "green"
-        else:
-            candle_color = "red"
+        candle_color = (
+            "green"
+            if c >= o
+            else "red"
+        )
 
         ax.vlines(
             i,
@@ -1746,6 +2039,7 @@ def save_m30_hook_chart(
         body_height = abs(c - o)
 
         if body_height <= 0:
+
             body_height = max(
                 abs(h - l) * 0.01,
                 1e-12
@@ -1765,19 +2059,14 @@ def save_m30_hook_chart(
 
         ax.add_patch(rect)
 
-    # --------------------------------------------------------
-    # Hook points
-    # --------------------------------------------------------
-
     x_values = []
     y_values = []
     labels = []
 
     time_to_x = {
         int(row["time"]): i
-        for i, (_, row) in enumerate(
-            plot_df.iterrows()
-        )
+        for i, (_, row)
+        in enumerate(plot_df.iterrows())
     }
 
     for label, price, ts in points:
@@ -1788,18 +2077,25 @@ def save_m30_hook_chart(
         x = None
 
         if ts is not None:
+
             ts = int(ts)
 
             if ts in time_to_x:
+
                 x = time_to_x[ts]
+
             else:
-                # nearest candle
+
                 nearest = min(
                     time_to_x.keys(),
                     key=lambda t: abs(t - ts)
                 )
 
-                if abs(nearest - ts) <= 30 * 60 * 2:
+                if (
+                    abs(nearest - ts)
+                    <= 30 * 60 * 2
+                ):
+
                     x = time_to_x[nearest]
 
         if x is None:
@@ -1810,6 +2106,7 @@ def save_m30_hook_chart(
         labels.append(label)
 
     if x_values:
+
         ax.plot(
             x_values,
             y_values,
@@ -1832,15 +2129,14 @@ def save_m30_hook_chart(
             y_values,
             labels
         ):
+
             ax.annotate(
                 label,
-                (
-                    x,
-                    y
-                ),
+                (x, y),
                 xytext=(
                     0,
-                    offset if label.startswith("H")
+                    offset
+                    if label.startswith("H")
                     else -offset
                 ),
                 textcoords="offset points",
@@ -1849,11 +2145,8 @@ def save_m30_hook_chart(
                 fontweight="bold"
             )
 
-    # --------------------------------------------------------
-    # Current price
-    # --------------------------------------------------------
-
     if current_price is not None:
+
         ax.axhline(
             current_price,
             linestyle="--",
@@ -1864,10 +2157,6 @@ def save_m30_hook_chart(
             )
         )
 
-    # --------------------------------------------------------
-    # Trade levels
-    # --------------------------------------------------------
-
     if levels:
 
         entry = levels.get("entry")
@@ -1875,6 +2164,7 @@ def save_m30_hook_chart(
         tp = levels.get("tp")
 
         if entry is not None:
+
             ax.axhline(
                 entry,
                 linestyle="-.",
@@ -1883,6 +2173,7 @@ def save_m30_hook_chart(
             )
 
         if sl is not None:
+
             ax.axhline(
                 sl,
                 linestyle="--",
@@ -1891,6 +2182,7 @@ def save_m30_hook_chart(
             )
 
         if tp is not None:
+
             ax.axhline(
                 tp,
                 linestyle="--",
@@ -1903,16 +2195,16 @@ def save_m30_hook_chart(
         target = hook.get("target")
 
         if target is not None:
+
             ax.axhline(
                 target,
                 linestyle="--",
                 linewidth=1.3,
-                label=f"Target {fmt_price(target)}"
+                label=(
+                    f"Target "
+                    f"{fmt_price(target)}"
+                )
             )
-
-    # --------------------------------------------------------
-    # X axis
-    # --------------------------------------------------------
 
     tick_count = min(
         10,
@@ -1920,6 +2212,7 @@ def save_m30_hook_chart(
     )
 
     if tick_count > 1:
+
         indexes = np.linspace(
             0,
             len(plot_df) - 1,
@@ -1931,6 +2224,7 @@ def save_m30_hook_chart(
         labels_x = []
 
         for idx in indexes:
+
             ts = int(
                 plot_df.iloc[idx]["time"]
             )
@@ -1939,7 +2233,9 @@ def save_m30_hook_chart(
                 datetime.fromtimestamp(
                     ts,
                     timezone.utc
-                ).strftime("%m-%d %H:%M")
+                ).strftime(
+                    "%m-%d %H:%M"
+                )
             )
 
         ax.set_xticklabels(
@@ -1947,10 +2243,6 @@ def save_m30_hook_chart(
             rotation=35,
             ha="right"
         )
-
-    # --------------------------------------------------------
-    # Title
-    # --------------------------------------------------------
 
     side = hook["side"]
 
@@ -2060,6 +2352,7 @@ def send_signal_message(
     )
 
     if chart_path:
+
         if send_telegram_photo(
             chart_path,
             caption
@@ -2078,7 +2371,12 @@ def scan_m30(assets):
 
     for symbol in assets:
 
+        diagnostics[
+            "m30_requests"
+        ] += 1
+
         try:
+
             df = fetch_candles(
                 symbol,
                 M30_INTERVAL,
@@ -2086,7 +2384,16 @@ def scan_m30(assets):
             )
 
             if df.empty:
+
+                diagnostics[
+                    "m30_data_empty"
+                ] += 1
+
                 continue
+
+            diagnostics[
+                "m30_data_ok"
+            ] += 1
 
             df = get_closed_candles(
                 df,
@@ -2094,22 +2401,37 @@ def scan_m30(assets):
             )
 
             if len(df) < 30:
+
+                diagnostics[
+                    "m30_data_short"
+                ] += 1
+
                 continue
 
-            # Positive / SHORT
-            hook = detect_m30_positive_hook(
-                df
-            )
+            # ------------------------------------------------
+            # SHORT
+            # ------------------------------------------------
+
+            hook = detect_m30_positive_hook(df)
 
             if hook:
 
-                if not hook_is_expired(
-                    hook
-                ):
+                if hook_is_expired(hook):
+
+                    diagnostics[
+                        "m30_expired"
+                    ] += 1
+
+                else:
+
                     save_hook(
                         symbol,
                         hook
                     )
+
+                    diagnostics[
+                        "m30_short_saved"
+                    ] += 1
 
                     new_hooks += 1
 
@@ -2125,20 +2447,30 @@ def scan_m30(assets):
 
                 continue
 
-            # Negative / LONG
-            hook = detect_m30_negative_hook(
-                df
-            )
+            # ------------------------------------------------
+            # LONG
+            # ------------------------------------------------
+
+            hook = detect_m30_negative_hook(df)
 
             if hook:
 
-                if not hook_is_expired(
-                    hook
-                ):
+                if hook_is_expired(hook):
+
+                    diagnostics[
+                        "m30_expired"
+                    ] += 1
+
+                else:
+
                     save_hook(
                         symbol,
                         hook
                     )
+
+                    diagnostics[
+                        "m30_long_saved"
+                    ] += 1
 
                     new_hooks += 1
 
@@ -2153,12 +2485,23 @@ def scan_m30(assets):
                     )
 
         except Exception as exc:
+
+            diagnostics[
+                "m30_errors"
+            ] += 1
+
+            diagnostics[
+                "errors"
+            ] += 1
+
             print(
                 f"M30 scan error "
                 f"{symbol}: {exc}"
             )
 
-        time.sleep(REQUEST_SLEEP)
+        time.sleep(
+            REQUEST_SLEEP
+        )
 
     return new_hooks
 
@@ -2174,6 +2517,10 @@ def scan_m1(assets):
     new_short = 0
 
     hooks = load_active_hooks()
+
+    diagnostics[
+        "m1_hooks_seen"
+    ] += len(hooks)
 
     hook_symbols = {
         h["symbol"]
@@ -2192,6 +2539,10 @@ def scan_m1(assets):
         symbol = hook["symbol"]
         side = hook["side"]
 
+        diagnostics[
+            "m1_requests"
+        ] += 1
+
         try:
 
             df = fetch_candles(
@@ -2201,7 +2552,16 @@ def scan_m1(assets):
             )
 
             if df.empty:
+
+                diagnostics[
+                    "m1_data_empty"
+                ] += 1
+
                 continue
+
+            diagnostics[
+                "m1_data_ok"
+            ] += 1
 
             df = get_closed_candles(
                 df,
@@ -2209,6 +2569,11 @@ def scan_m1(assets):
             )
 
             if len(df) < 20:
+
+                diagnostics[
+                    "m1_data_short"
+                ] += 1
+
                 continue
 
             current_price = (
@@ -2220,20 +2585,33 @@ def scan_m1(assets):
                 continue
 
             # ------------------------------------------------
-            # Check Hook invalidation
+            # Hook invalidation
             # ------------------------------------------------
+
+            m30_raw = fetch_candles(
+                symbol,
+                M30_INTERVAL,
+                M30_CANDLES
+            )
+
+            m30_closed = get_closed_candles(
+                m30_raw,
+                30 * 60
+            )
 
             if hook_is_invalidated(
                 hook,
-                fetch_candles(
-                    symbol,
-                    M30_INTERVAL,
-                    M30_CANDLES
-                )
+                m30_closed
             ):
+
+                diagnostics[
+                    "m1_hook_invalidated"
+                ] += 1
+
                 conn = db()
 
                 try:
+
                     conn.execute("""
                         UPDATE hooks
                         SET status = 'INVALID',
@@ -2252,31 +2630,64 @@ def scan_m1(assets):
                 continue
 
             # ------------------------------------------------
-            # M1 123F
+            # 123F
             # ------------------------------------------------
 
             if side == "SHORT":
+
                 setup = detect_m1_short_123f(
                     df,
                     hook
                 )
+
             else:
+
                 setup = detect_m1_long_123f(
                     df,
                     hook
                 )
 
             if not setup:
+
+                diagnostics[
+                    "m1_no_123f"
+                ] += 1
+
                 continue
 
-            if open_trade_count() >= MAX_OPEN_TRADES:
+            # ------------------------------------------------
+            # MAX OPEN TRADES
+            # ------------------------------------------------
+
+            if (
+                open_trade_count()
+                >= MAX_OPEN_TRADES
+            ):
+
+                diagnostics[
+                    "m1_blocked_max_trades"
+                ] += 1
+
                 continue
+
+            # ------------------------------------------------
+            # COOLDOWN
+            # ------------------------------------------------
 
             if signal_on_cooldown(
                 symbol,
                 side
             ):
+
+                diagnostics[
+                    "m1_blocked_cooldown"
+                ] += 1
+
                 continue
+
+            # ------------------------------------------------
+            # LEVELS
+            # ------------------------------------------------
 
             levels = calculate_trade_levels(
                 side,
@@ -2286,37 +2697,48 @@ def scan_m1(assets):
             )
 
             if not levels:
+
+                diagnostics[
+                    "m1_level_error"
+                ] += 1
+
                 continue
 
             # ------------------------------------------------
-            # M30 signal chart
+            # CHART
             # ------------------------------------------------
 
             chart_path = None
 
             if ENABLE_CHARTS:
 
-                m30_df = fetch_candles(
-                    symbol,
-                    M30_INTERVAL,
-                    M30_CANDLES
-                )
+                if m30_closed.empty:
 
-                if not m30_df.empty:
+                    m30_df = fetch_candles(
+                        symbol,
+                        M30_INTERVAL,
+                        M30_CANDLES
+                    )
 
-                    m30_df = get_closed_candles(
+                    m30_closed = get_closed_candles(
                         m30_df,
                         30 * 60
                     )
 
+                if not m30_closed.empty:
+
                     chart_path = save_m30_hook_chart(
                         symbol,
                         hook,
-                        m30_df,
+                        m30_closed,
                         current_price=current_price,
                         levels=levels,
                         context="NEW SIGNAL"
                     )
+
+            # ------------------------------------------------
+            # INSERT
+            # ------------------------------------------------
 
             signal_id = insert_signal(
                 symbol,
@@ -2356,13 +2778,21 @@ def scan_m1(assets):
             )
 
         except Exception as exc:
+
+            diagnostics[
+                "errors"
+            ] += 1
+
             print(
                 f"M1 scan error "
                 f"{symbol}: {exc}"
             )
+
             traceback.print_exc()
 
-        time.sleep(REQUEST_SLEEP)
+        time.sleep(
+            REQUEST_SLEEP
+        )
 
     return new_long, new_short
 
@@ -2387,6 +2817,7 @@ def close_trade(
     conn = db()
 
     try:
+
         conn.execute("""
             UPDATE signals
             SET status = 'CLOSED',
@@ -2430,6 +2861,7 @@ def manage_open_trades(price_map):
     conn = db()
 
     try:
+
         rows = conn.execute("""
             SELECT *
             FROM signals
@@ -2458,6 +2890,7 @@ def manage_open_trades(price_map):
         if side == "LONG":
 
             if current <= signal["sl"]:
+
                 close_trade(
                     signal,
                     current,
@@ -2465,6 +2898,7 @@ def manage_open_trades(price_map):
                 )
 
             elif current >= signal["tp"]:
+
                 close_trade(
                     signal,
                     current,
@@ -2474,6 +2908,7 @@ def manage_open_trades(price_map):
         else:
 
             if current >= signal["sl"]:
+
                 close_trade(
                     signal,
                     current,
@@ -2481,6 +2916,7 @@ def manage_open_trades(price_map):
                 )
 
             elif current <= signal["tp"]:
+
                 close_trade(
                     signal,
                     current,
@@ -2489,13 +2925,14 @@ def manage_open_trades(price_map):
 
 
 # ============================================================
-# REPORT
+# REPORT DATA
 # ============================================================
 
 def get_report_data():
     conn = db()
 
     try:
+
         open_trades = conn.execute("""
             SELECT *
             FROM signals
@@ -2536,6 +2973,10 @@ def get_report_data():
         conn.close()
 
 
+# ============================================================
+# ACTIVE HOOK CHARTS
+# ============================================================
+
 def send_active_hook_charts(
     hooks,
     price_map
@@ -2545,6 +2986,7 @@ def send_active_hook_charts(
         symbol = hook["symbol"]
 
         try:
+
             current = (
                 price_map.get(symbol)
                 or fetch_current_price(symbol)
@@ -2619,11 +3061,20 @@ def send_active_hook_charts(
             time.sleep(0.25)
 
         except Exception as exc:
+
+            diagnostics[
+                "errors"
+            ] += 1
+
             print(
                 f"Active hook chart error "
                 f"{symbol}: {exc}"
             )
 
+
+# ============================================================
+# REPORT
+# ============================================================
 
 def send_report(
     assets_scanned,
@@ -2637,10 +3088,6 @@ def send_report(
     open_trades = data["open_trades"]
     closed = data["closed"]
     hooks = data["hooks"]
-
-    # --------------------------------------------------------
-    # Current prices
-    # --------------------------------------------------------
 
     symbols = [
         x["symbol"]
@@ -2660,10 +3107,6 @@ def send_report(
     latest_price_map.update(
         price_map
     )
-
-    # --------------------------------------------------------
-    # Closed statistics
-    # --------------------------------------------------------
 
     wins = sum(
         1
@@ -2702,9 +3145,7 @@ def send_report(
         symbol = trade["symbol"]
         side = trade["side"]
 
-        current = price_map.get(
-            symbol
-        )
+        current = price_map.get(symbol)
 
         if current is None:
             current = fetch_current_price(
@@ -2756,20 +3197,18 @@ def send_report(
         f"Total P/L: <b>{fmt_pct(total_pnl)}</b>\n"
     )
 
-    # --------------------------------------------------------
-    # Send report
-    # --------------------------------------------------------
-
     send_telegram(text)
 
-    # --------------------------------------------------------
-    # IMPORTANT:
-    # If there was NO NEW SIGNAL since the previous report,
-    # send charts of ACTIVE M30 Hooks.
-    # --------------------------------------------------------
+    # Diagnostic report is sent together with
+    # the normal report.
+    send_diagnostic_report(
+        assets_scanned
+    )
 
     if signals_since_last_report == 0:
+
         if hooks:
+
             send_active_hook_charts(
                 hooks,
                 price_map
@@ -2777,20 +3216,28 @@ def send_report(
 
     signals_since_last_report = 0
 
+    reset_diagnostics()
+
 
 # ============================================================
 # ERROR
 # ============================================================
 
 def log_error(message):
+    diagnostics[
+        "errors"
+    ] += 1
+
     print(message)
 
     try:
+
         send_telegram(
             f"<b>🚨 NDS SCANNER ERROR</b>\n\n"
             f"<code>{message[:3000]}</code>\n\n"
             f"Version: {VERSION}"
         )
+
     except Exception:
         pass
 
@@ -2803,6 +3250,7 @@ def main():
     global latest_price_map
 
     if not PAPER_ONLY:
+
         raise RuntimeError(
             "PAPER_ONLY must remain True."
         )
@@ -2817,6 +3265,7 @@ def main():
     assets = discover_assets()
 
     if not assets:
+
         raise RuntimeError(
             "No Kraken PF assets discovered."
         )
@@ -2832,10 +3281,6 @@ def main():
     total_new_long = 0
     total_new_short = 0
 
-    # --------------------------------------------------------
-    # Immediate first M30 scan
-    # --------------------------------------------------------
-
     print(
         f"Starting NDS scanner {VERSION}"
     )
@@ -2844,25 +3289,33 @@ def main():
         f"Assets: {len(assets)}"
     )
 
+    # --------------------------------------------------------
+    # INITIAL M30
+    # --------------------------------------------------------
+
     try:
+
         new_hooks = scan_m30(
             assets
         )
 
         print(
-            f"Initial M30 hooks: {new_hooks}"
+            f"Initial M30 hooks: "
+            f"{new_hooks}"
         )
 
     except Exception as exc:
+
         log_error(
             f"Initial M30 scan failed: {exc}"
         )
 
     # --------------------------------------------------------
-    # Immediate first M1 scan
+    # INITIAL M1
     # --------------------------------------------------------
 
     try:
+
         new_long, new_short = scan_m1(
             assets
         )
@@ -2871,8 +3324,32 @@ def main():
         total_new_short += new_short
 
     except Exception as exc:
+
         log_error(
             f"Initial M1 scan failed: {exc}"
+        )
+
+    # --------------------------------------------------------
+    # Send an immediate diagnostic report
+    # so we don't have to wait 15 minutes like
+    # some ancient financial terminal.
+    # --------------------------------------------------------
+
+    try:
+
+        send_report(
+            len(assets),
+            total_new_long,
+            total_new_short
+        )
+
+        total_new_long = 0
+        total_new_short = 0
+
+    except Exception as exc:
+
+        log_error(
+            f"Initial report failed: {exc}"
         )
 
     last_m30_scan = time.time()
@@ -2880,7 +3357,7 @@ def main():
     last_report = time.time()
 
     # --------------------------------------------------------
-    # Main loop
+    # MAIN LOOP
     # --------------------------------------------------------
 
     while (
@@ -2920,7 +3397,7 @@ def main():
             latest_price_map = price_map
 
             # ------------------------------------------------
-            # Manage open trades
+            # Manage trades
             # ------------------------------------------------
 
             manage_open_trades(
@@ -2963,7 +3440,7 @@ def main():
                 last_m1_scan = current_time
 
             # ------------------------------------------------
-            # Report
+            # REPORT
             # ------------------------------------------------
 
             if (
@@ -2998,7 +3475,7 @@ def main():
             )
 
     # --------------------------------------------------------
-    # Final report
+    # FINAL REPORT
     # --------------------------------------------------------
 
     try:
