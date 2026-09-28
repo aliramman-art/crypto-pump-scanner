@@ -221,45 +221,134 @@ def build_hooks(df: pd.DataFrame, pivots: List[Pivot]) -> List[Hook]:
     for h in hooks: unique[h.fingerprint] = h
     return list(unique.values())
 
-def m1_structure(df: pd.DataFrame, direction: str, hook_time: pd.Timestamp) -> Dict[str, Any]:
-    # Build swing highs and lows independently. Four highs may have intervening lows;
-    # they must NOT be required to be adjacent in the alternating pivot list.
+def m1_structure(df: pd.DataFrame, direction: str, hook_time: pd.Timestamp, hook_price: float) -> Dict[str, Any]:
+    # M30 H3/L3 is only the activator. It is NOT point 1 of the M1 123F.
+    # SHORT must be: H3(M30) < 1 < 2 < 3 < F.
+    # LONG  must be: L3(M30) > 1 > 2 > 3 > F.
+    # Every new point is checked against ALL previous points, not only the
+    # immediately preceding point. Intervening opposite pivots are ignored.
     piv = find_pivots(df, alternating=False)
     piv = [p for p in piv if p.time >= hook_time]
     highs = [p for p in piv if p.kind == 'H']
     lows = [p for p in piv if p.kind == 'L']
-    result = {'points': [], 'confirmed': False, 'status': 'WAITING FOR 1M STRUCTURE', 'entry': None, 'sl': None}
+    result = {
+        'points': [], 'confirmed': False,
+        'status': 'WAITING FOR 1M STRUCTURE',
+        'entry': None, 'sl': None
+    }
+
     if direction == 'SHORT':
-        # 1,2,3,F are successive swing highs with ascending prices; F is the last high.
-        candidates = []
-        for i in range(3, len(highs)):
-            p1,p2,p3,pf = highs[i-3:i+1]
-            if p1.price < p2.price < p3.price < pf.price:
-                # Reject a sequence with huge gaps or stale F.
-                if (df.iloc[-1]['time']-pf.time).total_seconds()/60 <= MAX_SETUP_AGE_MIN:
-                    candidates.append((p1,p2,p3,pf))
-        if candidates:
-            seq = candidates[-1]; result['points'] = list(seq); result['status'] = '123F CONFIRMED'
-            result['confirmed'] = True; result['entry'] = seq[-1].price
-            prior_lows = [p for p in lows if p.index > seq[0].index and p.index < seq[-1].index]
-            result['sl'] = max([p.price for p in prior_lows], default=seq[-1].price*1.01)
-        elif highs:
-            result['points'] = highs[-3:]; result['status'] = f'BUILDING SHORT: {len(result["points"])}/4 HIGHS'
+        # H3 < 1
+        points: List[Pivot] = []
+        for p in highs:
+            if not points:
+                if p.price > hook_price:
+                    points.append(p)
+                continue
+
+            # 2 > 1 AND 2 > H3
+            if len(points) == 1:
+                if p.price > points[0].price and p.price > hook_price:
+                    points.append(p)
+                continue
+
+            # 3 > 2 AND 3 > 1 AND 3 > H3
+            if len(points) == 2:
+                if (
+                    p.price > points[1].price
+                    and p.price > points[0].price
+                    and p.price > hook_price
+                ):
+                    points.append(p)
+                continue
+
+            # F > 3 AND F > 2 AND F > 1 AND F > H3
+            if len(points) == 3:
+                if (
+                    p.price > points[2].price
+                    and p.price > points[1].price
+                    and p.price > points[0].price
+                    and p.price > hook_price
+                ):
+                    points.append(p)
+                    break
+
+        result['points'] = points
+        if len(points) == 4:
+            f = points[-1]
+            if (df.iloc[-1]['time'] - f.time).total_seconds() / 60 <= MAX_SETUP_AGE_MIN:
+                result['status'] = '123F CONFIRMED'
+                result['confirmed'] = True
+                result['entry'] = f.price
+                prior_lows = [
+                    p for p in lows
+                    if p.index > points[0].index and p.index < f.index
+                ]
+                result['sl'] = max(
+                    [p.price for p in prior_lows],
+                    default=f.price * 1.01
+                )
+            else:
+                result['status'] = '123F FOUND - F TOO OLD'
+        elif points:
+            result['status'] = f'BUILDING SHORT: {len(points)}/4'
+
     else:
-        # Mirror for LONG: four successive swing lows descending, with F as the last low.
-        candidates = []
-        for i in range(3, len(lows)):
-            p1,p2,p3,pf = lows[i-3:i+1]
-            if p1.price > p2.price > p3.price > pf.price:
-                if (df.iloc[-1]['time']-pf.time).total_seconds()/60 <= MAX_SETUP_AGE_MIN:
-                    candidates.append((p1,p2,p3,pf))
-        if candidates:
-            seq = candidates[-1]; result['points'] = list(seq); result['status'] = '123F CONFIRMED'
-            result['confirmed'] = True; result['entry'] = seq[-1].price
-            prior_highs = [p for p in highs if p.index > seq[0].index and p.index < seq[-1].index]
-            result['sl'] = min([p.price for p in prior_highs], default=seq[-1].price*0.99)
-        elif lows:
-            result['points'] = lows[-3:]; result['status'] = f'BUILDING LONG: {len(result["points"])}/4 LOWS'
+        # L3 > 1
+        points = []
+        for p in lows:
+            if not points:
+                if p.price < hook_price:
+                    points.append(p)
+                continue
+
+            # 2 < 1 AND 2 < L3
+            if len(points) == 1:
+                if p.price < points[0].price and p.price < hook_price:
+                    points.append(p)
+                continue
+
+            # 3 < 2 AND 3 < 1 AND 3 < L3
+            if len(points) == 2:
+                if (
+                    p.price < points[1].price
+                    and p.price < points[0].price
+                    and p.price < hook_price
+                ):
+                    points.append(p)
+                continue
+
+            # F < 3 AND F < 2 AND F < 1 AND F < L3
+            if len(points) == 3:
+                if (
+                    p.price < points[2].price
+                    and p.price < points[1].price
+                    and p.price < points[0].price
+                    and p.price < hook_price
+                ):
+                    points.append(p)
+                    break
+
+        result['points'] = points
+        if len(points) == 4:
+            f = points[-1]
+            if (df.iloc[-1]['time'] - f.time).total_seconds() / 60 <= MAX_SETUP_AGE_MIN:
+                result['status'] = '123F CONFIRMED'
+                result['confirmed'] = True
+                result['entry'] = f.price
+                prior_highs = [
+                    p for p in highs
+                    if p.index > points[0].index and p.index < f.index
+                ]
+                result['sl'] = min(
+                    [p.price for p in prior_highs],
+                    default=f.price * 0.99
+                )
+            else:
+                result['status'] = '123F FOUND - F TOO OLD'
+        elif points:
+            result['status'] = f'BUILDING LONG: {len(points)}/4'
+
     return result
 
 def make_chart(symbol: str, m30: pd.DataFrame, m1: Optional[pd.DataFrame], hook: Hook,
@@ -418,7 +507,7 @@ def run_once():
                 if m1 is None: continue
                 stats['m1_ok'] += 1
                 current=float(m1.iloc[-1]['close']); prices[symbol]=current
-                structure=m1_structure(m1,hook.direction,hook.end.time)
+                structure=m1_structure(m1,hook.direction,hook.end.time,hook.end.price)
                 age=max(0,(m30.iloc[-1]['time']-hook.end.time).total_seconds()/60)
                 score=hook.score + (25 if structure.get('confirmed') else min(12,len(structure.get('points',[]))*3))
                 all_candidates.append((score,symbol,m30,m1,hook,structure,current,age))
