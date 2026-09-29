@@ -1,6 +1,6 @@
 # ============================================================
 # NDS M30 LIVE SCANNER
-# VERSION 4.5.1
+# VERSION 4.5.2
 # ============================================================
 #
 # PAPER ONLY
@@ -22,7 +22,7 @@
 # H3 > H2
 #
 # TP:
-# H3 - 86.4% RETRACEMENT TOWARD START
+# H3 - 86.4% OF THE MOVE START -> H3
 #
 # ============================================================
 #
@@ -37,19 +37,28 @@
 # L3 < L2
 #
 # TP:
-# L3 + 86.4% RETRACEMENT TOWARD START
+# L3 + 86.4% OF THE MOVE START -> L3
 #
 # ============================================================
 #
-# IMPORTANT
+# IMPORTANT:
 #
-# 86.4% = TP
-# START = 0% ORIGIN
+# 86.4% IS TP
+# START IS 0% ORIGIN
 #
-# TRADEABILITY FILTER:
+# A HOOK IS REJECTED IF:
 #
-# MIN_TP_DISTANCE_PCT = 0.30%
-# MAX_TP_DISTANCE_PCT = 5.00%
+# 1) TP DISTANCE IS TOO SMALL
+# 2) TP DISTANCE IS TOO LARGE
+# 3) TP WAS ALREADY TOUCHED AFTER H3/L3
+#
+# TP TOUCH CHECK USES BOTH WICKS:
+#
+# SHORT:
+#     any LOW <= TP after H3 => REJECT
+#
+# LONG:
+#     any HIGH >= TP after L3 => REJECT
 #
 # ============================================================
 
@@ -65,6 +74,7 @@ import numpy as np
 
 import matplotlib
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 
 
@@ -72,7 +82,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "4.5.1"
+VERSION = "4.5.2"
 
 DB_FILE = os.getenv(
     "NDS_DB_FILE",
@@ -91,52 +101,80 @@ BASE_URL = (
 INTERVAL = "30m"
 
 M30_COUNT = int(
-    os.getenv("M30_COUNT", "320")
+    os.getenv(
+        "M30_COUNT",
+        "320"
+    )
 )
 
 PIVOT_LEFT = int(
-    os.getenv("PIVOT_LEFT", "2")
+    os.getenv(
+        "PIVOT_LEFT",
+        "2"
+    )
 )
 
 PIVOT_RIGHT = int(
-    os.getenv("PIVOT_RIGHT", "2")
+    os.getenv(
+        "PIVOT_RIGHT",
+        "2"
+    )
 )
 
-# Minimum percentage swing between opposite pivots.
 MIN_SWING_PCT = float(
-    os.getenv("MIN_SWING_PCT", "0.0005")
+    os.getenv(
+        "MIN_SWING_PCT",
+        "0.0005"
+    )
 )
 
 # ============================================================
-# TP TRADEABILITY FILTER
+# TP DISTANCE FILTER
 # ============================================================
 
-# Minimum distance from H3/L3 to TP.
 MIN_TP_DISTANCE_PCT = float(
-    os.getenv("MIN_TP_DISTANCE_PCT", "0.30")
+    os.getenv(
+        "MIN_TP_DISTANCE_PCT",
+        "0.30"
+    )
 )
 
-# Maximum distance from H3/L3 to TP.
 MAX_TP_DISTANCE_PCT = float(
-    os.getenv("MAX_TP_DISTANCE_PCT", "5.00")
+    os.getenv(
+        "MAX_TP_DISTANCE_PCT",
+        "5.00"
+    )
 )
 
+# 86.4%
 TP_RETRACE = 0.864
 
 SL_BUFFER_PCT = float(
-    os.getenv("SL_BUFFER_PCT", "0.0015")
+    os.getenv(
+        "SL_BUFFER_PCT",
+        "0.0015"
+    )
 )
 
 REQUEST_TIMEOUT = int(
-    os.getenv("REQUEST_TIMEOUT", "20")
+    os.getenv(
+        "REQUEST_TIMEOUT",
+        "20"
+    )
 )
 
 CHART_CANDLES = int(
-    os.getenv("CHART_CANDLES", "180")
+    os.getenv(
+        "CHART_CANDLES",
+        "180"
+    )
 )
 
 MAX_CHARTS_PER_SCAN = int(
-    os.getenv("MAX_CHARTS_PER_SCAN", "10")
+    os.getenv(
+        "MAX_CHARTS_PER_SCAN",
+        "10"
+    )
 )
 
 
@@ -146,14 +184,18 @@ MAX_CHARTS_PER_SCAN = int(
 
 TELEGRAM_BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
-    or os.getenv("TELEGRAM_TOKEN")
-    or ""
+    or
+    os.getenv("TELEGRAM_TOKEN")
+    or
+    ""
 )
 
 TELEGRAM_CHAT_ID = (
     os.getenv("TELEGRAM_CHAT_ID")
-    or os.getenv("TELEGRAM_CHAT")
-    or ""
+    or
+    os.getenv("TELEGRAM_CHAT")
+    or
+    ""
 )
 
 
@@ -226,7 +268,7 @@ else:
 
 
 # ============================================================
-# DIAGNOSTICS
+# STATISTICS
 # ============================================================
 
 STATS = {
@@ -239,7 +281,6 @@ STATS = {
     "pivot_highs": 0,
     "pivot_lows": 0,
     "alternating_pivots": 0,
-
     "six_point_sequences": 0,
 
     "positive_candidates": 0,
@@ -254,12 +295,11 @@ STATS = {
     "positive_tp_distance_rejected": 0,
     "negative_tp_distance_rejected": 0,
 
-    "positive_price_passed_tp": 0,
-    "negative_price_passed_tp": 0,
+    "positive_tp_already_touched": 0,
+    "negative_tp_already_touched": 0,
 
     "confirmed_hooks": 0,
     "new_signals": 0,
-
     "charts": 0,
 }
 
@@ -278,16 +318,18 @@ REJECTION = {
 
 
 # ============================================================
-# HELPERS
+# BASIC HELPERS
 # ============================================================
 
 def utc_now():
+
     return datetime.now(
         timezone.utc
     )
 
 
 def utc_iso():
+
     return utc_now().isoformat()
 
 
@@ -295,6 +337,7 @@ def safe_float(
     value,
     default=None
 ):
+
     try:
 
         if value is None:
@@ -310,20 +353,6 @@ def safe_float(
     except Exception:
 
         return default
-
-
-def pct_difference(
-    a,
-    b
-):
-    if b == 0:
-        return 0.0
-
-    return (
-        abs(a - b)
-        / abs(b)
-        * 100.0
-    )
 
 
 def fmt_price(x):
@@ -441,7 +470,8 @@ def telegram_send_message(text):
 
     if (
         not TELEGRAM_BOT_TOKEN
-        or not TELEGRAM_CHAT_ID
+        or
+        not TELEGRAM_CHAT_ID
     ):
         return False
 
@@ -456,10 +486,17 @@ def telegram_send_message(text):
         response = requests.post(
             url,
             data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
+                "chat_id":
+                    TELEGRAM_CHAT_ID,
+
+                "text":
+                    text,
+
+                "parse_mode":
+                    "HTML",
+
+                "disable_web_page_preview":
+                    True,
             },
             timeout=REQUEST_TIMEOUT,
         )
@@ -478,7 +515,8 @@ def telegram_send_photo(
 
     if (
         not TELEGRAM_BOT_TOKEN
-        or not TELEGRAM_CHAT_ID
+        or
+        not TELEGRAM_CHAT_ID
     ):
         return False
 
@@ -498,9 +536,14 @@ def telegram_send_photo(
             response = requests.post(
                 url,
                 data={
-                    "chat_id": TELEGRAM_CHAT_ID,
-                    "caption": caption,
-                    "parse_mode": "HTML",
+                    "chat_id":
+                        TELEGRAM_CHAT_ID,
+
+                    "caption":
+                        caption,
+
+                    "parse_mode":
+                        "HTML",
                 },
                 files={
                     "photo": f
@@ -516,7 +559,7 @@ def telegram_send_photo(
 
 
 # ============================================================
-# KRAKEN DATA
+# KRAKEN M30 DATA
 # ============================================================
 
 def fetch_m30(symbol):
@@ -580,34 +623,42 @@ def fetch_m30(symbol):
 
                 ts = (
                     c.get("time")
-                    or c.get("timestamp")
-                    or c.get("t")
+                    or
+                    c.get("timestamp")
+                    or
+                    c.get("t")
                 )
 
                 op = (
                     c.get("open")
-                    or c.get("o")
+                    or
+                    c.get("o")
                 )
 
                 hi = (
                     c.get("high")
-                    or c.get("h")
+                    or
+                    c.get("h")
                 )
 
                 lo = (
                     c.get("low")
-                    or c.get("l")
+                    or
+                    c.get("l")
                 )
 
                 cl = (
                     c.get("close")
-                    or c.get("c")
+                    or
+                    c.get("c")
                 )
 
                 volume = (
                     c.get("volume")
-                    or c.get("v")
-                    or 0
+                    or
+                    c.get("v")
+                    or
+                    0
                 )
 
             else:
@@ -624,7 +675,8 @@ def fetch_m30(symbol):
                 volume = (
                     c[5]
                     if len(c) > 5
-                    else 0
+                    else
+                    0
                 )
 
             ts = safe_float(ts)
@@ -696,18 +748,27 @@ def fetch_m30(symbol):
 
         if len(df) < 50:
 
-            STATS["short_data"] += 1
+            STATS[
+                "short_data"
+            ] += 1
 
             return None
 
-        # Ignore currently forming candle.
+        # Remove currently forming candle.
         if len(df) > 1:
-            df = df.iloc[:-1].copy()
+
+            df = (
+                df
+                .iloc[:-1]
+                .copy()
+            )
 
         df = (
             df
             .tail(M30_COUNT)
-            .reset_index(drop=True)
+            .reset_index(
+                drop=True
+            )
         )
 
         STATS["data_ok"] += 1
@@ -797,8 +858,13 @@ def find_raw_pivots(df):
                 "kind": "L",
             })
 
-    STATS["pivot_highs"] += len(highs)
-    STATS["pivot_lows"] += len(lows)
+    STATS[
+        "pivot_highs"
+    ] += len(highs)
+
+    STATS[
+        "pivot_lows"
+    ] += len(lows)
 
     return highs, lows
 
@@ -814,7 +880,8 @@ def build_alternating_pivots(
 
     all_pivots = (
         raw_highs
-        + raw_lows
+        +
+        raw_lows
     )
 
     all_pivots.sort(
@@ -836,51 +903,56 @@ def build_alternating_pivots(
 
         last = result[-1]
 
-        # ----------------------------------------------
-        # Same type
-        # ----------------------------------------------
+        # ----------------------------------------------------
+        # Same pivot type
+        # ----------------------------------------------------
 
         if p["kind"] == last["kind"]:
 
             if p["kind"] == "H":
 
-                # Keep highest high.
                 if (
                     p["price"]
                     >= last["price"]
                 ):
+
                     result[-1] = p
 
             else:
 
-                # Keep lowest low.
                 if (
                     p["price"]
                     <= last["price"]
                 ):
+
                     result[-1] = p
 
             continue
 
-        # ----------------------------------------------
-        # Opposite type
-        # ----------------------------------------------
+        # ----------------------------------------------------
+        # Opposite pivot
+        # ----------------------------------------------------
+
+        if last["price"] == 0:
+            continue
 
         swing = (
             abs(
                 p["price"]
-                - last["price"]
+                -
+                last["price"]
             )
-            / abs(last["price"])
+            /
+            abs(last["price"])
         )
 
         if swing >= MIN_SWING_PCT:
 
             result.append(p)
 
-    STATS["alternating_pivots"] += len(
-        result
-    )
+    STATS[
+        "alternating_pivots"
+    ] += len(result)
 
     return result
 
@@ -896,8 +968,14 @@ def calculate_short_tp(
 
     return (
         h3
-        - TP_RETRACE
-        * (h3 - start)
+        -
+        TP_RETRACE
+        *
+        (
+            h3
+            -
+            start
+        )
     )
 
 
@@ -908,8 +986,14 @@ def calculate_long_tp(
 
     return (
         l3
-        + TP_RETRACE
-        * (start - l3)
+        +
+        TP_RETRACE
+        *
+        (
+            start
+            -
+            l3
+        )
     )
 
 
@@ -926,9 +1010,15 @@ def short_tp_distance_pct(
         return 0.0
 
     return (
-        (h3 - tp)
-        / h3
-        * 100.0
+        (
+            h3
+            -
+            tp
+        )
+        /
+        h3
+        *
+        100.0
     )
 
 
@@ -941,9 +1031,15 @@ def long_tp_distance_pct(
         return 0.0
 
     return (
-        (tp - l3)
-        / l3
-        * 100.0
+        (
+            tp
+            -
+            l3
+        )
+        /
+        l3
+        *
+        100.0
     )
 
 
@@ -961,57 +1057,91 @@ def tp_distance_is_valid(
 
 
 # ============================================================
-# CURRENT PRICE TRADEABILITY
+# HISTORICAL TP TOUCH CHECK
+# ============================================================
+#
+# THIS IS THE IMPORTANT CHANGE IN VERSION 4.5.2
+#
+# We DO NOT just check current price.
+#
+# We inspect EVERY CLOSED M30 CANDLE after H3/L3.
+#
+# SHORT:
+#     if ANY LOW <= TP
+#     TP has already been touched.
+#
+# LONG:
+#     if ANY HIGH >= TP
+#     TP has already been touched.
+#
+# The confirmation candle itself is excluded.
+#
 # ============================================================
 
-def short_price_tradeable(
-    current_price,
-    h3,
+def short_tp_was_touched(
+    df,
+    confirm_index,
     tp
 ):
-    """
-    After H3 confirmation:
 
-    H3
-    |
-    |   still available
-    |
-    TP
-
-    Current price must not already be
-    at or below TP.
-    """
-
-    return (
-        current_price > tp
-        and
-        current_price <= h3
+    start_index = (
+        confirm_index + 1
     )
 
+    if start_index >= len(df):
 
-def long_price_tradeable(
-    current_price,
-    l3,
+        return False
+
+    future_candles = df.iloc[
+        start_index:
+    ]
+
+    for _, candle in (
+        future_candles.iterrows()
+    ):
+
+        candle_low = float(
+            candle["low"]
+        )
+
+        if candle_low <= tp:
+
+            return True
+
+    return False
+
+
+def long_tp_was_touched(
+    df,
+    confirm_index,
     tp
 ):
-    """
-    After L3 confirmation:
 
-    TP
-    |
-    |   still available
-    |
-    L3
-
-    Current price must not already be
-    at or above TP.
-    """
-
-    return (
-        current_price < tp
-        and
-        current_price >= l3
+    start_index = (
+        confirm_index + 1
     )
+
+    if start_index >= len(df):
+
+        return False
+
+    future_candles = df.iloc[
+        start_index:
+    ]
+
+    for _, candle in (
+        future_candles.iterrows()
+    ):
+
+        candle_high = float(
+            candle["high"]
+        )
+
+        if candle_high >= tp:
+
+            return True
+
+    return False
 
 
 # ============================================================
@@ -1036,7 +1166,12 @@ def find_previous_valid_high(
 
         return (
             confirmation_price
-            * (1.0 + SL_BUFFER_PCT)
+            *
+            (
+                1.0
+                +
+                SL_BUFFER_PCT
+            )
         )
 
     return float(
@@ -1062,7 +1197,12 @@ def find_previous_valid_low(
 
         return (
             confirmation_price
-            * (1.0 - SL_BUFFER_PCT)
+            *
+            (
+                1.0
+                -
+                SL_BUFFER_PCT
+            )
         )
 
     return float(
@@ -1091,6 +1231,10 @@ def build_hooks(
     current_price = float(
         df.iloc[-1]["close"]
     )
+
+    # ========================================================
+    # Scan six-point structures
+    # ========================================================
 
     for i in range(
         len(alternating_pivots) - 5
@@ -1122,9 +1266,10 @@ def build_hooks(
             l2 = q[4]
             h3 = q[5]
 
-            # ----------------------------------------------
-            # START must be lowest point.
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # START must be the LOWEST point
+            # of the entire six-point hook.
+            # ------------------------------------------------
 
             if start["price"] >= min(
                 h1["price"],
@@ -1140,7 +1285,10 @@ def build_hooks(
 
                 continue
 
+            # ------------------------------------------------
             # H2 > H1
+            # ------------------------------------------------
+
             if h2["price"] <= h1["price"]:
 
                 REJECTION[
@@ -1149,7 +1297,10 @@ def build_hooks(
 
                 continue
 
+            # ------------------------------------------------
             # L2 < L1
+            # ------------------------------------------------
+
             if l2["price"] >= l1["price"]:
 
                 REJECTION[
@@ -1158,7 +1309,10 @@ def build_hooks(
 
                 continue
 
+            # ------------------------------------------------
             # H3 > H2
+            # ------------------------------------------------
+
             if h3["price"] <= h2["price"]:
 
                 REJECTION[
@@ -1183,14 +1337,18 @@ def build_hooks(
                 h3["price"]
             )
 
+            # ------------------------------------------------
+            # TP = 86.4%
+            # ------------------------------------------------
+
             tp = calculate_short_tp(
                 start_price,
                 h3_price
             )
 
-            # ----------------------------------------------
-            # TP distance
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # TP distance from H3
+            # ------------------------------------------------
 
             distance_pct = (
                 short_tp_distance_pct(
@@ -1213,22 +1371,33 @@ def build_hooks(
                 "positive_tp_distance_valid"
             ] += 1
 
-            # ----------------------------------------------
-            # Current price must still be
-            # between H3 and TP.
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # CRITICAL:
+            #
+            # Has TP already been touched after H3?
+            #
+            # Any LOW <= TP means:
+            #
+            # TP already touched
+            #
+            # Reject.
+            # ------------------------------------------------
 
-            if not short_price_tradeable(
-                current_price,
-                h3_price,
+            if short_tp_was_touched(
+                df,
+                h3["index"],
                 tp
             ):
 
                 STATS[
-                    "positive_price_passed_tp"
+                    "positive_tp_already_touched"
                 ] += 1
 
                 continue
+
+            # ------------------------------------------------
+            # SL
+            # ------------------------------------------------
 
             sl = find_previous_valid_high(
                 df,
@@ -1238,21 +1407,29 @@ def build_hooks(
 
             hooks.append({
 
-                "symbol": symbol,
+                "symbol":
+                    symbol,
 
-                "direction": "SHORT",
+                "direction":
+                    "SHORT",
 
-                "start": start,
+                "start":
+                    start,
 
-                "h1": h1,
+                "h1":
+                    h1,
 
-                "l1": l1,
+                "l1":
+                    l1,
 
-                "h2": h2,
+                "h2":
+                    h2,
 
-                "l2": l2,
+                "l2":
+                    l2,
 
-                "confirm": h3,
+                "confirm":
+                    h3,
 
                 "start_price":
                     start_price,
@@ -1260,9 +1437,11 @@ def build_hooks(
                 "confirm_price":
                     h3_price,
 
-                "tp": tp,
+                "tp":
+                    tp,
 
-                "sl": sl,
+                "sl":
+                    sl,
 
                 "tp_distance_pct":
                     distance_pct,
@@ -1272,6 +1451,7 @@ def build_hooks(
 
                 "structure":
                     "START-H1-L1-H2-L2-H3",
+
             })
 
         # ====================================================
@@ -1287,9 +1467,10 @@ def build_hooks(
             h2 = q[4]
             l3 = q[5]
 
-            # ----------------------------------------------
-            # START must be highest point.
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # START must be the HIGHEST point
+            # of the entire six-point hook.
+            # ------------------------------------------------
 
             if start["price"] <= max(
                 l1["price"],
@@ -1305,7 +1486,10 @@ def build_hooks(
 
                 continue
 
+            # ------------------------------------------------
             # L2 < L1
+            # ------------------------------------------------
+
             if l2["price"] >= l1["price"]:
 
                 REJECTION[
@@ -1314,7 +1498,10 @@ def build_hooks(
 
                 continue
 
+            # ------------------------------------------------
             # H2 > H1
+            # ------------------------------------------------
+
             if h2["price"] <= h1["price"]:
 
                 REJECTION[
@@ -1323,7 +1510,10 @@ def build_hooks(
 
                 continue
 
+            # ------------------------------------------------
             # L3 < L2
+            # ------------------------------------------------
+
             if l3["price"] >= l2["price"]:
 
                 REJECTION[
@@ -1348,14 +1538,18 @@ def build_hooks(
                 l3["price"]
             )
 
+            # ------------------------------------------------
+            # TP = 86.4%
+            # ------------------------------------------------
+
             tp = calculate_long_tp(
                 start_price,
                 l3_price
             )
 
-            # ----------------------------------------------
-            # TP distance
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # TP distance from L3
+            # ------------------------------------------------
 
             distance_pct = (
                 long_tp_distance_pct(
@@ -1378,22 +1572,33 @@ def build_hooks(
                 "negative_tp_distance_valid"
             ] += 1
 
-            # ----------------------------------------------
-            # Current price must still be
-            # between L3 and TP.
-            # ----------------------------------------------
+            # ------------------------------------------------
+            # CRITICAL:
+            #
+            # Has TP already been touched after L3?
+            #
+            # Any HIGH >= TP means:
+            #
+            # TP already touched
+            #
+            # Reject.
+            # ------------------------------------------------
 
-            if not long_price_tradeable(
-                current_price,
-                l3_price,
+            if long_tp_was_touched(
+                df,
+                l3["index"],
                 tp
             ):
 
                 STATS[
-                    "negative_price_passed_tp"
+                    "negative_tp_already_touched"
                 ] += 1
 
                 continue
+
+            # ------------------------------------------------
+            # SL
+            # ------------------------------------------------
 
             sl = find_previous_valid_low(
                 df,
@@ -1403,21 +1608,29 @@ def build_hooks(
 
             hooks.append({
 
-                "symbol": symbol,
+                "symbol":
+                    symbol,
 
-                "direction": "LONG",
+                "direction":
+                    "LONG",
 
-                "start": start,
+                "start":
+                    start,
 
-                "l1": l1,
+                "l1":
+                    l1,
 
-                "h1": h1,
+                "h1":
+                    h1,
 
-                "l2": l2,
+                "l2":
+                    l2,
 
-                "h2": h2,
+                "h2":
+                    h2,
 
-                "confirm": l3,
+                "confirm":
+                    l3,
 
                 "start_price":
                     start_price,
@@ -1425,9 +1638,11 @@ def build_hooks(
                 "confirm_price":
                     l3_price,
 
-                "tp": tp,
+                "tp":
+                    tp,
 
-                "sl": sl,
+                "sl":
+                    sl,
 
                 "tp_distance_pct":
                     distance_pct,
@@ -1437,10 +1652,11 @@ def build_hooks(
 
                 "structure":
                     "START-L1-H1-L2-H2-L3",
+
             })
 
     # ========================================================
-    # Deduplicate
+    # DEDUPLICATE
     # ========================================================
 
     unique = {}
@@ -1462,7 +1678,7 @@ def build_hooks(
 
 
 # ============================================================
-# DATABASE SAVE
+# SAVE HOOK
 # ============================================================
 
 def save_hook(
@@ -1486,9 +1702,7 @@ def save_hook(
             p3 = hook["l2"]
             p4 = hook["h2"]
 
-        before = conn.total_changes
-
-        conn.execute("""
+        cursor = conn.execute("""
             INSERT OR IGNORE INTO hooks (
                 symbol,
                 direction,
@@ -1531,8 +1745,13 @@ def save_hook(
             hook["symbol"],
             hook["direction"],
 
-            hook["start"]["time"].isoformat(),
-            hook["confirm"]["time"].isoformat(),
+            hook[
+                "start"
+            ]["time"].isoformat(),
+
+            hook[
+                "confirm"
+            ]["time"].isoformat(),
 
             hook["start_price"],
 
@@ -1560,8 +1779,7 @@ def save_hook(
         conn.commit()
 
         return (
-            conn.total_changes
-            > before
+            cursor.rowcount > 0
         )
 
     except Exception:
@@ -1570,7 +1788,7 @@ def save_hook(
 
 
 # ============================================================
-# EXISTING HOOK
+# CHECK EXISTING HOOK
 # ============================================================
 
 def hook_exists(
@@ -1591,9 +1809,13 @@ def hook_exists(
         hook["symbol"],
         hook["direction"],
 
-        hook["start"]["time"].isoformat(),
+        hook[
+            "start"
+        ]["time"].isoformat(),
 
-        hook["confirm"]["time"].isoformat(),
+        hook[
+            "confirm"
+        ]["time"].isoformat(),
 
     )).fetchone()
 
@@ -1601,7 +1823,7 @@ def hook_exists(
 
 
 # ============================================================
-# PAPER EVENT
+# PAPER TRADE
 # ============================================================
 
 def create_paper_event(
@@ -1623,7 +1845,9 @@ def create_paper_event(
             hook["symbol"],
             hook["direction"],
 
-            hook["confirm"]["time"].isoformat(),
+            hook[
+                "confirm"
+            ]["time"].isoformat(),
 
         )).fetchone()
 
@@ -1654,7 +1878,9 @@ def create_paper_event(
 
             hook["sl"],
 
-            hook["confirm"]["time"].isoformat(),
+            hook[
+                "confirm"
+            ]["time"].isoformat(),
 
         ))
 
@@ -1674,8 +1900,13 @@ def create_paper_event(
 def label_offset(df):
 
     price_range = (
-        float(df["high"].max())
-        - float(df["low"].min())
+        float(
+            df["high"].max()
+        )
+        -
+        float(
+            df["low"].min()
+        )
     )
 
     if price_range <= 0:
@@ -1692,7 +1923,9 @@ def plot_hook_chart(
 
     chart_df = (
         df
-        .tail(CHART_CANDLES)
+        .tail(
+            CHART_CANDLES
+        )
         .copy()
     )
 
@@ -1709,10 +1942,21 @@ def plot_hook_chart(
 
     for i, row in chart_df.iterrows():
 
-        op = float(row["open"])
-        hi = float(row["high"])
-        lo = float(row["low"])
-        cl = float(row["close"])
+        op = float(
+            row["open"]
+        )
+
+        hi = float(
+            row["high"]
+        )
+
+        lo = float(
+            row["low"]
+        )
+
+        cl = float(
+            row["close"]
+        )
 
         face = (
             "white"
@@ -1739,7 +1983,8 @@ def plot_hook_chart(
 
         body_height = (
             body_high
-            - body_low
+            -
+            body_low
         )
 
         if body_height == 0:
@@ -1779,10 +2024,13 @@ def plot_hook_chart(
         t = point["time"]
 
         if t in time_to_x:
+
             return time_to_x[t]
 
         diffs = (
-            chart_df["time"] - t
+            chart_df["time"]
+            -
+            t
         ).abs()
 
         return int(
@@ -1790,7 +2038,7 @@ def plot_hook_chart(
         )
 
     # ========================================================
-    # POINTS
+    # HOOK POINTS
     # ========================================================
 
     if hook["direction"] == "SHORT":
@@ -1845,11 +2093,13 @@ def plot_hook_chart(
         chart_df
     )
 
-    for idx, (name, p) in enumerate(
-        points
-    ):
+    for idx, (
+        name,
+        p
+    ) in enumerate(points):
 
         xx = get_x(p)
+
         yy = float(
             p["price"]
         )
@@ -1876,9 +2126,11 @@ def plot_hook_chart(
             "H3",
             "L3"
         ):
+
             fontsize = 14
 
         if name == "START":
+
             fontsize = 13
 
         ax.annotate(
@@ -1892,7 +2144,9 @@ def plot_hook_chart(
             ),
             xytext=(
                 0,
-                0
+                15
+                if idx % 2 == 0
+                else -15
             ),
             textcoords="offset points",
             ha="center",
@@ -1902,7 +2156,7 @@ def plot_hook_chart(
         )
 
     # ========================================================
-    # CONFIRMATION
+    # CONFIRMATION MARK
     # ========================================================
 
     confirm_x = get_x(
@@ -1922,7 +2176,7 @@ def plot_hook_chart(
     )
 
     # ========================================================
-    # TP
+    # TP 86.4%
     # ========================================================
 
     tp = hook["tp"]
@@ -2026,8 +2280,11 @@ def plot_hook_chart(
 
     direction_text = (
         "SHORT"
-        if hook["direction"] == "SHORT"
-        else "LONG"
+        if hook["direction"]
+        ==
+        "SHORT"
+        else
+        "LONG"
     )
 
     ax.set_title(
@@ -2104,18 +2361,14 @@ def plot_hook_chart(
 
 
 # ============================================================
-# TELEGRAM MESSAGE
+# TELEGRAM HOOK MESSAGE
 # ============================================================
 
 def build_hook_message(
     hook
 ):
 
-    direction = (
-        hook["direction"]
-    )
-
-    if direction == "SHORT":
+    if hook["direction"] == "SHORT":
 
         structure = (
             "START → H1 → L1 → H2 → L2 → H3"
@@ -2137,7 +2390,7 @@ def build_hook_message(
         f"<b>{short_symbol(hook['symbol'])}</b>\n"
 
         f"Direction: "
-        f"<b>{direction}</b>\n\n"
+        f"<b>{hook['direction']}</b>\n\n"
 
         f"<b>{structure}</b>\n\n"
 
@@ -2159,6 +2412,7 @@ def build_hook_message(
         f"Current: "
         f"<b>{fmt_price(hook['current_price'])}</b>\n\n"
 
+        "TP not previously touched\n"
         "M30 confirmation only\n"
         "M1 / 123F disabled\n"
         "PAPER ONLY"
@@ -2172,9 +2426,13 @@ def build_hook_message(
 def diagnostic_text():
 
     total_structure = (
-        STATS["positive_candidates"]
+        STATS[
+            "positive_structure_valid"
+        ]
         +
-        STATS["negative_candidates"]
+        STATS[
+            "negative_structure_valid"
+        ]
     )
 
     total_distance_valid = (
@@ -2197,13 +2455,13 @@ def diagnostic_text():
         ]
     )
 
-    total_price_passed = (
+    total_tp_touched = (
         STATS[
-            "positive_price_passed_tp"
+            "positive_tp_already_touched"
         ]
         +
         STATS[
-            "negative_price_passed_tp"
+            "negative_tp_already_touched"
         ]
     )
 
@@ -2214,86 +2472,125 @@ def diagnostic_text():
         f"Time: {utc_iso()}\n\n"
 
         "M30\n"
-        f"Requests: {STATS['requests']}\n"
-        f"Data OK: {STATS['data_ok']}\n"
-        f"Empty: {STATS['empty']}\n"
-        f"Short data: {STATS['short_data']}\n"
-        f"Errors: {STATS['errors']}\n\n"
+        f"Requests: "
+        f"{STATS['requests']}\n"
+
+        f"Data OK: "
+        f"{STATS['data_ok']}\n"
+
+        f"Empty: "
+        f"{STATS['empty']}\n"
+
+        f"Short data: "
+        f"{STATS['short_data']}\n"
+
+        f"Errors: "
+        f"{STATS['errors']}\n\n"
 
         "PIVOTS\n"
         f"Pivot Highs: "
         f"{STATS['pivot_highs']}\n"
+
         f"Pivot Lows: "
         f"{STATS['pivot_lows']}\n"
+
         f"Alternating Pivots: "
         f"{STATS['alternating_pivots']}\n"
+
         f"6-point Sequences: "
         f"{STATS['six_point_sequences']}\n\n"
 
         "POSITIVE / SHORT\n"
         f"Structure Candidates: "
         f"{STATS['positive_candidates']}\n"
+
         f"Structure Valid: "
         f"{STATS['positive_structure_valid']}\n"
+
         f"TP Distance Valid: "
         f"{STATS['positive_tp_distance_valid']}\n"
+
         f"TP Distance Rejected: "
         f"{STATS['positive_tp_distance_rejected']}\n"
-        f"Price Already Passed TP: "
-        f"{STATS['positive_price_passed_tp']}\n"
+
+        f"TP Already Touched: "
+        f"{STATS['positive_tp_already_touched']}\n"
+
         f"START rejected: "
         f"{REJECTION['positive_start']}\n"
+
         f"H2 rejected: "
         f"{REJECTION['positive_h2']}\n"
+
         f"L2 rejected: "
         f"{REJECTION['positive_l2']}\n"
+
         f"H3 rejected: "
         f"{REJECTION['positive_h3']}\n\n"
 
         "NEGATIVE / LONG\n"
         f"Structure Candidates: "
         f"{STATS['negative_candidates']}\n"
+
         f"Structure Valid: "
         f"{STATS['negative_structure_valid']}\n"
+
         f"TP Distance Valid: "
         f"{STATS['negative_tp_distance_valid']}\n"
+
         f"TP Distance Rejected: "
         f"{STATS['negative_tp_distance_rejected']}\n"
-        f"Price Already Passed TP: "
-        f"{STATS['negative_price_passed_tp']}\n"
+
+        f"TP Already Touched: "
+        f"{STATS['negative_tp_already_touched']}\n"
+
         f"START rejected: "
         f"{REJECTION['negative_start']}\n"
+
         f"L2 rejected: "
         f"{REJECTION['negative_l2']}\n"
+
         f"H2 rejected: "
         f"{REJECTION['negative_h2']}\n"
+
         f"L3 rejected: "
         f"{REJECTION['negative_l3']}\n\n"
 
-        "TP TRADEABILITY\n"
-        f"Minimum TP distance: "
+        "TP FILTER\n"
+        f"TP Retracement: "
+        f"{TP_RETRACE * 100:.1f}%\n"
+
+        f"Minimum Distance: "
         f"{MIN_TP_DISTANCE_PCT:.2f}%\n"
-        f"Maximum TP distance: "
-        f"{MAX_TP_DISTANCE_PCT:.2f}%\n"
+
+        f"Maximum Distance: "
+        f"{MAX_TP_DISTANCE_PCT:.2f}%\n\n"
+
         f"Structure Valid Total: "
         f"{total_structure}\n"
+
         f"TP Distance Valid Total: "
         f"{total_distance_valid}\n"
+
         f"TP Distance Rejected Total: "
         f"{total_distance_rejected}\n"
-        f"Price Passed TP Total: "
-        f"{total_price_passed}\n\n"
+
+        f"TP Already Touched Total: "
+        f"{total_tp_touched}\n\n"
 
         "HOOK STATUS\n"
         f"Confirmed Hooks: "
         f"{STATS['confirmed_hooks']}\n"
+
         f"New Signals: "
         f"{STATS['new_signals']}\n"
+
         f"Charts: "
         f"{STATS['charts']}\n\n"
 
         "M30 ONLY\n"
         "NO M1 / NO 123F\n"
+        "NO PREVIOUS TP TOUCH\n"
         "PAPER ONLY"
     )
 
@@ -2313,10 +2610,13 @@ def process_symbol(
     )
 
     if df is None:
+
         return chart_counter
 
     raw_highs, raw_lows = (
-        find_raw_pivots(df)
+        find_raw_pivots(
+            df
+        )
     )
 
     alternating = (
@@ -2333,6 +2633,7 @@ def process_symbol(
     )
 
     if not hooks:
+
         return chart_counter
 
     for hook in hooks:
@@ -2348,43 +2649,48 @@ def process_symbol(
 
         if is_new:
 
-            save_hook(
+            saved = save_hook(
                 conn,
                 hook
             )
 
-            created = (
-                create_paper_event(
-                    conn,
-                    hook
+            if saved:
+
+                created = (
+                    create_paper_event(
+                        conn,
+                        hook
+                    )
                 )
-            )
 
-            if created:
+                if created:
 
-                STATS[
-                    "new_signals"
-                ] += 1
+                    STATS[
+                        "new_signals"
+                    ] += 1
 
-            telegram_send_message(
-                build_hook_message(
-                    hook
+                telegram_send_message(
+                    build_hook_message(
+                        hook
+                    )
                 )
-            )
 
         # ----------------------------------------------------
-        # Chart
+        # CHART
         # ----------------------------------------------------
 
         if (
             is_new
             and
             chart_counter
-            < MAX_CHARTS_PER_SCAN
+            <
+            MAX_CHARTS_PER_SCAN
         ):
 
             confirm_time = (
-                hook["confirm"]["time"]
+                hook[
+                    "confirm"
+                ]["time"]
                 .strftime(
                     "%Y%m%d_%H%M"
                 )
@@ -2416,7 +2722,8 @@ def process_symbol(
                         f"{hook['direction']} | "
                         f"{short_symbol(symbol)} | "
                         f"TP 86.4% | "
-                        f"{hook['tp_distance_pct']:.2f}%"
+                        f"{hook['tp_distance_pct']:.2f}% | "
+                        f"TP NOT TOUCHED"
                     )
 
                     telegram_send_photo(
@@ -2431,26 +2738,29 @@ def process_symbol(
                     chart_counter += 1
 
             except Exception:
+
                 pass
 
     return chart_counter
 
 
 # ============================================================
-# RESET
+# RESET STATS
 # ============================================================
 
 def reset_stats():
 
     for key in STATS:
+
         STATS[key] = 0
 
     for key in REJECTION:
+
         REJECTION[key] = 0
 
 
 # ============================================================
-# MAIN SCAN
+# RUN SCAN
 # ============================================================
 
 def run_scan():
@@ -2462,12 +2772,15 @@ def run_scan():
     chart_counter = 0
 
     print()
+
     print(
         "===================================================="
     )
+
     print(
         f"NDS M30 LIVE SCANNER {VERSION}"
     )
+
     print(
         "===================================================="
     )
@@ -2501,6 +2814,10 @@ def run_scan():
     print(
         f"Max TP Distance: "
         f"{MAX_TP_DISTANCE_PCT:.2f}%"
+    )
+
+    print(
+        "Previous TP Touch: REJECT"
     )
 
     print()
@@ -2583,4 +2900,5 @@ if __name__ == "__main__":
             )
 
         except Exception:
+
             pass
