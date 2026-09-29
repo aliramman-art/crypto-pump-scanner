@@ -1,6 +1,6 @@
 # ============================================================
 # NDS H4 -> M5 LIVE SCANNER
-# VERSION 5.2.0
+# VERSION 5.2.1
 # ============================================================
 #
 # PAPER TRADING ONLY
@@ -22,7 +22,6 @@
 import os
 import time
 import json
-import math
 import hashlib
 import sqlite3
 from datetime import datetime, timezone
@@ -36,7 +35,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "5.2.0"
+VERSION = "5.2.1"
 
 DB_FILE = "nds_h4_m5_live_v51.db"
 CHART_DIR = "nds_h4_m5_charts"
@@ -70,10 +69,6 @@ MAX_OPEN_TRADES = 3
 CHART_CANDLES = 180
 
 REQUEST_TIMEOUT = 12
-
-# One execution only.
-# GitHub Actions should run this script repeatedly by schedule.
-SCAN_SECONDS = 0
 
 TELEGRAM_BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
@@ -143,7 +138,7 @@ session = requests.Session()
 
 session.headers.update(
     {
-        "User-Agent": "NDS-H4-M5-Scanner/5.2.0",
+        "User-Agent": "NDS-H4-M5-Scanner/5.2.1",
         "Accept": "application/json",
     }
 )
@@ -218,10 +213,6 @@ def iso_now():
     return utc_now().isoformat()
 
 
-def ts_to_iso(ts):
-    return pd.Timestamp(ts).tz_convert("UTC").isoformat()
-
-
 def normalize_timestamp(ts):
     t = pd.Timestamp(ts)
 
@@ -229,6 +220,10 @@ def normalize_timestamp(ts):
         return t.tz_localize("UTC")
 
     return t.tz_convert("UTC")
+
+
+def ts_to_iso(ts):
+    return normalize_timestamp(ts).isoformat()
 
 
 # ============================================================
@@ -260,13 +255,20 @@ def telegram_send(text):
         )
 
         if r.status_code != 200:
-            print("Telegram error:", r.status_code, r.text[:500])
+            print(
+                "Telegram error:",
+                r.status_code,
+                r.text[:500],
+            )
             return False
 
         return True
 
     except Exception as e:
-        print("Telegram exception:", repr(e))
+        print(
+            "Telegram exception:",
+            repr(e),
+        )
         return False
 
 
@@ -302,13 +304,20 @@ def telegram_photo(path, caption=""):
             )
 
         if r.status_code != 200:
-            print("Telegram photo error:", r.status_code, r.text[:500])
+            print(
+                "Telegram photo error:",
+                r.status_code,
+                r.text[:500],
+            )
             return False
 
         return True
 
     except Exception as e:
-        print("Telegram photo exception:", repr(e))
+        print(
+            "Telegram photo exception:",
+            repr(e),
+        )
         return False
 
 
@@ -383,13 +392,16 @@ def fetch_candles(symbol, interval, count):
 
                 ts_num = float(ts)
 
-                # Kraken timestamps can be seconds or milliseconds.
                 if ts_num > 10_000_000_000:
                     ts_num /= 1000.0
 
                 parsed.append(
                     [
-                        pd.to_datetime(ts_num, unit="s", utc=True),
+                        pd.to_datetime(
+                            ts_num,
+                            unit="s",
+                            utc=True,
+                        ),
                         float(o),
                         float(h),
                         float(l),
@@ -417,14 +429,13 @@ def fetch_candles(symbol, interval, count):
         )
 
         df = (
-            df.drop_duplicates(subset=["time"])
+            df.drop_duplicates(
+                subset=["time"]
+            )
             .sort_values("time")
             .tail(count)
             .reset_index(drop=True)
         )
-
-        if len(df) < max(20, PIVOT_LEFT + PIVOT_RIGHT + 5):
-            return df
 
         return df
 
@@ -446,9 +457,20 @@ def find_pivots(df):
 
     n = len(df)
 
-    for i in range(PIVOT_LEFT, n - PIVOT_RIGHT):
-        current_high = float(df.iloc[i]["high"])
-        current_low = float(df.iloc[i]["low"])
+    if n < PIVOT_LEFT + PIVOT_RIGHT + 1:
+        return highs, lows
+
+    for i in range(
+        PIVOT_LEFT,
+        n - PIVOT_RIGHT,
+    ):
+        current_high = float(
+            df.iloc[i]["high"]
+        )
+
+        current_low = float(
+            df.iloc[i]["low"]
+        )
 
         left_highs = df.iloc[
             i - PIVOT_LEFT:i
@@ -464,7 +486,7 @@ def find_pivots(df):
 
         right_lows = df.iloc[
             i + 1:i + PIVOT_RIGHT + 1
-        ]["low"].astype(float]
+        ]["low"].astype(float)
 
         if (
             current_high >= left_highs.max()
@@ -519,8 +541,6 @@ def build_ordered_pivots(highs, lows):
         )
     )
 
-    # Prevent consecutive pivots of the same type.
-    # Keep the more extreme one.
     cleaned = []
 
     for p in pivots:
@@ -546,27 +566,44 @@ def build_ordered_pivots(highs, lows):
 
 
 # ============================================================
-# HOOK VALIDATION
+# SWING
 # ============================================================
 
 def pct_distance(a, b):
     if a == 0:
         return 0.0
 
-    return abs(a - b) / abs(a) * 100.0
+    return (
+        abs(a - b)
+        / abs(a)
+        * 100.0
+    )
 
 
 def valid_swing(a, b):
-    return pct_distance(a, b) >= (
+    return pct_distance(
+        a,
+        b,
+    ) >= (
         MIN_SWING_PCT * 100.0
     )
 
 
-def make_hook_id(symbol, timeframe, direction, points):
+# ============================================================
+# HOOK ID
+# ============================================================
+
+def make_hook_id(
+    symbol,
+    timeframe,
+    direction,
+    points,
+):
     raw = (
         f"{symbol}|{timeframe}|{direction}|"
         + "|".join(
-            f"{p['type']}:{p['index']}:{p['price']:.12f}"
+            f"{p['type']}:{p['index']}:"
+            f"{p['price']:.12f}"
             for p in points
         )
     )
@@ -576,22 +613,35 @@ def make_hook_id(symbol, timeframe, direction, points):
     ).hexdigest()
 
 
-def calculate_hook(symbol, timeframe, points):
+# ============================================================
+# HOOK VALIDATION
+# ============================================================
+
+def calculate_hook(
+    symbol,
+    timeframe,
+    points,
+):
     if len(points) != 6:
         return None
 
     p0, p1, p2, p3, p4, p5 = points
 
-    # --------------------------------------------------------
+    # ========================================================
     # POSITIVE HOOK = SHORT
     #
     # START -> H1 -> L1 -> H2 -> L2 -> H3
     #
-    # START = lowest point
+    # START is the lowest point.
+    #
     # H2 > H1
     # L2 < L1
     # H3 > H2
-    # --------------------------------------------------------
+    #
+    # Entry = H3
+    # TP = 86.4% from H3 toward START
+    # SL = 50% of Entry -> TP distance above Entry
+    # ========================================================
 
     if (
         p0["type"] == "L"
@@ -635,25 +685,34 @@ def calculate_hook(symbol, timeframe, points):
 
         entry = h3
 
-        # 86.4% retracement from H3 back toward START.
-        tp = h3 - TP_RETRACE * (h3 - start)
+        tp = (
+            h3
+            - TP_RETRACE * (h3 - start)
+        )
 
-        sl = entry + SL_TP_MULTIPLIER * abs(
-            entry - tp
+        sl = (
+            entry
+            + SL_TP_MULTIPLIER
+            * abs(entry - tp)
         )
 
         direction = "SHORT"
 
-    # --------------------------------------------------------
+    # ========================================================
     # NEGATIVE HOOK = LONG
     #
     # START -> L1 -> H1 -> L2 -> H2 -> L3
     #
-    # START = highest point
+    # START is the highest point.
+    #
     # L2 < L1
     # H2 > H1
     # L3 < L2
-    # --------------------------------------------------------
+    #
+    # Entry = L3
+    # TP = 86.4% from L3 toward START
+    # SL = 50% of Entry -> TP distance below Entry
+    # ========================================================
 
     elif (
         p0["type"] == "H"
@@ -697,11 +756,15 @@ def calculate_hook(symbol, timeframe, points):
 
         entry = l3
 
-        # 86.4% retracement from L3 back toward START.
-        tp = l3 + TP_RETRACE * (start - l3)
+        tp = (
+            l3
+            + TP_RETRACE * (start - l3)
+        )
 
-        sl = entry - SL_TP_MULTIPLIER * abs(
-            entry - tp
+        sl = (
+            entry
+            - SL_TP_MULTIPLIER
+            * abs(entry - tp)
         )
 
         direction = "LONG"
@@ -714,10 +777,16 @@ def calculate_hook(symbol, timeframe, points):
         tp,
     )
 
-    if tp_distance_pct < MIN_TP_DISTANCE_PCT:
+    if (
+        tp_distance_pct
+        < MIN_TP_DISTANCE_PCT
+    ):
         return None
 
-    if tp_distance_pct > MAX_TP_DISTANCE_PCT:
+    if (
+        tp_distance_pct
+        > MAX_TP_DISTANCE_PCT
+    ):
         return None
 
     hook_id = make_hook_id(
@@ -751,7 +820,12 @@ def calculate_hook(symbol, timeframe, points):
 # DETECT HOOKS
 # ============================================================
 
-def detect_hooks(symbol, timeframe, df, wanted_direction=None):
+def detect_hooks(
+    symbol,
+    timeframe,
+    df,
+    wanted_direction=None,
+):
     highs, lows = find_pivots(df)
 
     pivots = build_ordered_pivots(
@@ -769,8 +843,9 @@ def detect_hooks(symbol, timeframe, df, wanted_direction=None):
             "hooks": [],
         }
 
-    # Scan all six-point windows.
-    for i in range(len(pivots) - 5):
+    for i in range(
+        len(pivots) - 5
+    ):
         points = pivots[i:i + 6]
 
         hook = calculate_hook(
@@ -784,7 +859,8 @@ def detect_hooks(symbol, timeframe, df, wanted_direction=None):
 
         if (
             wanted_direction is not None
-            and hook["direction"] != wanted_direction
+            and hook["direction"]
+            != wanted_direction
         ):
             continue
 
@@ -824,11 +900,17 @@ def tp_already_touched(
 
     if direction == "SHORT":
         return bool(
-            (future["low"] <= tp_price).any()
+            (
+                future["low"]
+                <= tp_price
+            ).any()
         )
 
     return bool(
-        (future["high"] >= tp_price).any()
+        (
+            future["high"]
+            >= tp_price
+        ).any()
     )
 
 
@@ -844,7 +926,8 @@ def hook_age_seconds(hook):
     )
 
     return (
-        now - entry_time.to_pydatetime()
+        now
+        - entry_time.to_pydatetime()
     ).total_seconds()
 
 
@@ -904,8 +987,12 @@ def save_hook(hook):
             hook["symbol"],
             hook["timeframe"],
             hook["direction"],
-            ts_to_iso(hook["start_time"]),
-            ts_to_iso(hook["entry_time"]),
+            ts_to_iso(
+                hook["start_time"]
+            ),
+            ts_to_iso(
+                hook["entry_time"]
+            ),
             hook["start_price"],
             hook["entry_price"],
             hook["tp_price"],
@@ -914,8 +1001,30 @@ def save_hook(hook):
         ),
     )
 
+    inserted = conn.total_changes > 0
+
     conn.commit()
     conn.close()
+
+    return inserted
+
+
+def trade_exists(hook_id):
+    conn = db_connect()
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM paper_trades
+        WHERE hook_id = ?
+        LIMIT 1
+        """,
+        (hook_id,),
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
 
 
 def get_open_trades():
@@ -982,7 +1091,9 @@ def create_paper_trade(hook):
                 hook["hook_id"],
                 hook["symbol"],
                 hook["direction"],
-                ts_to_iso(hook["entry_time"]),
+                ts_to_iso(
+                    hook["entry_time"]
+                ),
                 hook["entry_price"],
                 hook["tp_price"],
                 hook["sl_price"],
@@ -991,9 +1102,11 @@ def create_paper_trade(hook):
         )
 
         conn.commit()
+        return True
 
     except sqlite3.IntegrityError:
         conn.rollback()
+        return False
 
     finally:
         conn.close()
@@ -1036,7 +1149,11 @@ def close_trade(
 # PNL
 # ============================================================
 
-def calculate_pnl(direction, entry, exit):
+def calculate_pnl(
+    direction,
+    entry,
+    exit,
+):
     if entry == 0:
         return 0.0
 
@@ -1073,7 +1190,8 @@ def monitor_open_trades():
         return stats
 
     print(
-        f"\n[OPEN TRADES] Monitoring {len(trades)} trade(s)"
+        f"\n[OPEN TRADES] "
+        f"Monitoring {len(trades)} trade(s)"
     )
 
     for trade in trades:
@@ -1087,9 +1205,12 @@ def monitor_open_trades():
 
         if df is None or df.empty:
             stats["errors"] += 1
+
             print(
-                f"[OPEN] {symbol}: no M5 data"
+                f"[OPEN] {symbol}: "
+                f"no M5 data"
             )
+
             continue
 
         last = df.iloc[-1]
@@ -1109,10 +1230,12 @@ def monitor_open_trades():
         # Conservative rule:
         # If both SL and TP are touched in the same candle,
         # assume SL happened first.
+
         if direction == "LONG":
             if low <= sl:
                 exit_price = sl
                 reason = "SL"
+
             elif high >= tp:
                 exit_price = tp
                 reason = "TP"
@@ -1121,6 +1244,7 @@ def monitor_open_trades():
             if high >= sl:
                 exit_price = sl
                 reason = "SL"
+
             elif low <= tp:
                 exit_price = tp
                 reason = "TP"
@@ -1149,10 +1273,15 @@ def monitor_open_trades():
         else:
             stats["losses"] += 1
 
-        emoji = "🟢" if reason == "TP" else "🔴"
+        emoji = (
+            "🟢"
+            if reason == "TP"
+            else "🔴"
+        )
 
         text = (
-            f"{emoji} <b>NDS TRADE CLOSED</b>\n"
+            f"{emoji} "
+            f"<b>NDS TRADE CLOSED</b>\n"
             f"Symbol: <b>{symbol}</b>\n"
             f"Direction: <b>{direction}</b>\n"
             f"Entry: <b>{entry:.8g}</b>\n"
@@ -1164,8 +1293,9 @@ def monitor_open_trades():
         telegram_send(text)
 
         print(
-            f"[CLOSED] {symbol} {direction} "
-            f"{reason} PnL={pnl:+.2f}%"
+            f"[CLOSED] {symbol} "
+            f"{direction} {reason} "
+            f"PnL={pnl:+.2f}%"
         )
 
     return stats
@@ -1209,16 +1339,25 @@ def save_hook_chart(
 
     points = hook["points"]
 
-    point_names = [
-        "START",
-        "H1/L1",
-        "L1/H1",
-        "H2/L2",
-        "L2/H2",
-        "H3/L3",
-    ]
+    if hook["direction"] == "SHORT":
+        point_names = [
+            "START",
+            "H1",
+            "L1",
+            "H2",
+            "L2",
+            "H3 ENTRY",
+        ]
+    else:
+        point_names = [
+            "START",
+            "L1",
+            "H1",
+            "L2",
+            "H2",
+            "L3 ENTRY",
+        ]
 
-    # Exact hook points.
     for idx, p in enumerate(points):
         x = normalize_timestamp(
             p["time"]
@@ -1233,13 +1372,14 @@ def save_hook_chart(
             zorder=5,
         )
 
-        label = point_names[idx]
-
-        # Separate vertical offsets to avoid overlapping labels.
-        offset = 12 if idx % 2 == 0 else -18
+        offset = (
+            14
+            if idx % 2 == 0
+            else -20
+        )
 
         ax.annotate(
-            label,
+            point_names[idx],
             xy=(x, y),
             xytext=(0, offset),
             textcoords="offset points",
@@ -1314,16 +1454,21 @@ def performance_stats():
         """
         SELECT
             COUNT(*) AS count,
-            COALESCE(SUM(pnl_pct), 0) AS pnl,
+            COALESCE(
+                SUM(pnl_pct),
+                0
+            ) AS pnl,
             SUM(
                 CASE
-                    WHEN pnl_pct > 0 THEN 1
+                    WHEN pnl_pct > 0
+                    THEN 1
                     ELSE 0
                 END
             ) AS wins,
             SUM(
                 CASE
-                    WHEN pnl_pct <= 0 THEN 1
+                    WHEN pnl_pct <= 0
+                    THEN 1
                     ELSE 0
                 END
             ) AS losses
@@ -1342,15 +1487,27 @@ def performance_stats():
 
     conn.close()
 
-    total = int(closed["count"] or 0)
-    wins = int(closed["wins"] or 0)
-    losses = int(closed["losses"] or 0)
-    pnl = float(closed["pnl"] or 0.0)
+    total = int(
+        closed["count"] or 0
+    )
 
-    if total:
-        win_rate = wins / total * 100.0
-    else:
-        win_rate = 0.0
+    wins = int(
+        closed["wins"] or 0
+    )
+
+    losses = int(
+        closed["losses"] or 0
+    )
+
+    pnl = float(
+        closed["pnl"] or 0.0
+    )
+
+    win_rate = (
+        wins / total * 100.0
+        if total
+        else 0.0
+    )
 
     return {
         "closed": total,
@@ -1413,7 +1570,7 @@ def determine_h4_state(
 
 
 # ============================================================
-# SCAN ONE SYMBOL
+# PROCESS SYMBOL
 # ============================================================
 
 def process_symbol(
@@ -1421,14 +1578,13 @@ def process_symbol(
     h4_state,
     stats,
 ):
-    # --------------------------------------------------------
-    # H4 FILTER
-    # --------------------------------------------------------
-
     h4_short = h4_state["latest_short"]
     h4_long = h4_state["latest_long"]
 
-    if h4_short is None and h4_long is None:
+    if (
+        h4_short is None
+        and h4_long is None
+    ):
         stats["h4_no_valid"] += 1
 
         print(
@@ -1438,7 +1594,6 @@ def process_symbol(
 
         return
 
-    # If both directions somehow exist, use the newest.
     if (
         h4_short is not None
         and h4_long is not None
@@ -1450,12 +1605,16 @@ def process_symbol(
             h4_hook = h4_short
         else:
             h4_hook = h4_long
+
     elif h4_short is not None:
         h4_hook = h4_short
+
     else:
         h4_hook = h4_long
 
-    allowed_direction = h4_hook["direction"]
+    allowed_direction = (
+        h4_hook["direction"]
+    )
 
     stats["h4_filtered"] += 1
 
@@ -1465,7 +1624,7 @@ def process_symbol(
     )
 
     # --------------------------------------------------------
-    # M5 DATA
+    # M5
     # --------------------------------------------------------
 
     m5 = fetch_candles(
@@ -1480,7 +1639,8 @@ def process_symbol(
         stats["m5_data_error"] += 1
 
         print(
-            f"[M5] {symbol}: DATA ERROR"
+            f"[M5] {symbol}: "
+            f"DATA ERROR"
         )
 
         return
@@ -1496,15 +1656,6 @@ def process_symbol(
         return
 
     stats["m5_ok"] += 1
-
-    # --------------------------------------------------------
-    # DETECT ONLY H4-MATCHING DIRECTION
-    #
-    # IMPORTANT:
-    # We filter by direction BEFORE selecting the latest
-    # hook. Therefore a newer opposite hook cannot suppress
-    # an otherwise valid same-direction hook.
-    # --------------------------------------------------------
 
     result = detect_hooks(
         symbol,
@@ -1529,19 +1680,36 @@ def process_symbol(
 
         print(
             f"[M5] {symbol}: "
-            f"NO MATCHING {allowed_direction} HOOK"
+            f"NO MATCHING "
+            f"{allowed_direction} HOOK"
         )
 
         return
 
-    # Newest matching M5 Hook.
     hook = matching_hooks[-1]
 
     # --------------------------------------------------------
-    # Save hook regardless of whether it is fresh.
-    # This prevents old hooks from being repeatedly processed.
+    # Check whether this exact hook was already processed.
     # --------------------------------------------------------
 
+    already_seen = hook_exists(
+        hook["hook_id"]
+    )
+
+    if already_seen:
+        if trade_exists(
+            hook["hook_id"]
+        ):
+            stats["duplicate"] += 1
+
+            print(
+                f"[SKIP] {symbol}: "
+                f"DUPLICATE SIGNAL"
+            )
+
+            return
+
+    # Save Hook after duplicate check.
     save_hook(hook)
 
     # --------------------------------------------------------
@@ -1561,45 +1729,11 @@ def process_symbol(
 
         print(
             f"[SKIP] {symbol}: "
-            f"STALE HOOK age={age:.1f}s"
+            f"STALE HOOK "
+            f"age={age:.1f}s"
         )
 
         return
-
-    # --------------------------------------------------------
-    # DUPLICATE
-    # --------------------------------------------------------
-
-    if hook_exists(hook["hook_id"]):
-        # save_hook() already inserted it.
-        # Need to determine whether this hook belongs to an
-        # already existing trade or simply the seen-hook table.
-        #
-        # A hook inserted into hooks above is considered seen.
-        # Therefore we separately check paper_trades.
-        conn = db_connect()
-
-        row = conn.execute(
-            """
-            SELECT id
-            FROM paper_trades
-            WHERE hook_id = ?
-            LIMIT 1
-            """,
-            (hook["hook_id"],),
-        ).fetchone()
-
-        conn.close()
-
-        if row is not None:
-            stats["duplicate"] += 1
-
-            print(
-                f"[SKIP] {symbol}: "
-                f"DUPLICATE SIGNAL"
-            )
-
-            return
 
     # --------------------------------------------------------
     # OPEN TRADE PER SYMBOL
@@ -1634,22 +1768,27 @@ def process_symbol(
         return
 
     # --------------------------------------------------------
-    # TP ALREADY TOUCHED?
+    # ENTRY INDEX
     # --------------------------------------------------------
 
     entry_idx = None
 
+    target_time = normalize_timestamp(
+        hook["entry_time"]
+    )
+
     for i in range(len(m5)):
-        if (
-            normalize_timestamp(
-                m5.iloc[i]["time"]
-            )
-            == normalize_timestamp(
-                hook["entry_time"]
-            )
-        ):
+        candle_time = normalize_timestamp(
+            m5.iloc[i]["time"]
+        )
+
+        if candle_time == target_time:
             entry_idx = i
             break
+
+    # --------------------------------------------------------
+    # TP ALREADY TOUCHED
+    # --------------------------------------------------------
 
     if tp_already_touched(
         m5,
@@ -1670,16 +1809,29 @@ def process_symbol(
     # CREATE PAPER TRADE
     # --------------------------------------------------------
 
-    create_paper_trade(hook)
+    created = create_paper_trade(
+        hook
+    )
+
+    if not created:
+        stats["duplicate"] += 1
+
+        print(
+            f"[SKIP] {symbol}: "
+            f"TRADE ALREADY EXISTS"
+        )
+
+        return
 
     stats["signals"] += 1
 
     direction = hook["direction"]
 
-    if direction == "SHORT":
-        emoji = "🔴"
-    else:
-        emoji = "🟢"
+    emoji = (
+        "🔴"
+        if direction == "SHORT"
+        else "🟢"
+    )
 
     chart_name = (
         f"{symbol}_M5_"
@@ -1701,39 +1853,56 @@ def process_symbol(
     )
 
     signal_text = (
-        f"{emoji} <b>NDS M5 SIGNAL</b>\n"
+        f"{emoji} "
+        f"<b>NDS M5 SIGNAL</b>\n"
         f"Symbol: <b>{symbol}</b>\n"
         f"Direction: <b>{direction}</b>\n"
-        f"Entry: <b>{hook['entry_price']:.8g}</b>\n"
-        f"SL: <b>{hook['sl_price']:.8g}</b>\n"
-        f"TP 86.4%: <b>{hook['tp_price']:.8g}</b>\n"
-        f"TP Distance: <b>{hook['tp_distance_pct']:.2f}%</b>\n"
-        f"H4 Filter: <b>{allowed_direction}</b>\n"
+        f"Entry: <b>"
+        f"{hook['entry_price']:.8g}"
+        f"</b>\n"
+        f"SL: <b>"
+        f"{hook['sl_price']:.8g}"
+        f"</b>\n"
+        f"TP 86.4%: <b>"
+        f"{hook['tp_price']:.8g}"
+        f"</b>\n"
+        f"TP Distance: <b>"
+        f"{hook['tp_distance_pct']:.2f}%"
+        f"</b>\n"
+        f"H4 Filter: <b>"
+        f"{allowed_direction}"
+        f"</b>\n"
         f"Mode: <b>PAPER</b>"
     )
 
-    telegram_send(signal_text)
+    telegram_send(
+        signal_text
+    )
 
     telegram_photo(
         chart_path,
         caption=(
             f"NDS M5 {direction} | "
             f"{symbol} | "
-            f"Entry {hook['entry_price']:.8g}"
+            f"Entry "
+            f"{hook['entry_price']:.8g}"
         ),
     )
 
     print(
         f"[SIGNAL] {symbol} "
         f"{direction} "
-        f"Entry={hook['entry_price']:.8g} "
-        f"TP={hook['tp_price']:.8g} "
-        f"SL={hook['sl_price']:.8g}"
+        f"Entry="
+        f"{hook['entry_price']:.8g} "
+        f"TP="
+        f"{hook['tp_price']:.8g} "
+        f"SL="
+        f"{hook['sl_price']:.8g}"
     )
 
 
 # ============================================================
-# DIAGNOSTIC REPORT
+# DIAGNOSTIC
 # ============================================================
 
 def build_diagnostic(
@@ -1828,14 +1997,22 @@ def run_scan():
     }
 
     print("=" * 70)
-    print("NDS H4 -> M5 LIVE SCANNER")
-    print(f"VERSION {VERSION}")
-    print("PAPER ONLY")
-    print("ONE SCAN CYCLE")
+    print(
+        "NDS H4 -> M5 LIVE SCANNER"
+    )
+    print(
+        f"VERSION {VERSION}"
+    )
+    print(
+        "PAPER ONLY"
+    )
+    print(
+        "ONE SCAN CYCLE"
+    )
     print("=" * 70)
 
     # --------------------------------------------------------
-    # 1. MONITOR EXISTING OPEN TRADES FIRST
+    # 1. MONITOR OPEN TRADES
     # --------------------------------------------------------
 
     open_stats = monitor_open_trades()
@@ -1855,7 +2032,8 @@ def run_scan():
     h4_states = {}
 
     print(
-        f"\n[H4] Scanning {len(ASSETS)} assets..."
+        f"\n[H4] Scanning "
+        f"{len(ASSETS)} assets..."
     )
 
     for symbol in ASSETS:
@@ -1871,7 +2049,8 @@ def run_scan():
             stats["h4_data_error"] += 1
 
             print(
-                f"[H4] {symbol}: DATA ERROR"
+                f"[H4] {symbol}: "
+                f"DATA ERROR"
             )
 
             continue
@@ -1881,7 +2060,8 @@ def run_scan():
 
             print(
                 f"[H4] {symbol}: "
-                f"SHORT DATA ({len(df)})"
+                f"SHORT DATA "
+                f"({len(df)})"
             )
 
             continue
@@ -1908,24 +2088,30 @@ def run_scan():
 
         print(
             f"[H4] {symbol}: "
-            f"pivots={state['result']['pivot_count']} "
-            f"SHORT={len(state['short_hooks'])} "
-            f"LONG={len(state['long_hooks'])}"
+            f"pivots="
+            f"{state['result']['pivot_count']} "
+            f"SHORT="
+            f"{len(state['short_hooks'])} "
+            f"LONG="
+            f"{len(state['long_hooks'])}"
         )
 
     # --------------------------------------------------------
-    # 3. M5 SCAN ONLY FOR H4 VALID SYMBOLS
+    # 3. M5 SCAN
     # --------------------------------------------------------
 
     print(
-        "\n[M5] Scanning H4-filtered assets..."
+        "\n[M5] Scanning "
+        "H4-filtered assets..."
     )
 
     for symbol in ASSETS:
         if symbol not in h4_states:
             continue
 
-        state = h4_states[symbol]["state"]
+        state = h4_states[
+            symbol
+        ]["state"]
 
         process_symbol(
             symbol,
@@ -1939,7 +2125,10 @@ def run_scan():
 
     performance = performance_stats()
 
-    runtime = time.time() - start_time
+    runtime = (
+        time.time()
+        - start_time
+    )
 
     report = build_diagnostic(
         stats,
@@ -1947,9 +2136,23 @@ def run_scan():
         runtime,
     )
 
-    print("\n" + "=" * 70)
-    print(report.replace("<b>", "").replace("</b>", ""))
-    print("=" * 70)
+    print(
+        "\n" + "=" * 70
+    )
+
+    print(
+        report.replace(
+            "<b>",
+            "",
+        ).replace(
+            "</b>",
+            "",
+        )
+    )
+
+    print(
+        "=" * 70
+    )
 
     telegram_send(report)
 
@@ -1980,13 +2183,6 @@ if __name__ == "__main__":
             )
         )
 
-        # IMPORTANT:
-        # No while True.
-        # No sleep.
-        # No infinite process.
-        # GitHub Actions exits here and its schedule
-        # starts the next scan later.
-
     except KeyboardInterrupt:
         print(
             "\nScanner interrupted."
@@ -1998,11 +2194,12 @@ if __name__ == "__main__":
             repr(e),
         )
 
-        # Telegram notification for unexpected errors.
         telegram_send(
             "❌ <b>NDS SCANNER ERROR</b>\n"
             f"Version: <b>{VERSION}</b>\n"
-            f"Error: <code>{str(e)[:1000]}</code>"
+            f"Error: <code>"
+            f"{str(e)[:1000]}"
+            f"</code>"
         )
 
         raise
