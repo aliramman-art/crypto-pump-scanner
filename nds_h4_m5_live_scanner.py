@@ -1,6 +1,6 @@
 # ============================================================
 # NDS H4 -> M5 LIVE SCANNER
-# VERSION 5.2.1
+# VERSION 5.3.0
 # ============================================================
 #
 # PAPER TRADING ONLY
@@ -17,6 +17,16 @@
 # - One scan cycle per GitHub Actions run
 # - NO infinite while loop
 #
+# VERSION 5.3.0 FIXES:
+# - Hook freshness is measured from CONFIRMATION time
+#   rather than raw H3/L3 pivot time.
+# - PIVOT_RIGHT confirmation delay is included.
+# - M5 candidates are checked newest -> oldest.
+# - A stale newest candidate no longer prevents a newer
+#   valid candidate from being considered.
+# - Detailed rejection reasons are printed.
+# - Signal chart includes all Hook points and 86.4% TP.
+#
 # ============================================================
 
 import os
@@ -24,7 +34,7 @@ import time
 import json
 import hashlib
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 import pandas as pd
@@ -35,7 +45,7 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "5.2.1"
+VERSION = "5.3.0"
 
 DB_FILE = "nds_h4_m5_live_v51.db"
 CHART_DIR = "nds_h4_m5_charts"
@@ -62,6 +72,15 @@ SL_TP_MULTIPLIER = 0.50
 MIN_TP_DISTANCE_PCT = 0.30
 MAX_TP_DISTANCE_PCT = 5.00
 
+# ------------------------------------------------------------
+# IMPORTANT:
+# Freshness is measured from the moment H3/L3 becomes
+# CONFIRMED, not from the raw pivot candle time.
+#
+# M5 pivot confirmation:
+# 2 candles x 5 minutes = approximately 10 minutes.
+# ------------------------------------------------------------
+
 MAX_NEW_SIGNAL_AGE_SECONDS = 20 * 60
 
 MAX_OPEN_TRADES = 3
@@ -69,6 +88,11 @@ MAX_OPEN_TRADES = 3
 CHART_CANDLES = 180
 
 REQUEST_TIMEOUT = 12
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 TELEGRAM_BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
@@ -138,7 +162,7 @@ session = requests.Session()
 
 session.headers.update(
     {
-        "User-Agent": "NDS-H4-M5-Scanner/5.2.1",
+        "User-Agent": "NDS-H4-M5-Scanner/5.3.0",
         "Accept": "application/json",
     }
 )
@@ -224,6 +248,19 @@ def normalize_timestamp(ts):
 
 def ts_to_iso(ts):
     return normalize_timestamp(ts).isoformat()
+
+
+def interval_minutes(interval):
+    mapping = {
+        "1m": 1,
+        "5m": 5,
+        "15m": 15,
+        "30m": 30,
+        "1h": 60,
+        "4h": 240,
+    }
+
+    return mapping.get(interval, 5)
 
 
 # ============================================================
@@ -382,7 +419,11 @@ def fetch_candles(symbol, interval, count):
                     h = row[2]
                     l = row[3]
                     c = row[4]
-                    v = row[5] if len(row) > 5 else 0
+                    v = (
+                        row[5]
+                        if len(row) > 5
+                        else 0
+                    )
 
                 else:
                     continue
@@ -614,6 +655,40 @@ def make_hook_id(
 
 
 # ============================================================
+# HOOK CONFIRMATION TIME
+# ============================================================
+
+def hook_confirmation_time(hook):
+    """
+    H3/L3 is only confirmed after PIVOT_RIGHT candles.
+
+    For M5:
+        2 right candles = approximately 10 minutes.
+
+    Therefore freshness must start from this confirmation
+    point, not from the raw pivot candle.
+    """
+
+    entry_time = normalize_timestamp(
+        hook["entry_time"]
+    )
+
+    minutes = (
+        PIVOT_RIGHT
+        * interval_minutes(
+            hook["timeframe"]
+        )
+    )
+
+    return (
+        entry_time
+        + pd.Timedelta(
+            minutes=minutes
+        )
+    )
+
+
+# ============================================================
 # HOOK VALIDATION
 # ============================================================
 
@@ -687,7 +762,8 @@ def calculate_hook(
 
         tp = (
             h3
-            - TP_RETRACE * (h3 - start)
+            - TP_RETRACE
+            * (h3 - start)
         )
 
         sl = (
@@ -758,7 +834,8 @@ def calculate_hook(
 
         tp = (
             l3
-            + TP_RETRACE * (start - l3)
+            + TP_RETRACE
+            * (start - l3)
         )
 
         sl = (
@@ -796,6 +873,20 @@ def calculate_hook(
         points,
     )
 
+    confirmation_time = (
+        normalize_timestamp(
+            p5["time"]
+        )
+        + pd.Timedelta(
+            minutes=(
+                PIVOT_RIGHT
+                * interval_minutes(
+                    timeframe
+                )
+            )
+        )
+    )
+
     return {
         "hook_id": hook_id,
         "symbol": symbol,
@@ -808,6 +899,7 @@ def calculate_hook(
         "entry_time": normalize_timestamp(
             p5["time"]
         ),
+        "confirmation_time": confirmation_time,
         "start_price": float(start),
         "entry_price": float(entry),
         "tp_price": float(tp),
@@ -867,7 +959,10 @@ def detect_hooks(
         hooks.append(hook)
 
     hooks.sort(
-        key=lambda x: x["entry_time"]
+        key=lambda x: (
+            x["confirmation_time"],
+            x["entry_time"],
+        )
     )
 
     return {
@@ -921,13 +1016,15 @@ def tp_already_touched(
 def hook_age_seconds(hook):
     now = utc_now()
 
-    entry_time = normalize_timestamp(
-        hook["entry_time"]
+    confirmation_time = (
+        normalize_timestamp(
+            hook["confirmation_time"]
+        )
     )
 
     return (
         now
-        - entry_time.to_pydatetime()
+        - confirmation_time.to_pydatetime()
     ).total_seconds()
 
 
@@ -1228,7 +1325,7 @@ def monitor_open_trades():
         reason = None
 
         # Conservative rule:
-        # If both SL and TP are touched in the same candle,
+        # If both SL and TP are touched in same candle,
         # assume SL happened first.
 
         if direction == "LONG":
@@ -1327,8 +1424,12 @@ def save_hook_chart(
     )
 
     fig, ax = plt.subplots(
-        figsize=(15, 8)
+        figsize=(16, 9)
     )
+
+    # --------------------------------------------------------
+    # Price
+    # --------------------------------------------------------
 
     ax.plot(
         chart_df["time"],
@@ -1358,6 +1459,10 @@ def save_hook_chart(
             "L3 ENTRY",
         ]
 
+    # --------------------------------------------------------
+    # Hook points
+    # --------------------------------------------------------
+
     for idx, p in enumerate(points):
         x = normalize_timestamp(
             p["time"]
@@ -1368,18 +1473,22 @@ def save_hook_chart(
         ax.scatter(
             [x],
             [y],
-            s=60,
+            s=75,
             zorder=5,
         )
 
-        offset = (
-            14
-            if idx % 2 == 0
-            else -20
-        )
+        if idx == 5:
+            offset = 24
+        elif idx % 2 == 0:
+            offset = 16
+        else:
+            offset = -24
 
         ax.annotate(
-            point_names[idx],
+            (
+                f"{point_names[idx]}\n"
+                f"{y:.8g}"
+            ),
             xy=(x, y),
             xytext=(0, offset),
             textcoords="offset points",
@@ -1388,9 +1497,45 @@ def save_hook_chart(
             fontweight="bold",
         )
 
-    entry = hook["entry_price"]
-    tp = hook["tp_price"]
-    sl = hook["sl_price"]
+    # --------------------------------------------------------
+    # Connect Hook points
+    # --------------------------------------------------------
+
+    hook_x = [
+        normalize_timestamp(
+            p["time"]
+        )
+        for p in points
+    ]
+
+    hook_y = [
+        float(p["price"])
+        for p in points
+    ]
+
+    ax.plot(
+        hook_x,
+        hook_y,
+        linewidth=1.5,
+        linestyle=":",
+        label="NDS HOOK",
+    )
+
+    # --------------------------------------------------------
+    # Entry / TP / SL
+    # --------------------------------------------------------
+
+    entry = float(
+        hook["entry_price"]
+    )
+
+    tp = float(
+        hook["tp_price"]
+    )
+
+    sl = float(
+        hook["sl_price"]
+    )
 
     ax.axhline(
         entry,
@@ -1402,7 +1547,7 @@ def save_hook_chart(
     ax.axhline(
         tp,
         linestyle="--",
-        linewidth=1.0,
+        linewidth=1.2,
         label=f"TP 86.4% {tp:.8g}",
     )
 
@@ -1413,13 +1558,41 @@ def save_hook_chart(
         label=f"SL {sl:.8g}",
     )
 
-    ax.set_title(
-        f"NDS {timeframe} {symbol} "
-        f"{hook['direction']} Hook"
+    # --------------------------------------------------------
+    # Confirmation marker
+    # --------------------------------------------------------
+
+    confirmation = normalize_timestamp(
+        hook["confirmation_time"]
     )
 
-    ax.set_xlabel("UTC")
-    ax.set_ylabel("Price")
+    ax.axvline(
+        confirmation,
+        linestyle=":",
+        linewidth=0.8,
+        alpha=0.7,
+        label="H3/L3 CONFIRMED",
+    )
+
+    # --------------------------------------------------------
+    # Title
+    # --------------------------------------------------------
+
+    ax.set_title(
+        f"NDS {timeframe} {symbol} "
+        f"{hook['direction']} Hook\n"
+        f"Entry={entry:.8g} | "
+        f"TP 86.4%={tp:.8g} | "
+        f"SL={sl:.8g}"
+    )
+
+    ax.set_xlabel(
+        "UTC"
+    )
+
+    ax.set_ylabel(
+        "Price"
+    )
 
     ax.grid(
         True,
@@ -1570,6 +1743,109 @@ def determine_h4_state(
 
 
 # ============================================================
+# FIND ENTRY INDEX
+# ============================================================
+
+def find_entry_index(
+    df,
+    hook,
+):
+    target_time = normalize_timestamp(
+        hook["entry_time"]
+    )
+
+    for i in range(len(df)):
+        candle_time = normalize_timestamp(
+            df.iloc[i]["time"]
+        )
+
+        if candle_time == target_time:
+            return i
+
+    return None
+
+
+# ============================================================
+# SELECT FRESH M5 HOOK
+# ============================================================
+
+def select_tradeable_hook(
+    matching_hooks,
+    symbol,
+    stats,
+):
+    if not matching_hooks:
+        return None
+
+    # Newest first.
+    candidates = sorted(
+        matching_hooks,
+        key=lambda h: (
+            h["confirmation_time"],
+            h["entry_time"],
+        ),
+        reverse=True,
+    )
+
+    for hook in candidates:
+        age = hook_age_seconds(
+            hook
+        )
+
+        print(
+            f"[CANDIDATE] {symbol} "
+            f"{hook['direction']} "
+            f"Entry={hook['entry_price']:.8g} "
+            f"Confirm="
+            f"{ts_to_iso(hook['confirmation_time'])} "
+            f"Age={age:.1f}s"
+        )
+
+        # ----------------------------------------------------
+        # Already processed?
+        # ----------------------------------------------------
+
+        if hook_exists(
+            hook["hook_id"]
+        ):
+            if trade_exists(
+                hook["hook_id"]
+            ):
+                stats["duplicate"] += 1
+
+                print(
+                    f"[REJECT] {symbol}: "
+                    f"DUPLICATE "
+                    f"hook={hook['hook_id'][:10]}"
+                )
+
+                continue
+
+        # ----------------------------------------------------
+        # Freshness
+        # ----------------------------------------------------
+
+        if not is_fresh_hook(
+            hook
+        ):
+            stats["m5_stale"] += 1
+
+            print(
+                f"[REJECT] {symbol}: "
+                f"STALE "
+                f"age={age:.1f}s "
+                f"limit="
+                f"{MAX_NEW_SIGNAL_AGE_SECONDS}s"
+            )
+
+            continue
+
+        return hook
+
+    return None
+
+
+# ============================================================
 # PROCESS SYMBOL
 # ============================================================
 
@@ -1593,6 +1869,10 @@ def process_symbol(
         )
 
         return
+
+    # --------------------------------------------------------
+    # Select latest H4 direction
+    # --------------------------------------------------------
 
     if (
         h4_short is not None
@@ -1650,7 +1930,8 @@ def process_symbol(
 
         print(
             f"[M5] {symbol}: "
-            f"SHORT DATA ({len(m5)})"
+            f"SHORT DATA "
+            f"({len(m5)})"
         )
 
         return
@@ -1686,71 +1967,53 @@ def process_symbol(
 
         return
 
-    hook = matching_hooks[-1]
-
-    # --------------------------------------------------------
-    # Check whether this exact hook was already processed.
-    # --------------------------------------------------------
-
-    already_seen = hook_exists(
-        hook["hook_id"]
-    )
-
-    if already_seen:
-        if trade_exists(
-            hook["hook_id"]
-        ):
-            stats["duplicate"] += 1
-
-            print(
-                f"[SKIP] {symbol}: "
-                f"DUPLICATE SIGNAL"
-            )
-
-            return
-
-    # Save Hook after duplicate check.
-    save_hook(hook)
-
-    # --------------------------------------------------------
-    # FRESHNESS
-    # --------------------------------------------------------
-
-    age = hook_age_seconds(hook)
-
     print(
         f"[M5] {symbol}: "
-        f"{allowed_direction} HOOK "
-        f"age={age:.1f}s"
+        f"{len(matching_hooks)} "
+        f"MATCHING {allowed_direction} "
+        f"HOOK(S)"
     )
 
-    if not is_fresh_hook(hook):
-        stats["m5_stale"] += 1
+    # --------------------------------------------------------
+    # Select a fresh, unprocessed Hook.
+    # --------------------------------------------------------
 
+    hook = select_tradeable_hook(
+        matching_hooks,
+        symbol,
+        stats,
+    )
+
+    if hook is None:
         print(
-            f"[SKIP] {symbol}: "
-            f"STALE HOOK "
-            f"age={age:.1f}s"
+            f"[M5] {symbol}: "
+            f"NO TRADEABLE FRESH HOOK"
         )
 
         return
 
     # --------------------------------------------------------
-    # OPEN TRADE PER SYMBOL
+    # Save Hook
+    # --------------------------------------------------------
+
+    save_hook(hook)
+
+    # --------------------------------------------------------
+    # Open trade per symbol
     # --------------------------------------------------------
 
     if has_open_trade(symbol):
         stats["open_trade_blocked"] += 1
 
         print(
-            f"[SKIP] {symbol}: "
+            f"[REJECT] {symbol}: "
             f"OPEN TRADE EXISTS"
         )
 
         return
 
     # --------------------------------------------------------
-    # MAX OPEN TRADES
+    # Max open trades
     # --------------------------------------------------------
 
     current_open = len(
@@ -1761,33 +2024,25 @@ def process_symbol(
         stats["max_open_blocked"] += 1
 
         print(
-            f"[SKIP] {symbol}: "
-            f"MAX OPEN TRADES"
+            f"[REJECT] {symbol}: "
+            f"MAX OPEN TRADES "
+            f"{current_open}/"
+            f"{MAX_OPEN_TRADES}"
         )
 
         return
 
     # --------------------------------------------------------
-    # ENTRY INDEX
+    # Entry index
     # --------------------------------------------------------
 
-    entry_idx = None
-
-    target_time = normalize_timestamp(
-        hook["entry_time"]
+    entry_idx = find_entry_index(
+        m5,
+        hook,
     )
 
-    for i in range(len(m5)):
-        candle_time = normalize_timestamp(
-            m5.iloc[i]["time"]
-        )
-
-        if candle_time == target_time:
-            entry_idx = i
-            break
-
     # --------------------------------------------------------
-    # TP ALREADY TOUCHED
+    # TP already touched
     # --------------------------------------------------------
 
     if tp_already_touched(
@@ -1799,14 +2054,15 @@ def process_symbol(
         stats["tp_already_touched"] += 1
 
         print(
-            f"[SKIP] {symbol}: "
-            f"TP ALREADY TOUCHED"
+            f"[REJECT] {symbol}: "
+            f"TP ALREADY TOUCHED "
+            f"after Entry"
         )
 
         return
 
     # --------------------------------------------------------
-    # CREATE PAPER TRADE
+    # Create paper trade
     # --------------------------------------------------------
 
     created = create_paper_trade(
@@ -1817,7 +2073,7 @@ def process_symbol(
         stats["duplicate"] += 1
 
         print(
-            f"[SKIP] {symbol}: "
+            f"[REJECT] {symbol}: "
             f"TRADE ALREADY EXISTS"
         )
 
@@ -1831,6 +2087,18 @@ def process_symbol(
         "🔴"
         if direction == "SHORT"
         else "🟢"
+    )
+
+    entry = float(
+        hook["entry_price"]
+    )
+
+    tp = float(
+        hook["tp_price"]
+    )
+
+    sl = float(
+        hook["sl_price"]
     )
 
     chart_name = (
@@ -1857,20 +2125,17 @@ def process_symbol(
         f"<b>NDS M5 SIGNAL</b>\n"
         f"Symbol: <b>{symbol}</b>\n"
         f"Direction: <b>{direction}</b>\n"
-        f"Entry: <b>"
-        f"{hook['entry_price']:.8g}"
-        f"</b>\n"
-        f"SL: <b>"
-        f"{hook['sl_price']:.8g}"
-        f"</b>\n"
-        f"TP 86.4%: <b>"
-        f"{hook['tp_price']:.8g}"
-        f"</b>\n"
+        f"Entry: <b>{entry:.8g}</b>\n"
+        f"SL: <b>{sl:.8g}</b>\n"
+        f"TP 86.4%: <b>{tp:.8g}</b>\n"
         f"TP Distance: <b>"
         f"{hook['tp_distance_pct']:.2f}%"
         f"</b>\n"
         f"H4 Filter: <b>"
         f"{allowed_direction}"
+        f"</b>\n"
+        f"Hook Confirmed: <b>"
+        f"{ts_to_iso(hook['confirmation_time'])}"
         f"</b>\n"
         f"Mode: <b>PAPER</b>"
     )
@@ -1885,19 +2150,18 @@ def process_symbol(
             f"NDS M5 {direction} | "
             f"{symbol} | "
             f"Entry "
-            f"{hook['entry_price']:.8g}"
+            f"{entry:.8g} | "
+            f"TP 86.4% "
+            f"{tp:.8g}"
         ),
     )
 
     print(
         f"[SIGNAL] {symbol} "
         f"{direction} "
-        f"Entry="
-        f"{hook['entry_price']:.8g} "
-        f"TP="
-        f"{hook['tp_price']:.8g} "
-        f"SL="
-        f"{hook['sl_price']:.8g}"
+        f"Entry={entry:.8g} "
+        f"TP={tp:.8g} "
+        f"SL={sl:.8g}"
     )
 
 
@@ -1997,18 +2261,27 @@ def run_scan():
     }
 
     print("=" * 70)
+
     print(
         "NDS H4 -> M5 LIVE SCANNER"
     )
+
     print(
         f"VERSION {VERSION}"
     )
+
     print(
         "PAPER ONLY"
     )
+
     print(
         "ONE SCAN CYCLE"
     )
+
+    print(
+        "FRESHNESS = H3/L3 CONFIRMATION TIME"
+    )
+
     print("=" * 70)
 
     # --------------------------------------------------------
