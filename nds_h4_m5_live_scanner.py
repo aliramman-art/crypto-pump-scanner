@@ -1,6 +1,6 @@
 # ============================================================
 # NDS H4 -> M5 LIVE SCANNER
-# VERSION 5.3.2
+# VERSION 5.3.3
 # ============================================================
 #
 # PAPER TRADING ONLY
@@ -23,14 +23,13 @@
 # TP:
 #   86.4% retracement
 #
-# IMPORTANT:
-#   86.4% is NOT the trade start.
-#   Entry is only at confirmed H3/L3.
-#
 # SELECTION:
-#   Among valid M5 hooks matching H4 direction,
-#   select the hook with the greatest percentage
-#   distance from ENTRY to TP 86.4%.
+#   1. Remove duplicate hooks.
+#   2. Remove hooks whose TP was already touched.
+#   3. From remaining hooks, select the hook with
+#      the greatest percentage distance from ENTRY
+#      to TP 86.4%.
+#   4. STALE does NOT block the selected hook.
 #
 # ============================================================
 
@@ -49,14 +48,13 @@ import matplotlib.pyplot as plt
 # CONFIG
 # ============================================================
 
-VERSION = "5.3.2"
+VERSION = "5.3.3"
 
 DB_FILE = "nds_h4_m5_live_v51.db"
 CHART_DIR = "nds_h4_m5_charts"
 
 KRAKEN_BASE = "https://futures.kraken.com/api/charts/v1/trade"
 
-# Kraken Futures chart resolutions
 H4_TIMEFRAME = "4h"
 M5_TIMEFRAME = "5m"
 
@@ -71,8 +69,6 @@ PIVOT_RIGHT = 2
 H4_MIN_SWING_PCT = 0.20
 M5_MIN_SWING_PCT = 0.07
 
-# Kept for diagnostic information.
-# STALE NO LONGER BLOCKS THE SELECTED HOOK.
 MAX_NEW_SIGNAL_AGE_SECONDS = 20 * 60
 
 MAX_OPEN_TRADES = 3
@@ -289,7 +285,10 @@ def interval_minutes(timeframe):
         "1w": 10080,
     }
 
-    return mapping.get(timeframe, 1)
+    return mapping.get(
+        timeframe,
+        1,
+    )
 
 
 def hook_confirmation_time(
@@ -316,7 +315,10 @@ def hook_age_seconds(hook):
 
     return max(
         0,
-        now_ts() - int(confirmation_time),
+        now_ts()
+        - int(
+            confirmation_time
+        ),
     )
 
 
@@ -380,7 +382,9 @@ def telegram_photo(
     if not telegram_enabled():
         return False
 
-    if not os.path.exists(photo_path):
+    if not os.path.exists(
+        photo_path
+    ):
         return False
 
     url = (
@@ -504,11 +508,15 @@ def fetch_candles(
 
             return None
 
-        rows = data.get("candles")
+        rows = data.get(
+            "candles"
+        )
 
         if rows is None:
 
-            rows = data.get("data")
+            rows = data.get(
+                "data"
+            )
 
         if (
             rows is None
@@ -518,7 +526,9 @@ def fetch_candles(
             )
         ):
 
-            rows = data["result"].get(
+            rows = data[
+                "result"
+            ].get(
                 "candles"
             )
 
@@ -781,7 +791,9 @@ def find_pivots(df):
     pivots.sort(
         key=lambda x: (
             x["time"],
-            0 if x["type"] == "H" else 1,
+            0
+            if x["type"] == "H"
+            else 1,
         )
     )
 
@@ -818,13 +830,19 @@ def build_ordered_pivots(pivots):
 
         if p["type"] == "H":
 
-            if p["price"] >= last["price"]:
+            if (
+                p["price"]
+                >= last["price"]
+            ):
 
                 cleaned[-1] = dict(p)
 
         else:
 
-            if p["price"] <= last["price"]:
+            if (
+                p["price"]
+                <= last["price"]
+            ):
 
                 cleaned[-1] = dict(p)
 
@@ -941,7 +959,6 @@ def calculate_hook(
 
         entry = h3["price"]
 
-        # 86.4% retracement
         tp = (
             entry
             - 0.864
@@ -951,7 +968,6 @@ def calculate_hook(
             )
         )
 
-        # Existing SL logic preserved
         sl = (
             entry
             + 0.50
@@ -1103,7 +1119,6 @@ def calculate_hook(
 
         entry = l3["price"]
 
-        # 86.4% retracement
         tp = (
             entry
             + 0.864
@@ -1113,7 +1128,6 @@ def calculate_hook(
             )
         )
 
-        # Existing SL logic preserved
         sl = (
             entry
             - 0.50
@@ -1210,7 +1224,9 @@ def detect_hooks(
     timeframe,
 ):
 
-    pivots = find_pivots(df)
+    pivots = find_pivots(
+        df
+    )
 
     cleaned = build_ordered_pivots(
         pivots
@@ -1247,7 +1263,6 @@ def detect_hooks(
                 hook
             )
 
-    # Newest first
     hooks.sort(
         key=lambda x: (
             x["confirmation_time"],
@@ -1301,8 +1316,6 @@ def get_h4_direction(symbol):
 
         return None, None
 
-    # IMPORTANT:
-    # detect_hooks() sorts newest first.
     latest_short = (
         short_hooks[0]
         if short_hooks
@@ -1441,7 +1454,9 @@ def has_open_trade(symbol):
           AND status = 'OPEN'
         LIMIT 1
         """,
-        (symbol,),
+        (
+            symbol,
+        ),
     ).fetchone()
 
     conn.close()
@@ -1685,20 +1700,22 @@ def tp_already_touched(
 
 
 # ============================================================
-# SELECT HOOK
+# SELECT TRADEABLE HOOK
 # ============================================================
 
 def select_tradeable_hook(
     symbol,
     hooks,
+    df,
 ):
     """
-    Select the valid M5 hook with the greatest
-    percentage distance from ENTRY to TP 86.4%.
+    Selection order:
 
-    STALE DOES NOT BLOCK SELECTION.
-
-    Duplicate hooks remain blocked.
+    1. Ignore duplicate hooks.
+    2. Ignore hooks whose TP was already touched.
+    3. Calculate distance from ENTRY to TP 86.4%.
+    4. Stale hooks remain eligible.
+    5. Select the greatest distance.
     """
 
     candidates = []
@@ -1725,6 +1742,25 @@ def select_tradeable_hook(
 
             continue
 
+        # ----------------------------------------------------
+        # IMPORTANT:
+        # Remove already-completed hooks BEFORE selecting
+        # the maximum-distance hook.
+        # ----------------------------------------------------
+
+        if tp_already_touched(
+            df,
+            hook,
+        ):
+
+            DIAG["tp_touched"] += 1
+
+            continue
+
+        # ----------------------------------------------------
+        # Calculate Entry -> TP 86.4% distance
+        # ----------------------------------------------------
+
         entry = float(
             hook["entry_price"]
         )
@@ -1736,29 +1772,43 @@ def select_tradeable_hook(
         if entry <= 0:
             continue
 
-        # ----------------------------------------------------
-        # Entry -> TP 86.4% distance
-        # ----------------------------------------------------
-
         distance_pct = (
             abs(entry - tp)
             / entry
             * 100.0
         )
 
-        hook["_tp_distance_pct"] = (
-            distance_pct
-        )
+        hook[
+            "_tp_distance_pct"
+        ] = distance_pct
+
+        # ----------------------------------------------------
+        # STALE IS INFORMATIONAL ONLY.
+        # It does NOT block entry.
+        # ----------------------------------------------------
+
+        if (
+            hook_age_seconds(hook)
+            >
+            MAX_NEW_SIGNAL_AGE_SECONDS
+        ):
+
+            DIAG["stale"] += 1
 
         candidates.append(
             hook
         )
 
+    # --------------------------------------------------------
+    # No eligible Hook
+    # --------------------------------------------------------
+
     if not candidates:
+
         return None
 
     # --------------------------------------------------------
-    # Greatest distance first
+    # MAXIMUM DISTANCE TO TP 86.4%
     # --------------------------------------------------------
 
     candidates.sort(
@@ -1767,23 +1817,7 @@ def select_tradeable_hook(
         reverse=True,
     )
 
-    selected = candidates[0]
-
-    # --------------------------------------------------------
-    # Stale is informational only
-    # --------------------------------------------------------
-
-    if (
-        hook_age_seconds(
-            selected
-        )
-        >
-        MAX_NEW_SIGNAL_AGE_SECONDS
-    ):
-
-        DIAG["stale"] += 1
-
-    return selected
+    return candidates[0]
 
 
 # ============================================================
@@ -1854,7 +1888,7 @@ def monitor_open_trades():
                 hit_tp = True
 
         # ----------------------------------------------------
-        # SL has priority if both occur in one candle.
+        # SL priority when both are hit on same candle.
         # ----------------------------------------------------
 
         if hit_sl:
@@ -2072,17 +2106,15 @@ def save_hook_chart(
             zorder=5,
         )
 
-        if label in (
-            "START",
-            "H1",
-            "H2",
-        ):
-
-            offset = 14
-
-        else:
-
-            offset = -20
+        offset = (
+            14
+            if label in (
+                "START",
+                "H1",
+                "H2",
+            )
+            else -20
+        )
 
         ax.annotate(
             (
@@ -2480,31 +2512,19 @@ def process_symbol(symbol):
 
         # ----------------------------------------------------
         # SELECT MAX DISTANCE TO 86.4%
+        #
+        # TP already touched is filtered INSIDE this function.
         # ----------------------------------------------------
 
         hook = (
             select_tradeable_hook(
                 symbol,
                 hooks,
+                df,
             )
         )
 
         if hook is None:
-            return
-
-        # ----------------------------------------------------
-        # TP ALREADY TOUCHED
-        # ----------------------------------------------------
-
-        if tp_already_touched(
-            df,
-            hook,
-        ):
-
-            DIAG[
-                "tp_touched"
-            ] += 1
-
             return
 
         # ----------------------------------------------------
