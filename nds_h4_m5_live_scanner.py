@@ -18,7 +18,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-VERSION = "5.4.3"
+VERSION = "5.4.4"
 REAL_TRADING = False
 
 KRAKEN_FUTURES_URL = "https://futures.kraken.com/derivatives/api/v3"
@@ -40,7 +40,7 @@ MAX_OPEN_TRADES = 3
 REQUEST_TIMEOUT = 20
 SCAN_SLEEP_SECONDS = 0.25
 CHART_CANDLES = 240
-DB_FILE = "nds_h4_m5_v543.db"
+DB_FILE = "nds_h4_m5_v544.db"
 CHART_DIR = "nds_h4_m5_charts"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or ""
@@ -465,43 +465,61 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="hook"):
         return None
 
 
-def send_detected_m5_hook_charts(symbol, df, direction):
-    """Send every newly detected, confirmed, recent M5 hook matching H4 direction,
-    regardless of whether it becomes a trade signal."""
+def send_detected_m5_hook_charts(symbol, df, direction=None):
+    """Send charts for every newly detected, confirmed, recent M5 hook.
+    If direction is None, chart both LONG and SHORT hooks regardless of H4.
+    Chart reporting is independent of trade eligibility.
+    """
     hooks = detect_hooks(df, M5_INTERVAL_MINUTES)
     now_ts = utc_now_ts()
     sent = 0
+
     for hook in hooks:
-        if hook["direction"] != direction:
+        if direction is not None and hook["direction"] != direction:
             continue
-        if not hook_is_confirmed(hook, now_ts) or not hook_is_recent(hook, now_ts):
+        if not hook_is_confirmed(hook, now_ts):
             continue
+        if not hook_is_recent(hook, now_ts):
+            continue
+
         key = hook_id(symbol, hook)
         if notification_exists(key):
             continue
+
         sl = calculate_sl(df, hook)
-        chart_path = create_hook_chart(symbol, df, hook, sl, "detected_hook")
+        chart_path = create_hook_chart(
+            symbol, df, hook, sl, "detected_hook"
+        )
         if not chart_path:
             DIAG["hook_chart_errors"] += 1
             continue
+
         caption = (
-            f"🔎 <b>NDS M5 HOOK DETECTED</b>\n"
-            f"<b>{symbol}</b>\n"
-            f"Direction: <b>{hook['direction']}</b>\n"
-            f"START: {fmt_price(hook['start']['price'])}\n"
-            f"Final: {fmt_price(hook['final']['price'])}\n"
-            f"Entry reference: {fmt_price(hook['entry'])}\n"
-            f"TP 86.4%: <b>{fmt_price(hook['tp'])}</b>\n"
-            f"SL reference: {fmt_price(sl)}\n"
-            f"Hook range: {hook['range_pct']:.2f}%\n"
-            f"Confirmed: {fmt_ts(hook['confirmation_time'])}\n"
-            f"<b>Chart only; not necessarily a trade signal.</b>\n"
+            f"🔎 <b>NDS M5 HOOK DETECTED</b>\\n"
+            f"<b>{symbol}</b>\\n"
+            f"Direction: <b>{hook['direction']}</b>\\n"
+            f"START: {fmt_price(hook['start']['price'])}\\n"
+            f"Final: {fmt_price(hook['final']['price'])}\\n"
+            f"Entry reference: {fmt_price(hook['entry'])}\\n"
+            f"TP 86.4%: <b>{fmt_price(hook['tp'])}</b>\\n"
+            f"SL reference: {fmt_price(sl)}\\n"
+            f"Hook range: {hook['range_pct']:.2f}%\\n"
+            f"Confirmed: {fmt_ts(hook['confirmation_time'])}\\n"
+            f"<b>Chart only; not necessarily a trade signal.</b>\\n"
             f"<b>PAPER TRADING ONLY</b>"
         )
+
         if telegram_send_photo(chart_path, caption):
             mark_notification_sent(key, chart_path)
             DIAG["hook_charts_sent"] += 1
             sent += 1
+        else:
+            DIAG["hook_chart_errors"] += 1
+            DIAG["api_errors"].append(
+                f"Hook chart not sent: {symbol} {hook['direction']} "
+                f"(check Telegram token/chat ID, bot permissions, and photo API response)"
+            )
+
     return sent
 
 
@@ -559,26 +577,43 @@ def build_signal_message(symbol, hook, sl):
 
 
 def process_symbol(symbol):
+    # H4 direction is used ONLY to authorize paper-trade signals.
+    # M5 hook discovery and chart reporting run independently.
     direction = get_h4_direction(symbol)
-    if direction is None:
-        DIAG["h4_filtered"] += 1
-        return
+
     DIAG["m5_requests"] += 1
     df = get_candles(symbol, M5_INTERVAL, M5_CANDLES)
+
     if df is None:
         DIAG["m5_data_error"] += 1
+        if direction is None:
+            DIAG["h4_filtered"] += 1
         return
     if df.empty:
         DIAG["m5_empty"] += 1
+        if direction is None:
+            DIAG["h4_filtered"] += 1
         return
     if len(df) < 100:
         DIAG["m5_short"] += 1
+        if direction is None:
+            DIAG["h4_filtered"] += 1
         return
+
     DIAG["m5_data_ok"] += 1
+
     hooks = detect_hooks(df, M5_INTERVAL_MINUTES)
     DIAG["m5_hooks"] += len(hooks)
-    # IMPORTANT: chart notifications are independent from trade signal filtering.
-    send_detected_m5_hook_charts(symbol, df, direction)
+
+    # Report confirmed, recent M5 hooks even if H4 has no valid direction.
+    # Pass None to disable H4 direction matching for chart-only notifications.
+    send_detected_m5_hook_charts(symbol, df, direction=None)
+
+    # Without a valid H4 direction, do not create a trade signal.
+    if direction is None:
+        DIAG["h4_filtered"] += 1
+        return
+
     now_ts = utc_now_ts()
     candidates = []
     for hook in hooks:
@@ -591,19 +626,26 @@ def process_symbol(symbol):
         if tp_already_touched(df, hook):
             continue
         candidates.append(hook)
+
     DIAG["m5_valid_hooks"] += len(candidates)
     if not candidates:
         return
-    candidates.sort(key=lambda h: (h["confirmation_time"], h["final"]["time"]), reverse=True)
+
+    candidates.sort(
+        key=lambda h: (h["confirmation_time"], h["final"]["time"]),
+        reverse=True
+    )
     hook = candidates[0]
     sl = calculate_sl(df, hook)
     if sl is None:
         return
+
     entry, tp, sl = float(hook["entry"]), float(hook["tp"]), float(sl)
     if direction == "SHORT" and not (sl > entry > tp):
         return
     if direction == "LONG" and not (sl < entry < tp):
         return
+
     key = hook_id(symbol, hook)
     if hook_exists(key) or trade_exists(key):
         DIAG["duplicate_signals"] += 1
@@ -611,13 +653,17 @@ def process_symbol(symbol):
     if open_trade_count() >= MAX_OPEN_TRADES:
         DIAG["max_open"] += 1
         return
+
     chart_path = create_hook_chart(symbol, df, hook, sl, "signal")
     save_hook(symbol, hook, sl, chart_path)
     save_trade(key, symbol, hook, sl, chart_path)
     DIAG["signals"] += 1
     telegram_send(build_signal_message(symbol, hook, sl))
     if chart_path:
-        telegram_send_photo(chart_path, f"NDS {direction} SIGNAL | {symbol} | Paper Trading")
+        telegram_send_photo(
+            chart_path,
+            f"NDS {direction} SIGNAL | {symbol} | Paper Trading"
+        )
 
 
 def get_open_trades():
@@ -746,6 +792,7 @@ def main():
     try:
         init_db()
         print(f"NDS H4 -> M5 Scanner {VERSION}")
+        print("M5 chart scan runs even when no H4 direction is available.")
         print("PAPER TRADING ONLY - NO REAL ORDERS")
         print(f"H4 pivot confirmation: {H4_INTERVAL_MINUTES}m x {PIVOT_RIGHT}")
         print(f"M5 pivot confirmation: {M5_INTERVAL_MINUTES}m x {PIVOT_RIGHT}")
