@@ -1,6 +1,6 @@
 # ============================================================
 # NDS H4 -> M5 LIVE SCANNER
-# VERSION 5.4.3
+# VERSION 5.4.5
 # PAPER TRADING ONLY - NO REAL ORDERS
 # H4 direction filter -> M5 hook detection
 # Sends charts for confirmed M5 hooks even when no trade signal
@@ -18,7 +18,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-VERSION = "5.4.4"
+VERSION = "5.4.5"
 REAL_TRADING = False
 
 KRAKEN_FUTURES_URL = "https://futures.kraken.com/derivatives/api/v3"
@@ -40,7 +40,7 @@ MAX_OPEN_TRADES = 3
 REQUEST_TIMEOUT = 20
 SCAN_SLEEP_SECONDS = 0.25
 CHART_CANDLES = 240
-DB_FILE = "nds_h4_m5_v544.db"
+DB_FILE = "nds_h4_m5_v545.db"
 CHART_DIR = "nds_h4_m5_charts"
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or ""
@@ -61,6 +61,7 @@ DIAG = {
     "api_errors": [],
 }
 H4_DIRECTION = {}
+H4_DATA = {}
 START_TIME = time.time()
 
 
@@ -242,6 +243,9 @@ def detect_hooks(df, interval_minutes):
             start, h1, l1, h2, l2, h3 = p
             if not (h2["price"] > h1["price"] and l2["price"] < l1["price"] and h3["price"] > h2["price"]):
                 continue
+            # Positive/SHORT hook START must be the lowest point of the whole hook.
+            if not (start["price"] < l1["price"] and start["price"] < l2["price"]):
+                continue
             rng = h3["price"] - start["price"]
             if rng <= 0 or start["price"] <= 0:
                 continue
@@ -257,6 +261,9 @@ def detect_hooks(df, interval_minutes):
         if [x["type"] for x in p] == ["H", "L", "H", "L", "H", "L"]:
             start, l1, h1, l2, h2, l3 = p
             if not (l2["price"] < l1["price"] and h2["price"] > h1["price"] and l3["price"] < l2["price"]):
+                continue
+            # Negative/LONG hook START must be the highest point of the whole hook.
+            if not (start["price"] > h1["price"] and start["price"] > h2["price"]):
                 continue
             rng = start["price"] - l3["price"]
             if rng <= 0 or start["price"] <= 0:
@@ -411,14 +418,14 @@ def tp_already_touched(df, hook):
     return bool((future["high"] >= hook["tp"]).any())
 
 
-def create_hook_chart(symbol, df, hook, sl, path_prefix="hook"):
+def create_hook_chart(symbol, df, hook, sl, path_prefix="hook", timeframe="M5"):
     try:
         chart_df = df.tail(CHART_CANDLES).copy()
         if chart_df.empty:
             return None
         fig, ax = plt.subplots(figsize=(15, 8))
         x = pd.to_datetime(chart_df["time"], unit="s", utc=True)
-        ax.plot(x, chart_df["close"], linewidth=1.0, label="M5 Close", color="dimgray")
+        ax.plot(x, chart_df["close"], linewidth=1.0, label=f"{timeframe} Close", color="dimgray")
         if hook["direction"] == "SHORT":
             points = [hook["start"], hook["h1"], hook["l1"], hook["h2"], hook["l2"], hook["h3"]]
             labels = ["START", "H1", "L1", "H2", "L2", "H3"]
@@ -444,7 +451,7 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="hook"):
                       label=f"SL {fmt_price(sl)}", color="crimson")
         confirmation_dt = datetime.fromtimestamp(hook["confirmation_time"], tz=timezone.utc)
         ax.axvline(confirmation_dt, linestyle=":", linewidth=1.2, label="CONFIRMED", color="purple")
-        ax.set_title(f"NDS H4 → M5 | {symbol} | {hook['direction']} | CONFIRMED HOOK")
+        ax.set_title(f"NDS {timeframe} | {symbol} | {hook['direction']} | CONFIRMED HOOK")
         ax.set_xlabel("Time UTC")
         ax.set_ylabel("Price")
         ax.grid(alpha=0.25)
@@ -536,6 +543,7 @@ def get_h4_direction(symbol):
         DIAG["h4_short"] += 1
         return None
     DIAG["h4_data_ok"] += 1
+    H4_DATA[symbol] = df.copy()
     highs, lows = find_pivots(df)
     DIAG["h4_pivots"] += len(highs) + len(lows)
     hooks = detect_hooks(df, H4_INTERVAL_MINUTES)
@@ -605,10 +613,7 @@ def process_symbol(symbol):
     hooks = detect_hooks(df, M5_INTERVAL_MINUTES)
     DIAG["m5_hooks"] += len(hooks)
 
-    # Report confirmed, recent M5 hooks even if H4 has no valid direction.
-    # Pass None to disable H4 direction matching for chart-only notifications.
-    send_detected_m5_hook_charts(symbol, df, direction=None)
-
+    # Only signals that pass the H4 direction filter and M5 validation are charted.
     # Without a valid H4 direction, do not create a trade signal.
     if direction is None:
         DIAG["h4_filtered"] += 1
@@ -654,7 +659,8 @@ def process_symbol(symbol):
         DIAG["max_open"] += 1
         return
 
-    chart_path = create_hook_chart(symbol, df, hook, sl, "signal")
+    # M5 signal chart plus the corresponding H4 direction-hook chart.
+    chart_path = create_hook_chart(symbol, df, hook, sl, "signal_m5", timeframe="M5")
     save_hook(symbol, hook, sl, chart_path)
     save_trade(key, symbol, hook, sl, chart_path)
     DIAG["signals"] += 1
@@ -662,8 +668,23 @@ def process_symbol(symbol):
     if chart_path:
         telegram_send_photo(
             chart_path,
-            f"NDS {direction} SIGNAL | {symbol} | Paper Trading"
+            f"📍 <b>NDS {direction} SIGNAL | M5</b>\n<b>{symbol}</b>\nEntry: {fmt_price(hook['entry'])}\nTP 86.4%: {fmt_price(hook['tp'])}\nSL: {fmt_price(sl)}\nPAPER TRADING ONLY"
         )
+
+    h4_info = H4_DIRECTION.get(symbol)
+    h4_df = H4_DATA.get(symbol)
+    if h4_info and h4_df is not None:
+        h4_hook = h4_info.get("hook")
+        h4_sl = calculate_sl(h4_df, h4_hook) if h4_hook else None
+        if h4_hook:
+            h4_chart_path = create_hook_chart(
+                symbol, h4_df, h4_hook, h4_sl, "signal_h4", timeframe="H4"
+            )
+            if h4_chart_path:
+                telegram_send_photo(
+                    h4_chart_path,
+                    f"🧭 <b>H4 DIRECTION CONFIRMATION</b>\n<b>{symbol}</b>\nDirection: <b>{direction}</b>\nThis H4 hook authorized the M5 signal.\nPAPER TRADING ONLY"
+                )
 
 
 def get_open_trades():
@@ -792,7 +813,7 @@ def main():
     try:
         init_db()
         print(f"NDS H4 -> M5 Scanner {VERSION}")
-        print("M5 chart scan runs even when no H4 direction is available.")
+        print("Charts are sent only for M5 signals approved by H4; both H4 and M5 charts are sent.")
         print("PAPER TRADING ONLY - NO REAL ORDERS")
         print(f"H4 pivot confirmation: {H4_INTERVAL_MINUTES}m x {PIVOT_RIGHT}")
         print(f"M5 pivot confirmation: {M5_INTERVAL_MINUTES}m x {PIVOT_RIGHT}")
