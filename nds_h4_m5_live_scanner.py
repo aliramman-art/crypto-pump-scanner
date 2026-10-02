@@ -1,6 +1,6 @@
 # ============================================================
 # NDS H4 -> M5 LIVE SCANNER
-# VERSION 5.4.5
+# VERSION 5.6.0
 # PAPER TRADING ONLY - NO REAL ORDERS
 # H4 direction filter -> M5 hook detection
 # Sends charts for confirmed M5 hooks even when no trade signal
@@ -18,7 +18,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-VERSION = "5.5.0"
+VERSION = "5.6.0"
 REAL_TRADING = False
 
 KRAKEN_FUTURES_URL = "https://futures.kraken.com/derivatives/api/v3"
@@ -35,6 +35,7 @@ PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
 NDS_RETRACE = 0.864
 M5_MIN_HOOK_RANGE_PCT = 0.20
+H4_SL_BUFFER_PCT = 0.15
 H4_MAX_HOOK_AGE_SECONDS = 24 * 60 * 60
 M5_MAX_HOOK_AGE_SECONDS = 6 * 60 * 60
 MAX_OPEN_TRADES = 3
@@ -405,38 +406,52 @@ def save_trade(key, symbol, hook, sl, chart_path=None):
     conn.close()
 
 
-def calculate_sl(df, hook):
-    """Find the nearest valid protective swing before the hook START.
+def calculate_h4_sl(h4_df, hook):
+    """Calculate the protective SL from the nearest valid H4 HA pivot.
 
-    SHORT: use the most recent pre-START pivot high that is ABOVE entry.
-    LONG:  use the most recent pre-START pivot low that is BELOW entry.
+    LONG: nearest H4 pivot low below M5 entry, then a small buffer below it.
+    SHORT: mirrored logic: nearest H4 pivot high above M5 entry, then a small
+    buffer above it.
 
-    The pivot immediately inside the hook (H2/L2) is deliberately excluded.
-    We keep walking backwards through earlier valid pivots until one satisfies
-    the required protective-side geometry. This prevents a perfectly valid hook
-    from being rejected merely because the latest old swing was not high/low
-    enough to protect the H3/L3 entry.
+    H4 pivots are generated from Heikin Ashi candles, exactly like the H4
+    direction/hook nodes. The SL is therefore structurally independent from
+    the M5 hook while remaining on the protective side of the entry.
     """
-    highs, lows = find_pivots(df)
-    start_time = float(hook["start"]["time"])
-    entry = float(hook["entry"])
+    if h4_df is None or h4_df.empty or hook is None:
+        return None
 
-    if hook["direction"] == "SHORT":
+    try:
+        ha_df = heikin_ashi_ohlc(h4_df)
+        highs, lows = find_pivots(ha_df)
+        entry = float(hook["entry"])
+
+        signal_time = float(hook.get("confirmation_time", hook["final"]["time"]))
+
+        if hook["direction"] == "LONG":
+            candidates = [
+                x for x in lows
+                if float(x["price"]) < entry
+                and float(x["time"]) <= signal_time
+            ]
+            if not candidates:
+                return None
+            # "Nearest valid floor" = closest price below the entry.
+            pivot = min(candidates, key=lambda x: entry - float(x["price"]))
+            return float(pivot["price"]) * (1.0 - H4_SL_BUFFER_PCT / 100.0)
+
         candidates = [
             x for x in highs
-            if float(x["time"]) < start_time
-            and float(x["price"]) > entry
+            if float(x["price"]) > entry
+            and float(x["time"]) <= signal_time
         ]
-        candidates.sort(key=lambda x: x["time"], reverse=True)
-        return float(candidates[0]["price"]) if candidates else None
-
-    candidates = [
-        x for x in lows
-        if float(x["time"]) < start_time
-        and float(x["price"]) < entry
-    ]
-    candidates.sort(key=lambda x: x["time"], reverse=True)
-    return float(candidates[0]["price"]) if candidates else None
+        if not candidates:
+            return None
+        # Mirrored protective logic for SHORT.
+        pivot = min(candidates, key=lambda x: float(x["price"]) - entry)
+        return float(pivot["price"]) * (1.0 + H4_SL_BUFFER_PCT / 100.0)
+    except Exception as e:
+        DIAG["api_errors"].append(f"H4 SL: {str(e)[:180]}")
+        return None
 
 
 def tp_already_touched(df, hook):
@@ -449,9 +464,7 @@ def tp_already_touched(df, hook):
 
 
 def calculate_heikin_ashi(df):
-    """Calculate Heikin Ashi from real Kraken OHLC.
-    NDS logic never uses these HA values; HA is display-only.
-    """
+    """Calculate standard Heikin Ashi candles from real Kraken OHLC."""
     ha = (
         df[["time", "open", "high", "low", "close"]]
         .copy()
@@ -459,39 +472,36 @@ def calculate_heikin_ashi(df):
     )
 
     ha["ha_close"] = (
-        ha["open"]
-        + ha["high"]
-        + ha["low"]
-        + ha["close"]
+        ha["open"] + ha["high"] + ha["low"] + ha["close"]
     ) / 4.0
 
     ha_open = []
-
     for i in range(len(ha)):
         if i == 0:
-            value = (
-                float(ha.iloc[i]["open"])
-                + float(ha.iloc[i]["close"])
-            ) / 2.0
+            value = (float(ha.iloc[i]["open"]) + float(ha.iloc[i]["close"])) / 2.0
         else:
-            value = (
-                float(ha_open[i - 1])
-                + float(ha.iloc[i - 1]["ha_close"])
-            ) / 2.0
-
+            value = (float(ha_open[i - 1]) + float(ha.iloc[i - 1]["ha_close"])) / 2.0
         ha_open.append(value)
 
     ha["ha_open"] = ha_open
-
-    ha["ha_high"] = ha[
-        ["high", "ha_open", "ha_close"]
-    ].max(axis=1)
-
-    ha["ha_low"] = ha[
-        ["low", "ha_open", "ha_close"]
-    ].min(axis=1)
-
+    ha["ha_high"] = ha[["high", "ha_open", "ha_close"]].max(axis=1)
+    ha["ha_low"] = ha[["low", "ha_open", "ha_close"]].min(axis=1)
     return ha
+
+
+def heikin_ashi_ohlc(df):
+    """Return a dataframe whose OHLC fields are Heikin Ashi values.
+
+    This dataframe is used ONLY for NDS pivots, Hook nodes, Hook geometry and
+    H4 SL pivot selection. Trade monitoring still uses the real exchange OHLC.
+    """
+    ha = calculate_heikin_ashi(df)
+    out = df.copy().reset_index(drop=True)
+    out["open"] = ha["ha_open"].astype(float)
+    out["high"] = ha["ha_high"].astype(float)
+    out["low"] = ha["ha_low"].astype(float)
+    out["close"] = ha["ha_close"].astype(float)
+    return out
 
 
 def create_hook_chart(symbol, df, hook, sl, path_prefix="hook", timeframe="M5"):
@@ -603,7 +613,7 @@ def send_detected_m5_hook_charts(symbol, df):
     """Send charts only for confirmed, recent, range-valid M5 hooks.
     This reporting path is independent of the H4 direction/trade filter.
     """
-    hooks = detect_hooks(df, M5_INTERVAL_MINUTES)
+    hooks = detect_hooks(heikin_ashi_ohlc(df), M5_INTERVAL_MINUTES)
     now_ts = utc_now_ts()
 
     for hook in hooks:
@@ -621,7 +631,7 @@ def send_detected_m5_hook_charts(symbol, df):
         if notification_exists(key):
             continue
 
-        sl = calculate_sl(df, hook)
+        sl = calculate_h4_sl(H4_DATA.get(symbol), hook)
         chart_path = create_hook_chart(symbol, df, hook, sl, "detected_hook", timeframe="M5")
         if not chart_path:
             DIAG["hook_chart_errors"] += 1
@@ -638,7 +648,7 @@ def send_detected_m5_hook_charts(symbol, df):
             f"SL reference: {fmt_price(sl)}\n"
             f"Hook range: {hook['range_pct']:.2f}%\n"
             f"Confirmed: {fmt_ts(hook['confirmation_time'])}\n"
-            f"<b>Heikin Ashi chart; NDS values use real OHLC.</b>\n"
+            f"<b>Heikin Ashi nodes/levels; execution monitoring uses real OHLC.</b>\n"
             f"<b>Chart only; not necessarily a trade signal.</b>\n"
             f"<b>PAPER TRADING ONLY</b>"
         )
@@ -667,9 +677,10 @@ def get_h4_direction(symbol):
         return None
     DIAG["h4_data_ok"] += 1
     H4_DATA[symbol] = df.copy()
-    highs, lows = find_pivots(df)
+    h4_ha_df = heikin_ashi_ohlc(df)
+    highs, lows = find_pivots(h4_ha_df)
     DIAG["h4_pivots"] += len(highs) + len(lows)
-    hooks = detect_hooks(df, H4_INTERVAL_MINUTES)
+    hooks = detect_hooks(h4_ha_df, H4_INTERVAL_MINUTES)
     DIAG["h4_hooks"] += len(hooks)
     now_ts = utc_now_ts()
     confirmed = [h for h in hooks if hook_is_confirmed(h, now_ts)]
@@ -695,18 +706,20 @@ def build_signal_message(symbol, hook, sl):
     emoji = "🔴" if direction == "SHORT" else "🟢"
     entry, tp, sl = float(hook["entry"]), float(hook["tp"]), float(sl)
     if direction == "SHORT":
-        risk_pct = (sl-entry)/entry*100
-        reward_pct = (entry-tp)/entry*100
+        risk_pct = (sl - entry) / entry * 100.0
+        reward_pct = (entry - tp) / entry * 100.0
     else:
-        risk_pct = (entry-sl)/entry*100
-        reward_pct = (tp-entry)/entry*100
+        risk_pct = (entry - sl) / entry * 100.0
+        reward_pct = (tp - entry) / entry * 100.0
     return (
         f"{emoji} <b>NDS {direction}</b>\n<b>{symbol}</b>\n\n"
         f"Entry: <b>{fmt_price(entry)}</b>\n"
-        f"SL: <b>{fmt_price(sl)}</b> ({risk_pct:.2f}%)\n"
-        f"TP 86.4%: <b>{fmt_price(tp)}</b> ({reward_pct:.2f}%)\n\n"
+        f"SL: <b>{fmt_price(sl)}</b> ({risk_pct:+.2f}%)\n"
+        f"TP 86.4% M5: <b>{fmt_price(tp)}</b> ({reward_pct:+.2f}%)\n\n"
         f"Hook Range: {hook['range_pct']:.2f}%\n"
         f"Confirmed: {fmt_ts(hook['confirmation_time'])}\n"
+        f"<b>Hook nodes/levels: Heikin Ashi</b>\n"
+        f"<b>SL: nearest valid H4 pivot + {H4_SL_BUFFER_PCT:.2f}% buffer</b>\n"
         f"<b>H4 direction confirmed</b>\n<b>Paper Trading</b>"
     )
 
@@ -735,10 +748,11 @@ def process_symbol(symbol):
         return
 
     DIAG["m5_data_ok"] += 1
-    highs, lows = find_pivots(df)
+    m5_ha_df = heikin_ashi_ohlc(df)
+    highs, lows = find_pivots(m5_ha_df)
     DIAG["m5_pivots"] += len(highs) + len(lows)
 
-    hooks = detect_hooks(df, M5_INTERVAL_MINUTES)
+    hooks = detect_hooks(m5_ha_df, M5_INTERVAL_MINUTES)
     DIAG["m5_hooks"] += len(hooks)
 
     # Report every confirmed/recent/range-valid M5 hook regardless of H4 direction.
@@ -778,7 +792,7 @@ def process_symbol(symbol):
     )
 
     for hook in candidates:
-        sl = calculate_sl(df, hook)
+        sl = calculate_h4_sl(H4_DATA.get(symbol), hook)
         if sl is None:
             continue
         DIAG["m5_sl_found"] += 1
@@ -824,7 +838,7 @@ def process_symbol(symbol):
                 f"Entry: {fmt_price(entry)}\n"
                 f"TP 86.4%: {fmt_price(tp)}\n"
                 f"SL: {fmt_price(sl)}\n"
-                f"Heikin Ashi chart; NDS values use real OHLC.\n"
+                f"Heikin Ashi nodes/levels; execution monitoring uses real OHLC.\n"
                 f"PAPER TRADING ONLY"
             )
 
@@ -832,7 +846,7 @@ def process_symbol(symbol):
         h4_df = H4_DATA.get(symbol)
         if h4_info and h4_df is not None:
             h4_hook = h4_info.get("hook")
-            h4_sl = calculate_sl(h4_df, h4_hook) if h4_hook else None
+            h4_sl = calculate_h4_sl(h4_df, h4_hook) if h4_hook else None
             if h4_hook:
                 h4_chart_path = create_hook_chart(
                     symbol, h4_df, h4_hook, h4_sl, "signal_h4", timeframe="H4"
@@ -844,7 +858,7 @@ def process_symbol(symbol):
                         f"<b>{symbol}</b>\n"
                         f"Direction: <b>{direction}</b>\n"
                         f"This H4 hook authorized the M5 signal.\n"
-                        f"Heikin Ashi chart; NDS values use real OHLC.\n"
+                        f"Heikin Ashi nodes/levels; execution monitoring uses real OHLC.\n"
                         f"PAPER TRADING ONLY"
                     )
         # One signal per symbol per scan. If this one fails, earlier candidates were already tried.
@@ -907,6 +921,96 @@ def monitor_open_trades():
             )
         except Exception as e:
             DIAG["api_errors"].append(f"Monitor {symbol}: {str(e)[:180]}")
+
+
+def trade_metrics(entry, sl, tp, direction, current):
+    entry = float(entry)
+    sl = float(sl)
+    tp = float(tp)
+    current = float(current)
+
+    if direction == "LONG":
+        pnl_pct = (current - entry) / entry * 100.0 if entry else 0.0
+        tp_pct = (tp - entry) / entry * 100.0 if entry else 0.0
+        sl_pct = (sl - entry) / entry * 100.0 if entry else 0.0
+    else:
+        pnl_pct = (entry - current) / entry * 100.0 if entry else 0.0
+        tp_pct = (entry - tp) / entry * 100.0 if entry else 0.0
+        sl_pct = (entry - sl) / entry * 100.0 if entry else 0.0
+    return pnl_pct, tp_pct, sl_pct
+
+
+def get_current_price(symbol):
+    """Get the latest Futures ticker price; fall back to latest 5m close."""
+    try:
+        r = requests.get(f"{KRAKEN_FUTURES_URL}/tickers", timeout=REQUEST_TIMEOUT)
+        if r.ok:
+            payload = r.json()
+            tickers = payload.get("tickers", [])
+            if isinstance(tickers, list):
+                for ticker in tickers:
+                    if not isinstance(ticker, dict):
+                        continue
+                    ticker_symbol = str(ticker.get("symbol") or ticker.get("pair") or ticker.get("instrument") or "")
+                    if ticker_symbol != symbol:
+                        continue
+                    for key in ("last", "lastPrice", "markPrice", "price"):
+                        value = ticker.get(key)
+                        if value is not None:
+                            return float(value)
+        else:
+            DIAG["api_errors"].append(f"Ticker {symbol} HTTP {r.status_code}")
+    except Exception as e:
+        DIAG["api_errors"].append(f"Ticker {symbol}: {str(e)[:180]}")
+
+    try:
+        df = get_candles(symbol, M5_INTERVAL, 2)
+        if df is None or df.empty:
+            return None
+        return float(df.iloc[-1]["close"])
+    except Exception as e:
+        DIAG["api_errors"].append(f"Current price fallback {symbol}: {str(e)[:180]}")
+        return None
+
+
+def open_trades_report_lines():
+    rows = get_open_trades()
+    lines = ["━━━ <b>OPEN TRADES</b> ━━━"]
+    if not rows:
+        lines.append("None")
+        return lines
+
+    for trade in rows:
+        symbol = trade["symbol"]
+        direction = trade["direction"]
+        entry = float(trade["entry"])
+        sl = float(trade["sl"])
+        tp = float(trade["tp"])
+        current = get_current_price(symbol)
+        if current is None:
+            lines += [
+                f"{'🟢' if direction == 'LONG' else '🔴'} <b>{symbol} {direction}</b>",
+                f"Entry: {fmt_price(entry)}",
+                f"Current: -",
+                f"TP: {fmt_price(tp)}",
+                f"SL: {fmt_price(sl)}",
+                "",
+            ]
+            continue
+
+        pnl_pct, tp_pct, sl_pct = trade_metrics(entry, sl, tp, direction, current)
+        lines += [
+            f"{'🟢' if direction == 'LONG' else '🔴'} <b>{symbol} {direction}</b>",
+            f"Entry: {fmt_price(entry)}",
+            f"Current: <b>{fmt_price(current)} ({pnl_pct:+.2f}%)</b>",
+            f"TP: <b>{fmt_price(tp)} ({tp_pct:+.2f}%)</b>",
+            f"SL: <b>{fmt_price(sl)} ({sl_pct:+.2f}%)</b>",
+            "",
+        ]
+
+    if lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def performance_summary():
@@ -973,6 +1077,8 @@ def diagnostic_text():
         f"Max Open Limit: {DIAG['max_open']}",
         f"Open Trades: <b>{open_trade_count()}</b>",
         "",
+        *open_trades_report_lines(),
+        "",
         "━━━ <b>PAPER PERFORMANCE</b> ━━━",
         f"Closed Trades: {perf['total']}",
         f"TP: {perf['wins']}",
@@ -989,10 +1095,10 @@ def main():
     try:
         init_db()
         print(f"NDS H4 -> M5 Scanner {VERSION}")
-        print("M5 valid-hook charts are sent independently; signal charts require H4 direction approval.")
+        print("H4 direction + H4 HA structure -> M5 HA hook -> TP 86.4% M5 -> H4 pivot SL")
         print("PAPER TRADING ONLY - NO REAL ORDERS")
         print(f"H4 pivot confirmation: {H4_INTERVAL_MINUTES}m x {PIVOT_RIGHT} | max age {H4_MAX_HOOK_AGE_SECONDS//3600}h")
-        print(f"M5 pivot confirmation: {M5_INTERVAL_MINUTES}m x {PIVOT_RIGHT} | max age {M5_MAX_HOOK_AGE_SECONDS//3600}h")
+        print(f"M5 pivot confirmation: {M5_INTERVAL_MINUTES}m x {PIVOT_RIGHT} | max age {M5_MAX_HOOK_AGE_SECONDS//3600}h | HA nodes")
         symbols = get_futures_instruments()
         if not symbols:
             report = "❌ <b>NDS Scanner</b>\n\nNo futures instruments found."
