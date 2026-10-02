@@ -1,6 +1,6 @@
 # ============================================================
 # NDS H4 -> M5 LIVE SCANNER
-# VERSION 5.4.6
+# VERSION 5.4.7
 # PAPER TRADING ONLY - NO REAL ORDERS
 #
 # H4:
@@ -39,6 +39,10 @@
 # LONG:
 #   TP = FINAL + 86.4% * (START - FINAL)
 #
+# CHART:
+#   - Heikin Ashi candles
+#   - NDS calculations remain based on real OHLC data
+#
 # PAPER TRADING ONLY
 # ============================================================
 
@@ -54,13 +58,14 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-VERSION = "5.4.6"
+VERSION = "5.4.7"
 
 REAL_TRADING = False
 
@@ -85,12 +90,8 @@ NDS_RETRACE = 0.864
 
 M5_MIN_HOOK_RANGE_PCT = 0.20
 
-# M5 hooks are short-lived.
 M5_MAX_HOOK_AGE_SECONDS = 6 * 60 * 60
 
-# H4 hooks are allowed to remain directional longer.
-# Otherwise an H4 hook becomes invalid simply because the lower
-# timeframe takes some time to find its M5 confirmation.
 H4_MAX_HOOK_AGE_SECONDS = 24 * 60 * 60
 
 MAX_OPEN_TRADES = 3
@@ -660,17 +661,6 @@ def detect_hooks_from_pivots(
     lows,
     interval_minutes
 ):
-    """
-    Detect NDS hooks from explicit pivot lists.
-
-    Returns:
-        hooks
-        ordered_pivots
-
-    This is important for diagnostics:
-    the pivot count reported by the scanner is now
-    the SAME pivot set actually used by Hook detection.
-    """
 
     ordered = build_ordered_pivots(
         highs,
@@ -701,8 +691,6 @@ def detect_hooks_from_pivots(
 
         # ====================================================
         # POSITIVE HOOK / SHORT
-        #
-        # START(L) -> H1 -> L1 -> H2 -> L2 -> H3
         # ====================================================
 
         if types == [
@@ -725,8 +713,6 @@ def detect_hooks_from_pivots(
             ):
                 continue
 
-            # START MUST BE THE LOWEST POINT
-            # OF THE WHOLE HOOK.
             if not (
                 start["price"] < l1["price"]
                 and
@@ -782,8 +768,6 @@ def detect_hooks_from_pivots(
 
         # ====================================================
         # NEGATIVE HOOK / LONG
-        #
-        # START(H) -> L1 -> H1 -> L2 -> H2 -> L3
         # ====================================================
 
         if types == [
@@ -806,8 +790,6 @@ def detect_hooks_from_pivots(
             ):
                 continue
 
-            # START MUST BE THE HIGHEST POINT
-            # OF THE WHOLE HOOK.
             if not (
                 start["price"] > h1["price"]
                 and
@@ -868,6 +850,7 @@ def detect_hooks(
     df,
     interval_minutes
 ):
+
     if df is None or df.empty:
         return [], [], []
 
@@ -1293,6 +1276,112 @@ def tp_already_touched(
 
 
 # ============================================================
+# HEIKIN ASHI
+# ============================================================
+
+def calculate_heikin_ashi(df):
+
+    """
+    IMPORTANT:
+    This function is ONLY for chart display.
+
+    NDS Hook detection, Entry, SL and TP continue to use
+    the original Kraken OHLC values.
+
+    HA formulas:
+
+        HA Close = (O + H + L + C) / 4
+
+        HA Open  = (previous HA Open
+                    + previous HA Close) / 2
+
+        HA High  = max(H, HA Open, HA Close)
+
+        HA Low   = min(L, HA Open, HA Close)
+    """
+
+    ha = df.copy()
+
+    if ha.empty:
+        return ha
+
+    ha_open = []
+    ha_close = []
+    ha_high = []
+    ha_low = []
+
+    for i in range(len(ha)):
+
+        op = float(
+            ha.iloc[i]["open"]
+        )
+
+        hi = float(
+            ha.iloc[i]["high"]
+        )
+
+        lo = float(
+            ha.iloc[i]["low"]
+        )
+
+        cl = float(
+            ha.iloc[i]["close"]
+        )
+
+        current_ha_close = (
+            op + hi + lo + cl
+        ) / 4.0
+
+        if i == 0:
+
+            current_ha_open = (
+                op + cl
+            ) / 2.0
+
+        else:
+
+            current_ha_open = (
+                ha_open[i - 1]
+                + ha_close[i - 1]
+            ) / 2.0
+
+        current_ha_high = max(
+            hi,
+            current_ha_open,
+            current_ha_close
+        )
+
+        current_ha_low = min(
+            lo,
+            current_ha_open,
+            current_ha_close
+        )
+
+        ha_open.append(
+            current_ha_open
+        )
+
+        ha_close.append(
+            current_ha_close
+        )
+
+        ha_high.append(
+            current_ha_high
+        )
+
+        ha_low.append(
+            current_ha_low
+        )
+
+    ha["ha_open"] = ha_open
+    ha["ha_high"] = ha_high
+    ha["ha_low"] = ha_low
+    ha["ha_close"] = ha_close
+
+    return ha
+
+
+# ============================================================
 # CHART
 # ============================================================
 
@@ -1307,8 +1396,21 @@ def create_hook_chart(
 
     try:
 
+        # ----------------------------------------------------
+        # Calculate Heikin Ashi from the FULL dataframe first.
+        #
+        # This is important because HA Open depends on the
+        # previous HA candle. We then take the last candles
+        # only for visual display.
+        # ----------------------------------------------------
+
+        ha_df = calculate_heikin_ashi(
+            df
+        )
+
         chart_df = (
-            df.tail(CHART_CANDLES)
+            ha_df
+            .tail(CHART_CANDLES)
             .copy()
         )
 
@@ -1319,18 +1421,143 @@ def create_hook_chart(
             figsize=(15, 8)
         )
 
-        x = pd.to_datetime(
+        # ----------------------------------------------------
+        # Heikin Ashi candles
+        # ----------------------------------------------------
+
+        if len(chart_df) > 1:
+
+            time_diffs = (
+                chart_df["time"]
+                .diff()
+                .dropna()
+            )
+
+            candle_width = (
+                float(
+                    time_diffs.median()
+                )
+                * 0.70
+                if not time_diffs.empty
+                else 60.0
+            )
+
+        else:
+
+            candle_width = 60.0
+
+        for _, candle in chart_df.iterrows():
+
+            x = float(
+                candle["time"]
+            )
+
+            op = float(
+                candle["ha_open"]
+            )
+
+            hi = float(
+                candle["ha_high"]
+            )
+
+            lo = float(
+                candle["ha_low"]
+            )
+
+            cl = float(
+                candle["ha_close"]
+            )
+
+            if cl >= op:
+
+                body_color = "green"
+
+            else:
+
+                body_color = "red"
+
+            # Wick
+            ax.vlines(
+                x,
+                lo,
+                hi,
+                linewidth=0.8,
+                color=body_color,
+                alpha=0.9,
+                zorder=2
+            )
+
+            # Body
+            body_bottom = min(
+                op,
+                cl
+            )
+
+            body_height = abs(
+                cl - op
+            )
+
+            # Avoid invisible zero-height bodies.
+            min_body = (
+                (hi - lo) * 0.002
+                if hi != lo
+                else 0.00000001
+            )
+
+            body_height = max(
+                body_height,
+                min_body
+            )
+
+            rect = Rectangle(
+                (
+                    x - candle_width / 2,
+                    body_bottom
+                ),
+                candle_width,
+                body_height,
+                facecolor=body_color,
+                edgecolor=body_color,
+                linewidth=0.7,
+                alpha=0.85,
+                zorder=3
+            )
+
+            ax.add_patch(rect)
+
+        # ----------------------------------------------------
+        # X axis uses datetime.
+        # ----------------------------------------------------
+
+        chart_start_time = float(
+            chart_df["time"].iloc[0]
+        )
+
+        chart_end_time = float(
+            chart_df["time"].iloc[-1]
+        )
+
+        chart_x = pd.to_datetime(
             chart_df["time"],
             unit="s",
             utc=True
         )
 
-        ax.plot(
-            x,
-            chart_df["close"],
-            linewidth=1.0,
-            label=f"{timeframe} Close"
+        # Convert axis from timestamps to datetime.
+        ax.set_xlim(
+            datetime.fromtimestamp(
+                chart_start_time,
+                tz=timezone.utc
+            ),
+            datetime.fromtimestamp(
+                chart_end_time,
+                tz=timezone.utc
+            )
         )
+
+        # ----------------------------------------------------
+        # Hook points
+        # ----------------------------------------------------
 
         if hook["direction"] == "SHORT":
 
@@ -1390,8 +1617,13 @@ def create_hook_chart(
             py,
             marker="o",
             linewidth=2.0,
-            label="Confirmed NDS Hook"
+            label="Confirmed NDS Hook",
+            zorder=5
         )
+
+        # ----------------------------------------------------
+        # Point labels
+        # ----------------------------------------------------
 
         offsets = [
             (0, 18),
@@ -1425,7 +1657,12 @@ def create_hook_chart(
                     fc="white",
                     alpha=0.80
                 ),
+                zorder=10
             )
+
+        # ----------------------------------------------------
+        # Entry / TP / SL
+        # ----------------------------------------------------
 
         entry = float(
             hook["entry"]
@@ -1435,8 +1672,14 @@ def create_hook_chart(
             hook["tp"]
         )
 
+        sl_value = (
+            float(sl)
+            if sl is not None
+            else None
+        )
+
         start_x = min(
-            x.iloc[0],
+            chart_x.iloc[0],
             px[0]
         )
 
@@ -1446,7 +1689,7 @@ def create_hook_chart(
         )
 
         end_x = max(
-            x.iloc[-1],
+            chart_x.iloc[-1],
             confirmation_dt
         )
 
@@ -1460,6 +1703,7 @@ def create_hook_chart(
                 f"ENTRY "
                 f"{fmt_price(entry)}"
             ),
+            zorder=4
         )
 
         ax.hlines(
@@ -1472,34 +1716,42 @@ def create_hook_chart(
                 f"TP 86.4% "
                 f"{fmt_price(tp)}"
             ),
+            zorder=4
         )
 
-        if sl is not None:
+        if sl_value is not None:
 
             ax.hlines(
-                float(sl),
+                sl_value,
                 start_x,
                 end_x,
                 linestyles="--",
                 linewidth=1.4,
                 label=(
                     f"SL "
-                    f"{fmt_price(sl)}"
+                    f"{fmt_price(sl_value)}"
                 ),
+                zorder=4
             )
 
         ax.axvline(
             confirmation_dt,
             linestyle=":",
             linewidth=1.2,
-            label="CONFIRMED"
+            label="CONFIRMED",
+            zorder=4
         )
+
+        # ----------------------------------------------------
+        # Title
+        # ----------------------------------------------------
 
         ax.set_title(
             f"NDS {timeframe} | "
             f"{symbol} | "
             f"{hook['direction']} | "
-            f"CONFIRMED HOOK"
+            f"CONFIRMED HOOK | "
+            f"HEIKIN ASHI"
         )
 
         ax.set_xlabel(
@@ -1520,6 +1772,10 @@ def create_hook_chart(
         )
 
         fig.autofmt_xdate()
+
+        # ----------------------------------------------------
+        # Save
+        # ----------------------------------------------------
 
         safe_symbol = (
             symbol
@@ -1571,20 +1827,6 @@ def send_detected_m5_hook_charts(
     symbol,
     df
 ):
-
-    """
-    M5 chart reporting is INDEPENDENT of H4.
-
-    This is intentional.
-
-    A confirmed/recent M5 Hook can be shown in Telegram
-    even when:
-        - H4 has no valid direction
-        - M5 hook direction differs from H4
-        - no trade is created
-
-    This lets us see whether the M5 detector itself works.
-    """
 
     hooks, highs, lows = detect_hooks(
         df,
@@ -1667,7 +1909,7 @@ def send_detected_m5_hook_charts(
             f"{hook['range_pct']:.2f}%\n"
             f"Confirmed: "
             f"{fmt_ts(hook['confirmation_time'])}\n\n"
-            f"<b>M5 HOOK CHART</b>\n"
+            f"<b>M5 HEIKIN ASHI HOOK CHART</b>\n"
             f"<b>PAPER TRADING ONLY</b>"
         )
 
@@ -1751,8 +1993,6 @@ def get_h4_direction(symbol):
         H4_INTERVAL_MINUTES
     )
 
-    # IMPORTANT:
-    # count EXACTLY the pivots used by detector.
     DIAG[
         "h4_pivots"
     ] += len(highs) + len(lows)
@@ -1989,11 +2229,6 @@ def process_symbol(symbol):
 
     # --------------------------------------------------------
     # 3. M5 PIVOTS
-    #
-    # This was the broken diagnostic in 5.4.5.
-    #
-    # We calculate the exact pivots used by the hook detector
-    # and immediately report them.
     # --------------------------------------------------------
 
     hooks, highs, lows = detect_hooks(
@@ -2040,8 +2275,6 @@ def process_symbol(symbol):
 
     # --------------------------------------------------------
     # 4. SEND M5 HOOK CHARTS INDEPENDENTLY OF H4
-    #
-    # This is deliberately BEFORE the H4 filter.
     # --------------------------------------------------------
 
     send_detected_m5_hook_charts(
@@ -2069,18 +2302,15 @@ def process_symbol(symbol):
 
     for hook in recent_m5:
 
-        # M5 direction must match H4 direction.
         if hook["direction"] != direction:
             continue
 
-        # Range filter.
         if (
             hook["range_pct"]
             < M5_MIN_HOOK_RANGE_PCT
         ):
             continue
 
-        # TP already touched.
         if tp_already_touched(
             df,
             hook
@@ -2098,7 +2328,6 @@ def process_symbol(symbol):
     if not candidates:
         return
 
-    # Most recently confirmed M5 hook.
     candidates.sort(
         key=lambda h: (
             h["confirmation_time"],
@@ -2238,6 +2467,7 @@ def process_symbol(symbol):
                 f"{fmt_price(hook['tp'])}\n"
                 f"SL: "
                 f"{fmt_price(sl)}\n"
+                f"<b>HEIKIN ASHI CHART</b>\n"
                 f"<b>PAPER TRADING ONLY</b>"
             )
         )
@@ -2291,6 +2521,7 @@ def process_symbol(symbol):
                         f"<b>{direction}</b>\n"
                         f"This H4 Hook authorized "
                         f"the M5 signal.\n"
+                        f"<b>HEIKIN ASHI CHART</b>\n"
                         f"<b>PAPER TRADING ONLY</b>"
                     )
                 )
@@ -2432,9 +2663,6 @@ def monitor_open_trades():
                         high >= tp
                     )
 
-                # Conservative:
-                # if both hit in same candle,
-                # SL is assumed first.
                 if hit_sl:
 
                     close_price = sl
@@ -2773,6 +3001,10 @@ def main():
         )
 
         print(
+            "Charts: HEIKIN ASHI"
+        )
+
+        print(
             f"H4 pivot confirmation: "
             f"{H4_INTERVAL_MINUTES}m x "
             f"{PIVOT_RIGHT}"
@@ -2816,7 +3048,6 @@ def main():
             "assets_scanned"
         ] = len(symbols)
 
-        # Monitor existing paper trades
         monitor_open_trades()
 
         for symbol in symbols:
@@ -2840,7 +3071,6 @@ def main():
                 SCAN_SLEEP_SECONDS
             )
 
-        # Monitor again after scan
         monitor_open_trades()
 
         report = diagnostic_text()
