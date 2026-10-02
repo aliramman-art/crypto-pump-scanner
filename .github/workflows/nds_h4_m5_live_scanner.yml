@@ -1,10 +1,11 @@
+
 name: NDS H4 M5 Live Scanner
 
 on:
   workflow_dispatch:
 
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: write
