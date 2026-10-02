@@ -1,54 +1,11 @@
 # ============================================================
 # NDS H4 -> M5 LIVE SCANNER
-# VERSION 5.4.8
+# VERSION 5.4.9
 # PAPER TRADING ONLY - NO REAL ORDERS
-#
-# H4:
-#   - Detect confirmed NDS Hook
-#   - Determine SHORT / LONG direction
-#   - H4 direction authorizes M5 trade signals
-#
-# M5:
-#   - Detect NDS Hooks independently
-#   - Confirm Hook after PIVOT_RIGHT candles
-#   - Send chart for confirmed/recent valid M5 Hook
-#   - Trade signal only if M5 direction == H4 direction
-#
-# IMPORTANT NDS LOGIC
-# -------------------
-# POSITIVE HOOK / SHORT:
-#   START(L) -> H1 -> L1 -> H2 -> L2 -> H3
-#   H2 > H1
-#   L2 < L1
-#   H3 > H2
-#   START is the LOWEST point of the whole hook
-#
-# NEGATIVE HOOK / LONG:
-#   START(H) -> L1 -> H1 -> L2 -> H2 -> L3
-#   L2 < L1
-#   H2 > H1
-#   L3 < L2
-#   START is the HIGHEST point of the whole hook
-#
-# TP:
-#   86.4% retracement from FINAL back toward START
-#
-# SHORT:
-#   TP = FINAL - 86.4% * (FINAL - START)
-#
-# LONG:
-#   TP = FINAL + 86.4% * (START - FINAL)
-#
-# IMPORTANT:
-#   NDS detection uses ORIGINAL OHLC.
-#   Chart display uses HEIKIN ASHI.
-#
-# CHART:
-#   - Heikin Ashi candles
-#   - NDS calculations remain based on real OHLC data
-#   - Hook points/labels displayed separately
-#
-# PAPER TRADING ONLY
+# H4 direction filter -> M5 hook detection
+# M5 valid-hook charts are sent independently of H4
+# H4 charts are sent only when an M5 trade signal is created
+# Heikin Ashi is DISPLAY ONLY; NDS calculations use real OHLC
 # ============================================================
 
 import os
@@ -59,30 +16,16 @@ from datetime import datetime, timezone
 
 import requests
 import pandas as pd
-
 import matplotlib
 matplotlib.use("Agg")
-
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-from matplotlib.patches import Rectangle
 
 
-# ============================================================
-# CONFIG
-# ============================================================
-
-VERSION = "5.4.8"
-
+VERSION = "5.4.9"
 REAL_TRADING = False
 
-KRAKEN_FUTURES_URL = (
-    "https://futures.kraken.com/derivatives/api/v3"
-)
-
-KRAKEN_CHART_URL = (
-    "https://futures.kraken.com/api/charts/v1"
-)
+KRAKEN_FUTURES_URL = "https://futures.kraken.com/derivatives/api/v3"
+KRAKEN_CHART_URL = "https://futures.kraken.com/api/charts/v1"
 
 TARGET_ASSETS = 100
 
@@ -102,13 +45,11 @@ NDS_RETRACE = 0.864
 
 M5_MIN_HOOK_RANGE_PCT = 0.20
 
-M5_MAX_HOOK_AGE_SECONDS = (
-    6 * 60 * 60
-)
-
-H4_MAX_HOOK_AGE_SECONDS = (
-    24 * 60 * 60
-)
+# Separate age limits:
+# H4 direction hook: max 24 hours old
+# M5 trade hook: max 6 hours old
+H4_MAX_HOOK_AGE_SECONDS = 24 * 60 * 60
+M5_MAX_HOOK_AGE_SECONDS = 6 * 60 * 60
 
 MAX_OPEN_TRADES = 3
 
@@ -117,10 +58,10 @@ SCAN_SLEEP_SECONDS = 0.25
 
 CHART_CANDLES = 240
 
-DB_FILE = "nds_h4_m5_v546.db"
+# Keep the existing paper-trading DB so previous paper trades remain available.
+DB_FILE = "nds_h4_m5_v545.db"
 
 CHART_DIR = "nds_h4_m5_charts"
-
 
 TELEGRAM_BOT_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
@@ -136,12 +77,13 @@ TELEGRAM_CHAT_ID = (
 
 
 # ============================================================
-# DIAGNOSTIC
+# DIAGNOSTICS
 # ============================================================
 
 DIAG = {
     "assets_scanned": 0,
 
+    # H4
     "h4_requests": 0,
     "h4_data_ok": 0,
     "h4_data_error": 0,
@@ -149,13 +91,14 @@ DIAG = {
     "h4_short": 0,
     "h4_pivots": 0,
     "h4_hooks": 0,
-    "h4_confirmed_hooks": 0,
-    "h4_recent_hooks": 0,
+    "h4_confirmed": 0,
+    "h4_recent": 0,
     "h4_valid_hooks": 0,
     "h4_short_direction": 0,
     "h4_long_direction": 0,
     "h4_filtered": 0,
 
+    # M5
     "m5_requests": 0,
     "m5_data_ok": 0,
     "m5_data_error": 0,
@@ -163,14 +106,23 @@ DIAG = {
     "m5_short": 0,
     "m5_pivots": 0,
     "m5_hooks": 0,
-    "m5_confirmed_hooks": 0,
-    "m5_recent_hooks": 0,
-    "m5_range_valid_hooks": 0,
-    "m5_valid_hooks": 0,
+    "m5_confirmed": 0,
+    "m5_recent": 0,
+    "m5_range_valid": 0,
 
+    # Signal pipeline
+    "m5_direction_match": 0,
+    "m5_valid_hooks": 0,
+    "m5_tp_touched": 0,
+    "m5_sl_found": 0,
+    "m5_geometry_valid": 0,
+    "m5_duplicate": 0,
+    "m5_max_open": 0,
+    "signal_ready": 0,
+
+    # Charts / signals
     "hook_charts_sent": 0,
     "hook_chart_errors": 0,
-
     "signals": 0,
     "duplicate_signals": 0,
     "max_open": 0,
@@ -186,7 +138,7 @@ START_TIME = time.time()
 
 
 # ============================================================
-# TIME / FORMAT
+# UTILS
 # ============================================================
 
 def utc_now():
@@ -194,9 +146,7 @@ def utc_now():
 
 
 def utc_now_ts():
-    return int(
-        utc_now().timestamp()
-    )
+    return int(utc_now().timestamp())
 
 
 def fmt_ts(ts):
@@ -204,9 +154,7 @@ def fmt_ts(ts):
         return datetime.fromtimestamp(
             float(ts),
             tz=timezone.utc
-        ).strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
-        )
+        ).strftime("%Y-%m-%d %H:%M:%S UTC")
     except Exception:
         return "-"
 
@@ -235,7 +183,6 @@ def fmt_price(value):
 # ============================================================
 
 def telegram_enabled():
-
     return bool(
         TELEGRAM_BOT_TOKEN
         and TELEGRAM_CHAT_ID
@@ -243,17 +190,15 @@ def telegram_enabled():
 
 
 def telegram_send(text):
-
     if not telegram_enabled():
         return False
 
     url = (
-        "https://api.telegram.org/"
+        f"https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     )
 
     try:
-
         r = requests.post(
             url,
             json={
@@ -266,29 +211,20 @@ def telegram_send(text):
         )
 
         if not r.ok:
-
             DIAG["api_errors"].append(
-                f"Telegram text HTTP "
-                f"{r.status_code}"
+                f"Telegram text HTTP {r.status_code}"
             )
 
         return r.ok
 
     except Exception as e:
-
         DIAG["api_errors"].append(
-            f"Telegram text: "
-            f"{str(e)[:160]}"
+            f"Telegram text: {str(e)[:160]}"
         )
-
         return False
 
 
-def telegram_send_photo(
-    photo_path,
-    caption
-):
-
+def telegram_send_photo(photo_path, caption):
     if (
         not telegram_enabled()
         or not photo_path
@@ -297,49 +233,34 @@ def telegram_send_photo(
         return False
 
     url = (
-        "https://api.telegram.org/"
+        f"https://api.telegram.org/"
         f"bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     )
 
     try:
-
-        with open(
-            photo_path,
-            "rb"
-        ) as photo:
-
+        with open(photo_path, "rb") as photo:
             r = requests.post(
                 url,
-                files={
-                    "photo": photo
-                },
+                files={"photo": photo},
                 data={
-                    "chat_id":
-                        TELEGRAM_CHAT_ID,
-                    "caption":
-                        caption[:1024],
-                    "parse_mode":
-                        "HTML",
+                    "chat_id": TELEGRAM_CHAT_ID,
+                    "caption": caption[:1024],
+                    "parse_mode": "HTML",
                 },
                 timeout=REQUEST_TIMEOUT,
             )
 
         if not r.ok:
-
             DIAG["api_errors"].append(
-                f"Telegram photo HTTP "
-                f"{r.status_code}"
+                f"Telegram photo HTTP {r.status_code}"
             )
 
         return r.ok
 
     except Exception as e:
-
         DIAG["api_errors"].append(
-            f"Telegram photo: "
-            f"{str(e)[:160]}"
+            f"Telegram photo: {str(e)[:160]}"
         )
-
         return False
 
 
@@ -348,12 +269,10 @@ def telegram_send_photo(
 # ============================================================
 
 def get_futures_instruments():
-
     try:
-
         r = requests.get(
             f"{KRAKEN_FUTURES_URL}/instruments",
-            timeout=REQUEST_TIMEOUT,
+            timeout=REQUEST_TIMEOUT
         )
 
         r.raise_for_status()
@@ -366,7 +285,6 @@ def get_futures_instruments():
         symbols = []
 
         for item in instruments:
-
             symbol = str(
                 item.get("symbol")
                 or item.get("instrument")
@@ -379,25 +297,17 @@ def get_futures_instruments():
             if "USD" not in symbol:
                 continue
 
-            if item.get(
-                "tradeable",
-                True
-            ) is False:
+            if item.get("tradeable", True) is False:
                 continue
 
             symbols.append(symbol)
 
-        return list(
-            dict.fromkeys(symbols)
-        )[:TARGET_ASSETS]
+        return list(dict.fromkeys(symbols))[:TARGET_ASSETS]
 
     except Exception as e:
-
         DIAG["api_errors"].append(
-            f"Instruments: "
-            f"{str(e)[:180]}"
+            f"Instruments: {str(e)[:180]}"
         )
-
         return []
 
 
@@ -405,34 +315,23 @@ def get_futures_instruments():
 # KRAKEN CANDLES
 # ============================================================
 
-def get_candles(
-    symbol,
-    interval,
-    count
-):
-
+def get_candles(symbol, interval, count):
     url = (
         f"{KRAKEN_CHART_URL}/trade/"
         f"{symbol}/{interval}"
     )
 
     try:
-
         r = requests.get(
             url,
-            params={
-                "count": int(count)
-            },
-            timeout=REQUEST_TIMEOUT,
+            params={"count": int(count)},
+            timeout=REQUEST_TIMEOUT
         )
 
         if not r.ok:
-
             DIAG["api_errors"].append(
-                f"{symbol} {interval} "
-                f"HTTP {r.status_code}"
+                f"{symbol} {interval} HTTP {r.status_code}"
             )
-
             return None
 
         candles = r.json().get(
@@ -445,7 +344,6 @@ def get_candles(
         for c in candles:
 
             if isinstance(c, dict):
-
                 ts = c.get(
                     "time",
                     c.get(
@@ -479,13 +377,7 @@ def get_candles(
                     c.get("v", 0)
                 )
 
-            elif (
-                isinstance(
-                    c,
-                    (list, tuple)
-                )
-                and len(c) >= 5
-            ):
+            elif isinstance(c, (list, tuple)) and len(c) >= 5:
 
                 ts, op, hi, lo, cl = c[:5]
 
@@ -498,14 +390,16 @@ def get_candles(
             else:
                 continue
 
-            rows.append([
-                ts,
-                op,
-                hi,
-                lo,
-                cl,
-                vol
-            ])
+            rows.append(
+                [
+                    ts,
+                    op,
+                    hi,
+                    lo,
+                    cl,
+                    vol
+                ]
+            )
 
         if not rows:
             return pd.DataFrame()
@@ -518,8 +412,8 @@ def get_candles(
                 "high",
                 "low",
                 "close",
-                "volume",
-            ],
+                "volume"
+            ]
         )
 
         for col in [
@@ -528,9 +422,8 @@ def get_candles(
             "high",
             "low",
             "close",
-            "volume",
+            "volume"
         ]:
-
             df[col] = pd.to_numeric(
                 df[col],
                 errors="coerce"
@@ -542,45 +435,32 @@ def get_candles(
                 "open",
                 "high",
                 "low",
-                "close",
+                "close"
             ]
         )
 
         if df.empty:
             return df
 
-        if (
-            df["time"].max()
-            > 10_000_000_000
-        ):
-
+        if df["time"].max() > 10_000_000_000:
             df["time"] = (
                 df["time"] / 1000.0
             )
 
-        df["time"] = (
-            df["time"]
-            .astype(float)
-        )
+        df["time"] = df["time"].astype(float)
 
         df = (
-            df
-            .sort_values("time")
-            .drop_duplicates(
-                "time"
-            )
+            df.sort_values("time")
+            .drop_duplicates("time")
             .reset_index(drop=True)
         )
 
         return df
 
     except Exception as e:
-
         DIAG["api_errors"].append(
-            f"{symbol} {interval}: "
-            f"{str(e)[:180]}"
+            f"{symbol} {interval}: {str(e)[:180]}"
         )
-
         return None
 
 
@@ -589,7 +469,6 @@ def get_candles(
 # ============================================================
 
 def find_pivots(df):
-
     highs = []
     lows = []
 
@@ -597,11 +476,7 @@ def find_pivots(df):
         df is None
         or df.empty
         or len(df)
-        < (
-            PIVOT_LEFT
-            + PIVOT_RIGHT
-            + 1
-        )
+        < PIVOT_LEFT + PIVOT_RIGHT + 1
     ):
         return highs, lows
 
@@ -619,9 +494,7 @@ def find_pivots(df):
         )
 
         left_hi = [
-            float(
-                df.iloc[j]["high"]
-            )
+            float(df.iloc[j]["high"])
             for j in range(
                 i - PIVOT_LEFT,
                 i
@@ -629,9 +502,7 @@ def find_pivots(df):
         ]
 
         right_hi = [
-            float(
-                df.iloc[j]["high"]
-            )
+            float(df.iloc[j]["high"])
             for j in range(
                 i + 1,
                 i + PIVOT_RIGHT + 1
@@ -639,9 +510,7 @@ def find_pivots(df):
         ]
 
         left_lo = [
-            float(
-                df.iloc[j]["low"]
-            )
+            float(df.iloc[j]["low"])
             for j in range(
                 i - PIVOT_LEFT,
                 i
@@ -649,9 +518,7 @@ def find_pivots(df):
         ]
 
         right_lo = [
-            float(
-                df.iloc[j]["low"]
-            )
+            float(df.iloc[j]["low"])
             for j in range(
                 i + 1,
                 i + PIVOT_RIGHT + 1
@@ -659,63 +526,39 @@ def find_pivots(df):
         ]
 
         if (
-            all(
-                hi > x
-                for x in left_hi
-            )
-            and
-            all(
-                hi >= x
-                for x in right_hi
-            )
+            all(hi > x for x in left_hi)
+            and all(hi >= x for x in right_hi)
         ):
-
-            highs.append({
-
-                "type": "H",
-
-                "index": i,
-
-                "time": float(
-                    df.iloc[i]["time"]
-                ),
-
-                "price": hi,
-            })
+            highs.append(
+                {
+                    "type": "H",
+                    "index": i,
+                    "time": float(
+                        df.iloc[i]["time"]
+                    ),
+                    "price": hi,
+                }
+            )
 
         if (
-            all(
-                lo < x
-                for x in left_lo
-            )
-            and
-            all(
-                lo <= x
-                for x in right_lo
-            )
+            all(lo < x for x in left_lo)
+            and all(lo <= x for x in right_lo)
         ):
-
-            lows.append({
-
-                "type": "L",
-
-                "index": i,
-
-                "time": float(
-                    df.iloc[i]["time"]
-                ),
-
-                "price": lo,
-            })
+            lows.append(
+                {
+                    "type": "L",
+                    "index": i,
+                    "time": float(
+                        df.iloc[i]["time"]
+                    ),
+                    "price": lo,
+                }
+            )
 
     return highs, lows
 
 
-def build_ordered_pivots(
-    highs,
-    lows
-):
-
+def build_ordered_pivots(highs, lows):
     pivots = sorted(
         highs + lows,
         key=lambda p: (
@@ -728,48 +571,36 @@ def build_ordered_pivots(
 
     for p in pivots:
 
-        if not result:
-
+        if (
+            not result
+            or p["type"]
+            != result[-1]["type"]
+        ):
             result.append(p)
-            continue
 
-        last = result[-1]
-
-        if p["type"] != last["type"]:
-
-            result.append(p)
-            continue
-
-        if p["type"] == "H":
-
-            if (
-                p["price"]
-                >= last["price"]
-            ):
-
-                result[-1] = p
-
-        else:
-
-            if (
-                p["price"]
-                <= last["price"]
-            ):
-
-                result[-1] = p
+        elif (
+            p["type"] == "H"
+            and p["price"]
+            >= result[-1]["price"]
+        ) or (
+            p["type"] == "L"
+            and p["price"]
+            <= result[-1]["price"]
+        ):
+            result[-1] = p
 
     return result
 
 
 # ============================================================
-# HOOK DETECTION
+# NDS HOOK DETECTION
 # ============================================================
 
-def detect_hooks_from_pivots(
-    highs,
-    lows,
-    interval_minutes
-):
+def detect_hooks(df, interval_minutes):
+    if df is None or df.empty:
+        return []
+
+    highs, lows = find_pivots(df)
 
     ordered = build_ordered_pivots(
         highs,
@@ -785,61 +616,49 @@ def detect_hooks_from_pivots(
     )
 
     if len(ordered) < 6:
-        return hooks, ordered
+        return hooks
 
     for i in range(
         len(ordered) - 5
     ):
 
-        p = ordered[
-            i:i + 6
-        ]
+        p = ordered[i:i + 6]
 
-        types = [
-            x["type"]
-            for x in p
-        ]
-
-        # ====================================================
+        # ----------------------------------------------------
         # POSITIVE HOOK / SHORT
-        # ====================================================
+        #
+        # START(L) -> H1 -> L1 -> H2 -> L2 -> H3
+        #
+        # H2 > H1
+        # L2 < L1
+        # H3 > H2
+        #
+        # START must be the LOWEST point of the hook.
+        # ----------------------------------------------------
 
-        if types == [
+        if [
+            x["type"] for x in p
+        ] == [
             "L",
             "H",
             "L",
             "H",
             "L",
-            "H",
+            "H"
         ]:
 
-            (
-                start,
-                h1,
-                l1,
-                h2,
-                l2,
-                h3
-            ) = p
+            start, h1, l1, h2, l2, h3 = p
 
             if not (
-                h2["price"]
-                > h1["price"]
-                and
-                l2["price"]
-                < l1["price"]
-                and
-                h3["price"]
-                > h2["price"]
+                h2["price"] > h1["price"]
+                and l2["price"] < l1["price"]
+                and h3["price"] > h2["price"]
             ):
                 continue
 
             if not (
-                start["price"]
-                < l1["price"]
-                and
-                start["price"]
-                < l2["price"]
+                start["price"] < l1["price"]
+                and start["price"] < l2["price"]
             ):
                 continue
 
@@ -854,88 +673,71 @@ def detect_hooks_from_pivots(
             ):
                 continue
 
-            # ------------------------------------------------
-            # 86.4% retracement from FINAL back toward START
-            # ------------------------------------------------
-
             tp = (
                 h3["price"]
                 - NDS_RETRACE * rng
             )
 
-            hooks.append({
+            hooks.append(
+                {
+                    "direction": "SHORT",
+                    "start": start,
+                    "h1": h1,
+                    "l1": l1,
+                    "h2": h2,
+                    "l2": l2,
+                    "h3": h3,
+                    "final": h3,
+                    "entry": h3["price"],
+                    "tp": tp,
+                    "range_pct": (
+                        rng
+                        / start["price"]
+                        * 100
+                    ),
+                    "confirmation_time": (
+                        h3["time"]
+                        + confirmation_seconds
+                    ),
+                    "created_time": h3["time"],
+                }
+            )
 
-                "direction": "SHORT",
-
-                "start": start,
-
-                "h1": h1,
-                "l1": l1,
-                "h2": h2,
-                "l2": l2,
-
-                "h3": h3,
-
-                "final": h3,
-
-                "entry":
-                    h3["price"],
-
-                "tp": tp,
-
-                "range_pct":
-                    rng
-                    / start["price"]
-                    * 100.0,
-
-                "confirmation_time":
-                    h3["time"]
-                    + confirmation_seconds,
-
-                "created_time":
-                    h3["time"],
-            })
-
-        # ====================================================
+        # ----------------------------------------------------
         # NEGATIVE HOOK / LONG
-        # ====================================================
+        #
+        # START(H) -> L1 -> H1 -> L2 -> H2 -> L3
+        #
+        # L2 < L1
+        # H2 > H1
+        # L3 < L2
+        #
+        # START must be the HIGHEST point of the hook.
+        # ----------------------------------------------------
 
-        if types == [
+        if [
+            x["type"] for x in p
+        ] == [
             "H",
             "L",
             "H",
             "L",
             "H",
-            "L",
+            "L"
         ]:
 
-            (
-                start,
-                l1,
-                h1,
-                l2,
-                h2,
-                l3
-            ) = p
+            start, l1, h1, l2, h2, l3 = p
 
             if not (
-                l2["price"]
-                < l1["price"]
-                and
-                h2["price"]
-                > h1["price"]
-                and
-                l3["price"]
-                < l2["price"]
+                l2["price"] < l1["price"]
+                and h2["price"] > h1["price"]
+                and l3["price"] < l2["price"]
             ):
                 continue
 
             if not (
-                start["price"]
-                > h1["price"]
-                and
-                start["price"]
-                > h2["price"]
+                start["price"] > h1["price"]
+                and start["price"] > h2["price"]
             ):
                 continue
 
@@ -950,81 +752,44 @@ def detect_hooks_from_pivots(
             ):
                 continue
 
-            # ------------------------------------------------
-            # 86.4% retracement from FINAL back toward START
-            # ------------------------------------------------
-
             tp = (
                 l3["price"]
                 + NDS_RETRACE * rng
             )
 
-            hooks.append({
+            hooks.append(
+                {
+                    "direction": "LONG",
+                    "start": start,
+                    "l1": l1,
+                    "h1": h1,
+                    "l2": l2,
+                    "h2": h2,
+                    "l3": l3,
+                    "final": l3,
+                    "entry": l3["price"],
+                    "tp": tp,
+                    "range_pct": (
+                        rng
+                        / start["price"]
+                        * 100
+                    ),
+                    "confirmation_time": (
+                        l3["time"]
+                        + confirmation_seconds
+                    ),
+                    "created_time": l3["time"],
+                }
+            )
 
-                "direction": "LONG",
-
-                "start": start,
-
-                "l1": l1,
-                "h1": h1,
-                "l2": l2,
-                "h2": h2,
-
-                "l3": l3,
-
-                "final": l3,
-
-                "entry":
-                    l3["price"],
-
-                "tp": tp,
-
-                "range_pct":
-                    rng
-                    / start["price"]
-                    * 100.0,
-
-                "confirmation_time":
-                    l3["time"]
-                    + confirmation_seconds,
-
-                "created_time":
-                    l3["time"],
-            })
-
-    return hooks, ordered
-
-
-def detect_hooks(
-    df,
-    interval_minutes
-):
-
-    if df is None or df.empty:
-        return [], [], []
-
-    highs, lows = find_pivots(df)
-
-    hooks, ordered = (
-        detect_hooks_from_pivots(
-            highs,
-            lows,
-            interval_minutes
-        )
-    )
-
-    return hooks, highs, lows
+    return hooks
 
 
 # ============================================================
-# HOOK STATUS
+# HOOK IDS
 # ============================================================
 
-def hook_id(
-    symbol,
-    hook
-):
-
+def hook_id(symbol, hook):
     final = hook["final"]
 
     return (
@@ -1035,11 +800,11 @@ def hook_id(
     )
 
 
-def hook_is_confirmed(
-    hook,
-    now_ts=None
-):
+# ============================================================
+# HOOK TIMING
+# ============================================================
 
+def hook_is_confirmed(hook, now_ts=None):
     if now_ts is None:
         now_ts = utc_now_ts()
 
@@ -1051,12 +816,16 @@ def hook_is_confirmed(
 
 def hook_is_recent(
     hook,
-    max_age_seconds,
-    now_ts=None
+    now_ts=None,
+    max_age_seconds=None
 ):
-
     if now_ts is None:
         now_ts = utc_now_ts()
+
+    if max_age_seconds is None:
+        max_age_seconds = (
+            M5_MAX_HOOK_AGE_SECONDS
+        )
 
     age = (
         now_ts
@@ -1073,7 +842,6 @@ def hook_is_recent(
 # ============================================================
 
 def db_connect():
-
     conn = sqlite3.connect(
         DB_FILE
     )
@@ -1084,7 +852,6 @@ def db_connect():
 
 
 def init_db():
-
     os.makedirs(
         CHART_DIR,
         exist_ok=True
@@ -1092,61 +859,67 @@ def init_db():
 
     conn = db_connect()
 
-    conn.executescript("""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS hooks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hook_key TEXT UNIQUE,
+            symbol TEXT,
+            direction TEXT,
 
-    CREATE TABLE IF NOT EXISTS hooks (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        hook_key TEXT UNIQUE,
-        symbol TEXT,
-        direction TEXT,
-        start_price REAL,
-        h1_price REAL,
-        l1_price REAL,
-        h2_price REAL,
-        l2_price REAL,
-        final_price REAL,
-        entry REAL,
-        tp REAL,
-        sl REAL,
-        range_pct REAL,
-        confirmation_time INTEGER,
-        created_time INTEGER,
-        detected_time INTEGER,
-        chart_path TEXT
-    );
+            start_price REAL,
+            h1_price REAL,
+            l1_price REAL,
+            h2_price REAL,
+            l2_price REAL,
+            final_price REAL,
 
-    CREATE TABLE IF NOT EXISTS trades (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        hook_key TEXT UNIQUE,
-        symbol TEXT,
-        direction TEXT,
-        entry REAL,
-        sl REAL,
-        tp REAL,
-        opened_at INTEGER,
-        closed_at INTEGER,
-        close_price REAL,
-        status TEXT,
-        pnl_pct REAL,
-        pnl_price REAL,
-        chart_path TEXT
-    );
+            entry REAL,
+            tp REAL,
+            sl REAL,
+            range_pct REAL,
 
-    CREATE TABLE IF NOT EXISTS
-    hook_chart_notifications (
-        hook_key TEXT PRIMARY KEY,
-        sent_at INTEGER,
-        chart_path TEXT
-    );
+            confirmation_time INTEGER,
+            created_time INTEGER,
+            detected_time INTEGER,
+            chart_path TEXT
+        );
 
-    """)
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            hook_key TEXT UNIQUE,
+            symbol TEXT,
+            direction TEXT,
+
+            entry REAL,
+            sl REAL,
+            tp REAL,
+
+            opened_at INTEGER,
+            closed_at INTEGER,
+
+            close_price REAL,
+            status TEXT,
+
+            pnl_pct REAL,
+            pnl_price REAL,
+
+            chart_path TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS hook_chart_notifications (
+            hook_key TEXT PRIMARY KEY,
+            sent_at INTEGER,
+            chart_path TEXT
+        );
+        """
+    )
 
     conn.commit()
     conn.close()
 
 
 def notification_exists(key):
-
     conn = db_connect()
 
     row = conn.execute(
@@ -1167,24 +940,22 @@ def mark_notification_sent(
     key,
     path
 ):
-
     conn = db_connect()
 
     conn.execute(
         """
         INSERT OR IGNORE INTO
-        hook_chart_notifications
-        (
+        hook_chart_notifications(
             hook_key,
             sent_at,
             chart_path
         )
-        VALUES (?,?,?)
+        VALUES(?,?,?)
         """,
         (
             key,
             utc_now_ts(),
-            path,
+            path
         )
     )
 
@@ -1193,7 +964,6 @@ def mark_notification_sent(
 
 
 def hook_exists(key):
-
     conn = db_connect()
 
     row = conn.execute(
@@ -1212,7 +982,6 @@ def hook_exists(key):
 
 
 def trade_exists(key):
-
     conn = db_connect()
 
     row = conn.execute(
@@ -1231,7 +1000,6 @@ def trade_exists(key):
 
 
 def open_trade_count():
-
     conn = db_connect()
 
     row = conn.execute(
@@ -1255,7 +1023,6 @@ def save_hook(
     sl,
     chart_path=None
 ):
-
     key = hook_id(
         symbol,
         hook
@@ -1269,64 +1036,48 @@ def save_hook(
             hook_key,
             symbol,
             direction,
+
             start_price,
             h1_price,
             l1_price,
             h2_price,
             l2_price,
             final_price,
+
             entry,
             tp,
             sl,
             range_pct,
+
             confirmation_time,
             created_time,
             detected_time,
             chart_path
         )
         VALUES (
-            ?,?,?,?,?,?,?,?,?,?,
-            ?,?,?,?,?,?,?
+            ?,?,?,?,?,?,?,?,
+            ?,?,?,?,?,?,?,?
         )
         """,
         (
             key,
             symbol,
             hook["direction"],
+
             hook["start"]["price"],
-            hook.get(
-                "h1",
-                {}
-            ).get(
-                "price"
-            ),
-            hook.get(
-                "l1",
-                {}
-            ).get(
-                "price"
-            ),
-            hook.get(
-                "h2",
-                {}
-            ).get(
-                "price"
-            ),
-            hook.get(
-                "l2",
-                {}
-            ).get(
-                "price"
-            ),
+            hook.get("h1", {}).get("price"),
+            hook.get("l1", {}).get("price"),
+            hook.get("h2", {}).get("price"),
+            hook.get("l2", {}).get("price"),
             hook["final"]["price"],
+
             hook["entry"],
             hook["tp"],
             sl,
             hook["range_pct"],
+
             int(
-                hook[
-                    "confirmation_time"
-                ]
+                hook["confirmation_time"]
             ),
             int(
                 hook["created_time"]
@@ -1349,7 +1100,6 @@ def save_trade(
     sl,
     chart_path=None
 ):
-
     conn = db_connect()
 
     conn.execute(
@@ -1376,7 +1126,7 @@ def save_trade(
             hook["tp"],
             utc_now_ts(),
             "OPEN",
-            chart_path,
+            chart_path
         )
     )
 
@@ -1385,18 +1135,26 @@ def save_trade(
 
 
 # ============================================================
-# STOP LOSS
+# SL
+# IMPORTANT FIX:
+# SL comes from previous valid opposite pivot BEFORE START.
+#
+# SHORT:
+# previous valid H before START
+#
+# LONG:
+# previous valid L before START
+#
+# NOT H2/L2.
+# H2/L2 are inside the hook and are on the wrong side of
+# the final H3/L3 entry.
 # ============================================================
 
-def calculate_sl(
-    df,
-    hook
-):
-
+def calculate_sl(df, hook):
     highs, lows = find_pivots(df)
 
-    final_time = (
-        hook["final"]["time"]
+    start_time = (
+        hook["start"]["time"]
     )
 
     if hook["direction"] == "SHORT":
@@ -1404,7 +1162,7 @@ def calculate_sl(
         candidates = [
             x
             for x in highs
-            if x["time"] < final_time
+            if x["time"] < start_time
         ]
 
     else:
@@ -1412,7 +1170,7 @@ def calculate_sl(
         candidates = [
             x
             for x in lows
-            if x["time"] < final_time
+            if x["time"] < start_time
         ]
 
     candidates.sort(
@@ -1427,14 +1185,13 @@ def calculate_sl(
 
 
 # ============================================================
-# TP TEST
+# TP ALREADY TOUCHED?
 # ============================================================
 
 def tp_already_touched(
     df,
     hook
 ):
-
     future = df[
         df["time"]
         > hook["final"]["time"]
@@ -1462,163 +1219,86 @@ def tp_already_touched(
 
 # ============================================================
 # HEIKIN ASHI
+# DISPLAY ONLY
+#
+# NDS calculations remain on:
+# real open/high/low/close
 # ============================================================
 
 def calculate_heikin_ashi(df):
+    ha = df[
+        [
+            "time",
+            "open",
+            "high",
+            "low",
+            "close"
+        ]
+    ].copy()
 
-    """
-    ONLY for chart display.
-
-    NDS Hook detection, Entry, SL and TP use
-    original Kraken OHLC values.
-
-    HA Close =
-        (O + H + L + C) / 4
-
-    HA Open =
-        (previous HA Open + previous HA Close) / 2
-
-    HA High =
-        max(H, HA Open, HA Close)
-
-    HA Low =
-        min(L, HA Open, HA Close)
-    """
-
-    ha = df.copy()
-
-    if ha.empty:
-        return ha
+    ha["ha_close"] = (
+        ha["open"]
+        + ha["high"]
+        + ha["low"]
+        + ha["close"]
+    ) / 4.0
 
     ha_open = []
-    ha_close = []
-    ha_high = []
-    ha_low = []
 
-    for i in range(
-        len(ha)
-    ):
-
-        op = float(
-            ha.iloc[i]["open"]
-        )
-
-        hi = float(
-            ha.iloc[i]["high"]
-        )
-
-        lo = float(
-            ha.iloc[i]["low"]
-        )
-
-        cl = float(
-            ha.iloc[i]["close"]
-        )
-
-        current_ha_close = (
-            op + hi + lo + cl
-        ) / 4.0
+    for i in range(len(ha)):
 
         if i == 0:
 
-            current_ha_open = (
-                op + cl
+            value = (
+                float(
+                    ha.iloc[i]["open"]
+                )
+                +
+                float(
+                    ha.iloc[i]["close"]
+                )
             ) / 2.0
 
         else:
 
-            current_ha_open = (
-                ha_open[i - 1]
-                + ha_close[i - 1]
+            value = (
+                float(
+                    ha.iloc[i - 1]["ha_open"]
+                )
+                +
+                float(
+                    ha.iloc[i - 1]["ha_close"]
+                )
             ) / 2.0
 
-        current_ha_high = max(
-            hi,
-            current_ha_open,
-            current_ha_close
-        )
-
-        current_ha_low = min(
-            lo,
-            current_ha_open,
-            current_ha_close
-        )
-
-        ha_open.append(
-            current_ha_open
-        )
-
-        ha_close.append(
-            current_ha_close
-        )
-
-        ha_high.append(
-            current_ha_high
-        )
-
-        ha_low.append(
-            current_ha_low
-        )
+        ha_open.append(value)
 
     ha["ha_open"] = ha_open
-    ha["ha_high"] = ha_high
-    ha["ha_low"] = ha_low
-    ha["ha_close"] = ha_close
+
+    ha["ha_high"] = ha[
+        [
+            "high",
+            "ha_open",
+            "ha_close"
+        ]
+    ].max(axis=1)
+
+    ha["ha_low"] = ha[
+        [
+            "low",
+            "ha_open",
+            "ha_close"
+        ]
+    ].min(axis=1)
 
     return ha
 
 
 # ============================================================
-# CHART HELPERS
-# ============================================================
-
-def get_hook_points(hook):
-
-    if hook["direction"] == "SHORT":
-
-        points = [
-            hook["start"],
-            hook["h1"],
-            hook["l1"],
-            hook["h2"],
-            hook["l2"],
-            hook["h3"],
-        ]
-
-        labels = [
-            "START",
-            "H1",
-            "L1",
-            "H2",
-            "L2",
-            "H3",
-        ]
-
-    else:
-
-        points = [
-            hook["start"],
-            hook["l1"],
-            hook["h1"],
-            hook["l2"],
-            hook["h2"],
-            hook["l3"],
-        ]
-
-        labels = [
-            "START",
-            "L1",
-            "H1",
-            "L2",
-            "H2",
-            "L3",
-        ]
-
-    return points, labels
-
-
-# ============================================================
 # CHART
+#
+# Uses Heikin Ashi candles.
+# NDS hook points / Entry / TP / SL use real OHLC.
 # ============================================================
 
 def create_hook_chart(
@@ -1629,182 +1309,168 @@ def create_hook_chart(
     path_prefix="hook",
     timeframe="M5"
 ):
-
     try:
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        # Calculate HA from the FULL dataframe first.
-        # ----------------------------------------------------
-
-        ha_df = calculate_heikin_ashi(
-            df
-        )
-
         chart_df = (
-            ha_df
-            .tail(CHART_CANDLES)
+            df.tail(CHART_CANDLES)
             .copy()
+            .reset_index(drop=True)
         )
 
         if chart_df.empty:
             return None
 
-        # ----------------------------------------------------
-        # Convert candle times to timezone-aware datetime.
-        # ----------------------------------------------------
-
-        chart_df["dt"] = pd.to_datetime(
-            chart_df["time"],
-            unit="s",
-            utc=True
+        ha = calculate_heikin_ashi(
+            chart_df
         )
 
         fig, ax = plt.subplots(
             figsize=(15, 8)
         )
 
-        # ----------------------------------------------------
-        # Heikin Ashi candle width
-        #
-        # Matplotlib datetime axes use DAYS.
-        # ----------------------------------------------------
+        dt_series = pd.to_datetime(
+            ha["time"],
+            unit="s",
+            utc=True
+        )
 
-        if len(chart_df) > 1:
+        x_num = matplotlib.dates.date2num(
+            dt_series.dt.to_pydatetime()
+        )
 
-            time_diffs_days = (
-                chart_df["dt"]
-                .diff()
-                .dropna()
-                .dt.total_seconds()
-                / 86400.0
+        if timeframe == "H4":
+            candle_minutes = (
+                H4_INTERVAL_MINUTES
             )
-
-            median_diff = (
-                float(
-                    time_diffs_days.median()
-                )
-                if not time_diffs_days.empty
-                else (
-                    M5_INTERVAL_MINUTES
-                    / 1440.0
-                )
-            )
-
-            candle_width = (
-                median_diff * 0.72
-            )
-
         else:
+            candle_minutes = (
+                M5_INTERVAL_MINUTES
+            )
 
-            if timeframe == "H4":
-
-                candle_width = (
-                    H4_INTERVAL_MINUTES
-                    / 1440.0
-                    * 0.72
-                )
-
-            else:
-
-                candle_width = (
-                    M5_INTERVAL_MINUTES
-                    / 1440.0
-                    * 0.72
-                )
+        width = max(
+            (
+                candle_minutes
+                / 1440.0
+            ) * 0.72,
+            0.0008
+        )
 
         # ----------------------------------------------------
-        # Heikin Ashi candles
-        #
-        # IMPORTANT:
-        # x is datetime, NOT Unix seconds.
-        # This fixes the original chart-axis bug.
+        # HEIKIN ASHI CANDLES
         # ----------------------------------------------------
 
-        for _, candle in chart_df.iterrows():
+        for i, row in ha.iterrows():
 
-            x = candle["dt"]
+            x0 = x_num[i]
 
-            op = float(
-                candle["ha_open"]
+            o = float(
+                row["ha_open"]
+            )
+
+            c = float(
+                row["ha_close"]
             )
 
             hi = float(
-                candle["ha_high"]
+                row["ha_high"]
             )
 
             lo = float(
-                candle["ha_low"]
+                row["ha_low"]
             )
 
-            cl = float(
-                candle["ha_close"]
+            up = c >= o
+
+            body_low = min(
+                o,
+                c
             )
 
-            if cl >= op:
+            body_high = max(
+                o,
+                c
+            )
 
-                body_color = "green"
+            body_height = max(
+                body_high - body_low,
+                max(abs(c), 1.0)
+                * 1e-7
+            )
 
-            else:
+            candle_color = (
+                "#26a69a"
+                if up
+                else "#ef5350"
+            )
 
-                body_color = "red"
-
-            # Wick
             ax.vlines(
-                x,
+                x0,
                 lo,
                 hi,
+                color="black",
                 linewidth=0.8,
-                color=body_color,
                 alpha=0.9,
                 zorder=2
             )
 
-            # Body
-            body_bottom = min(
-                op,
-                cl
-            )
-
-            body_height = abs(
-                cl - op
-            )
-
-            min_body = (
-                (hi - lo) * 0.002
-                if hi != lo
-                else 0.00000001
-            )
-
-            body_height = max(
-                body_height,
-                min_body
-            )
-
-            rect = Rectangle(
+            rect = plt.Rectangle(
                 (
-                    mdates.date2num(x)
-                    - candle_width / 2,
-                    body_bottom
+                    x0 - width / 2.0,
+                    body_low
                 ),
-                candle_width,
+                width,
                 body_height,
-                facecolor=body_color,
-                edgecolor=body_color,
-                linewidth=0.7,
-                alpha=0.85,
+                facecolor=candle_color,
+                edgecolor="black",
+                linewidth=0.6,
                 zorder=3
             )
 
             ax.add_patch(rect)
 
         # ----------------------------------------------------
-        # Hook points
+        # HOOK POINTS
         # ----------------------------------------------------
 
-        points, labels = get_hook_points(
-            hook
-        )
+        if hook["direction"] == "SHORT":
+
+            points = [
+                hook["start"],
+                hook["h1"],
+                hook["l1"],
+                hook["h2"],
+                hook["l2"],
+                hook["h3"],
+            ]
+
+            labels = [
+                "START",
+                "H1",
+                "L1",
+                "H2",
+                "L2",
+                "H3",
+            ]
+
+        else:
+
+            points = [
+                hook["start"],
+                hook["l1"],
+                hook["h1"],
+                hook["l2"],
+                hook["h2"],
+                hook["l3"],
+            ]
+
+            labels = [
+                "START",
+                "L1",
+                "H1",
+                "L2",
+                "H2",
+                "L3",
+            ]
 
         px = [
             datetime.fromtimestamp(
@@ -1819,53 +1485,39 @@ def create_hook_chart(
             for p in points
         ]
 
-        # ----------------------------------------------------
-        # Hook connecting line
-        # ----------------------------------------------------
-
         ax.plot(
             px,
             py,
             marker="o",
-            linewidth=2.0,
+            linewidth=2.1,
+            color="royalblue",
             label="Confirmed NDS Hook",
             zorder=5
         )
 
-        # ----------------------------------------------------
-        # Improved labels
-        #
-        # Alternate/staggered offsets so labels do not
-        # pile onto each other.
-        # ----------------------------------------------------
-
         if hook["direction"] == "SHORT":
 
             offsets = [
-                (0, -34),   # START
-                (0, 30),    # H1
-                (0, -32),   # L1
-                (0, 32),    # H2
-                (0, -32),   # L2
-                (0, 34),    # H3
+                (0, -28),  # START
+                (0, 18),   # H1
+                (0, -30),  # L1
+                (0, 18),   # H2
+                (0, -30),  # L2
+                (0, 22),   # H3
             ]
 
         else:
 
             offsets = [
-                (0, 36),    # START
-                (0, -32),   # L1
-                (0, 30),    # H1
-                (0, -32),   # L2
-                (0, 30),    # H2
-                (0, -36),   # L3
+                (0, 24),   # START
+                (0, -30),  # L1
+                (0, 18),   # H1
+                (0, -30),  # L2
+                (0, 18),   # H2
+                (0, -32),  # L3
             ]
 
-        for (
-            p,
-            label,
-            offset
-        ) in zip(
+        for p, label, offset in zip(
             points,
             labels,
             offsets
@@ -1876,27 +1528,58 @@ def create_hook_chart(
                 tz=timezone.utc
             )
 
+            emphasis = (
+                label
+                in {
+                    "START",
+                    "H3",
+                    "L3"
+                }
+            )
+
             ax.annotate(
                 (
                     f"{label}\n"
                     f"{fmt_price(p['price'])}"
                 ),
-                (dt, p["price"]),
+                (
+                    dt,
+                    p["price"]
+                ),
                 xytext=offset,
                 textcoords="offset points",
                 ha="center",
                 va="center",
-                fontsize=8,
+                fontsize=(
+                    9 if emphasis
+                    else 8
+                ),
+                fontweight=(
+                    "bold"
+                    if emphasis
+                    else "normal"
+                ),
                 bbox=dict(
-                    boxstyle="round,pad=0.25",
+                    boxstyle="round,pad=0.22",
                     fc="white",
-                    alpha=0.86
+                    ec=(
+                        "black"
+                        if emphasis
+                        else "gray"
+                    ),
+                    alpha=0.9
+                ),
+                arrowprops=dict(
+                    arrowstyle="-",
+                    color="gray",
+                    linewidth=0.7,
+                    alpha=0.7
                 ),
                 zorder=10
             )
 
         # ----------------------------------------------------
-        # Entry / TP / SL
+        # ENTRY / TP / SL
         # ----------------------------------------------------
 
         entry = float(
@@ -1907,140 +1590,91 @@ def create_hook_chart(
             hook["tp"]
         )
 
-        sl_value = (
-            float(sl)
-            if sl is not None
-            else None
-        )
-
         chart_start_dt = (
-            chart_df["dt"].iloc[0]
+            pd.to_datetime(
+                ha["time"].iloc[0],
+                unit="s",
+                utc=True
+            ).to_pydatetime()
         )
 
         chart_end_dt = (
-            chart_df["dt"].iloc[-1]
+            pd.to_datetime(
+                ha["time"].iloc[-1],
+                unit="s",
+                utc=True
+            ).to_pydatetime()
         )
 
-        hook_min_dt = min(
-            px
-        )
-
-        hook_max_dt = max(
-            px
+        confirmation_dt = (
+            datetime.fromtimestamp(
+                hook["confirmation_time"],
+                tz=timezone.utc
+            )
         )
 
         start_x = min(
             chart_start_dt,
-            hook_min_dt
-        )
-
-        confirmation_dt = datetime.fromtimestamp(
-            hook["confirmation_time"],
-            tz=timezone.utc
+            px[0]
         )
 
         end_x = max(
             chart_end_dt,
-            hook_max_dt,
             confirmation_dt
-        )
-
-        # Add a small horizontal margin.
-        total_days = (
-            end_x - start_x
-        ).total_seconds() / 86400.0
-
-        if total_days <= 0:
-            total_days = (
-                M5_INTERVAL_MINUTES
-                / 1440.0
-            )
-
-        x_margin = (
-            total_days * 0.03
-        )
-
-        start_x_plot = (
-            start_x
-            - pd.Timedelta(
-                days=x_margin
-            )
-        )
-
-        end_x_plot = (
-            end_x
-            + pd.Timedelta(
-                days=x_margin
-            )
         )
 
         ax.hlines(
             entry,
-            start_x_plot,
-            end_x_plot,
+            start_x,
+            end_x,
             linestyles="--",
-            linewidth=1.4,
+            linewidth=1.5,
             label=(
                 f"ENTRY "
                 f"{fmt_price(entry)}"
             ),
+            color="darkorange",
             zorder=4
         )
 
         ax.hlines(
             tp,
-            start_x_plot,
-            end_x_plot,
+            start_x,
+            end_x,
             linestyles="--",
             linewidth=1.6,
             label=(
                 f"TP 86.4% "
                 f"{fmt_price(tp)}"
             ),
+            color="seagreen",
             zorder=4
         )
 
-        if sl_value is not None:
+        if sl is not None:
 
             ax.hlines(
-                sl_value,
-                start_x_plot,
-                end_x_plot,
+                float(sl),
+                start_x,
+                end_x,
                 linestyles="--",
-                linewidth=1.4,
+                linewidth=1.5,
                 label=(
                     f"SL "
-                    f"{fmt_price(sl_value)}"
+                    f"{fmt_price(sl)}"
                 ),
+                color="crimson",
                 zorder=4
             )
-
-        # ----------------------------------------------------
-        # Confirmation line
-        # ----------------------------------------------------
 
         ax.axvline(
             confirmation_dt,
             linestyle=":",
             linewidth=1.2,
             label="CONFIRMED",
+            color="purple",
             zorder=4
         )
-
-        # ----------------------------------------------------
-        # Highlight FINAL point
-        # ----------------------------------------------------
-
-        ax.scatter(
-            [px[-1]],
-            [py[-1]],
-            s=70,
-            zorder=11
-        )
-
-        # ----------------------------------------------------
-        # Title
-        # ----------------------------------------------------
 
         ax.set_title(
             (
@@ -2049,9 +1683,7 @@ def create_hook_chart(
                 f"{hook['direction']} | "
                 f"CONFIRMED HOOK | "
                 f"HEIKIN ASHI"
-            ),
-            fontsize=12,
-            fontweight="bold"
+            )
         )
 
         ax.set_xlabel(
@@ -2062,43 +1694,8 @@ def create_hook_chart(
             "Price"
         )
 
-        # ----------------------------------------------------
-        # Datetime axis
-        # ----------------------------------------------------
-
-        if timeframe == "H4":
-
-            locator = mdates.AutoDateLocator(
-                minticks=6,
-                maxticks=10
-            )
-
-        else:
-
-            locator = mdates.AutoDateLocator(
-                minticks=8,
-                maxticks=12
-            )
-
-        formatter = mdates.ConciseDateFormatter(
-            locator
-        )
-
-        ax.xaxis.set_major_locator(
-            locator
-        )
-
-        ax.xaxis.set_major_formatter(
-            formatter
-        )
-
-        ax.set_xlim(
-            start_x_plot,
-            end_x_plot
-        )
-
         ax.grid(
-            alpha=0.25
+            alpha=0.22
         )
 
         ax.legend(
@@ -2106,11 +1703,18 @@ def create_hook_chart(
             fontsize=8
         )
 
-        fig.autofmt_xdate()
+        ax.set_xlim(
+            min(
+                start_x,
+                px[0]
+            ),
+            max(
+                end_x,
+                px[-1]
+            )
+        )
 
-        # ----------------------------------------------------
-        # Save
-        # ----------------------------------------------------
+        fig.autofmt_xdate()
 
         safe_symbol = (
             symbol
@@ -2124,7 +1728,8 @@ def create_hook_chart(
                 f"{path_prefix}_"
                 f"{safe_symbol}_"
                 f"{hook['direction']}_"
-                f"{int(hook['final']['time'])}.png"
+                f"{int(hook['final']['time'])}"
+                f".png"
             )
         )
 
@@ -2132,8 +1737,7 @@ def create_hook_chart(
 
         plt.savefig(
             path,
-            dpi=140,
-            bbox_inches="tight"
+            dpi=150
         )
 
         plt.close(fig)
@@ -2156,15 +1760,22 @@ def create_hook_chart(
 
 
 # ============================================================
-# M5 HOOK CHART REPORTING
+# SEND VALID M5 HOOK CHARTS
+#
+# Independent of H4 direction.
+#
+# Only:
+#   confirmed
+#   recent <= 6h
+#   range >= 0.20%
+#
 # ============================================================
 
 def send_detected_m5_hook_charts(
     symbol,
     df
 ):
-
-    hooks, highs, lows = detect_hooks(
+    hooks = detect_hooks(
         df,
         M5_INTERVAL_MINUTES
     )
@@ -2179,12 +1790,16 @@ def send_detected_m5_hook_charts(
         ):
             continue
 
+        DIAG["m5_confirmed"] += 1
+
         if not hook_is_recent(
             hook,
-            M5_MAX_HOOK_AGE_SECONDS,
-            now_ts
+            now_ts,
+            M5_MAX_HOOK_AGE_SECONDS
         ):
             continue
+
+        DIAG["m5_recent"] += 1
 
         if (
             hook["range_pct"]
@@ -2192,9 +1807,7 @@ def send_detected_m5_hook_charts(
         ):
             continue
 
-        DIAG[
-            "m5_range_valid_hooks"
-        ] += 1
+        DIAG["m5_range_valid"] += 1
 
         key = hook_id(
             symbol,
@@ -2215,25 +1828,22 @@ def send_detected_m5_hook_charts(
             hook,
             sl,
             "detected_hook",
-            "M5"
+            timeframe="M5"
         )
 
         if not chart_path:
 
-            DIAG[
-                "hook_chart_errors"
-            ] += 1
+            DIAG["hook_chart_errors"] += 1
 
             continue
 
         caption = (
-            f"🔎 <b>NDS M5 HOOK</b>\n"
+            f"🔎 <b>NDS M5 VALID HOOK</b>\n"
             f"<b>{symbol}</b>\n"
-            f"Direction: "
-            f"<b>{hook['direction']}</b>\n\n"
+            f"Direction: <b>{hook['direction']}</b>\n"
             f"START: "
             f"{fmt_price(hook['start']['price'])}\n"
-            f"FINAL: "
+            f"Final: "
             f"{fmt_price(hook['final']['price'])}\n"
             f"Entry reference: "
             f"{fmt_price(hook['entry'])}\n"
@@ -2244,8 +1854,15 @@ def send_detected_m5_hook_charts(
             f"Hook range: "
             f"{hook['range_pct']:.2f}%\n"
             f"Confirmed: "
-            f"{fmt_ts(hook['confirmation_time'])}\n\n"
-            f"<b>M5 HEIKIN ASHI HOOK CHART</b>\n"
+            f"{fmt_ts(hook['confirmation_time'])}\n"
+            f"<b>"
+            f"Heikin Ashi chart; "
+            f"NDS values use real OHLC."
+            f"</b>\n"
+            f"<b>"
+            f"Chart only; not necessarily "
+            f"a trade signal."
+            f"</b>\n"
             f"<b>PAPER TRADING ONLY</b>"
         )
 
@@ -2270,9 +1887,11 @@ def send_detected_m5_hook_charts(
             ] += 1
 
             DIAG["api_errors"].append(
-                f"Hook chart not sent: "
-                f"{symbol} "
-                f"{hook['direction']}"
+                (
+                    f"Hook chart not sent: "
+                    f"{symbol} "
+                    f"{hook['direction']}"
+                )
             )
 
 
@@ -2282,9 +1901,7 @@ def send_detected_m5_hook_charts(
 
 def get_h4_direction(symbol):
 
-    DIAG[
-        "h4_requests"
-    ] += 1
+    DIAG["h4_requests"] += 1
 
     df = get_candles(
         symbol,
@@ -2294,51 +1911,45 @@ def get_h4_direction(symbol):
 
     if df is None:
 
-        DIAG[
-            "h4_data_error"
-        ] += 1
+        DIAG["h4_data_error"] += 1
 
         return None
 
     if df.empty:
 
-        DIAG[
-            "h4_empty"
-        ] += 1
+        DIAG["h4_empty"] += 1
 
         return None
 
     if len(df) < 50:
 
-        DIAG[
-            "h4_short"
-        ] += 1
+        DIAG["h4_short"] += 1
 
         return None
 
-    DIAG[
-        "h4_data_ok"
-    ] += 1
+    DIAG["h4_data_ok"] += 1
 
-    H4_DATA[
-        symbol
-    ] = df.copy()
-
-    hooks, highs, lows = detect_hooks(
-        df,
-        H4_INTERVAL_MINUTES
+    H4_DATA[symbol] = (
+        df.copy()
     )
 
-    DIAG[
-        "h4_pivots"
-    ] += (
+    highs, lows = find_pivots(
+        df
+    )
+
+    DIAG["h4_pivots"] += (
         len(highs)
         + len(lows)
     )
 
-    DIAG[
-        "h4_hooks"
-    ] += len(hooks)
+    hooks = detect_hooks(
+        df,
+        H4_INTERVAL_MINUTES
+    )
+
+    DIAG["h4_hooks"] += (
+        len(hooks)
+    )
 
     now_ts = utc_now_ts()
 
@@ -2356,27 +1967,29 @@ def get_h4_direction(symbol):
         for h in confirmed
         if hook_is_recent(
             h,
-            H4_MAX_HOOK_AGE_SECONDS,
-            now_ts
+            now_ts,
+            H4_MAX_HOOK_AGE_SECONDS
         )
     ]
 
-    DIAG[
-        "h4_confirmed_hooks"
-    ] += len(confirmed)
+    DIAG["h4_confirmed"] += (
+        len(confirmed)
+    )
 
-    DIAG[
-        "h4_recent_hooks"
-    ] += len(recent)
+    DIAG["h4_recent"] += (
+        len(recent)
+    )
 
-    DIAG[
-        "h4_valid_hooks"
-    ] += len(recent)
+    DIAG["h4_valid_hooks"] += (
+        len(recent)
+    )
 
-    if not recent:
+    valid = recent
+
+    if not valid:
         return None
 
-    recent.sort(
+    valid.sort(
         key=lambda h: (
             h["confirmation_time"],
             h["final"]["time"]
@@ -2384,18 +1997,19 @@ def get_h4_direction(symbol):
         reverse=True
     )
 
-    latest = recent[0]
+    latest = valid[0]
 
-    H4_DIRECTION[
-        symbol
-    ] = {
+    H4_DIRECTION[symbol] = {
         "direction":
             latest["direction"],
         "hook":
-            latest,
+            latest
     }
 
-    if latest["direction"] == "SHORT":
+    if (
+        latest["direction"]
+        == "SHORT"
+    ):
 
         DIAG[
             "h4_short_direction"
@@ -2419,10 +2033,9 @@ def build_signal_message(
     hook,
     sl
 ):
-
-    direction = hook[
-        "direction"
-    ]
+    direction = (
+        hook["direction"]
+    )
 
     emoji = (
         "🔴"
@@ -2497,25 +2110,34 @@ def build_signal_message(
 
 # ============================================================
 # PROCESS SYMBOL
+#
+# IMPORTANT:
+# M5 hook charts are independent of H4.
+#
+# Trade signal requires:
+#   1) H4 direction
+#   2) M5 same direction
+#   3) confirmed
+#   4) recent <= 6h
+#   5) range >= 0.20%
+#   6) TP not already touched
+#   7) previous valid SL exists
+#   8) SL / ENTRY / TP geometry valid
+#   9) not duplicate
+#   10) max open not exceeded
+#
+# Every candidate is checked.
+# We no longer stop after the newest candidate fails.
 # ============================================================
 
 def process_symbol(symbol):
 
-    # --------------------------------------------------------
-    # 1. H4 direction
-    # --------------------------------------------------------
-
+    # H4 only authorizes trade direction.
     direction = get_h4_direction(
         symbol
     )
 
-    # --------------------------------------------------------
-    # 2. M5 data
-    # --------------------------------------------------------
-
-    DIAG[
-        "m5_requests"
-    ] += 1
+    DIAG["m5_requests"] += 1
 
     df = get_candles(
         symbol,
@@ -2530,7 +2152,6 @@ def process_symbol(symbol):
         ] += 1
 
         if direction is None:
-
             DIAG[
                 "h4_filtered"
             ] += 1
@@ -2544,7 +2165,6 @@ def process_symbol(symbol):
         ] += 1
 
         if direction is None:
-
             DIAG[
                 "h4_filtered"
             ] += 1
@@ -2558,7 +2178,6 @@ def process_symbol(symbol):
         ] += 1
 
         if direction is None:
-
             DIAG[
                 "h4_filtered"
             ] += 1
@@ -2569,13 +2188,8 @@ def process_symbol(symbol):
         "m5_data_ok"
     ] += 1
 
-    # --------------------------------------------------------
-    # 3. M5 pivots / hooks
-    # --------------------------------------------------------
-
-    hooks, highs, lows = detect_hooks(
-        df,
-        M5_INTERVAL_MINUTES
+    highs, lows = find_pivots(
+        df
     )
 
     DIAG[
@@ -2585,43 +2199,17 @@ def process_symbol(symbol):
         + len(lows)
     )
 
+    hooks = detect_hooks(
+        df,
+        M5_INTERVAL_MINUTES
+    )
+
     DIAG[
         "m5_hooks"
     ] += len(hooks)
 
-    now_ts = utc_now_ts()
-
-    confirmed_m5 = [
-        h
-        for h in hooks
-        if hook_is_confirmed(
-            h,
-            now_ts
-        )
-    ]
-
-    recent_m5 = [
-        h
-        for h in confirmed_m5
-        if hook_is_recent(
-            h,
-            M5_MAX_HOOK_AGE_SECONDS,
-            now_ts
-        )
-    ]
-
-    DIAG[
-        "m5_confirmed_hooks"
-    ] += len(confirmed_m5)
-
-    DIAG[
-        "m5_recent_hooks"
-    ] += len(recent_m5)
-
     # --------------------------------------------------------
-    # 4. M5 confirmed/recent valid Hook charts
-    #
-    # Independent of H4 direction.
+    # SEND ALL VALID M5 HOOK CHARTS INDEPENDENTLY
     # --------------------------------------------------------
 
     send_detected_m5_hook_charts(
@@ -2630,7 +2218,7 @@ def process_symbol(symbol):
     )
 
     # --------------------------------------------------------
-    # 5. H4 filter applies ONLY to trading
+    # NO H4 DIRECTION = NO TRADE
     # --------------------------------------------------------
 
     if direction is None:
@@ -2641,17 +2229,32 @@ def process_symbol(symbol):
 
         return
 
-    # --------------------------------------------------------
-    # 6. M5 candidates for actual PAPER signal
-    # --------------------------------------------------------
+    now_ts = utc_now_ts()
 
     candidates = []
 
-    for hook in recent_m5:
+    # --------------------------------------------------------
+    # BUILD TRADE-ELIGIBLE CANDIDATES
+    # --------------------------------------------------------
+
+    for hook in hooks:
 
         if (
             hook["direction"]
             != direction
+        ):
+            continue
+
+        if not hook_is_confirmed(
+            hook,
+            now_ts
+        ):
+            continue
+
+        if not hook_is_recent(
+            hook,
+            now_ts,
+            M5_MAX_HOOK_AGE_SECONDS
         ):
             continue
 
@@ -2661,23 +2264,34 @@ def process_symbol(symbol):
         ):
             continue
 
+        DIAG[
+            "m5_direction_match"
+        ] += 1
+
+        DIAG[
+            "m5_valid_hooks"
+        ] += 1
+
+        # TP must NOT already have been touched.
         if tp_already_touched(
             df,
             hook
         ):
+
+            DIAG[
+                "m5_tp_touched"
+            ] += 1
+
             continue
 
         candidates.append(
             hook
         )
 
-    DIAG[
-        "m5_valid_hooks"
-    ] += len(candidates)
-
     if not candidates:
         return
 
+    # Newest first.
     candidates.sort(
         key=lambda h: (
             h["confirmation_time"],
@@ -2686,203 +2300,257 @@ def process_symbol(symbol):
         reverse=True
     )
 
-    hook = candidates[0]
-
-    sl = calculate_sl(
-        df,
-        hook
-    )
-
-    if sl is None:
-        return
-
-    entry = float(
-        hook["entry"]
-    )
-
-    tp = float(
-        hook["tp"]
-    )
-
-    sl = float(sl)
-
     # --------------------------------------------------------
-    # Price geometry safety check
+    # IMPORTANT:
+    # Try ALL candidates.
+    #
+    # Previously only candidates[0] was checked.
+    # If that one failed SL/geometry, the whole symbol died.
     # --------------------------------------------------------
 
-    if direction == "SHORT":
+    for hook in candidates:
 
-        if not (
-            sl
-            > entry
-            > tp
-        ):
-            return
+        sl = calculate_sl(
+            df,
+            hook
+        )
 
-    else:
-
-        if not (
-            sl
-            < entry
-            < tp
-        ):
-            return
-
-    # --------------------------------------------------------
-    # Duplicate protection
-    # --------------------------------------------------------
-
-    key = hook_id(
-        symbol,
-        hook
-    )
-
-    if (
-        hook_exists(key)
-        or trade_exists(key)
-    ):
+        if sl is None:
+            continue
 
         DIAG[
-            "duplicate_signals"
+            "m5_sl_found"
         ] += 1
 
-        return
+        entry = float(
+            hook["entry"]
+        )
 
-    # --------------------------------------------------------
-    # Maximum open trades
-    # --------------------------------------------------------
+        tp = float(
+            hook["tp"]
+        )
 
-    if (
-        open_trade_count()
-        >= MAX_OPEN_TRADES
-    ):
+        sl = float(sl)
+
+        # ----------------------------------------------------
+        # GEOMETRY
+        #
+        # SHORT:
+        # SL > ENTRY > TP
+        #
+        # LONG:
+        # SL < ENTRY < TP
+        # ----------------------------------------------------
+
+        if direction == "SHORT":
+
+            geometry_ok = (
+                sl > entry > tp
+            )
+
+        else:
+
+            geometry_ok = (
+                sl < entry < tp
+            )
+
+        if not geometry_ok:
+            continue
 
         DIAG[
-            "max_open"
+            "m5_geometry_valid"
         ] += 1
 
-        return
+        key = hook_id(
+            symbol,
+            hook
+        )
 
-    # --------------------------------------------------------
-    # M5 SIGNAL CHART
-    # --------------------------------------------------------
+        # ----------------------------------------------------
+        # DUPLICATE
+        # ----------------------------------------------------
 
-    chart_path = create_hook_chart(
-        symbol,
-        df,
-        hook,
-        sl,
-        "signal_m5",
-        "M5"
-    )
+        if (
+            hook_exists(key)
+            or trade_exists(key)
+        ):
 
-    save_hook(
-        symbol,
-        hook,
-        sl,
-        chart_path
-    )
+            DIAG[
+                "m5_duplicate"
+            ] += 1
 
-    save_trade(
-        key,
-        symbol,
-        hook,
-        sl,
-        chart_path
-    )
+            DIAG[
+                "duplicate_signals"
+            ] += 1
 
-    DIAG[
-        "signals"
-    ] += 1
+            # Do not kill the whole pipeline.
+            # Try older eligible candidate.
+            continue
 
-    # --------------------------------------------------------
-    # SIGNAL MESSAGE
-    # --------------------------------------------------------
+        # ----------------------------------------------------
+        # MAX OPEN
+        # ----------------------------------------------------
 
-    telegram_send(
-        build_signal_message(
+        if (
+            open_trade_count()
+            >= MAX_OPEN_TRADES
+        ):
+
+            DIAG[
+                "m5_max_open"
+            ] += 1
+
+            DIAG[
+                "max_open"
+            ] += 1
+
+            return
+
+        # ----------------------------------------------------
+        # SIGNAL READY
+        # ----------------------------------------------------
+
+        DIAG[
+            "signal_ready"
+        ] += 1
+
+        # ----------------------------------------------------
+        # M5 SIGNAL CHART
+        # ----------------------------------------------------
+
+        chart_path = create_hook_chart(
+            symbol,
+            df,
+            hook,
+            sl,
+            "signal_m5",
+            timeframe="M5"
+        )
+
+        # ----------------------------------------------------
+        # SAVE PAPER TRADE
+        # ----------------------------------------------------
+
+        save_hook(
             symbol,
             hook,
-            sl
+            sl,
+            chart_path
         )
-    )
 
-    if chart_path:
+        save_trade(
+            key,
+            symbol,
+            hook,
+            sl,
+            chart_path
+        )
 
-        telegram_send_photo(
-            chart_path,
-            (
-                f"📍 "
-                f"<b>NDS {direction} SIGNAL | M5</b>\n"
-                f"<b>{symbol}</b>\n"
-                f"Entry: "
-                f"{fmt_price(hook['entry'])}\n"
-                f"TP 86.4%: "
-                f"{fmt_price(hook['tp'])}\n"
-                f"SL: "
-                f"{fmt_price(sl)}\n"
-                f"<b>HEIKIN ASHI CHART</b>\n"
-                f"<b>PAPER TRADING ONLY</b>"
+        DIAG[
+            "signals"
+        ] += 1
+
+        # ----------------------------------------------------
+        # TELEGRAM SIGNAL
+        # ----------------------------------------------------
+
+        telegram_send(
+            build_signal_message(
+                symbol,
+                hook,
+                sl
             )
         )
 
-    # --------------------------------------------------------
-    # H4 CONFIRMATION CHART
-    # --------------------------------------------------------
+        if chart_path:
 
-    h4_info = H4_DIRECTION.get(
-        symbol
-    )
-
-    h4_df = H4_DATA.get(
-        symbol
-    )
-
-    if (
-        h4_info
-        and h4_df is not None
-    ):
-
-        h4_hook = h4_info.get(
-            "hook"
-        )
-
-        if h4_hook:
-
-            h4_sl = calculate_sl(
-                h4_df,
-                h4_hook
-            )
-
-            h4_chart_path = (
-                create_hook_chart(
-                    symbol,
-                    h4_df,
-                    h4_hook,
-                    h4_sl,
-                    "signal_h4",
-                    "H4"
+            telegram_send_photo(
+                chart_path,
+                (
+                    f"📍 "
+                    f"<b>NDS {direction} SIGNAL | M5</b>\n"
+                    f"<b>{symbol}</b>\n"
+                    f"Entry: "
+                    f"{fmt_price(entry)}\n"
+                    f"TP 86.4%: "
+                    f"{fmt_price(tp)}\n"
+                    f"SL: "
+                    f"{fmt_price(sl)}\n"
+                    f"Heikin Ashi chart; "
+                    f"NDS values use real OHLC.\n"
+                    f"PAPER TRADING ONLY"
                 )
             )
 
-            if h4_chart_path:
+        # ----------------------------------------------------
+        # H4 CONFIRMATION CHART
+        # ----------------------------------------------------
 
-                telegram_send_photo(
-                    h4_chart_path,
-                    (
-                        f"🧭 "
-                        f"<b>H4 DIRECTION "
-                        f"CONFIRMATION</b>\n"
-                        f"<b>{symbol}</b>\n"
-                        f"Direction: "
-                        f"<b>{direction}</b>\n"
-                        f"This H4 Hook "
-                        f"authorized "
-                        f"the M5 signal.\n"
-                        f"<b>HEIKIN ASHI CHART</b>\n"
-                        f"<b>PAPER TRADING ONLY</b>"
+        h4_info = (
+            H4_DIRECTION.get(
+                symbol
+            )
+        )
+
+        h4_df = (
+            H4_DATA.get(
+                symbol
+            )
+        )
+
+        if (
+            h4_info
+            and h4_df is not None
+        ):
+
+            h4_hook = (
+                h4_info.get(
+                    "hook"
+                )
+            )
+
+            h4_sl = (
+                calculate_sl(
+                    h4_df,
+                    h4_hook
+                )
+                if h4_hook
+                else None
+            )
+
+            if h4_hook:
+
+                h4_chart_path = (
+                    create_hook_chart(
+                        symbol,
+                        h4_df,
+                        h4_hook,
+                        h4_sl,
+                        "signal_h4",
+                        timeframe="H4"
                     )
                 )
+
+                if h4_chart_path:
+
+                    telegram_send_photo(
+                        h4_chart_path,
+                        (
+                            f"🧭 "
+                            f"<b>H4 DIRECTION CONFIRMATION</b>\n"
+                            f"<b>{symbol}</b>\n"
+                            f"Direction: "
+                            f"<b>{direction}</b>\n"
+                            f"This H4 hook authorized "
+                            f"the M5 signal.\n"
+                            f"Heikin Ashi chart; "
+                            f"NDS values use real OHLC.\n"
+                            f"PAPER TRADING ONLY"
+                        )
+                    )
+
+        # One successful signal per symbol per scan.
+        return
 
 
 # ============================================================
@@ -2906,6 +2574,10 @@ def get_open_trades():
 
     return rows
 
+
+# ============================================================
+# CLOSE TRADE
+# ============================================================
 
 def close_trade(
     trade,
@@ -2934,7 +2606,7 @@ def close_trade(
             reason,
             pnl_pct,
             pnl_price,
-            trade["id"],
+            trade["id"]
         )
     )
 
@@ -2942,17 +2614,16 @@ def close_trade(
     conn.close()
 
 
+# ============================================================
+# MONITOR PAPER TRADES
+# ============================================================
+
 def monitor_open_trades():
 
     for trade in get_open_trades():
 
-        symbol = trade[
-            "symbol"
-        ]
-
-        direction = trade[
-            "direction"
-        ]
+        symbol = trade["symbol"]
+        direction = trade["direction"]
 
         entry = float(
             trade["entry"]
@@ -2980,6 +2651,7 @@ def monitor_open_trades():
             ):
                 continue
 
+            # Only candles at/after the recorded paper entry time.
             future = df[
                 df["time"]
                 >= trade["opened_at"]
@@ -2991,9 +2663,7 @@ def monitor_open_trades():
             close_price = None
             reason = None
 
-            for _, candle in (
-                future.iterrows()
-            ):
+            for _, candle in future.iterrows():
 
                 high = float(
                     candle["high"]
@@ -3023,6 +2693,9 @@ def monitor_open_trades():
                         high >= tp
                     )
 
+                # Conservative:
+                # if both hit in same candle,
+                # assume SL first.
                 if hit_sl:
 
                     close_price = sl
@@ -3079,8 +2752,7 @@ def monitor_open_trades():
             telegram_send(
                 (
                     f"{emoji} "
-                    f"<b>NDS {direction} "
-                    f"CLOSED</b>\n"
+                    f"<b>NDS {direction} CLOSED</b>\n"
                     f"<b>{symbol}</b>\n\n"
                     f"Entry: "
                     f"<b>{fmt_price(entry)}</b>\n"
@@ -3096,8 +2768,11 @@ def monitor_open_trades():
         except Exception as e:
 
             DIAG["api_errors"].append(
-                f"Monitor {symbol}: "
-                f"{str(e)[:180]}"
+                (
+                    f"Monitor "
+                    f"{symbol}: "
+                    f"{str(e)[:180]}"
+                )
             )
 
 
@@ -3135,10 +2810,11 @@ def performance_summary():
 
     pnl = conn.execute(
         """
-        SELECT COALESCE(
-            SUM(pnl_pct),
-            0
-        ) p
+        SELECT
+            COALESCE(
+                SUM(pnl_pct),
+                0
+            ) p
         FROM trades
         WHERE status!='OPEN'
         """
@@ -3182,18 +2858,22 @@ def diagnostic_text():
         f"{utc_now().strftime('%Y-%m-%d %H:%M:%S UTC')}",
 
         f"Runtime: "
-        f"<b>{time.time() - START_TIME:.1f}s</b>",
+        f"<b>{time.time()-START_TIME:.1f}s</b>",
 
         "",
 
-        "━━━ <b>ASSETS</b> ━━━",
+        "━━━ "
+        "<b>ASSETS</b> "
+        "━━━",
 
         f"Scanned: "
         f"<b>{DIAG['assets_scanned']}</b>",
 
         "",
 
-        "━━━ <b>H4</b> ━━━",
+        "━━━ "
+        "<b>H4</b> "
+        "━━━",
 
         f"Requests: "
         f"{DIAG['h4_requests']}",
@@ -3216,13 +2896,13 @@ def diagnostic_text():
         f"Hooks: "
         f"{DIAG['h4_hooks']}",
 
-        f"Confirmed Hooks: "
-        f"{DIAG['h4_confirmed_hooks']}",
+        f"Confirmed: "
+        f"{DIAG['h4_confirmed']}",
 
-        f"Recent Hooks: "
-        f"{DIAG['h4_recent_hooks']}",
+        f"Recent ≤24h: "
+        f"{DIAG['h4_recent']}",
 
-        f"Valid Hooks: "
+        f"Valid Direction Hooks: "
         f"{DIAG['h4_valid_hooks']}",
 
         f"SHORT Direction: "
@@ -3236,7 +2916,9 @@ def diagnostic_text():
 
         "",
 
-        "━━━ <b>M5</b> ━━━",
+        "━━━ "
+        "<b>M5</b> "
+        "━━━",
 
         f"Requests: "
         f"{DIAG['m5_requests']}",
@@ -3259,17 +2941,39 @@ def diagnostic_text():
         f"Hooks: "
         f"{DIAG['m5_hooks']}",
 
-        f"Confirmed Hooks: "
-        f"{DIAG['m5_confirmed_hooks']}",
+        f"Confirmed: "
+        f"{DIAG['m5_confirmed']}",
 
-        f"Recent Hooks: "
-        f"{DIAG['m5_recent_hooks']}",
+        f"Recent ≤6h: "
+        f"{DIAG['m5_recent']}",
 
-        f"Range Valid Hooks: "
-        f"{DIAG['m5_range_valid_hooks']}",
+        f"Range Valid "
+        f"≥{M5_MIN_HOOK_RANGE_PCT:.2f}%: "
+        f"{DIAG['m5_range_valid']}",
 
-        f"Valid Hooks: "
+        f"H4 Direction Match: "
+        f"{DIAG['m5_direction_match']}",
+
+        f"Trade-Valid Before TP: "
         f"{DIAG['m5_valid_hooks']}",
+
+        f"TP Already Touched: "
+        f"{DIAG['m5_tp_touched']}",
+
+        f"SL Found: "
+        f"{DIAG['m5_sl_found']}",
+
+        f"Geometry Valid: "
+        f"{DIAG['m5_geometry_valid']}",
+
+        f"Duplicate: "
+        f"{DIAG['m5_duplicate']}",
+
+        f"Max Open: "
+        f"{DIAG['m5_max_open']}",
+
+        f"Signal Ready: "
+        f"{DIAG['signal_ready']}",
 
         f"Hook Charts Sent: "
         f"{DIAG['hook_charts_sent']}",
@@ -3279,7 +2983,9 @@ def diagnostic_text():
 
         "",
 
-        "━━━ <b>SIGNALS</b> ━━━",
+        "━━━ "
+        "<b>SIGNALS</b> "
+        "━━━",
 
         f"Signals: "
         f"{DIAG['signals']}",
@@ -3295,7 +3001,9 @@ def diagnostic_text():
 
         "",
 
-        "━━━ <b>PAPER PERFORMANCE</b> ━━━",
+        "━━━ "
+        "<b>PAPER PERFORMANCE</b> "
+        "━━━",
 
         f"Closed Trades: "
         f"{perf['total']}",
@@ -3314,7 +3022,9 @@ def diagnostic_text():
 
         lines += [
             "",
-            "━━━ <b>ERRORS</b> ━━━"
+            "━━━ "
+            "<b>ERRORS</b> "
+            "━━━"
         ]
 
         lines += [
@@ -3329,7 +3039,9 @@ def diagnostic_text():
         "<b>PAPER TRADING ONLY</b>"
     ]
 
-    return "\n".join(lines)
+    return "\n".join(
+        lines
+    )
 
 
 # ============================================================
@@ -3343,53 +3055,39 @@ def main():
         init_db()
 
         print(
-            f"NDS H4 -> M5 Scanner "
-            f"{VERSION}"
+            f"NDS H4 -> M5 "
+            f"Scanner {VERSION}"
         )
 
         print(
-            "H4 direction -> M5 signal"
+            "M5 valid-hook charts "
+            "are sent independently; "
+            "signal charts require "
+            "H4 direction approval."
         )
 
         print(
-            "M5 confirmed hooks are "
-            "reported independently."
-        )
-
-        print(
-            "PAPER TRADING ONLY - "
-            "NO REAL ORDERS"
-        )
-
-        print(
-            "Charts: HEIKIN ASHI"
+            "PAPER TRADING ONLY "
+            "- NO REAL ORDERS"
         )
 
         print(
             f"H4 pivot confirmation: "
-            f"{H4_INTERVAL_MINUTES}m x "
-            f"{PIVOT_RIGHT}"
-        )
-
-        print(
-            f"M5 pivot confirmation: "
-            f"{M5_INTERVAL_MINUTES}m x "
-            f"{PIVOT_RIGHT}"
-        )
-
-        print(
-            f"H4 hook max age: "
+            f"{H4_INTERVAL_MINUTES}m "
+            f"x {PIVOT_RIGHT} | "
+            f"max age "
             f"{H4_MAX_HOOK_AGE_SECONDS // 3600}h"
         )
 
         print(
-            f"M5 hook max age: "
+            f"M5 pivot confirmation: "
+            f"{M5_INTERVAL_MINUTES}m "
+            f"x {PIVOT_RIGHT} | "
+            f"max age "
             f"{M5_MAX_HOOK_AGE_SECONDS // 3600}h"
         )
 
-        symbols = (
-            get_futures_instruments()
-        )
+        symbols = get_futures_instruments()
 
         if not symbols:
 
@@ -3399,9 +3097,13 @@ def main():
                 "No futures instruments found."
             )
 
-            print(report)
+            print(
+                report
+            )
 
-            telegram_send(report)
+            telegram_send(
+                report
+            )
 
             return
 
@@ -3409,6 +3111,7 @@ def main():
             "assets_scanned"
         ] = len(symbols)
 
+        # Monitor previous paper trades first.
         monitor_open_trades()
 
         for symbol in symbols:
@@ -3421,9 +3124,14 @@ def main():
 
             except Exception as e:
 
-                DIAG["api_errors"].append(
-                    f"Process {symbol}: "
-                    f"{str(e)[:180]}"
+                DIAG[
+                    "api_errors"
+                ].append(
+                    (
+                        f"Process "
+                        f"{symbol}: "
+                        f"{str(e)[:180]}"
+                    )
                 )
 
                 traceback.print_exc()
@@ -3432,6 +3140,7 @@ def main():
                 SCAN_SLEEP_SECONDS
             )
 
+        # Monitor trades again after scan.
         monitor_open_trades()
 
         report = diagnostic_text()
@@ -3461,7 +3170,7 @@ def main():
 
 
 # ============================================================
-# ENTRY
+# ENTRY POINT
 # ============================================================
 
 if __name__ == "__main__":
