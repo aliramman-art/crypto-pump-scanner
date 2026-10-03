@@ -1,6 +1,6 @@
 # ============================================================
 # NDS H4 -> M5 LIVE SCANNER
-# VERSION 5.7.2
+# VERSION 5.7.3
 # PAPER TRADING ONLY - NO REAL ORDERS
 # H4 confirmed H3/L3 activates same-direction M5 hook search
 # Entry at confirmed M5 H3/L3; TP = M5 hook 86.4%; SL = nearest valid H4 HA pivot
@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-VERSION = "5.7.2"
+VERSION = "5.7.3"
 REAL_TRADING = False
 KRAKEN_FUTURES_URL = "https://futures.kraken.com/derivatives/api/v3"
 KRAKEN_CHART_URL = "https://futures.kraken.com/api/charts/v1"
@@ -45,7 +45,9 @@ DIAG = {k: 0 for k in [
     "m5_data_error", "m5_empty", "m5_short", "m5_pivots", "m5_hooks", "m5_confirmed",
     "m5_recent", "m5_range_valid", "m5_after_h4_activation", "m5_tp_touched", "m5_sl_found",
     "m5_geometry_valid", "m5_duplicate", "m5_max_open", "signal_ready", "hook_charts_sent",
-    "hook_chart_errors", "signals", "duplicate_signals", "max_open"]}
+    "hook_chart_errors", "signals", "duplicate_signals", "max_open",
+    "h4_sl_raw_pivots", "h4_sl_confirmed_highs", "h4_sl_confirmed_lows",
+    "h4_sl_protective_candidates", "h4_sl_missing"]}
 DIAG["api_errors"] = []
 H4_DIRECTION, H4_DATA = {}, {}
 START_TIME = time.time()
@@ -218,39 +220,56 @@ def pivot_confirmation_time(pivot, interval_minutes):
 
 def calculate_h4_sl(h4_df, hook):
     """
-    Nearest confirmed H4 Heikin Ashi protective pivot.
+    Find the nearest confirmed H4 *real-price* pivot on the protective side.
 
-    IMPORTANT: the pivot timestamp itself is NOT the confirmation time.
-    A pivot is usable only after PIVOT_RIGHT candles have closed to its right.
-    This replaces the previous artificial 8-hour cutoff.
+    Hook nodes remain Heikin-Ashi based. SL is deliberately based on the
+    actual H4 OHLC prices, because the stop is a real market level and HA
+    transformation can move the pivot away from the actual price extreme.
+
+    A pivot becomes usable only after PIVOT_RIGHT candles to its right have
+    completed. No artificial 8-hour age/cutoff is applied.
     """
-    if h4_df is None or h4_df.empty or hook is None: return None
+    if h4_df is None or h4_df.empty or hook is None:
+        DIAG["h4_sl_missing"] += 1
+        return None
     try:
-        ha=heikin_ashi_ohlc(h4_df)
-        highs,lows=find_pivots(ha)
-        entry=float(hook["entry"])
-        signal_time=float(hook["confirmation_time"])
+        highs, lows = find_pivots(h4_df)
+        DIAG["h4_sl_raw_pivots"] += len(highs) + len(lows)
+        entry = float(hook["entry"])
+        signal_time = float(hook["confirmation_time"])
 
-        confirmed_highs=[
+        confirmed_highs = [
             p for p in highs
-            if pivot_confirmation_time(p,H4_INTERVAL_MINUTES) <= signal_time
+            if pivot_confirmation_time(p, H4_INTERVAL_MINUTES) <= signal_time
+            and float(p["time"]) <= signal_time
         ]
-        confirmed_lows=[
+        confirmed_lows = [
             p for p in lows
-            if pivot_confirmation_time(p,H4_INTERVAL_MINUTES) <= signal_time
+            if pivot_confirmation_time(p, H4_INTERVAL_MINUTES) <= signal_time
+            and float(p["time"]) <= signal_time
         ]
+        DIAG["h4_sl_confirmed_highs"] += len(confirmed_highs)
+        DIAG["h4_sl_confirmed_lows"] += len(confirmed_lows)
 
-        if hook["direction"]=="LONG":
-            cand=[p for p in confirmed_lows if float(p["price"]) < entry]
-            if not cand: return None
-            p=min(cand,key=lambda x:entry-float(x["price"]))
-            return float(p["price"])*(1-H4_SL_BUFFER_PCT/100)
+        if hook["direction"] == "SHORT":
+            candidates = [p for p in confirmed_highs if float(p["price"]) > entry]
+            DIAG["h4_sl_protective_candidates"] += len(candidates)
+            if not candidates:
+                DIAG["h4_sl_missing"] += 1
+                return None
+            pivot = min(candidates, key=lambda p: float(p["price"]) - entry)
+            return float(pivot["price"]) * (1 + H4_SL_BUFFER_PCT / 100.0)
 
-        cand=[p for p in confirmed_highs if float(p["price"]) > entry]
-        if not cand: return None
-        p=min(cand,key=lambda x:float(x["price"])-entry)
-        return float(p["price"])*(1+H4_SL_BUFFER_PCT/100)
+        candidates = [p for p in confirmed_lows if float(p["price"]) < entry]
+        DIAG["h4_sl_protective_candidates"] += len(candidates)
+        if not candidates:
+            DIAG["h4_sl_missing"] += 1
+            return None
+        pivot = min(candidates, key=lambda p: entry - float(p["price"]))
+        return float(pivot["price"]) * (1 - H4_SL_BUFFER_PCT / 100.0)
+
     except Exception as e:
+        DIAG["h4_sl_missing"] += 1
         DIAG["api_errors"].append(f"H4 SL: {str(e)[:180]}")
         return None
 
@@ -414,13 +433,14 @@ def diagnostic_text():
     for label,key in [("Requests","h4_requests"),("Data OK","h4_data_ok"),("Data Error","h4_data_error"),("Empty","h4_empty"),("Short","h4_short"),("Pivot Points","h4_pivots"),("Hooks","h4_hooks"),("Confirmed","h4_confirmed"),("Recent ≤24h","h4_recent"),("Valid Activation Hooks","h4_valid_hooks"),("SHORT H3 Activations","h4_short_direction"),("LONG L3 Activations","h4_long_direction"),("Filtered","h4_filtered")]: lines.append(f"{label}: {DIAG[key]}")
     lines += ["","━━━ <b>M5</b> ━━━"]
     for label,key in [("Requests","m5_requests"),("Data OK","m5_data_ok"),("Data Error","m5_data_error"),("Empty","m5_empty"),("Short","m5_short"),("Pivot Points","m5_pivots"),("Hooks","m5_hooks"),("Confirmed","m5_confirmed"),("Recent ≤6h","m5_recent"),(f"Range Valid ≥{M5_MIN_HOOK_RANGE_PCT:.2f}%","m5_range_valid"),("Confirmed After H4 Activation","m5_after_h4_activation"),("TP Already Touched","m5_tp_touched"),("SL Found","m5_sl_found"),("Geometry Valid","m5_geometry_valid"),("Duplicate","m5_duplicate"),("Max Open","m5_max_open"),("Signal Ready","signal_ready")]: lines.append(f"{label}: {DIAG[key]}")
+    lines += ["", "━━━ <b>H4 SL DEBUG</b> ━━━", f"Raw H4 Pivots: {DIAG['h4_sl_raw_pivots']}", f"Confirmed H4 Highs: {DIAG['h4_sl_confirmed_highs']}", f"Confirmed H4 Lows: {DIAG['h4_sl_confirmed_lows']}", f"Protective Candidates: {DIAG['h4_sl_protective_candidates']}", f"SL Missing: {DIAG['h4_sl_missing']}"]
     lines += ["","━━━ <b>SIGNALS</b> ━━━",f"Signals: {DIAG['signals']}",f"Duplicates: {DIAG['duplicate_signals']}",f"Max Open Limit: {DIAG['max_open']}",f"Open Trades: <b>{open_trade_count()}</b>","",*open_trades_report_lines(),"","━━━ <b>PAPER PERFORMANCE</b> ━━━",f"Closed Trades: {p['total']}",f"TP: {p['wins']}",f"SL: {p['losses']}",f"PnL: <b>{p['pnl']:+.2f}%</b>"]
     if DIAG["api_errors"]: lines += ["","━━━ <b>ERRORS</b> ━━━"]+["• "+e for e in DIAG["api_errors"][-5:]]
     lines += ["","<b>PAPER TRADING ONLY - NO REAL ORDERS</b>"]
     return "\n".join(lines)
 def main():
     try:
-        init_db(); print(f"NDS H4 -> M5 Scanner {VERSION}"); print("H4 confirmed H3/L3 activates same-direction M5 hook search"); print("Entry M5 H3/L3 | TP 86.4% M5 | SL nearest confirmed H4 HA pivot (confirmation-time aware)"); print("PAPER TRADING ONLY - NO REAL ORDERS")
+        init_db(); print(f"NDS H4 -> M5 Scanner {VERSION}"); print("H4 confirmed H3/L3 activates same-direction M5 hook search"); print("Entry M5 H3/L3 | TP 86.4% M5 | SL nearest confirmed H4 real-price pivot | Hook nodes = HA"); print("PAPER TRADING ONLY - NO REAL ORDERS")
         symbols=get_futures_instruments()
         if not symbols:
             msg="❌ <b>NDS Scanner</b>\n\nNo futures instruments found."; print(msg); telegram_send(msg); return
