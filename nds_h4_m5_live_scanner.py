@@ -1,6 +1,6 @@
 # ============================================================
 # NDS M15 LIVE SCANNER
-# VERSION 6.0.1
+# VERSION 6.0.3
 # PAPER TRADING ONLY - NO REAL ORDERS
 #
 # IMPORTANT:
@@ -28,7 +28,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-VERSION = "6.0.1"
+VERSION = "6.0.3"
 REAL_TRADING = False
 
 KRAKEN_FUTURES_URL = "https://futures.kraken.com/derivatives/api/v3"
@@ -551,12 +551,52 @@ def tp_already_touched(df, hook):
 
 def create_hook_chart(symbol, df, hook, sl, path_prefix="signal_m15"):
     try:
-        chart_df = df.tail(CHART_CANDLES).copy().reset_index(drop=True)
+        os.makedirs(CHART_DIR, exist_ok=True)
+        if df is None or df.empty:
+            return None
+
+        # Build a node-centered window instead of blindly taking the last
+        # 240 candles. This guarantees that every Hook node remains visible,
+        # even when the setup is older than the chart's trailing window.
+        node_times = []
+        if hook["direction"] == "SHORT":
+            node_keys = ("start", "h1", "l1", "h2", "l2", "h3")
+        else:
+            node_keys = ("start", "l1", "h1", "l2", "h2", "l3")
+
+        for key in node_keys:
+            if key in hook and hook[key] is not None:
+                node_times.append(float(hook[key]["time"]))
+
+        work_df = df.copy().reset_index(drop=True)
+        times = work_df["time"].astype(float).tolist()
+
+        if node_times and times:
+            first_node_idx = min(range(len(times)), key=lambda i: abs(times[i] - min(node_times)))
+            last_node_idx = max(range(len(times)), key=lambda i: abs(times[i] - max(node_times)))
+            pad_left = 30
+            pad_right = 50
+            start_idx = max(0, first_node_idx - pad_left)
+            end_idx = min(len(work_df), last_node_idx + pad_right + 1)
+
+            # Ensure enough context for price/HA movement while keeping the
+            # chart readable on Telegram.
+            if end_idx - start_idx < 120:
+                center = (first_node_idx + last_node_idx) // 2
+                start_idx = max(0, center - 80)
+                end_idx = min(len(work_df), start_idx + 180)
+                if end_idx - start_idx < 180:
+                    start_idx = max(0, end_idx - 180)
+
+            chart_df = work_df.iloc[start_idx:end_idx].copy().reset_index(drop=True)
+        else:
+            chart_df = work_df.tail(CHART_CANDLES).copy().reset_index(drop=True)
+
         if chart_df.empty:
             return None
 
         ha = calculate_heikin_ashi(chart_df)
-        fig, (ax_price, ax_ha) = plt.subplots(2, 1, figsize=(15, 11), sharex=True)
+        fig, (ax_price, ax_ha) = plt.subplots(2, 1, figsize=(16, 12), sharex=True)
         x = mdates.date2num(pd.to_datetime(chart_df.time, unit="s", utc=True).dt.to_pydatetime())
         width = max((STRATEGY_INTERVAL_MINUTES / 1440.0) * 0.72, 0.0015)
 
@@ -604,56 +644,101 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="signal_m15"):
             labels = ["START", "L1", "H1", "L2", "H2", "L3"]
 
         px = [datetime.fromtimestamp(p["time"], tz=timezone.utc) for p in points]
-        py = [p["price"] for p in points]
-        ax_price.plot(px, py, marker="o", linewidth=2, color="royalblue", label="VALID M15 HOOK", zorder=5)
-        ax_ha.plot(px, py, marker="o", linewidth=2, color="royalblue", label="VALID M15 HOOK", zorder=5)
+        py = [float(p["price"]) for p in points]
 
+        # Main Hook path on both charts.
+        for ax in (ax_price, ax_ha):
+            ax.plot(
+                px, py,
+                marker="o",
+                linewidth=2.2,
+                color="royalblue",
+                label="VALID M15 HOOK",
+                zorder=6,
+            )
+
+        # Explicit node markers. Each node gets a large marker, a vertical
+        # guide line, and a boxed label so the exact H/L location is obvious.
         offsets = (
-            [(0, -28), (0, 18), (0, -30), (0, 18), (0, -30), (0, 22)]
+            [(0, -34), (0, 24), (0, -34), (0, 24), (0, -34), (0, 28)]
             if hook["direction"] == "SHORT"
-            else [(0, 24), (0, -30), (0, 18), (0, -30), (0, 18), (0, -32)]
+            else [(0, 28), (0, -34), (0, 24), (0, -34), (0, 24), (0, -38)]
         )
 
         for p, label, off in zip(points, labels, offsets):
             dt = datetime.fromtimestamp(p["time"], tz=timezone.utc)
-            emphasized = label in ("START", "H3", "L3")
-            txt = f"{label}\n{fmt_price(p['price'])}"
+            is_final = label in ("H3", "L3")
+            is_start = label == "START"
+
             for ax in (ax_price, ax_ha):
+                ax.axvline(
+                    dt,
+                    linestyle="--" if not is_final else "-.",
+                    linewidth=0.85 if not is_final else 1.2,
+                    color="gray" if not is_final else "purple",
+                    alpha=0.55,
+                    zorder=1,
+                )
+                ax.scatter(
+                    [dt], [float(p["price"])],
+                    s=115 if is_final else (90 if is_start else 70),
+                    marker="o",
+                    facecolors="white",
+                    edgecolors="purple" if is_final else "royalblue",
+                    linewidths=2.0 if is_final else 1.5,
+                    zorder=9,
+                )
                 ax.annotate(
-                    txt,
-                    (dt, p["price"]),
+                    f"{label}\n{fmt_price(p['price'])}",
+                    (dt, float(p["price"])),
                     xytext=off,
                     textcoords="offset points",
                     ha="center",
-                    fontsize=9 if emphasized else 8,
-                    fontweight="bold" if emphasized else "normal",
+                    va="center",
+                    fontsize=10 if is_final else 9,
+                    fontweight="bold",
                     bbox=dict(
-                        boxstyle="round,pad=.22",
-                        fc="white",
-                        ec="black" if emphasized else "gray",
-                        alpha=0.9,
+                        boxstyle="round,pad=.28",
+                        fc="#fffdf2" if not is_final else "#f3e8ff",
+                        ec="purple" if is_final else "royalblue",
+                        linewidth=1.4,
+                        alpha=0.96,
                     ),
-                    arrowprops=dict(arrowstyle="-", color="gray", linewidth=0.7),
-                    zorder=10,
+                    arrowprops=dict(arrowstyle="-", color="gray", linewidth=0.8),
+                    zorder=12,
                 )
 
         entry = float(hook["entry"])
         tp = float(hook["tp"])
         confirm_dt = datetime.fromtimestamp(hook["confirmation_time"], tz=timezone.utc)
         left_dt = pd.to_datetime(chart_df.time.iloc[0], unit="s", utc=True).to_pydatetime()
-        right_dt = max(pd.to_datetime(chart_df.time.iloc[-1], unit="s", utc=True).to_pydatetime(), confirm_dt)
+        right_dt = pd.to_datetime(chart_df.time.iloc[-1], unit="s", utc=True).to_pydatetime()
+        right_dt = max(right_dt, confirm_dt)
 
         for ax in (ax_price, ax_ha):
-            ax.hlines(entry, left_dt, right_dt, linestyles="--", linewidth=1.4, label=f"ENTRY {fmt_price(entry)}", color="darkorange")
-            ax.hlines(tp, left_dt, right_dt, linestyles="--", linewidth=1.5, label=f"TP 86.4% {fmt_price(tp)}", color="seagreen")
+            ax.hlines(
+                entry, left_dt, right_dt,
+                linestyles="--", linewidth=1.4,
+                label=f"ENTRY {fmt_price(entry)}", color="darkorange"
+            )
+            ax.hlines(
+                tp, left_dt, right_dt,
+                linestyles="--", linewidth=1.6,
+                label=f"TP 86.4% {fmt_price(tp)}", color="seagreen"
+            )
             if sl is not None:
-                ax.hlines(float(sl), left_dt, right_dt, linestyles="--", linewidth=1.5, label=f"SL M15 {fmt_price(sl)}", color="crimson")
-            ax.axvline(confirm_dt, linestyle=":", color="purple", label="M15 CONFIRMED")
+                ax.hlines(
+                    float(sl), left_dt, right_dt,
+                    linestyles="--", linewidth=1.6,
+                    label=f"SL M15 {fmt_price(sl)}", color="crimson"
+                )
+            ax.axvline(confirm_dt, linestyle=":", linewidth=1.1, color="purple", label="M15 CONFIRMED")
             ax.grid(alpha=0.22)
             ax.legend(loc="best", fontsize=8)
             ax.set_xlim(left_dt, right_dt)
 
-        ax_price.set_title(f"NDS M15 | {symbol} | {hook['direction']} | REAL PRICE CANDLES")
+        direction_text = "SHORT: H1→L1→H2→L2→H3" if hook["direction"] == "SHORT" else "LONG: L1→H1→L2→H2→L3"
+        ax_price.set_title(f"NDS M15 | {symbol} | {hook['direction']} | {direction_text}\nREAL PRICE CANDLES + MARKED NODES")
         ax_price.set_ylabel("Price")
         ax_ha.set_title("HEIKIN ASHI | VALID DIRECTION-CHANGE NODES")
         ax_ha.set_ylabel("HA Price")
@@ -665,7 +750,7 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="signal_m15"):
             f"{path_prefix}_{symbol.replace('/', '_').replace(':', '_')}_{hook['direction']}_{int(hook['final']['time'])}.png",
         )
         plt.tight_layout()
-        plt.savefig(path, dpi=140)
+        plt.savefig(path, dpi=150)
         plt.close(fig)
         return path
 
@@ -933,6 +1018,14 @@ def close_trade(trade, price, pnl_pct, pnl_price, reason):
 
 
 def monitor_open_trades():
+    """Monitor every OPEN paper trade, including trades older than the candle lookback.
+
+    Previously, the monitor fetched only 30 M15 candles and skipped a trade when
+    none of those candles had a timestamp >= opened_at. Old OPEN rows could then
+    remain open forever even after price had crossed SL/TP. We now inspect a wider
+    candle window, process candles after entry when available, and always perform
+    a final live-price safety check.
+    """
     for trade in get_open_trades():
         try:
             symbol = trade["symbol"]
@@ -940,31 +1033,43 @@ def monitor_open_trades():
             entry = float(trade["entry"])
             sl = float(trade["sl"])
             tp = float(trade["tp"])
+            opened_at = int(trade["opened_at"] or 0)
 
-            df = get_candles(symbol, STRATEGY_INTERVAL, 30)
-            if df is None or df.empty:
-                continue
-
-            future = df[df.time >= trade["opened_at"]]
-            if future.empty:
-                continue
-
+            df = get_candles(symbol, STRATEGY_INTERVAL, 500)
             reason = None
             price = None
-            for _, candle in future.iterrows():
-                hi = float(candle.high)
-                lo = float(candle.low)
-                hit_sl = hi >= sl if direction == "SHORT" else lo <= sl
-                hit_tp = lo <= tp if direction == "SHORT" else hi >= tp
 
-                # Conservative rule when the same candle touches both levels:
-                # SL is treated as hit first.
-                if hit_sl:
-                    price, reason = sl, "SL"
-                    break
-                if hit_tp:
-                    price, reason = tp, "TP"
-                    break
+            if df is not None and not df.empty:
+                future = df[df.time >= opened_at]
+                for _, candle in future.iterrows():
+                    hi = float(candle.high)
+                    lo = float(candle.low)
+                    hit_sl = hi >= sl if direction == "SHORT" else lo <= sl
+                    hit_tp = lo <= tp if direction == "SHORT" else hi >= tp
+                    # Conservative rule if one candle touches both levels.
+                    if hit_sl:
+                        price, reason = sl, "SL"
+                        break
+                    if hit_tp:
+                        price, reason = tp, "TP"
+                        break
+
+            # Always check the live ticker too. This catches old trades when the
+            # entry candle has fallen outside the available candle window, and
+            # catches a level crossed by the still-forming latest candle.
+            if reason is None:
+                current = get_current_price(symbol)
+                if current is not None:
+                    if direction == "SHORT":
+                        if current >= sl:
+                            price, reason = sl, "SL"
+                        elif current <= tp:
+                            price, reason = tp, "TP"
+                    else:
+                        if current <= sl:
+                            price, reason = sl, "SL"
+                        elif current >= tp:
+                            price, reason = tp, "TP"
 
             if reason is None:
                 continue
@@ -979,7 +1084,8 @@ def monitor_open_trades():
                 f"Entry: {fmt_price(entry)}\n"
                 f"Close: {fmt_price(price)}\n"
                 f"Result: <b>{reason}</b>\n"
-                f"PnL: <b>{pnl_pct:+.2f}%</b>"
+                f"PnL: <b>{pnl_pct:+.2f}%</b>\n"
+                f"PAPER TRADING ONLY"
             )
         except Exception as e:
             DIAG["api_errors"].append(f"Monitor {trade['symbol']}: {str(e)[:180]}")
