@@ -1,136 +1,57 @@
-name: NDS H4 M5 Live Scanner
+name: NDS M5 Channel Hook Live Scanner
 
 on:
   workflow_dispatch:
 
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: write
 
 concurrency:
-  group: nds-h4-m5-scanner
+  group: nds-m5-channel-hook-live
   cancel-in-progress: false
 
 jobs:
-  nds-scanner:
-
+  scanner:
     runs-on: ubuntu-latest
 
+    timeout-minutes: 5
+
     steps:
-
-      # ======================================================
-      # CHECKOUT
-      # ======================================================
-
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-
-      # ======================================================
-      # PYTHON
-      # ======================================================
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      # ======================================================
-      # DEPENDENCIES
-      # ======================================================
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas matplotlib
+          pip install requests pandas numpy matplotlib
 
-      # ======================================================
-      # CREATE CHART DIRECTORY
-      # ======================================================
-
-      - name: Prepare chart directory
-        run: |
-          mkdir -p nds_h4_m5_charts
-
-      # ======================================================
-      # RUN NDS SCANNER
-      # ======================================================
-
-      - name: Run NDS H4 M5 Scanner
+      - name: Run NDS M5 Channel Hook Scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PYTHONUNBUFFERED: "1"
-
         run: |
-          echo "========================================"
-          echo "NDS H4 -> M5 SCANNER"
-          echo "START TIME:"
-          date -u
-          echo "========================================"
+          python nds_m5_channel_hook_live_scanner.py
 
-          python -u nds_h4_m5_live_scanner.py
-
-          echo ""
-          echo "========================================"
-          echo "SCANNER FINISHED"
-          echo "END TIME:"
-          date -u
-          echo "========================================"
-
-      # ======================================================
-      # SHOW GENERATED FILES
-      # ======================================================
-
-      - name: Show scanner output
-        if: always()
+      - name: Save scanner state
         run: |
-
-          echo "========================================"
-          echo "NDS CHART DIRECTORY"
-          echo "========================================"
-
-          if [ -d "nds_h4_m5_charts" ]; then
-            find nds_h4_m5_charts -maxdepth 1 -type f -print
-          else
-            echo "Chart directory does not exist."
-          fi
-
-          echo ""
-          echo "========================================"
-          echo "DATABASE FILES"
-          echo "========================================"
-
-          ls -lh *.db 2>/dev/null || true
-
-          echo ""
-          echo "========================================"
-          echo "CURRENT UTC TIME"
-          echo "========================================"
-
-          date -u
-
-      # ======================================================
-      # COMMIT CHARTS
-      # ======================================================
-
-      - name: Commit updated charts
-        if: always()
-        run: |
-
-          mkdir -p nds_h4_m5_charts
-
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add -A nds_h4_m5_charts/
+          git add nds_m5_channel_hook_live.db
 
           if git diff --cached --quiet; then
-            echo "No chart changes to commit."
+            echo "No state changes to commit."
           else
-            git commit -m "Update NDS charts"
+            git commit -m "Update NDS M5 scanner state [skip ci]"
             git push
           fi
