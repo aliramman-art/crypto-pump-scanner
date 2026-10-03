@@ -1,18 +1,31 @@
 # ============================================================
 # NDS M15 LIVE SCANNER
-# VERSION 6.0.3
+# VERSION 6.1.0
 # PAPER TRADING ONLY - NO REAL ORDERS
 #
 # IMPORTANT:
 # - Strategy timeframe: M15 ONLY
-# - H4 is completely removed from the strategy
-# - Hook nodes are built from Heikin Ashi candles
-# - A node is VALID only when price direction changes around it
-# - Entry = confirmed M15 H3/L3
-# - TP = 86.4% M15 retracement
-# - SL = nearest confirmed VALID opposite M15 node available at entry
-# - No 6h hook-age cutoff; stale setups are rejected by TP-touched/DB/geometry rules
-# - NEAR is excluded and XAUT is explicitly included
+# - H4 is completely removed
+# - Hook nodes are built from HEIKIN ASHI candles
+# - A node is valid only when HA direction changes cleanly around it
+# - Each valid node must also be a strict HA local high/low
+# - Positive Hook / SHORT: START(L) -> H1 -> L1 -> H2 -> L2 -> H3
+# - Negative Hook / LONG : START(H) -> L1 -> H1 -> L2 -> H2 -> L3
+# - Entry = confirmed H3/L3
+# - TP = 86.4% retracement from START to H3/L3
+# - SL = nearest confirmed valid opposite M15 node at entry
+# - No age cutoff; old setups are still rejected by TP/DB/geometry rules
+# - NEAR excluded, XAUT explicitly included
+#
+# MAJOR NODE FIXES IN 6.1.0:
+# 1) No more "net delta" direction test.
+# 2) All HA closes on each side of a node must move monotonically.
+# 3) The node must also be a strict HA high/low across the confirmation window.
+# 4) Same-direction duplicate candidates are collapsed only when they are
+#    actually overlapping candidates from the same turn.
+# 5) Hook charts explicitly show START/H1/L1/H2/L2/H3 or START/L1/H1/L2/H2/L3.
+# 6) A fresh DB is used so old incorrectly detected hooks cannot suppress the
+#    corrected scanner through duplicate checks.
 # ============================================================
 
 import os
@@ -28,7 +41,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-VERSION = "6.0.3"
+VERSION = "6.1.0"
 REAL_TRADING = False
 
 KRAKEN_FUTURES_URL = "https://futures.kraken.com/derivatives/api/v3"
@@ -39,24 +52,26 @@ STRATEGY_INTERVAL = "15m"
 STRATEGY_INTERVAL_MINUTES = 15
 STRATEGY_CANDLES = 1800
 
+# A node needs this many strictly directional HA close steps before AND after.
+NODE_DIRECTION_BARS = 2
+
+# Kept as explicit pivot parameters for the strict local-extreme test.
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
-NODE_DIRECTION_BARS = 2
+
 NDS_RETRACE = 0.864
 MIN_HOOK_RANGE_PCT = 0.20
 SL_BUFFER_PCT = 0.15
-MAX_HOOK_AGE_SECONDS = None  # No age cutoff; TP/SL/DB checks control stale setups
+MAX_HOOK_AGE_SECONDS = None
 MAX_OPEN_TRADES = 3
 REQUEST_TIMEOUT = 20
 SCAN_SLEEP_SECONDS = 0.25
 CHART_CANDLES = 240
 
+# Fresh DB for the corrected node engine.
 DB_FILE = "nds_m15_v600.db"
 CHART_DIR = "nds_m15_charts"
 
-# The Kraken UI can expose XAUT/USD and XAUT/USDT views while the
-# derivatives instrument list can identify the tradable contract differently.
-# We therefore resolve XAUT dynamically from the instrument list.
 XAUT_PREFERRED_SYMBOLS = ("PF_XAUTUSDT", "PF_XAUTUSD")
 EXCLUDED_BASES = {"NEAR"}
 
@@ -74,10 +89,13 @@ DIAG = {
     "m15_data_error": 0,
     "m15_empty": 0,
     "m15_short": 0,
-    "m15_pivots": 0,
+    "candidate_turns": 0,
     "valid_high_nodes": 0,
     "valid_low_nodes": 0,
-    "invalid_direction_nodes": 0,
+    "rejected_non_monotonic": 0,
+    "rejected_non_extreme": 0,
+    "nodes_collapsed": 0,
+    "m15_nodes": 0,
     "hooks": 0,
     "confirmed_hooks": 0,
     "recent_hooks": 0,
@@ -178,7 +196,6 @@ def telegram_send_photo(photo_path, caption):
 
 
 def _instrument_base(symbol):
-    """Extract a base symbol from a Kraken futures symbol."""
     s = str(symbol or "").upper()
     if s.startswith("PF_"):
         s = s[3:]
@@ -212,8 +229,6 @@ def get_futures_instruments():
 
             base = _instrument_base(symbol)
             if base == "XAUT":
-                # Prefer an explicit USDT symbol if Kraken ever exposes one,
-                # otherwise use the official XAUT/USD futures contract.
                 upper = symbol.upper()
                 if xaut is None or upper in XAUT_PREFERRED_SYMBOLS:
                     xaut = symbol
@@ -233,7 +248,6 @@ def get_futures_instruments():
             return all_pf[:TARGET_ASSETS]
 
         DIAG["xaut_found"] = 1
-        # Keep the total universe at TARGET_ASSETS while guaranteeing XAUT is present.
         selected = all_pf[: max(0, TARGET_ASSETS - 1)]
         if xaut not in selected:
             selected.append(xaut)
@@ -318,75 +332,167 @@ def heikin_ashi_ohlc(df):
     return out
 
 
+def strictly_monotonic(values, direction):
+    if len(values) < 2:
+        return False
+    vals = [float(v) for v in values]
+    if direction == "UP":
+        return all(vals[i] < vals[i + 1] for i in range(len(vals) - 1))
+    return all(vals[i] > vals[i + 1] for i in range(len(vals) - 1))
+
+
 def direction_changed_around_node(df, index, node_type):
-    """
-    A valid node must show a real directional turn in HA close:
+    """Strict HA turning-point validation.
 
-      HIGH: price was moving UP before the node and DOWN after it.
-      LOW : price was moving DOWN before the node and UP after it.
+    HIGH:
+        close[index-n] < ... < close[index]
+        close[index] > ... > close[index+n]
 
-    Net direction is measured across NODE_DIRECTION_BARS candles on each side.
-    This intentionally rejects a local wick that does not actually reverse the
-    short-term direction. Human beings love calling every wiggle a 'node'; the
-    scanner will not indulge them.
+    LOW:
+        close[index-n] > ... > close[index]
+        close[index] < ... < close[index+n]
+
+    This is intentionally stricter than the old net-delta test.
     """
     n = NODE_DIRECTION_BARS
     if index - n < 0 or index + n >= len(df):
         return False
 
     closes = df["close"].astype(float).tolist()
-    before_delta = closes[index] - closes[index - n]
-    after_delta = closes[index + n] - closes[index]
+    before = closes[index - n : index + 1]
+    after = closes[index : index + n + 1]
 
     if node_type == "H":
-        return before_delta > 0 and after_delta < 0
-    return before_delta < 0 and after_delta > 0
+        return strictly_monotonic(before, "UP") and strictly_monotonic(after, "DOWN")
+    return strictly_monotonic(before, "DOWN") and strictly_monotonic(after, "UP")
+
+
+def _is_strict_local_extreme(df, index, node_type):
+    """Require the HA wick itself to be the local extreme around the turn."""
+    left = PIVOT_LEFT
+    right = PIVOT_RIGHT
+    if index - left < 0 or index + right >= len(df):
+        return False
+
+    if node_type == "H":
+        value = float(df.iloc[index].high)
+        left_vals = [float(df.iloc[j].high) for j in range(index - left, index)]
+        right_vals = [float(df.iloc[j].high) for j in range(index + 1, index + right + 1)]
+        return all(value > x for x in left_vals) and all(value > x for x in right_vals)
+
+    value = float(df.iloc[index].low)
+    left_vals = [float(df.iloc[j].low) for j in range(index - left, index)]
+    right_vals = [float(df.iloc[j].low) for j in range(index + 1, index + right + 1)]
+    return all(value < x for x in left_vals) and all(value < x for x in right_vals)
+
+
+def _make_node(df, index, node_type):
+    if node_type == "H":
+        price = float(df.iloc[index].high)
+        raw_key = "high"
+    else:
+        price = float(df.iloc[index].low)
+        raw_key = "low"
+
+    return {
+        "type": node_type,
+        "index": int(index),
+        "time": float(df.iloc[index].time),
+        "price": price,
+        "raw_price": float(df.iloc[index][raw_key]),
+        "ha_open": float(df.iloc[index].open),
+        "ha_close": float(df.iloc[index].close),
+        "ha_high": float(df.iloc[index].high),
+        "ha_low": float(df.iloc[index].low),
+    }
+
+
+def _collapse_overlapping_same_direction_nodes(nodes):
+    """Collapse only overlapping duplicate candidates from one actual turn."""
+    if not nodes:
+        return []
+
+    nodes = sorted(nodes, key=lambda p: (p["time"], p["index"]))
+    out = []
+    max_gap = NODE_DIRECTION_BARS
+
+    for node in nodes:
+        if not out:
+            out.append(node)
+            continue
+
+        prev = out[-1]
+        if node["type"] != prev["type"] or node["index"] - prev["index"] > max_gap:
+            out.append(node)
+            continue
+
+        DIAG["nodes_collapsed"] += 1
+        if node["type"] == "H":
+            if node["price"] > prev["price"]:
+                out[-1] = node
+        else:
+            if node["price"] < prev["price"]:
+                out[-1] = node
+
+    return out
 
 
 def find_pivots(df, count_diag=True):
-    highs, lows = [], []
-    if df is None or df.empty or len(df) < PIVOT_LEFT + PIVOT_RIGHT + 1:
-        return highs, lows
+    """Find nodes from strict HA direction changes plus strict HA extremes."""
+    high_nodes, low_nodes = [], []
+    if df is None or df.empty:
+        return high_nodes, low_nodes
 
-    for i in range(PIVOT_LEFT, len(df) - PIVOT_RIGHT):
-        hi = float(df.iloc[i].high)
-        lo = float(df.iloc[i].low)
+    n = NODE_DIRECTION_BARS
+    start = max(PIVOT_LEFT, n)
+    end = len(df) - max(PIVOT_RIGHT, n)
+    if end <= start:
+        return high_nodes, low_nodes
 
-        left_highs = [float(df.iloc[j].high) for j in range(i - PIVOT_LEFT, i)]
-        right_highs = [float(df.iloc[j].high) for j in range(i + 1, i + PIVOT_RIGHT + 1)]
-        left_lows = [float(df.iloc[j].low) for j in range(i - PIVOT_LEFT, i)]
-        right_lows = [float(df.iloc[j].low) for j in range(i + 1, i + PIVOT_RIGHT + 1)]
+    for i in range(start, end):
+        DIAG["candidate_turns"] += 2
 
-        is_pivot_high = all(hi > x for x in left_highs) and all(hi >= x for x in right_highs)
-        is_pivot_low = all(lo < x for x in left_lows) and all(lo <= x for x in right_lows)
+        high_turn = direction_changed_around_node(df, i, "H")
+        low_turn = direction_changed_around_node(df, i, "L")
 
-        if is_pivot_high:
-            if direction_changed_around_node(df, i, "H"):
-                highs.append({"type": "H", "index": i, "time": float(df.iloc[i].time), "price": hi})
+        if high_turn:
+            if _is_strict_local_extreme(df, i, "H"):
+                high_nodes.append(_make_node(df, i, "H"))
             else:
-                DIAG["invalid_direction_nodes"] += 1
-
-        if is_pivot_low:
-            if direction_changed_around_node(df, i, "L"):
-                lows.append({"type": "L", "index": i, "time": float(df.iloc[i].time), "price": lo})
+                DIAG["rejected_non_extreme"] += 1
+        elif low_turn:
+            if _is_strict_local_extreme(df, i, "L"):
+                low_nodes.append(_make_node(df, i, "L"))
             else:
-                DIAG["invalid_direction_nodes"] += 1
+                DIAG["rejected_non_extreme"] += 1
+        else:
+            # No directional turn around this candidate candle.
+            pass
+
+    high_nodes = _collapse_overlapping_same_direction_nodes(high_nodes)
+    low_nodes = _collapse_overlapping_same_direction_nodes(low_nodes)
 
     if count_diag:
-        DIAG["valid_high_nodes"] += len(highs)
-        DIAG["valid_low_nodes"] += len(lows)
-    return highs, lows
+        DIAG["valid_high_nodes"] += len(high_nodes)
+        DIAG["valid_low_nodes"] += len(low_nodes)
+
+    return high_nodes, low_nodes
 
 
 def build_ordered_pivots(highs, lows):
+    """Return the complete chronological valid-node sequence.
+
+    Since find_pivots already derives nodes from actual direction turns,
+    consecutive same-type nodes should be rare. We do not replace a stronger
+    node merely because its price is larger/smaller; only truly overlapping
+    duplicates were collapsed above.
+    """
+    all_nodes = sorted(highs + lows, key=lambda p: (p["time"], p["index"]))
     result = []
-    for p in sorted(highs + lows, key=lambda x: (x["time"], x["index"])):
-        if not result or p["type"] != result[-1]["type"]:
-            result.append(p)
-        elif p["type"] == "H" and p["price"] >= result[-1]["price"]:
-            result[-1] = p
-        elif p["type"] == "L" and p["price"] <= result[-1]["price"]:
-            result[-1] = p
+    for node in all_nodes:
+        if result and node["index"] == result[-1]["index"]:
+            continue
+        result.append(node)
     return result
 
 
@@ -398,23 +504,31 @@ def detect_hooks(df, interval_minutes=STRATEGY_INTERVAL_MINUTES, pivots=None):
         highs, lows = find_pivots(df)
     else:
         highs, lows = pivots
+
     ordered = build_ordered_pivots(highs, lows)
     hooks = []
     confirm_secs = interval_minutes * 60 * PIVOT_RIGHT
 
     for i in range(max(0, len(ordered) - 5)):
-        p = ordered[i:i + 6]
+        p = ordered[i : i + 6]
         if len(p) < 6:
             continue
 
         types = [x["type"] for x in p]
 
-        # Positive hook / SHORT:
+        # Positive Hook / SHORT:
         # START(L) -> H1 -> L1 -> H2 -> L2 -> H3
         if types == ["L", "H", "L", "H", "L", "H"]:
             start, h1, l1, h2, l2, h3 = p
-            if not (h2["price"] > h1["price"] and l2["price"] < l1["price"] and h3["price"] > h2["price"]):
+
+            if not (h2["price"] > h1["price"]):
                 continue
+            if not (l2["price"] < l1["price"]):
+                continue
+            if not (h3["price"] > h2["price"]):
+                continue
+
+            # START must remain the lowest structural point of the Hook.
             if not (start["price"] < l1["price"] and start["price"] < l2["price"]):
                 continue
 
@@ -438,12 +552,19 @@ def detect_hooks(df, interval_minutes=STRATEGY_INTERVAL_MINUTES, pivots=None):
                 "created_time": h3["time"],
             })
 
-        # Negative hook / LONG:
+        # Negative Hook / LONG:
         # START(H) -> L1 -> H1 -> L2 -> H2 -> L3
         elif types == ["H", "L", "H", "L", "H", "L"]:
             start, l1, h1, l2, h2, l3 = p
-            if not (l2["price"] < l1["price"] and h2["price"] > h1["price"] and l3["price"] < l2["price"]):
+
+            if not (l2["price"] < l1["price"]):
                 continue
+            if not (h2["price"] > h1["price"]):
+                continue
+            if not (l3["price"] < l2["price"]):
+                continue
+
+            # START must remain the highest structural point of the Hook.
             if not (start["price"] > h1["price"] and start["price"] > h2["price"]):
                 continue
 
@@ -476,16 +597,11 @@ def hook_id(symbol, hook):
 
 def hook_is_confirmed(hook, now_ts=None):
     now_ts = utc_now_ts() if now_ts is None else now_ts
-    return hook["confirmation_time"] <= now_ts
+    return float(hook["confirmation_time"]) <= float(now_ts)
 
 
 def hook_is_recent(hook, now_ts=None):
-    """Time eligibility is intentionally not age-limited.
-
-    A confirmed M15 hook can remain eligible until another condition rejects it,
-    chiefly because TP may already have been touched or the hook may already
-    exist in the paper-trading database.
-    """
+    # Kept intentionally age-free per the current strategy definition.
     now_ts = utc_now_ts() if now_ts is None else now_ts
     return bool(hook and float(hook.get("confirmation_time", 0)) <= float(now_ts))
 
@@ -495,11 +611,7 @@ def pivot_confirmation_time(pivot):
 
 
 def calculate_m15_sl(m15_df, hook):
-    """
-    SL is derived ONLY from valid M15 nodes already confirmed by the time
-    the entry becomes valid. For SHORT choose the nearest valid M15 HIGH above
-    entry. For LONG choose the nearest valid M15 LOW below entry.
-    """
+    """Nearest confirmed opposite valid HA node at entry."""
     if m15_df is None or m15_df.empty or hook is None:
         DIAG["sl_missing"] += 1
         return None
@@ -555,43 +667,35 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="signal_m15"):
         if df is None or df.empty:
             return None
 
-        # Build a node-centered window instead of blindly taking the last
-        # 240 candles. This guarantees that every Hook node remains visible,
-        # even when the setup is older than the chart's trailing window.
-        node_times = []
-        if hook["direction"] == "SHORT":
-            node_keys = ("start", "h1", "l1", "h2", "l2", "h3")
-        else:
-            node_keys = ("start", "l1", "h1", "l2", "h2", "l3")
-
-        for key in node_keys:
-            if key in hook and hook[key] is not None:
-                node_times.append(float(hook[key]["time"]))
+        node_keys = (
+            ("start", "h1", "l1", "h2", "l2", "h3")
+            if hook["direction"] == "SHORT"
+            else ("start", "l1", "h1", "l2", "h2", "l3")
+        )
+        points = [hook[k] for k in node_keys]
+        node_times = [float(p["time"]) for p in points]
 
         work_df = df.copy().reset_index(drop=True)
         times = work_df["time"].astype(float).tolist()
+        if not times:
+            return None
 
-        if node_times and times:
-            first_node_idx = min(range(len(times)), key=lambda i: abs(times[i] - min(node_times)))
-            last_node_idx = max(range(len(times)), key=lambda i: abs(times[i] - max(node_times)))
-            pad_left = 30
-            pad_right = 50
-            start_idx = max(0, first_node_idx - pad_left)
-            end_idx = min(len(work_df), last_node_idx + pad_right + 1)
+        first_node_idx = min(range(len(times)), key=lambda i: abs(times[i] - min(node_times)))
+        last_node_idx = max(range(len(times)), key=lambda i: abs(times[i] - max(node_times)))
 
-            # Ensure enough context for price/HA movement while keeping the
-            # chart readable on Telegram.
-            if end_idx - start_idx < 120:
-                center = (first_node_idx + last_node_idx) // 2
-                start_idx = max(0, center - 80)
-                end_idx = min(len(work_df), start_idx + 180)
-                if end_idx - start_idx < 180:
-                    start_idx = max(0, end_idx - 180)
+        pad_left = 30
+        pad_right = 50
+        start_idx = max(0, first_node_idx - pad_left)
+        end_idx = min(len(work_df), last_node_idx + pad_right + 1)
 
-            chart_df = work_df.iloc[start_idx:end_idx].copy().reset_index(drop=True)
-        else:
-            chart_df = work_df.tail(CHART_CANDLES).copy().reset_index(drop=True)
+        if end_idx - start_idx < 140:
+            center = (first_node_idx + last_node_idx) // 2
+            start_idx = max(0, center - 80)
+            end_idx = min(len(work_df), start_idx + 180)
+            if end_idx - start_idx < 180:
+                start_idx = max(0, end_idx - 180)
 
+        chart_df = work_df.iloc[start_idx:end_idx].copy().reset_index(drop=True)
         if chart_df.empty:
             return None
 
@@ -600,7 +704,7 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="signal_m15"):
         x = mdates.date2num(pd.to_datetime(chart_df.time, unit="s", utc=True).dt.to_pydatetime())
         width = max((STRATEGY_INTERVAL_MINUTES / 1440.0) * 0.72, 0.0015)
 
-        # Real-price candlesticks
+        # Real-price candles.
         for i, row in chart_df.iterrows():
             xo = x[i]
             o, c, hi, lo = map(float, [row.open, row.close, row.high, row.low])
@@ -618,7 +722,7 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="signal_m15"):
                 )
             )
 
-        # Heikin Ashi candles
+        # Heikin Ashi candles.
         for i, row in ha.iterrows():
             xo = x[i]
             o, c, hi, lo = map(float, [row.ha_open, row.ha_close, row.ha_high, row.ha_low])
@@ -636,61 +740,58 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="signal_m15"):
                 )
             )
 
-        if hook["direction"] == "SHORT":
-            points = [hook[k] for k in ("start", "h1", "l1", "h2", "l2", "h3")]
-            labels = ["START", "H1", "L1", "H2", "L2", "H3"]
-        else:
-            points = [hook[k] for k in ("start", "l1", "h1", "l2", "h2", "l3")]
-            labels = ["START", "L1", "H1", "L2", "H2", "L3"]
+        labels = [
+            "START", "H1", "L1", "H2", "L2", "H3"
+        ] if hook["direction"] == "SHORT" else [
+            "START", "L1", "H1", "L2", "H2", "L3"
+        ]
 
         px = [datetime.fromtimestamp(p["time"], tz=timezone.utc) for p in points]
         py = [float(p["price"]) for p in points]
 
-        # Main Hook path on both charts.
+        # Hook path. It is based on HA node prices.
         for ax in (ax_price, ax_ha):
             ax.plot(
                 px, py,
                 marker="o",
-                linewidth=2.2,
+                linewidth=2.4,
                 color="royalblue",
                 label="VALID M15 HOOK",
-                zorder=6,
+                zorder=7,
             )
 
-        # Explicit node markers. Each node gets a large marker, a vertical
-        # guide line, and a boxed label so the exact H/L location is obvious.
-        offsets = (
-            [(0, -34), (0, 24), (0, -34), (0, 24), (0, -34), (0, 28)]
-            if hook["direction"] == "SHORT"
-            else [(0, 28), (0, -34), (0, 24), (0, -34), (0, 24), (0, -38)]
-        )
+        if hook["direction"] == "SHORT":
+            offsets = [(0, -34), (0, 28), (0, -34), (0, 28), (0, -34), (0, 30)]
+        else:
+            offsets = [(0, 30), (0, -34), (0, 28), (0, -34), (0, 28), (0, -38)]
 
         for p, label, off in zip(points, labels, offsets):
             dt = datetime.fromtimestamp(p["time"], tz=timezone.utc)
             is_final = label in ("H3", "L3")
             is_start = label == "START"
+            ha_price = float(p["price"])
 
             for ax in (ax_price, ax_ha):
                 ax.axvline(
                     dt,
-                    linestyle="--" if not is_final else "-.",
-                    linewidth=0.85 if not is_final else 1.2,
-                    color="gray" if not is_final else "purple",
-                    alpha=0.55,
+                    linestyle="-." if is_final else "--",
+                    linewidth=1.2 if is_final else 0.85,
+                    color="purple" if is_final else "gray",
+                    alpha=0.60,
                     zorder=1,
                 )
                 ax.scatter(
-                    [dt], [float(p["price"])],
-                    s=115 if is_final else (90 if is_start else 70),
+                    [dt], [ha_price],
+                    s=125 if is_final else (95 if is_start else 78),
                     marker="o",
                     facecolors="white",
                     edgecolors="purple" if is_final else "royalblue",
                     linewidths=2.0 if is_final else 1.5,
-                    zorder=9,
+                    zorder=10,
                 )
                 ax.annotate(
-                    f"{label}\n{fmt_price(p['price'])}",
-                    (dt, float(p["price"])),
+                    f"{label}\nHA {fmt_price(ha_price)}",
+                    (dt, ha_price),
                     xytext=off,
                     textcoords="offset points",
                     ha="center",
@@ -698,11 +799,11 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="signal_m15"):
                     fontsize=10 if is_final else 9,
                     fontweight="bold",
                     bbox=dict(
-                        boxstyle="round,pad=.28",
+                        boxstyle="round,pad=.30",
                         fc="#fffdf2" if not is_final else "#f3e8ff",
                         ec="purple" if is_final else "royalblue",
                         linewidth=1.4,
-                        alpha=0.96,
+                        alpha=0.97,
                     ),
                     arrowprops=dict(arrowstyle="-", color="gray", linewidth=0.8),
                     zorder=12,
@@ -716,31 +817,29 @@ def create_hook_chart(symbol, df, hook, sl, path_prefix="signal_m15"):
         right_dt = max(right_dt, confirm_dt)
 
         for ax in (ax_price, ax_ha):
-            ax.hlines(
-                entry, left_dt, right_dt,
-                linestyles="--", linewidth=1.4,
-                label=f"ENTRY {fmt_price(entry)}", color="darkorange"
-            )
-            ax.hlines(
-                tp, left_dt, right_dt,
-                linestyles="--", linewidth=1.6,
-                label=f"TP 86.4% {fmt_price(tp)}", color="seagreen"
-            )
+            ax.hlines(entry, left_dt, right_dt, linestyles="--", linewidth=1.4,
+                      label=f"ENTRY {fmt_price(entry)}", color="darkorange")
+            ax.hlines(tp, left_dt, right_dt, linestyles="--", linewidth=1.6,
+                      label=f"TP 86.4% {fmt_price(tp)}", color="seagreen")
             if sl is not None:
-                ax.hlines(
-                    float(sl), left_dt, right_dt,
-                    linestyles="--", linewidth=1.6,
-                    label=f"SL M15 {fmt_price(sl)}", color="crimson"
-                )
+                ax.hlines(float(sl), left_dt, right_dt, linestyles="--", linewidth=1.6,
+                          label=f"SL M15 {fmt_price(sl)}", color="crimson")
             ax.axvline(confirm_dt, linestyle=":", linewidth=1.1, color="purple", label="M15 CONFIRMED")
             ax.grid(alpha=0.22)
             ax.legend(loc="best", fontsize=8)
             ax.set_xlim(left_dt, right_dt)
 
-        direction_text = "SHORT: H1→L1→H2→L2→H3" if hook["direction"] == "SHORT" else "LONG: L1→H1→L2→H2→L3"
-        ax_price.set_title(f"NDS M15 | {symbol} | {hook['direction']} | {direction_text}\nREAL PRICE CANDLES + MARKED NODES")
+        direction_text = (
+            "SHORT: START→H1→L1→H2→L2→H3"
+            if hook["direction"] == "SHORT"
+            else "LONG: START→L1→H1→L2→H2→L3"
+        )
+        ax_price.set_title(
+            f"NDS M15 | {symbol} | {hook['direction']}\n"
+            f"{direction_text} | REAL PRICE CANDLES | NODES FROM HA"
+        )
         ax_price.set_ylabel("Price")
-        ax_ha.set_title("HEIKIN ASHI | VALID DIRECTION-CHANGE NODES")
+        ax_ha.set_title("HEIKIN ASHI | STRICT DIRECTION-CHANGE NODES")
         ax_ha.set_ylabel("HA Price")
         ax_ha.set_xlabel("Time UTC")
 
@@ -908,9 +1007,9 @@ def build_signal_message(symbol, hook, sl):
         f"Entry M15 {final_label}: <b>{fmt_price(entry)}</b>\n"
         f"SL nearest valid M15 node: <b>{fmt_price(sl)}</b> ({risk:+.2f}%)\n"
         f"TP 86.4% M15: <b>{fmt_price(tp)}</b> ({reward:+.2f}%)\n\n"
-        f"M15 hook confirmed: {fmt_ts(hook['confirmation_time'])}\n"
+        f"Hook confirmed: {fmt_ts(hook['confirmation_time'])}\n"
         f"Hook range: {hook['range_pct']:.2f}%\n"
-        f"Nodes = HA + real direction change\n"
+        f"Nodes = strict HA direction change + HA local extreme\n"
         f"<b>PAPER TRADING ONLY</b>"
     )
 
@@ -932,7 +1031,7 @@ def process_symbol(symbol):
     DIAG["m15_data_ok"] += 1
     ha = heikin_ashi_ohlc(df)
     highs, lows = find_pivots(ha)
-    DIAG["m15_pivots"] += len(highs) + len(lows)
+    DIAG["m15_nodes"] += len(highs) + len(lows)
 
     hooks = detect_hooks(ha, STRATEGY_INTERVAL_MINUTES, pivots=(highs, lows))
     DIAG["hooks"] += len(hooks)
@@ -992,7 +1091,8 @@ def process_symbol(symbol):
                 f"<b>{symbol}</b>\n"
                 f"Entry: {fmt_price(entry)}\n"
                 f"TP 86.4%: {fmt_price(tp)}\n"
-                f"SL M15 node: {fmt_price(sl)}\n"
+                f"SL valid M15 node: {fmt_price(sl)}\n"
+                f"NODES: HA STRICT TURN\n"
                 f"PAPER TRADING ONLY",
             )
             if sent:
@@ -1017,15 +1117,27 @@ def close_trade(trade, price, pnl_pct, pnl_price, reason):
     c.close()
 
 
-def monitor_open_trades():
-    """Monitor every OPEN paper trade, including trades older than the candle lookback.
+def get_current_price(symbol):
+    try:
+        r = requests.get(f"{KRAKEN_FUTURES_URL}/tickers", timeout=REQUEST_TIMEOUT)
+        if r.ok:
+            for t in r.json().get("tickers", []):
+                if not isinstance(t, dict):
+                    continue
+                ts = str(t.get("symbol") or t.get("pair") or t.get("instrument") or "")
+                if ts != symbol:
+                    continue
+                for key in ("last", "lastPrice", "markPrice", "price"):
+                    if t.get(key) is not None:
+                        return float(t[key])
+    except Exception as e:
+        DIAG["api_errors"].append(f"Ticker {symbol}: {str(e)[:160]}")
 
-    Previously, the monitor fetched only 30 M15 candles and skipped a trade when
-    none of those candles had a timestamp >= opened_at. Old OPEN rows could then
-    remain open forever even after price had crossed SL/TP. We now inspect a wider
-    candle window, process candles after entry when available, and always perform
-    a final live-price safety check.
-    """
+    df = get_candles(symbol, STRATEGY_INTERVAL, 2)
+    return None if df is None or df.empty else float(df.iloc[-1].close)
+
+
+def monitor_open_trades():
     for trade in get_open_trades():
         try:
             symbol = trade["symbol"]
@@ -1046,7 +1158,6 @@ def monitor_open_trades():
                     lo = float(candle.low)
                     hit_sl = hi >= sl if direction == "SHORT" else lo <= sl
                     hit_tp = lo <= tp if direction == "SHORT" else hi >= tp
-                    # Conservative rule if one candle touches both levels.
                     if hit_sl:
                         price, reason = sl, "SL"
                         break
@@ -1054,9 +1165,6 @@ def monitor_open_trades():
                         price, reason = tp, "TP"
                         break
 
-            # Always check the live ticker too. This catches old trades when the
-            # entry candle has fallen outside the available candle window, and
-            # catches a level crossed by the still-forming latest candle.
             if reason is None:
                 current = get_current_price(symbol)
                 if current is not None:
@@ -1101,26 +1209,6 @@ def trade_metrics(entry, sl, tp, direction, current):
         tp_pct = (entry - tp) / entry * 100
         sl_pct = (entry - sl) / entry * 100
     return pnl, tp_pct, sl_pct
-
-
-def get_current_price(symbol):
-    try:
-        r = requests.get(f"{KRAKEN_FUTURES_URL}/tickers", timeout=REQUEST_TIMEOUT)
-        if r.ok:
-            for t in r.json().get("tickers", []):
-                if not isinstance(t, dict):
-                    continue
-                ts = str(t.get("symbol") or t.get("pair") or t.get("instrument") or "")
-                if ts != symbol:
-                    continue
-                for key in ("last", "lastPrice", "markPrice", "price"):
-                    if t.get(key) is not None:
-                        return float(t[key])
-    except Exception as e:
-        DIAG["api_errors"].append(f"Ticker {symbol}: {str(e)[:160]}")
-
-    df = get_candles(symbol, STRATEGY_INTERVAL, 2)
-    return None if df is None or df.empty else float(df.iloc[-1].close)
 
 
 def open_trades_report_lines():
@@ -1190,7 +1278,7 @@ def diagnostic_text():
         f"XAUT Included: <b>{DIAG['xaut_found']}</b>",
         f"NEAR Excluded: <b>{DIAG['near_excluded']}</b>",
         "",
-        "━━━ <b>M15 ONLY</b> ━━━",
+        "━━━ <b>M15 / HA NODE ENGINE</b> ━━━",
     ]
 
     for label, key in [
@@ -1199,10 +1287,12 @@ def diagnostic_text():
         ("Data Error", "m15_data_error"),
         ("Empty", "m15_empty"),
         ("Short", "m15_short"),
-        ("Pivot Points", "m15_pivots"),
+        ("Candidate Turn Checks", "candidate_turns"),
         ("Valid High Nodes", "valid_high_nodes"),
         ("Valid Low Nodes", "valid_low_nodes"),
-        ("Rejected: No Direction Change", "invalid_direction_nodes"),
+        ("Rejected: Non-Extreme", "rejected_non_extreme"),
+        ("Same-Turn Nodes Collapsed", "nodes_collapsed"),
+        ("Total Valid HA Nodes", "m15_nodes"),
         ("Hooks", "hooks"),
         ("Confirmed Hooks", "confirmed_hooks"),
         ("Confirmed Time-Eligible (no age cutoff)", "eligible_confirmed_hooks"),
@@ -1246,9 +1336,11 @@ def main():
         init_db()
         print(f"NDS M15 Scanner {VERSION}")
         print("M15 ONLY - H4 REMOVED")
-        print("VALID NODE = REAL DIRECTION CHANGE ON HEIKIN ASHI")
-        print("Entry M15 H3/L3 | TP 86.4% M15 | SL nearest confirmed valid M15 opposite node | NO HOOK AGE CUTOFF")
-        print("NEAR excluded | XAUT included")
+        print("NODE = STRICT HA DIRECTION CHANGE + STRICT HA LOCAL EXTREME")
+        print("SHORT: START-L -> H1 -> L1 -> H2 -> L2 -> H3")
+        print("LONG : START-H -> L1 -> H1 -> L2 -> H2 -> L3")
+        print("Entry H3/L3 | TP 86.4% M15 | SL nearest confirmed valid opposite M15 node")
+        print("NO HOOK AGE CUTOFF | NEAR excluded | XAUT included")
         print("PAPER TRADING ONLY - NO REAL ORDERS")
 
         symbols = get_futures_instruments()
