@@ -1,4 +1,3 @@
-
 name: NDS H4 M5 Live Scanner
 
 on:
@@ -9,6 +8,10 @@ on:
 
 permissions:
   contents: write
+
+concurrency:
+  group: nds-h4-m5-scanner
+  cancel-in-progress: false
 
 jobs:
   nds-scanner:
@@ -60,9 +63,23 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          PYTHONUNBUFFERED: "1"
 
         run: |
-          python nds_h4_m5_live_scanner.py
+          echo "========================================"
+          echo "NDS H4 -> M5 SCANNER"
+          echo "START TIME:"
+          date -u
+          echo "========================================"
+
+          python -u nds_h4_m5_live_scanner.py
+
+          echo ""
+          echo "========================================"
+          echo "SCANNER FINISHED"
+          echo "END TIME:"
+          date -u
+          echo "========================================"
 
       # ======================================================
       # SHOW GENERATED FILES
@@ -71,6 +88,7 @@ jobs:
       - name: Show scanner output
         if: always()
         run: |
+
           echo "========================================"
           echo "NDS CHART DIRECTORY"
           echo "========================================"
@@ -83,10 +101,17 @@ jobs:
 
           echo ""
           echo "========================================"
-          echo "DATABASE"
+          echo "DATABASE FILES"
           echo "========================================"
 
-          ls -lh nds_h4_m5_live_v51.db 2>/dev/null || true
+          ls -lh *.db 2>/dev/null || true
+
+          echo ""
+          echo "========================================"
+          echo "CURRENT UTC TIME"
+          echo "========================================"
+
+          date -u
 
       # ======================================================
       # COMMIT CHARTS
@@ -96,23 +121,16 @@ jobs:
         if: always()
         run: |
 
-          # Make absolutely sure the directory exists.
           mkdir -p nds_h4_m5_charts
 
-          # Git identity
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # Add only chart directory changes
           git add -A nds_h4_m5_charts/
 
-          # Do not fail when there is nothing new.
           if git diff --cached --quiet; then
             echo "No chart changes to commit."
           else
-
             git commit -m "Update NDS charts"
-
             git push
-
           fi
