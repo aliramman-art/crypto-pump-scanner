@@ -1,6 +1,6 @@
 # ============================================================
 # NDS M15 LIVE SCANNER
-# VERSION 6.0.0
+# VERSION 6.0.1
 # PAPER TRADING ONLY - NO REAL ORDERS
 #
 # IMPORTANT:
@@ -11,6 +11,7 @@
 # - Entry = confirmed M15 H3/L3
 # - TP = 86.4% M15 retracement
 # - SL = nearest confirmed VALID opposite M15 node available at entry
+# - No 6h hook-age cutoff; stale setups are rejected by TP-touched/DB/geometry rules
 # - NEAR is excluded and XAUT is explicitly included
 # ============================================================
 
@@ -27,7 +28,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 
-VERSION = "6.0.0"
+VERSION = "6.0.1"
 REAL_TRADING = False
 
 KRAKEN_FUTURES_URL = "https://futures.kraken.com/derivatives/api/v3"
@@ -44,7 +45,7 @@ NODE_DIRECTION_BARS = 2
 NDS_RETRACE = 0.864
 MIN_HOOK_RANGE_PCT = 0.20
 SL_BUFFER_PCT = 0.15
-MAX_HOOK_AGE_SECONDS = 6 * 3600
+MAX_HOOK_AGE_SECONDS = None  # No age cutoff; TP/SL/DB checks control stale setups
 MAX_OPEN_TRADES = 3
 REQUEST_TIMEOUT = 20
 SCAN_SLEEP_SECONDS = 0.25
@@ -80,6 +81,7 @@ DIAG = {
     "hooks": 0,
     "confirmed_hooks": 0,
     "recent_hooks": 0,
+    "eligible_confirmed_hooks": 0,
     "range_valid_hooks": 0,
     "tp_touched": 0,
     "sl_found": 0,
@@ -478,9 +480,14 @@ def hook_is_confirmed(hook, now_ts=None):
 
 
 def hook_is_recent(hook, now_ts=None):
+    """Time eligibility is intentionally not age-limited.
+
+    A confirmed M15 hook can remain eligible until another condition rejects it,
+    chiefly because TP may already have been touched or the hook may already
+    exist in the paper-trading database.
+    """
     now_ts = utc_now_ts() if now_ts is None else now_ts
-    age = now_ts - hook["confirmation_time"]
-    return 0 <= age <= MAX_HOOK_AGE_SECONDS
+    return bool(hook and float(hook.get("confirmation_time", 0)) <= float(now_ts))
 
 
 def pivot_confirmation_time(pivot):
@@ -854,6 +861,7 @@ def process_symbol(symbol):
         if not hook_is_recent(hook, now):
             continue
         DIAG["recent_hooks"] += 1
+        DIAG["eligible_confirmed_hooks"] += 1
 
         if hook["range_pct"] < MIN_HOOK_RANGE_PCT:
             continue
@@ -1091,7 +1099,7 @@ def diagnostic_text():
         ("Rejected: No Direction Change", "invalid_direction_nodes"),
         ("Hooks", "hooks"),
         ("Confirmed Hooks", "confirmed_hooks"),
-        ("Recent ≤6h", "recent_hooks"),
+        ("Confirmed Time-Eligible (no age cutoff)", "eligible_confirmed_hooks"),
         (f"Range Valid ≥{MIN_HOOK_RANGE_PCT:.2f}%", "range_valid_hooks"),
         ("TP Already Touched", "tp_touched"),
         ("SL Found", "sl_found"),
@@ -1133,7 +1141,7 @@ def main():
         print(f"NDS M15 Scanner {VERSION}")
         print("M15 ONLY - H4 REMOVED")
         print("VALID NODE = REAL DIRECTION CHANGE ON HEIKIN ASHI")
-        print("Entry M15 H3/L3 | TP 86.4% M15 | SL nearest confirmed valid M15 opposite node")
+        print("Entry M15 H3/L3 | TP 86.4% M15 | SL nearest confirmed valid M15 opposite node | NO HOOK AGE CUTOFF")
         print("NEAR excluded | XAUT included")
         print("PAPER TRADING ONLY - NO REAL ORDERS")
 
