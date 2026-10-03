@@ -1,0 +1,75 @@
+
+name: NDS M5 Hook Live Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/10 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nds-m5-hook-live-scanner
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 9
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          fi
+          pip install requests pandas numpy matplotlib
+
+      - name: Restore database if available
+        run: |
+          if [ -f nds_m5_hook_live.db ]; then
+            echo "Existing database found."
+          else
+            echo "Database does not exist yet. Scanner may create it."
+          fi
+
+      - name: Run scanner
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
+          PYTHONUNBUFFERED: "1"
+        run: |
+          python -u nds_m5_hook_live_scanner.py
+
+      - name: Commit database
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if [ -f nds_m5_hook_live.db ]; then
+            git add nds_m5_hook_live.db
+            if ! git diff --cached --quiet; then
+              git commit -m "Update NDS M5 scanner database"
+              git push origin HEAD:main
+            else
+              echo "No database changes to commit."
+            fi
+          else
+            echo "Database file not found; nothing to commit."
+          fi
