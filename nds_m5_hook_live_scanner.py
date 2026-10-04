@@ -54,6 +54,7 @@ import pandas as pd
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 
 
 # ============================================================
@@ -1319,17 +1320,206 @@ def create_hook_chart(
             figsize=(15, 8)
         )
 
-        x = pd.to_datetime(
-            chart_df["time"],
-            unit="s",
-            utc=True
+        # ====================================================
+        # HEIKIN ASHI
+        #
+        # IMPORTANT:
+        # Heikin Ashi is ONLY for chart visualization.
+        # NDS detection, hook prices, entry, TP and SL
+        # continue to use the original OHLC data.
+        # ====================================================
+
+        ha_df = chart_df.copy()
+
+        ha_df["ha_close"] = (
+            ha_df["open"]
+            + ha_df["high"]
+            + ha_df["low"]
+            + ha_df["close"]
+        ) / 4.0
+
+        ha_open_values = []
+
+        for i in range(len(ha_df)):
+
+            raw_open = float(
+                ha_df.iloc[i]["open"]
+            )
+
+            raw_close = float(
+                ha_df.iloc[i]["close"]
+            )
+
+            if i == 0:
+
+                ha_open = (
+                    raw_open
+                    + raw_close
+                ) / 2.0
+
+            else:
+
+                prev_ha_open = (
+                    ha_open_values[i - 1]
+                )
+
+                prev_ha_close = float(
+                    ha_df.iloc[i - 1]["ha_close"]
+                )
+
+                ha_open = (
+                    prev_ha_open
+                    + prev_ha_close
+                ) / 2.0
+
+            ha_open_values.append(
+                ha_open
+            )
+
+        ha_df["ha_open"] = (
+            ha_open_values
         )
 
+        ha_df["ha_high"] = ha_df[
+            [
+                "high",
+                "ha_open",
+                "ha_close",
+            ]
+        ].max(axis=1)
+
+        ha_df["ha_low"] = ha_df[
+            [
+                "low",
+                "ha_open",
+                "ha_close",
+            ]
+        ].min(axis=1)
+
+        # Candle width in matplotlib date units.
+        time_deltas = (
+            ha_df["time"]
+            .diff()
+            .dropna()
+        )
+
+        if not time_deltas.empty:
+
+            candle_width = (
+                float(
+                    time_deltas.median()
+                )
+                / 86400.0
+                * 0.70
+            )
+
+        else:
+
+            candle_width = (
+                (
+                    5
+                    if timeframe == "M5"
+                    else H4_INTERVAL_MINUTES
+                )
+                / 1440.0
+                * 0.70
+            )
+
+        # ====================================================
+        # DRAW HEIKIN ASHI CANDLES
+        # ====================================================
+
+        for _, candle in ha_df.iterrows():
+
+            dt = datetime.fromtimestamp(
+                float(candle["time"]),
+                tz=timezone.utc
+            )
+
+            x_pos = (
+                dt
+                .timestamp()
+                / 86400.0
+            )
+
+            ha_open = float(
+                candle["ha_open"]
+            )
+
+            ha_high = float(
+                candle["ha_high"]
+            )
+
+            ha_low = float(
+                candle["ha_low"]
+            )
+
+            ha_close = float(
+                candle["ha_close"]
+            )
+
+            # Wick
+            ax.plot(
+                [dt, dt],
+                [ha_low, ha_high],
+                linewidth=0.8,
+                zorder=1
+            )
+
+            body_low = min(
+                ha_open,
+                ha_close
+            )
+
+            body_high = max(
+                ha_open,
+                ha_close
+            )
+
+            body_height = (
+                body_high
+                - body_low
+            )
+
+            # Avoid invisible bodies when open == close.
+            if body_height <= 0:
+
+                body_height = (
+                    max(
+                        abs(ha_close),
+                        1.0
+                    )
+                    * 0.00001
+                )
+
+            if ha_close >= ha_open:
+                face_color = "green"
+            else:
+                face_color = "red"
+
+            rect = Rectangle(
+                (
+                    x_pos
+                    - candle_width / 2.0,
+                    body_low,
+                ),
+                candle_width,
+                body_height,
+                facecolor=face_color,
+                edgecolor=face_color,
+                linewidth=0.8,
+                alpha=0.75,
+                zorder=2
+            )
+
+            ax.add_patch(rect)
+
+        # Dummy legend line for Heikin Ashi candles.
         ax.plot(
-            x,
-            chart_df["close"],
-            linewidth=1.0,
-            label=f"{timeframe} Close"
+            [],
+            [],
+            linewidth=6,
+            label=f"{timeframe} Heikin Ashi"
         )
 
         if hook["direction"] == "SHORT":
@@ -1436,8 +1626,13 @@ def create_hook_chart(
         )
 
         start_x = min(
-            x.iloc[0],
-            px[0]
+            px[0],
+            datetime.fromtimestamp(
+                float(
+                    chart_df["time"].iloc[0]
+                ),
+                tz=timezone.utc
+            )
         )
 
         confirmation_dt = datetime.fromtimestamp(
@@ -1446,7 +1641,13 @@ def create_hook_chart(
         )
 
         end_x = max(
-            x.iloc[-1],
+            px[-1],
+            datetime.fromtimestamp(
+                float(
+                    chart_df["time"].iloc[-1]
+                ),
+                tz=timezone.utc
+            ),
             confirmation_dt
         )
 
