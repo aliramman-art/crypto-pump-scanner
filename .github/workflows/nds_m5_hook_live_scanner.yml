@@ -1,10 +1,9 @@
-
 name: NDS M5 Hook Live Scanner
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "3,13,23,33,43,53 * * * *"
 
 permissions:
   contents: write
@@ -20,12 +19,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: main
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: "pip"
@@ -37,14 +36,6 @@ jobs:
             pip install -r requirements.txt
           fi
           pip install requests pandas numpy matplotlib
-
-      - name: Restore database if available
-        run: |
-          if [ -f nds_m5_hook_live.db ]; then
-            echo "Existing database found."
-          else
-            echo "Database does not exist yet. Scanner may create it."
-          fi
 
       - name: Run scanner
         env:
@@ -64,6 +55,7 @@ jobs:
 
           if [ -f nds_m5_hook_live.db ]; then
             git add nds_m5_hook_live.db
+
             if ! git diff --cached --quiet; then
               git commit -m "Update NDS M5 scanner database"
               git push origin HEAD:main
