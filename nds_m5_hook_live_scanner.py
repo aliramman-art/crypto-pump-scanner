@@ -82,6 +82,11 @@ M5_CANDLES = 1500
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
 
+# Minimum number of candles required between
+# consecutive nodes of an NDS Hook.
+# Less than this -> Hook is not formed.
+MIN_NODE_CANDLES = 10
+
 NDS_RETRACE = 0.864
 
 M5_MIN_HOOK_RANGE_PCT = 0.20
@@ -694,6 +699,25 @@ def detect_hooks_from_pivots(
     ):
 
         p = ordered[i:i + 6]
+
+        # ====================================================
+        # MINIMUM NODE DISTANCE
+        #
+        # Every consecutive node in the Hook must be at least
+        # MIN_NODE_CANDLES candles apart.
+        #
+        # 10 candles or more -> allowed
+        # 9 candles or less -> Hook is rejected
+        # ====================================================
+
+        if any(
+            (
+                p[j]["index"]
+                - p[j - 1]["index"]
+            ) < MIN_NODE_CANDLES
+            for j in range(1, len(p))
+        ):
+            continue
 
         types = [
             x["type"]
