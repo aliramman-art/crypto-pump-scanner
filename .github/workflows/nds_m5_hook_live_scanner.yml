@@ -3,7 +3,7 @@ name: NDS M5 Hook Live Scanner
 on:
   workflow_dispatch:
   schedule:
-    - cron: "3,13,23,33,43,53 * * * *"
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: write
@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: main
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v7
@@ -53,8 +54,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if [ -f nds_m5_hook_live.db ]; then
-            git add nds_m5_hook_live.db
+          if [ -f nds_h4_m5_v546.db ]; then
+            echo "Database found:"
+            ls -lh nds_h4_m5_v546.db
+
+            git add nds_h4_m5_v546.db
 
             if ! git diff --cached --quiet; then
               git commit -m "Update NDS M5 scanner database"
@@ -63,5 +67,6 @@ jobs:
               echo "No database changes to commit."
             fi
           else
-            echo "Database file not found; nothing to commit."
+            echo "Database file not found: nds_h4_m5_v546.db"
+            echo "Nothing to commit."
           fi
