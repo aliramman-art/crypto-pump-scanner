@@ -1,6 +1,6 @@
 # ============================================================
 # NDS M5 LIVE SCANNER
-# VERSION 5.5.6
+# VERSION 5.5.8
 # PAPER TRADING ONLY - NO REAL ORDERS
 #
 # Strategy preserved:
@@ -18,8 +18,8 @@
 #   8) Diagnostic performance includes win rate and total/gross PnL.
 #   9) Heikin-Ashi remains chart-only; NDS detection uses real OHLC.
 #  10) REAL_TRADING remains False / PAPER ONLY.
-#  11) Protective SL uses the nearest previous valid M5 high/low on the
-#      protective side of Entry, starting before the H3/L3 confirmation window.
+#  11) Protective SL uses the previous qualifying RAW M5 candle high/low,
+#      not the ordered NDS pivot list, so the NDS geometry itself is unchanged.
 # ============================================================
 
 import os
@@ -37,7 +37,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 
-VERSION = "5.5.7"
+VERSION = "5.5.8"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -475,46 +475,44 @@ def tp_touch_info(rows: List[Dict[str, Any]], hook: Dict[str, Any]) -> Dict[str,
 
 
 def find_protective_sl(hook: Dict[str, Any], rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Find the nearest valid previous M5 high/low on the protective side.
+    """Find the previous qualifying raw M5 candle high/low for the SL.
 
-    The old implementation searched only previous *pivot* highs/lows beyond
-    the entry. For a confirmed NDS H3/L3, that condition is frequently
-    impossible by construction because the final node is already above H2
-    for SHORT or below L2 for LONG.
+    The old implementation searched only the ordered NDS pivot list. That is
+    structurally wrong for this strategy: H3/L3 is already the more extreme
+    NDS node, so asking an earlier NDS pivot of the same type to be beyond the
+    entry rejects most valid trades and produced SL Found = 0.
 
-    Strategy remains unchanged:
-      SHORT -> previous valid M5 high above Entry
-      LONG  -> previous valid M5 low below Entry
-
-    We start before the final pivot's confirmation window, so the SL cannot
-    accidentally come from one of the candles that merely confirms H3/L3.
+    This function does not alter NDS detection, node spacing, confirmation,
+    TP, or hook geometry. It only selects the previous real M5 candle extreme
+    needed for the existing SL rule.
     """
-    final_idx = hook["final"]["idx"]
-    entry = hook["final"]["price"]
+    final_idx = int(hook["final"]["idx"])
+    entry = float(hook["final"]["price"])
 
-    # PIVOT_RIGHT candles after the final pivot are confirmation candles.
-    # Skip those, plus the final pivot candle itself, and search backward.
-    start_idx = min(final_idx - PIVOT_RIGHT - 1, len(rows) - 1)
-    if start_idx < 0:
+    if final_idx <= 0 or not rows:
         return None
 
     if hook["direction"] == "SHORT":
-        for i in range(start_idx, -1, -1):
-            high = rows[i]["high"]
-            if high > entry:
+        # Previous real M5 high above entry. Nearest qualifying candle wins.
+        for i in range(min(final_idx - 1, len(rows) - 1), -1, -1):
+            candle = rows[i]
+            high = safe_float(candle.get("high"))
+            if high is not None and high > entry:
                 return {
                     "idx": i,
-                    "time": rows[i]["time"],
+                    "time": candle["time"],
                     "price": high,
                     "type": "H",
                 }
     else:
-        for i in range(start_idx, -1, -1):
-            low = rows[i]["low"]
-            if low < entry:
+        # Previous real M5 low below entry. Nearest qualifying candle wins.
+        for i in range(min(final_idx - 1, len(rows) - 1), -1, -1):
+            candle = rows[i]
+            low = safe_float(candle.get("low"))
+            if low is not None and low < entry:
                 return {
                     "idx": i,
-                    "time": rows[i]["time"],
+                    "time": candle["time"],
                     "price": low,
                     "type": "L",
                 }
@@ -1417,7 +1415,7 @@ def main() -> None:
                 stats["recent_hooks"] += 1
                 if hook["range_pct"] >= M5_MIN_HOOK_RANGE_PCT:
                     stats["range_valid"] += 1
-                    all_recent_valid.append({"hook": hook, "rows": rows, "pivots": pivots, "tp_touch": touch})
+                    all_recent_valid.append({"hook": hook, "rows": rows, "tp_touch": touch})
                     if not touch["touched"]:
                         stats["valid_before_tp"] += 1
 
