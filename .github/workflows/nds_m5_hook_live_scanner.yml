@@ -79,15 +79,15 @@ jobs:
 
           echo "Detected scanner version: $VERSION"
 
-          if [ "$VERSION" != "5.5.8" ]; then
+          if [ "$VERSION" != "5.5.9" ]; then
             echo "ERROR: Wrong scanner version."
-            echo "Required: 5.5.8"
+            echo "Required: 5.5.9"
             echo "Detected: $VERSION"
             echo "The workflow will NOT run an older scanner."
             exit 1
           fi
 
-          echo "Scanner version 5.5.8 confirmed."
+          echo "Scanner version 5.8.9 confirmed."
 
       - name: Run scanner
         env:
@@ -97,7 +97,7 @@ jobs:
           TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
           PYTHONUNBUFFERED: "1"
         run: |
-          echo "Starting NDS M5 Hook Live Scanner v5.5.8..."
+          echo "Starting NDS M5 Hook Live Scanner v5.5.9..."
           python -u nds_m5_hook_live_scanner.py
 
       - name: Commit database
