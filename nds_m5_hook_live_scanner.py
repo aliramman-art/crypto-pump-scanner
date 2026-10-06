@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 
-VERSION = "5.5.4"
+VERSION = "5.5.5"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -364,6 +364,10 @@ def build_hook(symbol: str, rows: List[Dict[str, Any]], nodes: List[Dict[str, An
     # SHORT = L H L H L H
     if types == "LHLHLH":
         start, h1, l1, h2, l2, final = nodes
+        # START of a positive/SHORT hook must be the lowest point
+        # among all six NDS nodes.
+        if not all(start["price"] < n["price"] for n in nodes[1:]):
+            return None
         if not (h2["price"] > h1["price"]):
             return None
         if not (l2["price"] < l1["price"]):
@@ -376,6 +380,10 @@ def build_hook(symbol: str, rows: List[Dict[str, Any]], nodes: List[Dict[str, An
     # LONG = H L H L H L
     elif types == "HLHLHL":
         start, l1, h1, l2, h2, final = nodes
+        # START of a negative/LONG hook must be the highest point
+        # among all six NDS nodes.
+        if not all(start["price"] > n["price"] for n in nodes[1:]):
+            return None
         if not (l2["price"] < l1["price"]):
             return None
         if not (h2["price"] > h1["price"]):
@@ -716,20 +724,67 @@ def performance_summary() -> Dict[str, Any]:
     conn = db_connect()
     try:
         closed = conn.execute(
-            "SELECT COUNT(*) AS n, COALESCE(SUM(pnl_pct),0) AS pnl FROM trades WHERE status IN ('TP','SL')"
+            "SELECT COUNT(*) AS n, COALESCE(SUM(pnl_pct),0) AS pnl, "
+            "COALESCE(SUM(CASE WHEN pnl_pct > 0 THEN pnl_pct ELSE 0 END),0) AS gross_profit, "
+            "COALESCE(SUM(CASE WHEN pnl_pct < 0 THEN pnl_pct ELSE 0 END),0) AS gross_loss "
+            "FROM trades WHERE status IN ('TP','SL')"
         ).fetchone()
         tp_n = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE status='TP'").fetchone()["n"]
         sl_n = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE status='SL'").fetchone()["n"]
         op = conn.execute("SELECT COUNT(*) AS n FROM trades WHERE status='OPEN'").fetchone()["n"]
+        total_closed = int(closed["n"] or 0)
+        tp_count = int(tp_n or 0)
+        win_rate = (tp_count / total_closed * 100.0) if total_closed else 0.0
         return {
-            "closed": int(closed["n"] or 0),
+            "closed": total_closed,
             "pnl": float(closed["pnl"] or 0.0),
-            "tp": int(tp_n or 0),
+            "gross_profit": float(closed["gross_profit"] or 0.0),
+            "gross_loss": float(closed["gross_loss"] or 0.0),
+            "tp": tp_count,
             "sl": int(sl_n or 0),
             "open": int(op or 0),
+            "win_rate": win_rate,
         }
     finally:
         conn.close()
+
+
+def open_trade_details() -> List[Dict[str, Any]]:
+    conn = db_connect()
+    try:
+        rows = conn.execute(
+            "SELECT symbol,direction,entry,tp,sl,pnl_pct,opened_at,last_price "
+            "FROM trades WHERE status='OPEN' ORDER BY opened_at ASC"
+        ).fetchall()
+        out: List[Dict[str, Any]] = []
+        now = utc_now()
+        for row in rows:
+            opened = parse_time(row["opened_at"]) or now
+            duration_seconds = max(0.0, (now - opened).total_seconds())
+            out.append({
+                "symbol": row["symbol"],
+                "direction": row["direction"],
+                "entry": float(row["entry"]),
+                "tp": float(row["tp"]),
+                "sl": float(row["sl"]),
+                "pnl_pct": float(row["pnl_pct"] or 0.0),
+                "last_price": safe_float(row["last_price"]),
+                "duration_seconds": duration_seconds,
+            })
+        return out
+    finally:
+        conn.close()
+
+
+def format_duration(seconds: float) -> str:
+    total_minutes = int(seconds // 60)
+    days, rem = divmod(total_minutes, 1440)
+    hours, minutes = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{minutes}m"
 
 
 # ------------------------------------------------------------
@@ -887,6 +942,14 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], sl
             (hook["l2"], "L2"),
             (hook["final"], "H3" if hook["direction"] == "SHORT" else "L3"),
         ]
+
+        # Draw the actual NDS path using each node's real time/price.
+        # This makes the six-node geometry explicit instead of leaving
+        # the viewer to infer it from the candles.
+        node_xs = [(node["time"] - x0).total_seconds() / 60.0 for node, _ in nodes]
+        node_ys = [node["price"] for node, _ in nodes]
+        ax.plot(node_xs, node_ys, linewidth=1.6, linestyle="-")
+
         for node, label in nodes:
             x = (node["time"] - x0).total_seconds() / 60.0
             ax.scatter([x], [node["price"]], s=24)
@@ -1197,8 +1260,24 @@ def main() -> None:
         f"Closed Trades: {perf['closed']}",
         f"Trades checked this run: {stats['trades_checked']}",
         f"Trades closed this run: {stats['trades_closed']}",
-        f"TP: {perf['tp']}  SL: {perf['sl']}  PnL: {perf['pnl']:+.2f}%",
+        f"TP: {perf['tp']}  SL: {perf['sl']}",
+        f"Success Rate: {perf['win_rate']:.2f}%",
+        f"Total PnL: {perf['pnl']:+.2f}%",
+        f"Gross Profit: {perf['gross_profit']:+.2f}%",
+        f"Gross Loss: {perf['gross_loss']:+.2f}%",
     ]
+
+    open_details = open_trade_details()
+    if open_details:
+        lines += ["", "━━━ OPEN TRADES ━━━"]
+        for tr in open_details:
+            arrow = "🟢 LONG" if tr["direction"] == "LONG" else "🔴 SHORT"
+            lines += [
+                f"{arrow} | {tr['symbol']}",
+                f"Entry: {fmt_price(tr['entry'])} | Current: {fmt_price(tr['last_price'])}",
+                f"SL: {fmt_price(tr['sl'])} | TP: {fmt_price(tr['tp'])}",
+                f"Current PnL: {tr['pnl_pct']:+.2f}% | Duration: {format_duration(tr['duration_seconds'])}",
+            ]
 
     if newest:
         age_h = max(0.0, (utc_now() - newest["confirmed_time"]).total_seconds() / 3600.0)
