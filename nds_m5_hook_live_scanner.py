@@ -1,13 +1,13 @@
 # ============================================================
 # NDS M5 LIVE SCANNER
-# VERSION 5.5.8
+# VERSION 5.8.9
 # PAPER TRADING ONLY - NO REAL ORDERS
 #
 # Strategy preserved:
 #   SHORT: START(L) -> H1 -> L1 -> H2 -> L2 -> H3
 #   LONG : START(H) -> L1 -> H1 -> L2 -> H2 -> L3
 #
-# 5.5.6 changes:
+# 5.8.9 changes:
 #   1) New hooks remain tracked persistently in SQLite.
 #   2) START must be the absolute low/high of all six NDS nodes.
 #   3) Charts show the real six-node NDS path and zoom around the hook.
@@ -37,7 +37,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 
-VERSION = "5.5.8"
+VERSION = "5.8.9"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -475,26 +475,30 @@ def tp_touch_info(rows: List[Dict[str, Any]], hook: Dict[str, Any]) -> Dict[str,
 
 
 def find_protective_sl(hook: Dict[str, Any], rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Find the previous qualifying raw M5 candle high/low for the SL.
+    """Find the protective SL without changing NDS entry/TP logic.
 
-    The old implementation searched only the ordered NDS pivot list. That is
-    structurally wrong for this strategy: H3/L3 is already the more extreme
-    NDS node, so asking an earlier NDS pivot of the same type to be beyond the
-    entry rejects most valid trades and produced SL Found = 0.
+    Primary rule:
+      SHORT -> previous real M5 high above entry
+      LONG  -> previous real M5 low below entry
 
-    This function does not alter NDS detection, node spacing, confirmation,
-    TP, or hook geometry. It only selects the previous real M5 candle extreme
-    needed for the existing SL rule.
+    If no qualifying previous M5 extreme exists in the available history, use
+    the historical scanner fallback used by the earlier paper version: 50% of
+    the Entry-to-TP distance on the protective side of Entry. This fallback
+    prevents a valid NDS hook from being discarded solely because the market
+    has not printed a prior raw M5 extreme beyond the NDS final point.
     """
     final_idx = int(hook["final"]["idx"])
     entry = float(hook["final"]["price"])
+    tp = float(hook["tp"])
 
-    if final_idx <= 0 or not rows:
+    if not rows or final_idx <= 0:
         return None
 
+    last_idx = min(final_idx - 1, len(rows) - 1)
+
     if hook["direction"] == "SHORT":
-        # Previous real M5 high above entry. Nearest qualifying candle wins.
-        for i in range(min(final_idx - 1, len(rows) - 1), -1, -1):
+        # Primary: nearest previous real M5 high above Entry.
+        for i in range(last_idx, -1, -1):
             candle = rows[i]
             high = safe_float(candle.get("high"))
             if high is not None and high > entry:
@@ -503,10 +507,24 @@ def find_protective_sl(hook: Dict[str, Any], rows: List[Dict[str, Any]]) -> Opti
                     "time": candle["time"],
                     "price": high,
                     "type": "H",
+                    "source": "PREVIOUS_M5_HIGH",
                 }
+
+        # Fallback: 50% of Entry-to-TP distance above Entry.
+        distance = entry - tp
+        if distance > 0:
+            sl = entry + (distance * 0.50)
+            return {
+                "idx": final_idx,
+                "time": hook["final"]["time"],
+                "price": sl,
+                "type": "F",
+                "source": "MIDPOINT_FALLBACK",
+            }
+
     else:
-        # Previous real M5 low below entry. Nearest qualifying candle wins.
-        for i in range(min(final_idx - 1, len(rows) - 1), -1, -1):
+        # Primary: nearest previous real M5 low below Entry.
+        for i in range(last_idx, -1, -1):
             candle = rows[i]
             low = safe_float(candle.get("low"))
             if low is not None and low < entry:
@@ -515,7 +533,20 @@ def find_protective_sl(hook: Dict[str, Any], rows: List[Dict[str, Any]]) -> Opti
                     "time": candle["time"],
                     "price": low,
                     "type": "L",
+                    "source": "PREVIOUS_M5_LOW",
                 }
+
+        # Fallback: 50% of Entry-to-TP distance below Entry.
+        distance = tp - entry
+        if distance > 0:
+            sl = entry - (distance * 0.50)
+            return {
+                "idx": final_idx,
+                "time": hook["final"]["time"],
+                "price": sl,
+                "type": "F",
+                "source": "MIDPOINT_FALLBACK",
+            }
 
     return None
 
@@ -1334,6 +1365,7 @@ def main() -> None:
         "valid_before_tp": 0,
         "tp_touched": 0,
         "sl_found": 0,
+        "sl_fallback": 0,
         "geometry_valid": 0,
         "duplicate": 0,
         "max_open": 0,
@@ -1433,6 +1465,8 @@ def main() -> None:
         if sl is None:
             continue
         stats["sl_found"] += 1
+        if sl.get("source") == "MIDPOINT_FALLBACK":
+            stats["sl_fallback"] += 1
 
         if not geometry_valid(hook, sl):
             continue
@@ -1500,6 +1534,7 @@ def main() -> None:
         f"Recent + Range Valid + TP Untouched: {stats['valid_before_tp']}",
         f"TP Already Touched After H3/L3: {stats['tp_touched']}",
         f"SL Found: {stats['sl_found']}",
+        f"SL Fallback (50% Entry-TP): {stats['sl_fallback']}",
         f"Geometry Valid: {stats['geometry_valid']}",
         f"Duplicate: {stats['duplicate']}",
         f"Max Open: {stats['max_open']}",
