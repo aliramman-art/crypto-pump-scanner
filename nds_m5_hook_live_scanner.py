@@ -1,20 +1,23 @@
 # ============================================================
 # NDS M5 LIVE SCANNER
-# VERSION 5.5.4
+# VERSION 5.5.6
 # PAPER TRADING ONLY - NO REAL ORDERS
 #
 # Strategy preserved:
 #   SHORT: START(L) -> H1 -> L1 -> H2 -> L2 -> H3
 #   LONG : START(H) -> L1 -> H1 -> L2 -> H2 -> L3
 #
-# Changes in 5.5.4:
-#   1) Explicitly records first-seen/new hooks in SQLite.
-#   2) Reports New Hooks Since Last Run.
-#   3) Telegram hook charts are sent ONLY when the 86.4% TP has
-#      NOT been touched after the final H3/L3 node.
-#   4) Keeps the existing DB filename for continuity.
-#   5) Adds clearer hook-age diagnostics.
-#   6) Keeps Heikin-Ashi charts while NDS detection uses real OHLC.
+# 5.5.6 changes:
+#   1) New hooks remain tracked persistently in SQLite.
+#   2) START must be the absolute low/high of all six NDS nodes.
+#   3) Charts show the real six-node NDS path and zoom around the hook.
+#   4) Generic hook charts are sent only when 86.4% TP is NOT touched.
+#   5) Every new paper signal gets a dedicated Telegram chart.
+#   6) Failed signal-chart sends are retried while the trade remains open.
+#   7) Open trades are sent to Telegram with current PnL and duration.
+#   8) Diagnostic performance includes win rate and total/gross PnL.
+#   9) Heikin-Ashi remains chart-only; NDS detection uses real OHLC.
+#  10) REAL_TRADING remains False / PAPER ONLY.
 # ============================================================
 
 import os
@@ -32,7 +35,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 
-VERSION = "5.5.5"
+VERSION = "5.5.6"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -52,6 +55,8 @@ MAX_OPEN_TRADES = 3
 REQUEST_TIMEOUT = 20
 SCAN_SLEEP_SECONDS = 0.25
 CHART_CANDLES = 240
+CHART_CONTEXT_BEFORE = 60
+CHART_CONTEXT_AFTER = 60
 
 DB_FILE = "nds_h4_m5_v546.db"
 CHART_DIR = "nds_h4_m5_charts"
@@ -572,6 +577,15 @@ def init_db() -> None:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trade_chart_notifications (
+                hook_key TEXT PRIMARY KEY,
+                path TEXT,
+                sent_at TEXT
+            )
+            """
+        )
         ensure_columns(conn, "hooks", {
             "hook_key": "TEXT",
             "symbol": "TEXT",
@@ -611,6 +625,11 @@ def init_db() -> None:
             "created_at": "TEXT",
         })
         ensure_columns(conn, "hook_chart_notifications", {
+            "hook_key": "TEXT",
+            "path": "TEXT",
+            "sent_at": "TEXT",
+        })
+        ensure_columns(conn, "trade_chart_notifications", {
             "hook_key": "TEXT",
             "path": "TEXT",
             "sent_at": "TEXT",
@@ -674,6 +693,29 @@ def mark_notification_sent(hook_key: str, path: str) -> None:
     try:
         conn.execute(
             "INSERT OR REPLACE INTO hook_chart_notifications(hook_key,path,sent_at) VALUES(?,?,?)",
+            (hook_key, path, utc_iso()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def trade_chart_notification_exists(hook_key: str) -> bool:
+    conn = db_connect()
+    try:
+        return conn.execute(
+            "SELECT 1 FROM trade_chart_notifications WHERE hook_key=? LIMIT 1",
+            (hook_key,),
+        ).fetchone() is not None
+    finally:
+        conn.close()
+
+
+def mark_trade_chart_notification_sent(hook_key: str, path: str) -> None:
+    conn = db_connect()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO trade_chart_notifications(hook_key,path,sent_at) VALUES(?,?,?)",
             (hook_key, path, utc_iso()),
         )
         conn.commit()
@@ -747,6 +789,100 @@ def performance_summary() -> Dict[str, Any]:
         }
     finally:
         conn.close()
+
+
+def load_hook_for_trade(hook_key: str, rows: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    conn = db_connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM hooks WHERE hook_key=? LIMIT 1",
+            (hook_key,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    if not row:
+        return None
+
+    by_time = {r["time"]: i for i, r in enumerate(rows)}
+
+    def node(time_key: str, price_key: str, ptype: str) -> Optional[Dict[str, Any]]:
+        dt = parse_time(row[time_key])
+        price = safe_float(row[price_key])
+        if dt is None or price is None:
+            return None
+        idx = by_time.get(dt)
+        if idx is None:
+            # Timestamps should normally match exactly. Keep a small fallback
+            # for any API timestamp normalization difference.
+            closest = min(range(len(rows)), key=lambda i: abs((rows[i]["time"] - dt).total_seconds())) if rows else None
+            if closest is None or abs((rows[closest]["time"] - dt).total_seconds()) > 120:
+                return None
+            idx = closest
+        return {"idx": idx, "time": dt, "price": price, "type": ptype}
+
+    nodes = [
+        node("start_time", "start_price", "L" if row["direction"] == "SHORT" else "H"),
+        node("h1_time", "h1_price", "H"),
+        node("l1_time", "l1_price", "L"),
+        node("h2_time", "h2_price", "H"),
+        node("l2_time", "l2_price", "L"),
+        node("final_time", "final_price", "H" if row["direction"] == "SHORT" else "L"),
+    ]
+    if any(n is None for n in nodes):
+        return None
+
+    direction = row["direction"]
+    return {
+        "symbol": row["symbol"],
+        "direction": direction,
+        "start": nodes[0],
+        "h1": nodes[1],
+        "l1": nodes[2],
+        "h2": nodes[3],
+        "l2": nodes[4],
+        "final": nodes[5],
+        "tp": float(row["tp"]),
+        "range_pct": float(row["range_pct"] or 0.0),
+        "confirmed_time": parse_time(row["confirmed_time"]) or nodes[5]["time"],
+        "hook_key": row["hook_key"],
+        "node_indices": [n["idx"] for n in nodes],
+    }
+
+
+def ensure_pending_trade_charts(rows_by_symbol: Dict[str, List[Dict[str, Any]]], stats: Dict[str, int]) -> None:
+    """Retry Telegram charts for any open trade missing its signal chart."""
+    conn = db_connect()
+    try:
+        trades = conn.execute(
+            "SELECT hook_key,symbol,sl FROM trades WHERE status='OPEN' ORDER BY opened_at ASC"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    for tr in trades:
+        hook_key = tr["hook_key"]
+        if trade_chart_notification_exists(hook_key):
+            continue
+
+        symbol = tr["symbol"]
+        rows = rows_by_symbol.get(symbol) or fetch_ohlc(symbol, M5_CANDLES)
+        if not rows:
+            continue
+        rows_by_symbol[symbol] = rows
+
+        hook = load_hook_for_trade(hook_key, rows)
+        if not hook:
+            continue
+
+        sl = {
+            "price": float(tr["sl"]),
+            "time": hook["final"]["time"],
+            "type": "H" if hook["direction"] == "SHORT" else "L",
+        }
+        if send_new_signal_chart(hook, rows, sl):
+            continue
+        stats["hook_chart_errors"] += 1
 
 
 def open_trade_details() -> List[Dict[str, Any]]:
@@ -914,8 +1050,12 @@ def heikin_ashi(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], sl: Optional[Dict[str, Any]], tp_info: Dict[str, Any]) -> Optional[str]:
     try:
         final_idx = hook["final"]["idx"]
-        left = max(0, final_idx - CHART_CANDLES + 1)
-        chart_rows = rows[left:final_idx + CHART_CANDLES // 3]
+        start_idx = hook["start"]["idx"]
+        left = max(0, start_idx - CHART_CONTEXT_BEFORE)
+        right = min(len(rows), final_idx + CHART_CONTEXT_AFTER + 1)
+        if right - left > CHART_CANDLES:
+            right = min(len(rows), left + CHART_CANDLES)
+        chart_rows = rows[left:right]
         if len(chart_rows) < 20:
             chart_rows = rows[max(0, len(rows) - CHART_CANDLES):]
 
@@ -973,6 +1113,23 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], sl
         ax.set_xlabel("Minutes")
         ax.set_ylabel("Price")
         ax.grid(alpha=0.15)
+
+        # Focus the y-axis on the hook itself so the six NDS nodes and their
+        # connecting lines remain visually meaningful instead of appearing flat
+        # because of a much larger historical price swing.
+        node_low = min(node_ys)
+        node_high = max(node_ys)
+        node_span = node_high - node_low
+        if node_span > 0:
+            pad = max(node_span * 0.18, abs(node_high) * 0.0008)
+            low_limit = min(min(r["low"] for r in chart_rows), node_low)
+            high_limit = max(max(r["high"] for r in chart_rows), node_high)
+            # Keep some candle context but prioritize the NDS node range.
+            low_limit = max(node_low - pad, low_limit)
+            high_limit = min(node_high + pad, high_limit)
+            if high_limit > low_limit:
+                ax.set_ylim(low_limit, high_limit)
+
         fig.tight_layout()
 
         Path(CHART_DIR).mkdir(parents=True, exist_ok=True)
@@ -1032,17 +1189,75 @@ def telegram_send_text(text: str) -> bool:
 def send_trade_alert(hook: Dict[str, Any], sl: Dict[str, Any], current_price: float) -> None:
     arrow = "🟢 LONG" if hook["direction"] == "LONG" else "🔴 SHORT"
     text = (
-        f"{arrow}\n"
+        f"{arrow} NEW SIGNAL\n"
         f"Symbol: {hook['symbol']}\n"
         f"Entry: {fmt_price(hook['final']['price'])}\n"
         f"SL: {fmt_price(sl['price'])}\n"
         f"TP: {fmt_price(hook['tp'])}\n"
         f"Current: {fmt_price(current_price)}\n"
         f"Range: {hook['range_pct']:.2f}%\n"
+        f"86.4%: NOT TOUCHED\n"
         f"Confirmed: {utc_iso(hook['confirmed_time'])}\n"
         f"Mode: PAPER ONLY"
     )
     telegram_send_text(text)
+
+
+def send_new_signal_chart(hook: Dict[str, Any], rows: List[Dict[str, Any]], sl: Dict[str, Any]) -> bool:
+    """Send a dedicated chart for a newly-created paper trade.
+
+    This notification is separate from the generic hook-chart notification so
+    a hook can have had a normal 86.4%-untouched chart sent earlier and still
+    produce a distinct signal chart exactly when a new trade is created.
+    """
+    if trade_chart_notification_exists(hook["hook_key"]):
+        return True
+
+    tp_info = {"touched": False}
+    path = make_chart(hook["symbol"], rows, hook, sl, tp_info)
+    if not path:
+        return False
+
+    arrow = "🟢 LONG" if hook["direction"] == "LONG" else "🔴 SHORT"
+    caption = (
+        f"{arrow} NEW SIGNAL CHART\n"
+        f"{hook['symbol']} | NDS M5\n"
+        f"Entry: {fmt_price(hook['final']['price'])}\n"
+        f"SL: {fmt_price(sl['price'])}\n"
+        f"TP: {fmt_price(hook['tp'])}\n"
+        f"86.4%: NOT TOUCHED\n"
+        f"Range: {hook['range_pct']:.2f}%\n"
+        f"Confirmed: {utc_iso(hook['confirmed_time'])}"
+    )
+    if not telegram_send_photo(path, caption):
+        return False
+
+    mark_trade_chart_notification_sent(hook["hook_key"], path)
+    return True
+
+
+def send_open_trades_update(open_details: List[Dict[str, Any]], perf: Dict[str, Any]) -> None:
+    if not open_details:
+        return
+
+    lines = [
+        "📊 OPEN TRADES UPDATE",
+        f"Open Trades: {len(open_details)}",
+        f"Performance: {perf['win_rate']:.2f}% win | {perf['pnl']:+.2f}% total PnL",
+        "",
+    ]
+
+    for tr in open_details:
+        arrow = "🟢 LONG" if tr["direction"] == "LONG" else "🔴 SHORT"
+        lines.extend([
+            f"{arrow} | {tr['symbol']}",
+            f"Entry: {fmt_price(tr['entry'])} | Current: {fmt_price(tr['last_price'])}",
+            f"SL: {fmt_price(tr['sl'])} | TP: {fmt_price(tr['tp'])}",
+            f"PnL: {tr['pnl_pct']:+.2f}% | Duration: {format_duration(tr['duration_seconds'])}",
+            "",
+        ])
+
+    telegram_send_text("\n".join(lines).rstrip())
 
 
 # ------------------------------------------------------------
@@ -1208,8 +1423,18 @@ def main() -> None:
             current_price = item["rows"][-1]["close"] if item.get("rows") else hook["final"]["price"]
             send_trade_alert(hook, sl, current_price)
 
+            # A new trade always gets its own Telegram chart. This is separate
+            # from the general hook-chart notification and therefore cannot be
+            # suppressed just because the hook chart was already sent.
+            if not send_new_signal_chart(hook, item["rows"], sl):
+                stats["hook_chart_errors"] += 1
+
     # Monitor newly created trades once more using the same candle data.
     monitor_open_trades(rows_by_symbol, stats)
+
+    # Guarantee that every still-open new signal has a Telegram chart.
+    # Failed sends are retried on this run and on later runs until recorded.
+    ensure_pending_trade_charts(rows_by_symbol, stats)
 
     age_counts = count_hooks_by_age(all_hooks_for_age)
     newest = max(all_hooks_for_age, key=lambda x: x["confirmed_time"], default=None)
@@ -1294,6 +1519,11 @@ def main() -> None:
     report_text = "\n".join(lines)
     print(report_text, flush=True)
     telegram_send_text(report_text)
+
+    # Open trades are sent as a dedicated Telegram update every run while any
+    # trade remains open, including current PnL and duration.
+    if open_details:
+        send_open_trades_update(open_details, perf)
 
 
 if __name__ == "__main__":
