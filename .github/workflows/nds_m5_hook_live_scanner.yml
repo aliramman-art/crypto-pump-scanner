@@ -44,20 +44,20 @@ jobs:
         run: |
           echo "Checking scanner file..."
 
-          if [ ! -f nds_m5_hook_live_scanner.py ]; then
-            echo "ERROR: nds_m5_hook_live_scanner.py not found."
+          if [ ! -f nds_m5_hook_live_scanner_v590-3.py ]; then
+            echo "ERROR: nds_m5_hook_live_scanner_v590-3.py not found."
             exit 1
           fi
 
           echo "Scanner file:"
-          ls -lh nds_m5_hook_live_scanner.py
+          ls -lh nds_m5_hook_live_scanner_v590-3.py
 
           echo "Checking version..."
 
           VERSION=$(python - <<'PY'
           import re
 
-          path = "nds_m5_hook_live_scanner.py"
+          path = "nds_m5_hook_live_scanner_v590-3.py"
 
           with open(path, "r", encoding="utf-8") as f:
               text = f.read()
@@ -98,7 +98,7 @@ jobs:
           PYTHONUNBUFFERED: "1"
         run: |
           echo "Starting NDS M5 Hook Live Scanner v5.8.9..."
-          python -u nds_m5_hook_live_scanner.py
+          python -u nds_m5_hook_live_scanner_v590-3.py
 
       - name: Commit database
         if: always()
