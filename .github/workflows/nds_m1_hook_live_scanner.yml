@@ -50,8 +50,8 @@ jobs:
           git log -5 --oneline -- nds_m1_v592.db || true
 
           echo "===== SCANNER VERSION ====="
-          test -f nds_m1_hook_live_scanner_v593_fixed.py
-          grep -m1 'VERSION = ' nds_m1_hook_live_scanner_v593_fixed.py
+          test -f nds_m1_hook_live_scanner_v594_fixed.py
+          grep -m1 'VERSION = ' nds_m1_hook_live_scanner_v594_fixed.py
 
           echo "===== DATABASE DIAGNOSTICS BEFORE SCAN ====="
           python - <<'PY'
@@ -71,60 +71,56 @@ jobs:
           with open(path, "rb") as f:
               print("SHA256:", hashlib.sha256(f.read()).hexdigest())
 
-          try:
-              con = sqlite3.connect(
-                  "file:" + path + "?mode=ro", uri=True
+          con = sqlite3.connect("file:" + path + "?mode=ro", uri=True)
+          print("INTEGRITY:", con.execute("PRAGMA integrity_check").fetchone()[0])
+
+          tables = [
+              r[0] for r in con.execute(
+                  "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
               )
-              print("INTEGRITY:", con.execute(
-                  "PRAGMA integrity_check"
-              ).fetchone()[0])
+          ]
+          print("TABLES:", tables)
 
-              tables = [
-                  r[0] for r in con.execute(
-                      "SELECT name FROM sqlite_master "
-                      "WHERE type='table' ORDER BY name"
-                  )
+          for table in tables:
+              safe = '"' + table.replace('"', '""') + '"'
+              count = con.execute(
+                  f"SELECT COUNT(*) FROM {safe}"
+              ).fetchone()[0]
+              print(f"ROW_COUNT {table}: {count}")
+
+          if "trades" in tables:
+              cols = [
+                  r[1] for r in con.execute('PRAGMA table_info("trades")')
               ]
-              print("TABLES:", tables)
+              print("TRADES_COLUMNS:", cols)
 
-              for table in tables:
-                  safe = '"' + table.replace('"', '""') + '"'
-                  count = con.execute(
-                      f"SELECT COUNT(*) FROM {safe}"
-                  ).fetchone()[0]
-                  print(f"ROW_COUNT {table}: {count}")
-
-              if "trades" in tables:
-                  cols = [
-                      r[1] for r in con.execute(
-                          'PRAGMA table_info("trades")'
-                      )
-                  ]
-                  print("TRADES_COLUMNS:", cols)
+              if "id" in cols:
                   rows = con.execute(
                       'SELECT * FROM "trades" ORDER BY id DESC LIMIT 20'
                   ).fetchall()
-                  print("LATEST_TRADE_ROWS:")
-                  for row in rows:
-                      print(dict(zip(cols, row)))
-              con.close()
-          except Exception as e:
-              print("DATABASE_READ_ERROR:", repr(e))
-              raise
+              else:
+                  rows = con.execute(
+                      'SELECT * FROM "trades" LIMIT 20'
+                  ).fetchall()
+
+              print("LATEST_TRADE_ROWS:")
+              for row in rows:
+                  print(dict(zip(cols, row)))
+
+          con.close()
           PY
 
-      - name: Run NDS M1 scanner
+      - name: Run NDS M1 scanner v5.9.4
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python nds_m1_hook_live_scanner_v593_fixed.py
+          python nds_m1_hook_live_scanner_v594_fixed.py
 
       - name: Verify database after scan
         if: always()
         run: |
           echo "===== DATABASE DIAGNOSTICS AFTER SCAN ====="
-
           python - <<'PY'
           import os
           import sqlite3
@@ -142,46 +138,43 @@ jobs:
           with open(path, "rb") as f:
               print("SHA256:", hashlib.sha256(f.read()).hexdigest())
 
-          try:
-              con = sqlite3.connect(
-                  "file:" + path + "?mode=ro", uri=True
+          con = sqlite3.connect("file:" + path + "?mode=ro", uri=True)
+          print("INTEGRITY:", con.execute("PRAGMA integrity_check").fetchone()[0])
+
+          tables = [
+              r[0] for r in con.execute(
+                  "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
               )
-              print("INTEGRITY:", con.execute(
-                  "PRAGMA integrity_check"
-              ).fetchone()[0])
+          ]
+          print("TABLES:", tables)
 
-              tables = [
-                  r[0] for r in con.execute(
-                      "SELECT name FROM sqlite_master "
-                      "WHERE type='table' ORDER BY name"
-                  )
+          for table in tables:
+              safe = '"' + table.replace('"', '""') + '"'
+              count = con.execute(
+                  f"SELECT COUNT(*) FROM {safe}"
+              ).fetchone()[0]
+              print(f"ROW_COUNT {table}: {count}")
+
+          if "trades" in tables:
+              cols = [
+                  r[1] for r in con.execute('PRAGMA table_info("trades")')
               ]
-              print("TABLES:", tables)
+              print("TRADES_COLUMNS:", cols)
 
-              for table in tables:
-                  safe = '"' + table.replace('"', '""') + '"'
-                  count = con.execute(
-                      f"SELECT COUNT(*) FROM {safe}"
-                  ).fetchone()[0]
-                  print(f"ROW_COUNT {table}: {count}")
-
-              if "trades" in tables:
-                  cols = [
-                      r[1] for r in con.execute(
-                          'PRAGMA table_info("trades")'
-                      )
-                  ]
-                  print("TRADES_COLUMNS:", cols)
+              if "id" in cols:
                   rows = con.execute(
                       'SELECT * FROM "trades" ORDER BY id DESC LIMIT 20'
                   ).fetchall()
-                  print("LATEST_TRADE_ROWS:")
-                  for row in rows:
-                      print(dict(zip(cols, row)))
-              con.close()
-          except Exception as e:
-              print("DATABASE_READ_ERROR:", repr(e))
-              raise
+              else:
+                  rows = con.execute(
+                      'SELECT * FROM "trades" LIMIT 20'
+                  ).fetchall()
+
+              print("LATEST_TRADE_ROWS:")
+              for row in rows:
+                  print(dict(zip(cols, row)))
+
+          con.close()
           PY
 
       - name: Save database and charts
@@ -190,8 +183,7 @@ jobs:
           set -euo pipefail
 
           git config user.name "github-actions[bot]"
-          git config user.email \
-            "41898282+github-actions[bot]@users.noreply.github.com"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           echo "===== FILES BEFORE COMMIT ====="
           git status --short
