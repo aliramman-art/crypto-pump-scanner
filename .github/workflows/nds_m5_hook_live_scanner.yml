@@ -44,20 +44,24 @@ jobs:
         run: |
           echo "Checking scanner file..."
 
-          if [ ! -f nds_m5_hook_live_scanner_v590-3.py ]; then
-            echo "ERROR: nds_m5_hook_live_scanner_v590-3.py not found."
+          SCANNER="nds_m5_hook_live_scanner_v591.py"
+
+          if [ ! -f "$SCANNER" ]; then
+            echo "ERROR: $SCANNER not found."
+            echo "Available NDS scanner files:"
+            ls -lh nds_m5_hook_live_scanner_*.py 2>/dev/null || true
             exit 1
           fi
 
           echo "Scanner file:"
-          ls -lh nds_m5_hook_live_scanner_v590-3.py
+          ls -lh "$SCANNER"
 
           echo "Checking version..."
 
           VERSION=$(python - <<'PY'
           import re
 
-          path = "nds_m5_hook_live_scanner_v590-3.py"
+          path = "nds_m5_hook_live_scanner_v591.py"
 
           with open(path, "r", encoding="utf-8") as f:
               text = f.read()
@@ -68,7 +72,7 @@ jobs:
           ]
 
           for pattern in patterns:
-              m = re.search(pattern, text)
+              m = re.search(pattern, text, re.IGNORECASE)
               if m:
                   print(m.group(1))
                   break
@@ -79,15 +83,15 @@ jobs:
 
           echo "Detected scanner version: $VERSION"
 
-          if [ "$VERSION" != "5.9.0" ]; then
+          if [ "$VERSION" != "5.9.1" ]; then
             echo "ERROR: Wrong scanner version."
-            echo "Required: 5.9.0"
+            echo "Required: 5.9.1"
             echo "Detected: $VERSION"
-            echo "The workflow will NOT run an older scanner."
+            echo "The workflow will NOT run the wrong scanner."
             exit 1
           fi
 
-          echo "Scanner version 5.9.0 confirmed."
+          echo "Scanner version 5.9.1 confirmed."
 
       - name: Run scanner
         env:
@@ -97,8 +101,8 @@ jobs:
           TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
           PYTHONUNBUFFERED: "1"
         run: |
-          echo "Starting NDS M5 Hook Live Scanner v5.9.0..."
-          python -u nds_m5_hook_live_scanner_v590-3.py
+          echo "Starting NDS M5 Hook Live Scanner v5.9.1..."
+          python -u nds_m5_hook_live_scanner_v591.py
 
       - name: Commit database
         if: always()
