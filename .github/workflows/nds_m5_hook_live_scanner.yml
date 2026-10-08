@@ -1,4 +1,4 @@
-name: NDS M5 Hook Live Scanner
+name: NDS M1 Hook Live Scanner
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: nds-m5-hook-live-scanner
+  group: nds-m1-hook-live-scanner
   cancel-in-progress: false
 
 jobs:
@@ -19,110 +19,52 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
-        with:
-          ref: main
-          fetch-depth: 0
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          pip install requests matplotlib
 
-          if [ -f requirements.txt ]; then
-            pip install -r requirements.txt
-          fi
-
-          pip install requests pandas numpy matplotlib
-
-      - name: Verify NDS scanner version
+      - name: Check scanner file
         run: |
           echo "Checking scanner file..."
-
-          SCANNER="nds_m5_hook_live_scanner_v591.py"
-
-          if [ ! -f "$SCANNER" ]; then
-            echo "ERROR: $SCANNER not found."
+          if [ ! -f "nds_m1_hook_live_scanner_v592.py" ]; then
+            echo "ERROR: nds_m1_hook_live_scanner_v592.py not found."
             echo "Available NDS scanner files:"
-            ls -lh nds_m5_hook_live_scanner_*.py 2>/dev/null || true
+            ls -lah | grep -i "nds.*scanner" || true
             exit 1
           fi
 
           echo "Scanner file:"
-          ls -lh "$SCANNER"
+          ls -lh nds_m1_hook_live_scanner_v592.py
 
           echo "Checking version..."
+          grep -m1 'VERSION = ' nds_m1_hook_live_scanner_v592.py || true
 
-          VERSION=$(python - <<'PY'
-          import re
-
-          path = "nds_m5_hook_live_scanner_v591.py"
-
-          with open(path, "r", encoding="utf-8") as f:
-              text = f.read()
-
-          patterns = [
-              r'VERSION\s*=\s*["\']([^"\']+)["\']',
-              r'Version:\s*([0-9]+\.[0-9]+\.[0-9]+)',
-          ]
-
-          for pattern in patterns:
-              m = re.search(pattern, text, re.IGNORECASE)
-              if m:
-                  print(m.group(1))
-                  break
-          else:
-              print("UNKNOWN")
-          PY
-          )
-
-          echo "Detected scanner version: $VERSION"
-
-          if [ "$VERSION" != "5.9.1" ]; then
-            echo "ERROR: Wrong scanner version."
-            echo "Required: 5.9.1"
-            echo "Detected: $VERSION"
-            echo "The workflow will NOT run the wrong scanner."
-            exit 1
-          fi
-
-          echo "Scanner version 5.9.1 confirmed."
-
-      - name: Run scanner
+      - name: Run NDS M1 scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
-          PYTHONUNBUFFERED: "1"
         run: |
-          echo "Starting NDS M5 Hook Live Scanner v5.9.1..."
-          python -u nds_m5_hook_live_scanner_v591.py
+          python nds_m1_hook_live_scanner_v592.py
 
-      - name: Commit database
+      - name: Save database and charts
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          if [ -f nds_h4_m5_v546.db ]; then
-            echo "Database found:"
-            ls -lh nds_h4_m5_v546.db
+          git add nds_h4_m5_v546.db nds_h4_m5_charts/ 2>/dev/null || true
 
-            git add nds_h4_m5_v546.db
-
-            if ! git diff --cached --quiet; then
-              git commit -m "Update NDS M5 scanner database"
-              git push origin HEAD:main
-            else
-              echo "No database changes to commit."
-            fi
+          if git diff --cached --quiet; then
+            echo "No database/chart changes to commit."
           else
-            echo "Database file not found: nds_h4_m5_v546.db"
-            echo "Nothing to commit."
+            git commit -m "Update NDS M1 scanner database and charts"
+            git push
           fi
