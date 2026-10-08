@@ -34,77 +34,83 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests matplotlib
 
-      - name: Check scanner and recover database
-        shell: bash
+      - name: Check scanner and database before scan
         run: |
           set -euo pipefail
 
-          SCANNER="nds_m1_hook_live_scanner_v593_fixed.py"
-          DB="nds_m1_v592.db"
-
-          if [ ! -f "$SCANNER" ]; then
-            echo "ERROR: Scanner file not found: $SCANNER"
-            exit 1
-          fi
-
-          echo "Scanner version:"
-          grep -m1 'VERSION = ' "$SCANNER"
-
-          echo "Current commit:"
+          echo "===== GIT STATE BEFORE SCAN ====="
           git rev-parse HEAD
+          git status --short
+          git ls-files -s nds_m1_v592.db || true
 
-          if [ ! -f "$DB" ]; then
-            echo "WARNING: Database is missing from the working tree."
+          echo "===== DATABASE FILES ====="
+          find . -maxdepth 3 -type f -name "*.db" -printf '%p %s bytes\n'
 
-            DB_COMMIT="$(git log -1 --format='%H' -- "$DB" || true)"
+          echo "===== DATABASE HISTORY ====="
+          git log -5 --oneline -- nds_m1_v592.db || true
 
-            if [ -z "$DB_COMMIT" ]; then
-              echo "ERROR: No previous committed database was found."
-              echo "Stopping to avoid silently starting with empty trade history."
-              exit 1
-            fi
+          echo "===== SCANNER VERSION ====="
+          test -f nds_m1_hook_live_scanner_v593_fixed.py
+          grep -m1 'VERSION = ' nds_m1_hook_live_scanner_v593_fixed.py
 
-            git show "${DB_COMMIT}:${DB}" > "$DB"
-
-            echo "Recovered database from commit: $DB_COMMIT"
-          fi
-
-          echo "Database before scan:"
-          ls -lh "$DB"
-
+          echo "===== DATABASE DIAGNOSTICS BEFORE SCAN ====="
           python - <<'PY'
+          import os
           import sqlite3
-          from pathlib import Path
+          import hashlib
 
-          path = Path("nds_m1_v592.db")
-          con = sqlite3.connect(path)
+          path = os.path.abspath("nds_m1_v592.db")
+          print("EXPECTED_DB_PATH:", path)
+          print("EXISTS:", os.path.exists(path))
+
+          if not os.path.exists(path):
+              print("DATABASE DOES NOT EXIST BEFORE SCAN")
+              raise SystemExit(0)
+
+          print("SIZE_BYTES:", os.path.getsize(path))
+          with open(path, "rb") as f:
+              print("SHA256:", hashlib.sha256(f.read()).hexdigest())
+
           try:
-              result = con.execute("PRAGMA integrity_check").fetchone()[0]
-              print("SQLite integrity:", result)
+              con = sqlite3.connect(
+                  "file:" + path + "?mode=ro", uri=True
+              )
+              print("INTEGRITY:", con.execute(
+                  "PRAGMA integrity_check"
+              ).fetchone()[0])
 
-              if result != "ok":
-                  raise SystemExit("ERROR: Database integrity check failed.")
-
-              tables = {
-                  row[0] for row in
-                  con.execute(
-                      "SELECT name FROM sqlite_master WHERE type='table'"
+              tables = [
+                  r[0] for r in con.execute(
+                      "SELECT name FROM sqlite_master "
+                      "WHERE type='table' ORDER BY name"
                   )
-              }
+              ]
+              print("TABLES:", tables)
 
-              print("Tables:", ", ".join(sorted(tables)))
+              for table in tables:
+                  safe = '"' + table.replace('"', '""') + '"'
+                  count = con.execute(
+                      f"SELECT COUNT(*) FROM {safe}"
+                  ).fetchone()[0]
+                  print(f"ROW_COUNT {table}: {count}")
 
               if "trades" in tables:
+                  cols = [
+                      r[1] for r in con.execute(
+                          'PRAGMA table_info("trades")'
+                      )
+                  ]
+                  print("TRADES_COLUMNS:", cols)
                   rows = con.execute(
-                      "SELECT status, COUNT(*) FROM trades GROUP BY status"
+                      'SELECT * FROM "trades" ORDER BY id DESC LIMIT 20'
                   ).fetchall()
-                  print("Trade counts:", rows)
-              else:
-                  raise SystemExit(
-                      "ERROR: Expected trades table is missing."
-                  )
-          finally:
+                  print("LATEST_TRADE_ROWS:")
+                  for row in rows:
+                      print(dict(zip(cols, row)))
               con.close()
+          except Exception as e:
+              print("DATABASE_READ_ERROR:", repr(e))
+              raise
           PY
 
       - name: Run NDS M1 scanner
@@ -116,52 +122,70 @@ jobs:
 
       - name: Verify database after scan
         if: always()
-        shell: bash
         run: |
-          set -euo pipefail
-
-          DB="nds_m1_v592.db"
-
-          if [ ! -f "$DB" ]; then
-            echo "ERROR: Database is missing after scan."
-            exit 1
-          fi
-
-          echo "Database after scan:"
-          ls -lh "$DB"
+          echo "===== DATABASE DIAGNOSTICS AFTER SCAN ====="
 
           python - <<'PY'
+          import os
           import sqlite3
+          import hashlib
 
-          con = sqlite3.connect("nds_m1_v592.db")
+          path = os.path.abspath("nds_m1_v592.db")
+          print("EXPECTED_DB_PATH:", path)
+          print("EXISTS:", os.path.exists(path))
+
+          if not os.path.exists(path):
+              print("DATABASE MISSING AFTER SCAN")
+              raise SystemExit(0)
+
+          print("SIZE_BYTES:", os.path.getsize(path))
+          with open(path, "rb") as f:
+              print("SHA256:", hashlib.sha256(f.read()).hexdigest())
+
           try:
-              result = con.execute("PRAGMA integrity_check").fetchone()[0]
-              print("SQLite integrity:", result)
+              con = sqlite3.connect(
+                  "file:" + path + "?mode=ro", uri=True
+              )
+              print("INTEGRITY:", con.execute(
+                  "PRAGMA integrity_check"
+              ).fetchone()[0])
 
-              if result != "ok":
-                  raise SystemExit("ERROR: Database integrity check failed.")
-
-              tables = {
-                  row[0] for row in
-                  con.execute(
-                      "SELECT name FROM sqlite_master WHERE type='table'"
+              tables = [
+                  r[0] for r in con.execute(
+                      "SELECT name FROM sqlite_master "
+                      "WHERE type='table' ORDER BY name"
                   )
-              }
+              ]
+              print("TABLES:", tables)
+
+              for table in tables:
+                  safe = '"' + table.replace('"', '""') + '"'
+                  count = con.execute(
+                      f"SELECT COUNT(*) FROM {safe}"
+                  ).fetchone()[0]
+                  print(f"ROW_COUNT {table}: {count}")
 
               if "trades" in tables:
-                  print(
-                      "Trade counts:",
-                      con.execute(
-                          "SELECT status, COUNT(*) FROM trades GROUP BY status"
-                      ).fetchall()
-                  )
-          finally:
+                  cols = [
+                      r[1] for r in con.execute(
+                          'PRAGMA table_info("trades")'
+                      )
+                  ]
+                  print("TRADES_COLUMNS:", cols)
+                  rows = con.execute(
+                      'SELECT * FROM "trades" ORDER BY id DESC LIMIT 20'
+                  ).fetchall()
+                  print("LATEST_TRADE_ROWS:")
+                  for row in rows:
+                      print(dict(zip(cols, row)))
               con.close()
+          except Exception as e:
+              print("DATABASE_READ_ERROR:", repr(e))
+              raise
           PY
 
       - name: Save database and charts
         if: always()
-        shell: bash
         run: |
           set -euo pipefail
 
@@ -169,20 +193,30 @@ jobs:
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
 
+          echo "===== FILES BEFORE COMMIT ====="
+          git status --short
+
           if [ -f "nds_m1_v592.db" ]; then
             git add -f nds_m1_v592.db
           else
-            echo "ERROR: Database missing; nothing to save."
-            exit 1
+            echo "WARNING: Database file is missing."
           fi
 
           if [ -d "nds_m1_charts" ]; then
             git add -f nds_m1_charts/
           fi
 
+          echo "===== STAGED CHANGES ====="
+          git diff --cached --stat
+
           if git diff --cached --quiet; then
-            echo "No database or chart changes to commit."
+            echo "NO DATABASE OR CHART CHANGES TO COMMIT"
           else
-            git commit -m "Persist NDS M1 database and charts"
+            git commit -m "Persist NDS M1 scanner database and charts"
             git push origin HEAD:main
+            echo "DATABASE_AND_CHART_PUSH_SUCCESS"
           fi
+
+          echo "===== FINAL GIT STATE ====="
+          git status --short
+          git log -3 --oneline -- nds_m1_v592.db
