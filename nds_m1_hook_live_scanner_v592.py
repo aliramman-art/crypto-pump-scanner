@@ -580,8 +580,23 @@ def heikin_ashi(rows):
 
 
 def make_chart(symbol, rows, hook, reason="", path=None):
-    nodes=[hook["start"],hook["h1"],hook["l1"],hook["h2"],hook["l2"],hook["final"]]
-    idxs=hook["node_indices"]
+    # IMPORTANT: draw the six NDS nodes in the exact strategy order.
+    # SHORT / positive: START -> H1 -> L1 -> H2 -> L2 -> H3
+    # LONG  / negative: START -> L1 -> H1 -> L2 -> H2 -> L3
+    if hook["direction"] == "SHORT":
+        nodes = [
+            hook["start"], hook["h1"], hook["l1"],
+            hook["h2"], hook["l2"], hook["final"],
+        ]
+        labels = ["START", "H1", "L1", "H2", "L2", "H3"]
+    else:
+        nodes = [
+            hook["start"], hook["l1"], hook["h1"],
+            hook["l2"], hook["h2"], hook["final"],
+        ]
+        labels = ["START", "L1", "H1", "L2", "H2", "L3"]
+
+    idxs = [n["idx"] for n in nodes]
     lo=max(0,min(idxs)-CHART_CONTEXT_BEFORE); hi=min(len(rows),max(idxs)+CHART_CONTEXT_AFTER+1)
     base=rows[lo:hi]
     if not base: return None
@@ -601,7 +616,6 @@ def make_chart(symbol, rows, hook, reason="", path=None):
     ax.axhline(entry,linestyle="--",linewidth=1.2,label=f"ENTRY {fmt_price(entry)}")
     tp_pct=abs(entry-tp)/abs(entry)*100 if entry else 0
     ax.axhline(tp,linestyle=":",linewidth=1.5,label=f"TP 86.4% ({tp_pct:.2f}%) {fmt_price(tp)}")
-    labels=["START","H1","L1","H2","L2","H3" if hook["direction"]=="SHORT" else "L3"]
     for x,y,label in zip(xs,ys,labels): ax.annotate(label,(x,y),xytext=(0,8),textcoords="offset points",ha="center",fontsize=9,fontweight="bold")
     ax.set_title(f"NDS M1 | {symbol} | {hook['direction']} | TP 86.4% | PAPER ONLY")
     ax.legend(loc="best"); ax.grid(alpha=0.18); fig.autofmt_xdate()
