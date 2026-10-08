@@ -34,25 +34,25 @@ jobs:
       - name: Check scanner file
         run: |
           echo "Checking scanner file..."
-          if [ ! -f "nds_m1_hook_live_scanner_v592.py" ]; then
-            echo "ERROR: nds_m1_hook_live_scanner_v592.py not found."
+          if [ ! -f "nds_m1_hook_live_scanner_v593_fixed.py" ]; then
+            echo "ERROR: nds_m1_hook_live_scanner_v593_fixed.py not found."
             echo "Available NDS scanner files:"
             ls -lah | grep -i "nds.*scanner" || true
             exit 1
           fi
 
           echo "Scanner file:"
-          ls -lh nds_m1_hook_live_scanner_v592.py
+          ls -lh nds_m1_hook_live_scanner_v593_fixed.py
 
           echo "Checking version..."
-          grep -m1 'VERSION = ' nds_m1_hook_live_scanner_v592.py || true
+          grep -m1 'VERSION = ' nds_m1_hook_live_scanner_v593_fixed.py || true
 
       - name: Run NDS M1 scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python nds_m1_hook_live_scanner_v592.py
+          python nds_m1_hook_live_scanner_v593_fixed.py
 
       - name: Save database and charts
         if: always()
