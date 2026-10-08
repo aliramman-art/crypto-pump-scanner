@@ -40,7 +40,7 @@ M1_INTERVAL_MINUTES = 1
 M1_CANDLES = 1500
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
-MIN_NODE_CANDLES = 15
+MIN_NODE_CANDLES = 20
 NDS_RETRACE = 0.864
 M1_MIN_HOOK_RANGE_PCT = 0.20
 M1_MAX_HOOK_AGE_SECONDS = 6 * 60 * 60
@@ -350,7 +350,7 @@ def tp_touch_info(rows: List[Dict[str, Any]], hook: Dict[str, Any]) -> Dict[str,
         candle = rows[i]
         touched = candle["low"] <= tp if direction == "SHORT" else candle["high"] >= tp
         if touched:
-            return {"touched": True, "idx": i, "time": candle["time"], "open": candle["open"], "high": candle["high"], "low": candle["low"], "close": candle["close"]}
+            return {"touched": True, "idx": i, "time": candle["time"], "price": tp, "open": candle["open"], "high": candle["high"], "low": candle["low"], "close": candle["close"]}
     return {"touched": False}
 
 
@@ -584,23 +584,17 @@ def make_chart(symbol, rows, hook, reason="", path=None):
     # SHORT / positive: START -> H1 -> L1 -> H2 -> L2 -> H3
     # LONG  / negative: START -> L1 -> H1 -> L2 -> H2 -> L3
     if hook["direction"] == "SHORT":
-        nodes = [
-            hook["start"], hook["h1"], hook["l1"],
-            hook["h2"], hook["l2"], hook["final"],
-        ]
+        nodes = [hook["start"], hook["h1"], hook["l1"], hook["h2"], hook["l2"], hook["final"]]
         labels = ["START", "H1", "L1", "H2", "L2", "H3"]
     else:
-        nodes = [
-            hook["start"], hook["l1"], hook["h1"],
-            hook["l2"], hook["h2"], hook["final"],
-        ]
+        nodes = [hook["start"], hook["l1"], hook["h1"], hook["l2"], hook["h2"], hook["final"]]
         labels = ["START", "L1", "H1", "L2", "H2", "L3"]
 
     idxs = [n["idx"] for n in nodes]
     lo=max(0,min(idxs)-CHART_CONTEXT_BEFORE); hi=min(len(rows),max(idxs)+CHART_CONTEXT_AFTER+1)
     base=rows[lo:hi]
     if not base: return None
-    ha=heikin_ashi(base); fig,ax=plt.subplots(figsize=(14,8))
+    ha=heikin_ashi(base); fig,ax=plt.subplots(figsize=(14,9))
     for x,r in enumerate(ha):
         up=r["close"]>=r["open"]
         ax.plot([x,x],[r["low"],r["high"]],linewidth=0.7)
@@ -616,14 +610,23 @@ def make_chart(symbol, rows, hook, reason="", path=None):
     ax.axhline(entry,linestyle="--",linewidth=1.2,label=f"ENTRY {fmt_price(entry)}")
     tp_pct=abs(entry-tp)/abs(entry)*100 if entry else 0
     ax.axhline(tp,linestyle=":",linewidth=1.5,label=f"TP 86.4% ({tp_pct:.2f}%) {fmt_price(tp)}")
-    for x,y,label in zip(xs,ys,labels): ax.annotate(label,(x,y),xytext=(0,8),textcoords="offset points",ha="center",fontsize=9,fontweight="bold")
+    for x,y,label in zip(xs,ys,labels):
+        ax.annotate(label,(x,y),xytext=(0,8),textcoords="offset points",ha="center",fontsize=9,fontweight="bold")
+
+    touch = tp_touch_info(rows, hook)
+    if touch["touched"]:
+        tp_status = f"TP 86.4%: TOUCHED | {fmt_price(tp)} | {utc_iso(touch['time'])}"
+    else:
+        tp_status = f"TP 86.4%: NOT TOUCHED | {fmt_price(tp)}"
+
     ax.set_title(f"NDS M1 | {symbol} | {hook['direction']} | TP 86.4% | PAPER ONLY")
     ax.legend(loc="best"); ax.grid(alpha=0.18); fig.autofmt_xdate()
-    if reason:
-        fig.text(0.5, 0.012, f"REASON: {reason}", ha="center", va="bottom", fontsize=10, fontweight="bold", wrap=True)
-        fig.tight_layout(rect=(0, 0.045, 1, 1))
-    else:
-        fig.tight_layout()
+
+    reason_text = reason or ("ACCEPTED: Candidate" if not touch["touched"] else "REJECTED: TP 86.4% already touched")
+    fig.text(0.5, 0.035, tp_status, ha="center", va="bottom", fontsize=10, fontweight="bold", wrap=True)
+    fig.text(0.5, 0.012, f"DECISION / REASON: {reason_text}", ha="center", va="bottom", fontsize=10, fontweight="bold", wrap=True)
+    fig.tight_layout(rect=(0, 0.075, 1, 1))
+
     Path(CHART_DIR).mkdir(parents=True,exist_ok=True)
     out=path or str(Path(CHART_DIR)/f"{symbol}_{hook['direction']}_{ts_key(hook['final']['time'])}.png")
     fig.savefig(out,dpi=150); plt.close(fig); return out
@@ -709,12 +712,13 @@ def main():
                 report["reason"]=f"REJECTED: Hook older than {M1_MAX_HOOK_AGE_SECONDS//3600}h"
             elif hook["range_pct"]<M1_MIN_HOOK_RANGE_PCT:
                 report["reason"]=f"REJECTED: Range {hook['range_pct']:.2f}% < minimum {M1_MIN_HOOK_RANGE_PCT:.2f}%"
-            elif tp_touch_info(rows,hook)["touched"]:
-                ti=tp_touch_info(rows,hook)
-                report["reason"]=f"REJECTED: TP 86.4% already touched at {fmt_price(ti.get('price') or hook['tp'])}"
             else:
-                report["reason"]="ACCEPTED: Candidate"
-                candidates.append((hook,rows,report))
+                ti=tp_touch_info(rows,hook)
+                if ti["touched"]:
+                    report["reason"]=f"REJECTED: TP 86.4% already touched | TP {fmt_price(hook['tp'])} | {utc_iso(ti['time'])}"
+                else:
+                    report["reason"]="ACCEPTED: Candidate"
+                    candidates.append((hook,rows,report))
             hook_reports.append(report)
         time.sleep(SCAN_SLEEP_SECONDS)
     live=get_live_prices(symbols); refresh_live_trade_prices(live)
