@@ -24,7 +24,7 @@ from matplotlib.patches import Rectangle
 VERSION = "5.9.5"
 REAL_TRADING = False
 PAPER_ONLY = True
-TARGET_ASSETS = 150
+TARGET_ASSETS = 200
 M1_INTERVAL = "1m"
 M1_INTERVAL_MINUTES = 1
 M1_CANDLES = 1500
