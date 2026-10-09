@@ -50,8 +50,8 @@ jobs:
           git log -5 --oneline -- nds_m1_v592.db || true
 
           echo "===== SCANNER VERSION ====="
-          test -f nds_m1_hook_live_scanner_v594_fixed.py
-          grep -m1 'VERSION = ' nds_m1_hook_live_scanner_v594_fixed.py
+          test -f nds_m1_hook_live_scanner_v595.py
+          grep -m1 'VERSION = ' nds_m1_hook_live_scanner_v595.py
 
           echo "===== DATABASE DIAGNOSTICS BEFORE SCAN ====="
           python - <<'PY'
@@ -110,12 +110,12 @@ jobs:
           con.close()
           PY
 
-      - name: Run NDS M1 scanner v5.9.4
+      - name: Run NDS M1 scanner v5.9.5
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python nds_m1_hook_live_scanner_v594_fixed.py
+          python nds_m1_hook_live_scanner_v595.py
 
       - name: Verify database after scan
         if: always()
