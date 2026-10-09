@@ -553,12 +553,16 @@ def performance_summary() -> Dict[str,Any]:
     finally: conn.close()
 
 
-def make_chart(symbol: str, rows: List[Dict[str,Any]], hook: Dict[str,Any], reason: str="", path: Optional[str]=None, current: Optional[float]=None):
+def make_chart(symbol: str, rows: List[Dict[str,Any]], hook: Dict[str,Any], reason: str="", path: Optional[str]=None, current: Optional[float]=None, include_latest: bool=False):
     if hook["direction"] == "SHORT":
         nodes=[hook["start"],hook["h1"],hook["l1"],hook["h2"],hook["l2"],hook["final"]]; labels=["START","H1","L1","H2","L2","H3"]
     else:
         nodes=[hook["start"],hook["l1"],hook["h1"],hook["l2"],hook["h2"],hook["final"]]; labels=["START","L1","H1","L2","H2","L3"]
     idxs=[n["idx"] for n in nodes]; lo=max(0,min(idxs)-CHART_CONTEXT_BEFORE); hi=min(len(rows),max(idxs)+CHART_CONTEXT_AFTER+1)
+    if include_latest:
+        # Open-trade updates must show the newest candles, not only the candles
+        # around the historical hook. Keep the full interval from START to now.
+        hi=len(rows)
     base=rows[lo:hi]
     if not base: return None
     ha=heikin_ashi(base); fig,ax=plt.subplots(figsize=(18,10))
@@ -595,7 +599,8 @@ def make_chart(symbol: str, rows: List[Dict[str,Any]], hook: Dict[str,Any], reas
             ax.annotate(f"HA REVERSAL\n{utc_iso(reversal_time)}",(local_x,base[local_x]["close"]),xytext=(8,-28),textcoords="offset points",fontsize=7.5,color="#6a1b9a",bbox=dict(boxstyle="round,pad=.2",facecolor="white",alpha=.9))
     touch=tp_touch_info(rows,hook)
     tp_status=f"TP 86.4%: {'TOUCHED | '+utc_iso(touch['time']) if touch['touched'] else 'NOT TOUCHED'} | {fmt_price(tp)}"
-    ax.set_title(f"NDS M1 | {symbol} | {hook['direction']} | TP 86.4% | PAPER ONLY"); ax.legend(loc="best"); ax.grid(alpha=.20); ax.margins(x=.025)
+    chart_mode = "OPEN TRADE UPDATE" if include_latest else "HOOK / SIGNAL"
+    ax.set_title(f"NDS M1 | {symbol} | {hook['direction']} | {chart_mode} | TP 86.4% | PAPER ONLY"); ax.legend(loc="best"); ax.grid(alpha=.20); ax.margins(x=.025)
     fig.text(.5,.035,tp_status,ha="center",va="bottom",fontsize=10,fontweight="bold",wrap=True)
     fig.text(.5,.012,f"DECISION / REASON: {reason or 'ACCEPTED: Candidate'}",ha="center",va="bottom",fontsize=9,fontweight="bold",wrap=True)
     fig.tight_layout(rect=(0,.075,1,1)); Path(CHART_DIR).mkdir(parents=True,exist_ok=True)
@@ -657,6 +662,71 @@ def send_open_update(live_prices: Dict[str,float]) -> bool:
     return tg_send_message("\n".join(lines))
 
 
+def send_open_trade_charts(rows_by_symbol: Dict[str,List[Dict[str,Any]]], live_prices: Dict[str,float], stats: Dict[str,int]) -> None:
+    """Send a freshly rendered chart for every trade still OPEN on each scan."""
+    if not telegram_ready():
+        print("OPEN_TRADE_CHART_SKIP | Telegram credentials unavailable")
+        return
+    conn=db_connect()
+    try:
+        trades=conn.execute("SELECT * FROM trades WHERE status='OPEN' ORDER BY opened_at").fetchall()
+    finally:
+        conn.close()
+    for tr in trades:
+        symbol=str(tr["symbol"]).upper()
+        try:
+            rows=rows_by_symbol.get(symbol)
+            if not rows:
+                rows=fetch_ohlc(symbol,M1_CANDLES)
+                if rows: rows_by_symbol[symbol]=rows
+            if not rows:
+                stats["open_chart_errors"]+=1
+                print(f"OPEN_TRADE_CHART_ERROR | {symbol} | no fresh OHLC candles")
+                continue
+            hook=load_hook_for_trade(tr["hook_key"],rows)
+            if hook is None:
+                # Recover from the current scan if a legacy DB has a trade but
+                # its hook row is missing or cannot be mapped to chart candles.
+                recovered,_=detect_hooks(symbol,rows)
+                hook=next((h for h in recovered if h["hook_key"]==tr["hook_key"]),None)
+            if hook is None:
+                stats["open_chart_errors"]+=1
+                print(f"OPEN_TRADE_CHART_ERROR | {symbol} | hook points unavailable | hook_key={tr['hook_key']}")
+                continue
+            current=live_prices.get(symbol)
+            entry=float(tr["entry"]); tp=float(tr["tp"]); opened=parse_time(tr["opened_at"]) or utc_now()
+            duration=int(max(0,(utc_now()-opened).total_seconds())//60)
+            if current is None:
+                current=safe_float(tr["last_price"])
+                price_line="Last known price"
+                pnl=float(tr["pnl_pct"] or 0)
+            else:
+                price_line="Current Kraken last"
+                pnl=trade_pnl_pct(tr["direction"],entry,current)
+            stamp=utc_now().strftime("%Y%m%dT%H%M%S")
+            chart_path=str(Path(CHART_DIR)/f"OPEN_{symbol}_{tr['direction']}_{stamp}.png")
+            reason=(f"OPEN TRADE UPDATE | Entry {fmt_price(entry)} | TP {fmt_price(tp)} | "
+                    f"{price_line}: {fmt_price(current)} | PnL {pnl:+.2f}% | Duration {duration}m | Updated {utc_iso()}")
+            path=make_chart(symbol,rows,hook,reason,path=chart_path,current=current,include_latest=True)
+            if not path:
+                stats["open_chart_errors"]+=1
+                print(f"OPEN_TRADE_CHART_ERROR | {symbol} | chart generation returned no path")
+                continue
+            caption=(f"📊 OPEN TRADE CHART UPDATE\n{'🟢 LONG' if tr['direction']=='LONG' else '🔴 SHORT'} | {symbol}\n"
+                     f"Entry: {fmt_price(entry)}\nTP 86.4%: {fmt_price(tp)}\n"
+                     f"{price_line}: {fmt_price(current)}\nPnL: {pnl:+.2f}%\nDuration: {duration} min\n"
+                     f"Chart updated: {utc_iso()}\nPAPER ONLY")
+            if tg_send_photo(path,caption):
+                stats["open_charts_sent"]+=1
+                print(f"OPEN_TRADE_CHART_SENT | {symbol} | {path}")
+            else:
+                stats["open_chart_errors"]+=1
+                print(f"OPEN_TRADE_CHART_ERROR | {symbol} | Telegram sendPhoto failed")
+        except Exception as exc:
+            stats["open_chart_errors"]+=1
+            print(f"OPEN_TRADE_CHART_ERROR | {symbol} | {type(exc).__name__}: {exc}")
+
+
 def send_pending_update(live_prices: Dict[str,float]) -> bool:
     conn=db_connect()
     try: rows=conn.execute("SELECT symbol,direction,entry,tp,pnl_pct,last_price,last_checked_at FROM pending_trades WHERE status='PENDING' ORDER BY confirmed_at").fetchall()
@@ -678,7 +748,7 @@ def main() -> None:
         raise RuntimeError("SAFETY STOP: paper-only mode is mandatory.")
     init_db(); Path(CHART_DIR).mkdir(parents=True,exist_ok=True)
     before=trade_db_snapshot(); print(f"DB_BEFORE_SCAN | total={before['total']} | open={before['open']} | tp={before['tp']} | statuses={before['statuses']} | bytes={before['db_bytes']} | path={before['db_path']}")
-    stats={"hooks":0,"new_hooks":0,"candidates":0,"signals":0,"pending":0,"pending_checked":0,"pending_expired":0,"tp_closed":0,"hook_chart_errors":0,"hook_charts_sent":0}
+    stats={"hooks":0,"new_hooks":0,"candidates":0,"signals":0,"pending":0,"pending_checked":0,"pending_expired":0,"tp_closed":0,"hook_chart_errors":0,"hook_charts_sent":0,"open_charts_sent":0,"open_chart_errors":0}
     symbols=get_target_assets(TARGET_ASSETS)
     if not symbols: raise RuntimeError("No PF_ Kraken Futures instruments were returned; stopping rather than reporting stale prices as current.")
     live=get_live_prices(symbols); refresh_live_trade_prices(live)
@@ -741,7 +811,9 @@ def main() -> None:
     monitor_open_trades(rows_by_symbol,stats,live_final); refresh_live_trade_prices(live_final); update_pending_trades(rows_by_symbol,stats,live_final)
     perf=performance_summary(); after=trade_db_snapshot()
     print(f"DB_AFTER_SCAN | total={after['total']} | open={after['open']} | tp={after['tp']} | statuses={after['statuses']} | bytes={after['db_bytes']} | path={after['db_path']}")
-    diagnostic=(f"🔎 NDS M1 DIAGNOSTIC\nVersion: {VERSION}\nTime: {utc_iso()}\n\n━━━ ASSETS ━━━\nScanned: {len(symbols)}\n\n━━━ M1 ━━━\nMin node spacing: {MIN_NODE_CANDLES} candles\nFinal node gate: CLOSED Heikin-Ashi reversal strictly AFTER final node\nSHORT: GREEN->RED | LONG: RED->GREEN\nPrice source: Kraken Futures ticker last only\nHooks: {stats['hooks']}\nNew hooks: {stats['new_hooks']}\nHook charts/signals sent: {stats['hook_charts_sent']}\nChart errors: {stats['hook_chart_errors']}\nCandidates: {stats['candidates']}\nSignals: {stats['signals']}\nPending: {stats['pending']}\nPending checked: {stats['pending_checked']}\nPending expired: {stats['pending_expired']}\nTP closed this scan: {stats['tp_closed']}\n\n━━━ DATABASE ━━━\nTrades total: {after['total']}\nTrades OPEN: {after['open']} | TP: {after['tp']}\nDB bytes: {after['db_bytes']}\nDB path: {after['db_path']}\n\n━━━ PERFORMANCE ━━━\nClosed TP: {perf['tp']}\nOpen: {perf['open']}\nWin rate: {perf['win_rate']:.2f}%\nTotal PnL: {perf['pnl']:+.2f}%\nGross profit: {perf['gross_profit']:+.2f}%\nGross loss: {perf['gross_loss']:+.2f}%\n\nTP ONLY | 86.4% | NO SL | PAPER ONLY")
+    # Send current charts for all trades that remain open after TP monitoring.
+    send_open_trade_charts(rows_by_symbol,live_final,stats)
+    diagnostic=(f"🔎 NDS M1 DIAGNOSTIC\nVersion: {VERSION}\nTime: {utc_iso()}\n\n━━━ ASSETS ━━━\nScanned: {len(symbols)}\n\n━━━ M1 ━━━\nMin node spacing: {MIN_NODE_CANDLES} candles\nFinal node gate: CLOSED Heikin-Ashi reversal strictly AFTER final node\nSHORT: GREEN->RED | LONG: RED->GREEN\nPrice source: Kraken Futures ticker last only\nHooks: {stats['hooks']}\nNew hooks: {stats['new_hooks']}\nHook charts/signals sent: {stats['hook_charts_sent']}\nOpen-trade charts sent: {stats['open_charts_sent']}\nOpen-trade chart errors: {stats['open_chart_errors']}\nChart errors: {stats['hook_chart_errors']}\nCandidates: {stats['candidates']}\nSignals: {stats['signals']}\nPending: {stats['pending']}\nPending checked: {stats['pending_checked']}\nPending expired: {stats['pending_expired']}\nTP closed this scan: {stats['tp_closed']}\n\n━━━ DATABASE ━━━\nTrades total: {after['total']}\nTrades OPEN: {after['open']} | TP: {after['tp']}\nDB bytes: {after['db_bytes']}\nDB path: {after['db_path']}\n\n━━━ PERFORMANCE ━━━\nClosed TP: {perf['tp']}\nOpen: {perf['open']}\nWin rate: {perf['win_rate']:.2f}%\nTotal PnL: {perf['pnl']:+.2f}%\nGross profit: {perf['gross_profit']:+.2f}%\nGross loss: {perf['gross_loss']:+.2f}%\n\nTP ONLY | 86.4% | NO SL | PAPER ONLY")
     print(diagnostic)
     if telegram_ready():
         tg_send_message(diagnostic); send_open_update(live_final); send_pending_update(live_final)
