@@ -3,8 +3,8 @@
 # PAPER TRADING ONLY - NO REAL ORDERS
 # File name intentionally unchanged; no workflow changes required.
 # Fixes: HA reversal strictly after H3/L3; only closed candles confirm;
-# strict Kraken last-traded price (no mark/bid/ask/candle-close fallback);
-# case-insensitive symbols; stale prices are labeled as last known;
+# live Kraken bid/ask midpoint first, mark price fallback, and last trade only
+# when its timestamp is fresh; case-insensitive symbols; stale prices labeled;
 # updated chart is sent for each newly accepted signal, even for an old hook.
 # ============================================================
 import os
@@ -43,6 +43,8 @@ DB_FILE = "nds_m1_v592.db"
 CHART_DIR = "nds_m1_charts"
 KRAKEN_FUTURES_BASE = "https://futures.kraken.com/derivatives/api/v3"
 KRAKEN_TICKERS_URL = f"{KRAKEN_FUTURES_BASE}/tickers"
+MAX_LAST_TRADE_AGE_SECONDS = 300
+LIVE_PRICE_SOURCES: Dict[str, str] = {}
 KRAKEN_INSTRUMENTS_URL = f"{KRAKEN_FUTURES_BASE}/instruments"
 KRAKEN_CHARTS_BASE = "https://futures.kraken.com/api/charts/v1/trade"
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN")
@@ -170,9 +172,16 @@ def get_target_assets(limit: int = TARGET_ASSETS) -> List[str]:
 
 
 def get_live_prices(symbols: Optional[List[str]] = None) -> Dict[str, float]:
-    """Return only Kraken ticker `last` prices; never invent a live price."""
+    """Get a current Kraken Futures market price, preferring the live bid/ask midpoint.
+
+    Priority: best bid/ask midpoint, current mark price, then last trade only if
+    Kraken's lastTime says that trade is recent. Never substitute candle closes
+    or an old last trade and call it current.
+    """
     data = get_json(KRAKEN_TICKERS_URL)
+    LIVE_PRICE_SOURCES.clear()
     if not data:
+        print("LIVE_PRICE_ERROR | Kraken ticker endpoint returned no data")
         return {}
     wanted = {str(s).strip().upper() for s in symbols} if symbols else None
     prices: Dict[str, float] = {}
@@ -184,10 +193,48 @@ def get_live_prices(symbols: Optional[List[str]] = None) -> Dict[str, float]:
             continue
         if wanted is not None and symbol not in wanted:
             continue
-        price = safe_float(item.get("last"))
+
+        bid = safe_float(item.get("bid"))
+        ask = safe_float(item.get("ask"))
+        mark = safe_float(item.get("markPrice") or item.get("mark_price"))
+        last = safe_float(item.get("last"))
+        price = None
+        source = ""
+
+        if bid is not None and ask is not None and bid > 0 and ask >= bid:
+            price = (bid + ask) / 2.0
+            source = "bid/ask midpoint"
+        elif mark is not None and mark > 0:
+            price = mark
+            source = "mark price fallback"
+        elif last is not None and last > 0:
+            last_time = parse_time(item.get("lastTime") or item.get("last_time"))
+            if last_time is not None and age_seconds(last_time) <= MAX_LAST_TRADE_AGE_SECONDS:
+                price = last
+                source = "recent last trade fallback"
+            else:
+                age = round(age_seconds(last_time)) if last_time else "unknown"
+                print(f"LIVE_PRICE_STALE | symbol={symbol} | last={last} | lastTime={item.get('lastTime') or item.get('last_time')} | age_seconds={age} | ignored")
+
         if price is not None and price > 0:
             prices[symbol] = price
+            LIVE_PRICE_SOURCES[symbol] = source
+            print(f"LIVE_PRICE | symbol={symbol} | price={price:.12g} | source={source} | bid={bid} | ask={ask} | last={last} | lastTime={item.get('lastTime') or item.get('last_time')}")
+        else:
+            print(f"LIVE_PRICE_UNAVAILABLE | symbol={symbol} | no valid bid/ask, mark price, or fresh last trade")
     return prices
+
+
+def live_price_label(symbol: str) -> str:
+    """Human-readable label matching the actual Kraken ticker field used."""
+    source = LIVE_PRICE_SOURCES.get(str(symbol).strip().upper())
+    if source == "bid/ask midpoint":
+        return "Current (Kraken bid/ask mid)"
+    if source == "mark price fallback":
+        return "Current (Kraken mark price)"
+    if source == "recent last trade fallback":
+        return "Recent last trade (fallback)"
+    return "Live price unavailable"
 
 
 def normalize_candle(item: Any) -> Optional[Dict[str, Any]]:
@@ -640,7 +687,7 @@ def tg_send_photo(path: str, caption: str) -> bool:
 def send_new_signal(hook: Dict[str,Any], rows: List[Dict[str,Any]], current: Optional[float], reason: str="NEW SIGNAL - ACCEPTED") -> bool:
     entry,tp=hook["final"]["price"],hook["tp"]; tp_pct=abs(entry-tp)/abs(entry)*100 if entry else 0
     text=(f"{'🟢 LONG' if hook['direction']=='LONG' else '🔴 SHORT'} NEW SIGNAL\nSymbol: {hook['symbol']}\nEntry: {fmt_price(entry)}\nTP 86.4%: {fmt_price(tp)} ({tp_pct:.2f}%)\n"
-          f"{'Latest traded price' if current is not None else 'Latest traded price unavailable'}: {fmt_price(current)}\nRange: {hook['range_pct']:.2f}%\nHA Reversal: {utc_iso(hook['ha_reversal_time'])}\nSignal Confirmed: {utc_iso(hook['confirmed_time'])}\nPAPER ONLY")
+          f"{live_price_label(hook['symbol']) if current is not None else 'Live market price unavailable'}: {fmt_price(current)}\nRange: {hook['range_pct']:.2f}%\nHA Reversal: {utc_iso(hook['ha_reversal_time'])}\nSignal Confirmed: {utc_iso(hook['confirmed_time'])}\nPAPER ONLY")
     path=make_chart(hook["symbol"],rows,hook,reason,current=current)
     return tg_send_photo(path,text+f"\n\nReason: {reason}") if path else False
 
@@ -655,7 +702,7 @@ def send_open_update(live_prices: Dict[str,float]) -> bool:
         symbol=str(r["symbol"]).upper(); opened=parse_time(r["opened_at"]) or now; dur=int(max(0,(now-opened).total_seconds())//60)
         current=live_prices.get(symbol)
         if current is not None:
-            pnl=trade_pnl_pct(r["direction"],float(r["entry"]),current); price_label="Current (Kraken last)"
+            pnl=trade_pnl_pct(r["direction"],float(r["entry"]),current); price_label=live_price_label(symbol)
         else:
             current=safe_float(r["last_price"]); pnl=float(r["pnl_pct"] or 0); checked=parse_time(r["last_checked_at"]); price_label=f"Last known @ {utc_iso(checked) if checked else 'unknown time'}"
         lines.append(f"{'🟢' if r['direction']=='LONG' else '🔴'} {symbol} | Entry {fmt_price(float(r['entry']))} | TP {fmt_price(float(r['tp']))} | {price_label} {fmt_price(current)} | PnL {pnl:+.2f}% | {dur}m")
@@ -701,7 +748,7 @@ def send_open_trade_charts(rows_by_symbol: Dict[str,List[Dict[str,Any]]], live_p
                 price_line="Last known price"
                 pnl=float(tr["pnl_pct"] or 0)
             else:
-                price_line="Current Kraken last"
+                price_line=live_price_label(symbol)
                 pnl=trade_pnl_pct(tr["direction"],entry,current)
             stamp=utc_now().strftime("%Y%m%dT%H%M%S")
             chart_path=str(Path(CHART_DIR)/f"OPEN_{symbol}_{tr['direction']}_{stamp}.png")
@@ -736,7 +783,7 @@ def send_pending_update(live_prices: Dict[str,float]) -> bool:
     for r in rows:
         symbol=str(r["symbol"]).upper(); current=live_prices.get(symbol)
         if current is not None:
-            pnl=trade_pnl_pct(r["direction"],float(r["entry"]),current); label="Current (Kraken last)"
+            pnl=trade_pnl_pct(r["direction"],float(r["entry"]),current); label=live_price_label(symbol)
         else:
             current=safe_float(r["last_price"]); pnl=float(r["pnl_pct"] or 0); checked=parse_time(r["last_checked_at"]); label=f"Last known @ {utc_iso(checked) if checked else 'unknown time'}"
         lines.append(f"{'🟢' if r['direction']=='LONG' else '🔴'} {symbol} | Entry {fmt_price(float(r['entry']))} | TP {fmt_price(float(r['tp']))} | {label} {fmt_price(current)} | PnL {pnl:+.2f}%")
@@ -813,7 +860,7 @@ def main() -> None:
     print(f"DB_AFTER_SCAN | total={after['total']} | open={after['open']} | tp={after['tp']} | statuses={after['statuses']} | bytes={after['db_bytes']} | path={after['db_path']}")
     # Send current charts for all trades that remain open after TP monitoring.
     send_open_trade_charts(rows_by_symbol,live_final,stats)
-    diagnostic=(f"🔎 NDS M1 DIAGNOSTIC\nVersion: {VERSION}\nTime: {utc_iso()}\n\n━━━ ASSETS ━━━\nScanned: {len(symbols)}\n\n━━━ M1 ━━━\nMin node spacing: {MIN_NODE_CANDLES} candles\nFinal node gate: CLOSED Heikin-Ashi reversal strictly AFTER final node\nSHORT: GREEN->RED | LONG: RED->GREEN\nPrice source: Kraken Futures ticker last only\nHooks: {stats['hooks']}\nNew hooks: {stats['new_hooks']}\nHook charts/signals sent: {stats['hook_charts_sent']}\nOpen-trade charts sent: {stats['open_charts_sent']}\nOpen-trade chart errors: {stats['open_chart_errors']}\nChart errors: {stats['hook_chart_errors']}\nCandidates: {stats['candidates']}\nSignals: {stats['signals']}\nPending: {stats['pending']}\nPending checked: {stats['pending_checked']}\nPending expired: {stats['pending_expired']}\nTP closed this scan: {stats['tp_closed']}\n\n━━━ DATABASE ━━━\nTrades total: {after['total']}\nTrades OPEN: {after['open']} | TP: {after['tp']}\nDB bytes: {after['db_bytes']}\nDB path: {after['db_path']}\n\n━━━ PERFORMANCE ━━━\nClosed TP: {perf['tp']}\nOpen: {perf['open']}\nWin rate: {perf['win_rate']:.2f}%\nTotal PnL: {perf['pnl']:+.2f}%\nGross profit: {perf['gross_profit']:+.2f}%\nGross loss: {perf['gross_loss']:+.2f}%\n\nTP ONLY | 86.4% | NO SL | PAPER ONLY")
+    diagnostic=(f"🔎 NDS M1 DIAGNOSTIC\nVersion: {VERSION}\nTime: {utc_iso()}\n\n━━━ ASSETS ━━━\nScanned: {len(symbols)}\n\n━━━ M1 ━━━\nMin node spacing: {MIN_NODE_CANDLES} candles\nFinal node gate: CLOSED Heikin-Ashi reversal strictly AFTER final node\nSHORT: GREEN->RED | LONG: RED->GREEN\nPrice source: Kraken Futures bid/ask midpoint; mark price fallback; last trade fallback only if lastTime is within 300 seconds\nHooks: {stats['hooks']}\nNew hooks: {stats['new_hooks']}\nHook charts/signals sent: {stats['hook_charts_sent']}\nOpen-trade charts sent: {stats['open_charts_sent']}\nOpen-trade chart errors: {stats['open_chart_errors']}\nChart errors: {stats['hook_chart_errors']}\nCandidates: {stats['candidates']}\nSignals: {stats['signals']}\nPending: {stats['pending']}\nPending checked: {stats['pending_checked']}\nPending expired: {stats['pending_expired']}\nTP closed this scan: {stats['tp_closed']}\n\n━━━ DATABASE ━━━\nTrades total: {after['total']}\nTrades OPEN: {after['open']} | TP: {after['tp']}\nDB bytes: {after['db_bytes']}\nDB path: {after['db_path']}\n\n━━━ PERFORMANCE ━━━\nClosed TP: {perf['tp']}\nOpen: {perf['open']}\nWin rate: {perf['win_rate']:.2f}%\nTotal PnL: {perf['pnl']:+.2f}%\nGross profit: {perf['gross_profit']:+.2f}%\nGross loss: {perf['gross_loss']:+.2f}%\n\nTP ONLY | 86.4% | NO SL | PAPER ONLY")
     print(diagnostic)
     if telegram_ready():
         tg_send_message(diagnostic); send_open_update(live_final); send_pending_update(live_final)
