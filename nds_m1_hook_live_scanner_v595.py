@@ -216,9 +216,14 @@ def get_live_prices(symbols: Optional[List[str]] = None) -> Dict[str, float]:
     LIVE_PRICE_SOURCES.clear()
     if not data:
         print("LIVE_PRICE_ERROR | Kraken ticker endpoint returned no data")
+        wanted = {str(s).strip().upper() for s in symbols} if symbols else set()
+        for required_symbol in ("PF_XBTUSD", "PF_XAUTUSD"):
+            if required_symbol in wanted:
+                print(f"LIVE_PRICE_UNAVAILABLE | symbol={required_symbol} | reason=ticker_endpoint_returned_no_data")
         return {}
     wanted = {str(s).strip().upper() for s in symbols} if symbols else None
     prices: Dict[str, float] = {}
+    seen_symbols = set()
     for item in extract_items(data):
         if not isinstance(item, dict):
             continue
@@ -227,6 +232,7 @@ def get_live_prices(symbols: Optional[List[str]] = None) -> Dict[str, float]:
             continue
         if wanted is not None and symbol not in wanted:
             continue
+        seen_symbols.add(symbol)
 
         bid = safe_float(item.get("bid"))
         ask = safe_float(item.get("ask"))
@@ -256,6 +262,10 @@ def get_live_prices(symbols: Optional[List[str]] = None) -> Dict[str, float]:
             print(f"LIVE_PRICE | symbol={symbol} | price={price:.12g} | source={source} | bid={bid} | ask={ask} | last={last} | lastTime={item.get('lastTime') or item.get('last_time')}")
         else:
             print(f"LIVE_PRICE_UNAVAILABLE | symbol={symbol} | no valid bid/ask, mark price, or fresh last trade")
+    if wanted is not None:
+        for required_symbol in ("PF_XBTUSD", "PF_XAUTUSD"):
+            if required_symbol in wanted and required_symbol not in seen_symbols:
+                print(f"LIVE_PRICE_UNAVAILABLE | symbol={required_symbol} | reason=symbol_not_present_in_ticker_response")
     return prices
 
 
@@ -835,10 +845,19 @@ def main() -> None:
     live=get_live_prices(symbols); refresh_live_trade_prices(live)
     rows_by_symbol={}; monitor_open_trades(rows_by_symbol,stats,live); update_pending_trades(rows_by_symbol,stats,live)
     hook_reports=[]; candidates=[]
+    required_diagnostic_symbols={"PF_XBTUSD", "PF_XAUTUSD"}
     for symbol in symbols:
+        is_required_diagnostic = symbol in required_diagnostic_symbols
+        if is_required_diagnostic:
+            print(f"ASSET_SCAN_START | symbol={symbol} | selected=True | live_price_available={symbol in live} | live_price_source={LIVE_PRICE_SOURCES.get(symbol, 'unavailable')}")
         rows=fetch_ohlc(symbol,M1_CANDLES)
-        if not rows: continue
+        if not rows:
+            if is_required_diagnostic:
+                print(f"OHLC_UNAVAILABLE | symbol={symbol} | timeframe=1m | candles=0 | reason=no_valid_candles_returned; check preceding OHLC_ERROR lines")
+            continue
         rows_by_symbol[symbol]=rows; hooks,_=detect_hooks(symbol,rows); stats["hooks"]+=len(hooks)
+        if is_required_diagnostic:
+            print(f"HOOK_SCAN_EXECUTED | symbol={symbol} | timeframe=1m | candles={len(rows)} | hooks_found={len(hooks)} | live_price_available={symbol in live}")
         for hook in hooks:
             is_new=save_hook(hook)
             if is_new: stats["new_hooks"]+=1
