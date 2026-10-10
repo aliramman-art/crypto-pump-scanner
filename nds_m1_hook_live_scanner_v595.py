@@ -152,23 +152,57 @@ def item_symbol(item: Dict[str, Any]) -> Optional[str]:
 
 
 def get_target_assets(limit: int = TARGET_ASSETS) -> List[str]:
-    symbols = []
+    # Always include Bitcoin and Tether Gold in the scan.
+    required = ["PF_XAUTUSD", "PF_XBTUSD"]
+    symbols = set()
+
     data = get_json(KRAKEN_INSTRUMENTS_URL)
     if data:
         for item in extract_items(data):
             if isinstance(item, dict):
                 sym = item_symbol(item)
                 if sym and sym.startswith("PF_"):
-                    symbols.append(sym)
-    if not symbols:
+                    symbols.add(sym)
+
+    # Merge ticker symbols as a fallback for missing required contracts, even
+    # when the instruments endpoint returned other symbols successfully.
+    if not set(required).issubset(symbols):
         data = get_json(KRAKEN_TICKERS_URL)
         if data:
             for item in extract_items(data):
                 if isinstance(item, dict):
                     sym = item_symbol(item)
                     if sym and sym.startswith("PF_"):
-                        symbols.append(sym)
-    return sorted(set(symbols))[:limit]
+                        symbols.add(sym)
+
+    missing = [sym for sym in required if sym not in symbols]
+    if missing:
+        raise RuntimeError(
+            "Required Kraken Futures contract(s) missing from instruments and tickers: "
+            + ", ".join(missing)
+        )
+
+    limit = max(0, int(limit))
+    if limit < len(required):
+        raise ValueError(f"Asset limit must be at least {len(required)} to include required symbols")
+
+    optional_symbols = sorted(symbols.difference(required))
+    selected = optional_symbols[: limit - len(required)] + required
+    result = sorted(set(selected))
+
+    if len(result) != min(limit, len(symbols)) or not set(required).issubset(result):
+        raise RuntimeError(
+            f"Asset selection failed: selected={len(result)}, requested={limit}, "
+            f"required={required}"
+        )
+
+    print(
+        "ASSET_SELECTION | "
+        f"requested={limit} | selected={len(result)} | "
+        f"required_included={all(sym in result for sym in required)} | "
+        f"XAUT={'PF_XAUTUSD' in result} | BTC={'PF_XBTUSD' in result}"
+    )
+    return result
 
 
 def get_live_prices(symbols: Optional[List[str]] = None) -> Dict[str, float]:
