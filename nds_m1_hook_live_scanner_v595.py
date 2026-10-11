@@ -1,8 +1,12 @@
 # ============================================================
-# NDS M5 LIVE SCANNER - VERSION 5.9.6 FIXED
+# NDS M5 LIVE SCANNER - VERSION 5.9.7
 # PAPER TRADING ONLY - NO REAL ORDERS
 # File name intentionally unchanged; no workflow changes required.
-# Fixes in 5.9.6:
+# Strategy in 5.9.7:
+#   Positive: START(L)->H1->L1->H2->L2->H3; after 86.4% retrace LONG.
+#   Negative: START(H)->L1->H1->L2->H2->L3; after 86.4% retrace SHORT.
+#   TP = H3/L3 (final node); SL = START. 86.4% is the entry trigger.
+# Retained from 5.9.6:
 #   1) Open-trade charts fetch the historical interval needed to recover nodes.
 #   2) Hook nodes are reconstructed by timestamp with tolerant mapping.
 #   3) Open/pending trade symbols are always included in ticker refreshes.
@@ -12,12 +16,10 @@
 #   6) Reject implausibly wide bid/ask spreads and fall back to mark/recent last.
 #   7) Do not count TP touches on incomplete candles.
 #   8) Avoid sending duplicate charts for the same new accepted signal.
-# Strategy change only:
-#   SHORT-shaped setup: START(L) -> H1 -> L1 -> H2 -> L2; trade LONG at L2.
-#   LONG-shaped setup : START(H) -> L1 -> H1 -> L2 -> H2; trade SHORT at H2.
-#   START is not numbered. Entry waits for a CLOSED HA color reversal after node 4.
-#   TP = node 3 (H2 for SHORT-shaped setup, L2 for LONG-shaped setup).
-#   SL = START. Remaining settings, database, ticker logic and workflow stay intact.
+# Strategy uses real OHLC pivots; Heikin-Ashi is chart display only.
+# Every numbered node is at least five M5 candles after the previous node.
+# A setup is actionable only after a closed M5 candle touches its 86.4% retracement.
+# A stale setup is rejected if TP or SL was touched before/after its entry trigger.
 # ============================================================
 import os
 import time
@@ -33,7 +35,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-VERSION = "5.9.6"
+VERSION = "5.9.7"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -308,9 +310,9 @@ def fetch_ohlc(symbol: str, candles: int = M5_CANDLES, start_time: Optional[date
     """Fetch paginated M5 data; optional start_time is used for old open trades."""
     candles = max(100, int(candles))
     end_dt = utc_now()
-    start_dt = parse_time(start_time) if start_time is not None else end_dt - timedelta(minutes=candles + 20)
+    start_dt = parse_time(start_time) if start_time is not None else end_dt - timedelta(minutes=M5_INTERVAL_MINUTES * (candles + 20))
     if start_dt is None:
-        start_dt = end_dt - timedelta(minutes=candles + 20)
+        start_dt = end_dt - timedelta(minutes=M5_INTERVAL_MINUTES * (candles + 20))
     url = f"{KRAKEN_CHARTS_BASE}/{symbol}/{M5_INTERVAL}"
     cursor_s, end_s = int(start_dt.timestamp()), int(end_dt.timestamp())
     rows_by_ms: Dict[int, Dict[str, Any]] = {}
@@ -422,75 +424,85 @@ def make_hook_key(symbol: str, direction: str, final_time: datetime, final_price
 
 
 def build_hook(symbol: str, rows: List[Dict[str, Any]], nodes: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    # START is separate from the five numbered structure nodes. Entry is node four,
-    # so only START + four pivots are required; node five is not awaited.
-    if len(nodes) != 5 or not node_spacing_ok(nodes):
+    """Build a six-point NDS hook. START is the origin, not a numbered node.
+
+    Positive hook: START(L) -> H1 -> L1 -> H2 -> L2 -> H3, traded LONG.
+    Negative hook: START(H) -> L1 -> H1 -> L2 -> H2 -> L3, traded SHORT.
+
+    The hook is structurally confirmed after the final pivot is confirmed.
+    It becomes a trade setup only when price later retraces 86.4% of the
+    START-to-final move. TP is the final point; SL is START.
+    """
+    if len(nodes) != 6 or not node_spacing_ok(nodes):
         return None
+
     types = "".join(n["type"] for n in nodes)
-    if types == "LHLHL":
-        # START -> H1 -> L1 -> H2 -> L2. Trade LONG from L2 toward H3.
-        start, h1, l1, h2, l2 = nodes
+
+    if types == "LHLHLH":
+        start, h1, l1, h2, l2, final = nodes
         if not all(start["price"] < n["price"] for n in nodes[1:]):
             return None
-        if not (h2["price"] > h1["price"] and l2["price"] < l1["price"]):
+        if not (h2["price"] > h1["price"] and l2["price"] < l1["price"] and final["price"] > h2["price"]):
             return None
-        structure_direction = "SHORT"
+        structure_direction = "SHORT"  # positive-shaped hook; trade direction is LONG
         trade_direction = "LONG"
-        entry_node, tp_node = l2, h2  # node four entry, node three target
-    elif types == "HLHLH":
-        # START -> L1 -> H1 -> L2 -> H2. Trade SHORT from H2 toward L3.
-        start, l1, h1, l2, h2 = nodes
+        entry = final["price"] - NDS_RETRACE * (final["price"] - start["price"])
+
+    elif types == "HLHLHL":
+        start, l1, h1, l2, h2, final = nodes
         if not all(start["price"] > n["price"] for n in nodes[1:]):
             return None
-        if not (l2["price"] < l1["price"] and h2["price"] > h1["price"]):
+        if not (l2["price"] < l1["price"] and h2["price"] > h1["price"] and final["price"] < l2["price"]):
             return None
-        structure_direction = "LONG"
+        structure_direction = "LONG"  # negative-shaped hook; trade direction is SHORT
         trade_direction = "SHORT"
-        entry_node, tp_node = h2, l2  # node four entry, node three target
+        entry = final["price"] + NDS_RETRACE * (start["price"] - final["price"])
+
     else:
         return None
 
-    start_price, entry_price, tp = float(start["price"]), float(entry_node["price"]), float(tp_node["price"])
-    sl = start_price
-    if min(start_price, entry_price, tp) <= 0:
+    start_price, final_price = float(start["price"]), float(final["price"])
+    entry_price = float(entry)
+    if min(start_price, final_price, entry_price) <= 0 or start_price == final_price:
         return None
-    # Enforce correct trade geometry: target must be in the profitable direction,
-    # and START must sit beyond the entry as the protective stop.
+
+    tp, sl = final_price, start_price
     if trade_direction == "LONG" and not (sl < entry_price < tp):
         return None
     if trade_direction == "SHORT" and not (tp < entry_price < sl):
         return None
 
-    reversal = find_closed_ha_reversal(rows, entry_node["idx"], trade_direction)
-    if reversal is None:
+    final_confirm_idx = final["idx"] + PIVOT_RIGHT
+    if final_confirm_idx >= len(rows) or not candle_is_closed(rows[final_confirm_idx]):
         return None
-    pivot_confirm_time = entry_node["time"] + timedelta(minutes=(PIVOT_RIGHT + 1) * M5_INTERVAL_MINUTES)
-    confirmed_time = max(pivot_confirm_time, reversal["time"] + timedelta(minutes=M5_INTERVAL_MINUTES))
-    # Keep the database's existing node columns and hook direction compatible:
-    # final aliases node four; no database reset or workflow change is needed.
-    final = dict(entry_node)
+    confirmed_time = rows[final_confirm_idx]["time"] + timedelta(minutes=M5_INTERVAL_MINUTES)
+
     return {
-        "symbol": symbol, "direction": structure_direction, "trade_direction": trade_direction,
-        "start": start, "h1": h1, "l1": l1, "h2": h2, "l2": l2,
-        "final": final, "entry_node": entry_node, "tp_node": tp_node,
-        "tp": tp, "sl": sl,
-        "range_pct": abs(entry_price - start_price) / abs(start_price) * 100.0,
-        "confirmed_time": confirmed_time, "ha_reversal_time": reversal["time"],
-        "ha_reversal_idx": reversal["idx"], "ha_reversal_from": reversal["from_color"],
-        "ha_reversal_to": reversal["to_color"],
-        "hook_key": make_hook_key(symbol, structure_direction, entry_node["time"], entry_price),
+        "symbol": symbol,
+        "direction": structure_direction,
+        "trade_direction": trade_direction,
+        "start": start,
+        "h1": h1,
+        "l1": l1,
+        "h2": h2,
+        "l2": l2,
+        "final": final,
+        "entry": entry_price,
+        "tp": tp,
+        "sl": sl,
+        "range_pct": abs(final_price - start_price) / abs(start_price) * 100.0,
+        "confirmed_time": confirmed_time,
+        "hook_key": make_hook_key(symbol, structure_direction, final["time"], final_price),
         "node_indices": [n["idx"] for n in nodes],
     }
 
-
 def detect_hooks(symbol: str, rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
     pivots = build_ordered_pivots(rows)
-    hooks, seen = [], set()
-    for i in range(max(0, len(pivots) - 4)):
-        nodes = pivots[i:i + 5]
-        if len(nodes) != 5 or nodes[-1]["idx"] + PIVOT_RIGHT >= len(rows):
-            continue
-        if not candle_is_closed(rows[nodes[-1]["idx"] + PIVOT_RIGHT]):
+    hooks: List[Dict[str, Any]] = []
+    seen = set()
+    for i in range(max(0, len(pivots) - 5)):
+        nodes = pivots[i:i + 6]
+        if len(nodes) != 6:
             continue
         hook = build_hook(symbol, rows, nodes)
         if hook and hook["hook_key"] not in seen:
@@ -504,20 +516,83 @@ def trade_pnl_pct(direction: str, entry: float, current: float) -> float:
     return (current - entry) / entry * 100.0 if direction == "LONG" else (entry - current) / entry * 100.0
 
 
-def tp_touch_info(rows: List[Dict[str, Any]], hook: Dict[str, Any]) -> Dict[str, Any]:
-    """Only count TP touches on closed candles strictly after the final node."""
-    tp, direction = float(hook["tp"]), hook.get("trade_direction", "LONG" if hook["direction"] == "SHORT" else "SHORT")
-    final_time = parse_time(hook.get("final", {}).get("time"))
-    if final_time is None:
-        return {"touched": False}
-    for i, candle in enumerate(rows):
-        if candle["time"] <= final_time or not candle_is_closed(candle):
+def entry_touch_info(rows: List[Dict[str, Any]], hook: Dict[str, Any]) -> Dict[str, Any]:
+    """Find the first closed M5 candle that touches the 86.4% retracement.
+
+    Entry checks begin only after the final H3/L3 pivot has been confirmed.
+    If START (SL) or the final node (TP) is revisited before the entry trigger,
+    the historical setup is stale and must not create a new signal.
+    A candle touching entry and either exit level simultaneously is rejected
+    conservatively because OHLC cannot tell us which level came first.
+    """
+    rows = rows or []
+    final = hook.get("final") or {}
+    final_idx = final.get("idx")
+    if final_idx is None and final.get("time") is not None:
+        final_idx = nearest_candle_index(rows, parse_time(final["time"]) or final["time"])
+    if final_idx is None or final_idx + PIVOT_RIGHT >= len(rows):
+        return {"touched": False, "invalid": False, "reason": "Final pivot not confirmed in available candles"}
+
+    confirm_idx = final_idx + PIVOT_RIGHT
+    if not candle_is_closed(rows[confirm_idx]):
+        return {"touched": False, "invalid": False, "reason": "Final pivot confirmation candle is not closed"}
+
+    direction = hook.get("trade_direction", "LONG" if hook.get("direction") == "SHORT" else "SHORT")
+    entry = float(hook.get("entry", hook["final"]["price"]))
+    tp = float(hook["tp"])
+    sl = float(hook.get("sl", hook["start"]["price"]))
+
+    for i in range(confirm_idx + 1, len(rows)):
+        candle = rows[i]
+        if not candle_is_closed(candle):
             continue
-        touched = candle["low"] <= tp if direction == "SHORT" else candle["high"] >= tp
-        if touched:
-            return {"touched": True, "idx": i, "time": candle["time"], "price": tp, "open": candle["open"], "high": candle["high"], "low": candle["low"], "close": candle["close"]}
+        entry_hit = candle["low"] <= entry if direction == "LONG" else candle["high"] >= entry
+        tp_hit = candle["high"] >= tp if direction == "LONG" else candle["low"] <= tp
+        sl_hit = candle["low"] <= sl if direction == "LONG" else candle["high"] >= sl
+
+        # Before entry, a prior revisit to TP or SL invalidates the setup.
+        # Same-candle entry/exit touches are also rejected as ambiguous.
+        if sl_hit:
+            return {"touched": False, "invalid": True, "reason": "SL START was touched before/with the 86.4% entry", "idx": i, "time": candle["time"], "exit": "SL", "price": sl}
+        if tp_hit:
+            return {"touched": False, "invalid": True, "reason": "TP final node was revisited before/with the 86.4% entry", "idx": i, "time": candle["time"], "exit": "TP", "price": tp}
+        if entry_hit:
+            return {"touched": True, "invalid": False, "idx": i, "time": candle["time"], "price": entry,
+                    "completed_time": candle["time"] + timedelta(minutes=M5_INTERVAL_MINUTES)}
+
+    return {"touched": False, "invalid": False, "reason": "86.4% entry level not touched after final pivot confirmation"}
+
+
+def trade_exit_touch_info(rows: List[Dict[str, Any]], hook: Dict[str, Any], entry_touch: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Find a TP/SL exit occurring after the first valid 86.4% entry touch."""
+    touch = entry_touch or entry_touch_info(rows, hook)
+    if not touch.get("touched"):
+        return {"touched": False, "reason": touch.get("reason", "Entry not touched"), "invalid": bool(touch.get("invalid"))}
+
+    direction = hook.get("trade_direction", "LONG" if hook.get("direction") == "SHORT" else "SHORT")
+    tp, sl = float(hook["tp"]), float(hook.get("sl", hook["start"]["price"]))
+    for i in range(int(touch["idx"]) + 1, len(rows)):
+        candle = rows[i]
+        if not candle_is_closed(candle):
+            continue
+        sl_hit = candle["low"] <= sl if direction == "LONG" else candle["high"] >= sl
+        tp_hit = candle["high"] >= tp if direction == "LONG" else candle["low"] <= tp
+        # Use conservative SL-first handling if both hit in one OHLC candle.
+        if sl_hit:
+            return {"touched": True, "reason": "SL", "idx": i, "time": candle["time"], "price": sl,
+                    "open": candle["open"], "high": candle["high"], "low": candle["low"], "close": candle["close"]}
+        if tp_hit:
+            return {"touched": True, "reason": "TP", "idx": i, "time": candle["time"], "price": tp,
+                    "open": candle["open"], "high": candle["high"], "low": candle["low"], "close": candle["close"]}
     return {"touched": False}
 
+
+def tp_touch_info(rows: List[Dict[str, Any]], hook: Dict[str, Any]) -> Dict[str, Any]:
+    """Compatibility helper for chart status: only TP after a valid entry counts."""
+    result = trade_exit_touch_info(rows, hook)
+    if result.get("touched") and result.get("reason") == "TP":
+        return result
+    return {"touched": False}
 
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, timeout=30)
@@ -588,7 +663,7 @@ def save_trade(hook: Dict[str, Any], entry_override: Optional[float] = None) -> 
     conn = db_connect()
     try:
         now = utc_iso()
-        entry = float(entry_override if entry_override is not None else hook["final"]["price"])
+        entry = float(entry_override if entry_override is not None else hook.get("entry", hook["final"]["price"]))
         cur = conn.execute("""INSERT OR IGNORE INTO trades
             (hook_key,symbol,direction,entry,tp,sl,status,pnl_pct,opened_at,created_at,last_checked_at,last_price,duration_seconds)
             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -617,7 +692,7 @@ def trade_db_snapshot() -> Dict[str, Any]:
 
 
 def save_pending_trade(hook: Dict[str, Any], current_price: float) -> None:
-    entry, tp = float(hook["final"]["price"]), float(hook["tp"])
+    entry, tp = float(hook.get("entry", hook["final"]["price"])), float(hook["tp"])
     conn = db_connect()
     try:
         conn.execute("""INSERT INTO pending_trades
@@ -686,39 +761,36 @@ def load_hook_for_trade(hook_key: str, rows: List[Dict[str, Any]]) -> Optional[D
             return None
         return {"idx": nearest_candle_index(rows, dt), "time": dt, "price": price, "type": typ}
 
-    is_short = row["direction"] == "SHORT"
+    positive_shape = row["direction"] == "SHORT"
     nodes = {
-        "start": build_node("start_time", "start_price", "L" if is_short else "H"),
+        "start": build_node("start_time", "start_price", "L" if positive_shape else "H"),
         "h1": build_node("h1_time", "h1_price", "H"),
         "l1": build_node("l1_time", "l1_price", "L"),
         "h2": build_node("h2_time", "h2_price", "H"),
         "l2": build_node("l2_time", "l2_price", "L"),
-        "final": build_node("final_time", "final_price", "L" if is_short else "H"),
+        "final": build_node("final_time", "final_price", "H" if positive_shape else "L"),
     }
     if any(node is None for node in nodes.values()):
         print(f"HOOK_RELOAD_INVALID | hook_key={hook_key} | reason=missing timestamp or price")
         return None
+
+    start_price = float(nodes["start"]["price"])
+    final_price = float(nodes["final"]["price"])
+    entry = (final_price - NDS_RETRACE * (final_price - start_price)) if positive_shape else (final_price + NDS_RETRACE * (start_price - final_price))
     hook = {"symbol": row["symbol"], "direction": row["direction"],
-            "trade_direction": "LONG" if row["direction"] == "SHORT" else "SHORT",
-            "sl": float(row["start_price"]), **nodes,
-            "tp": float(row["tp"]), "range_pct": float(row["range_pct"] or 0),
+            "trade_direction": "LONG" if positive_shape else "SHORT", "sl": start_price,
+            "entry": float(entry), **nodes, "tp": float(row["tp"]),
+            "range_pct": float(row["range_pct"] or 0),
             "confirmed_time": parse_time(row["confirmed_time"]) or nodes["final"]["time"],
             "hook_key": row["hook_key"],
-            "node_indices": [nodes[n]["idx"] for n in ("start", "h1", "l1", "h2", "l2")]}
-    # Recreate the reversal marker from stored OHLC when the reversal candle is present.
-    final_idx = nodes["final"]["idx"]
-    if final_idx is not None:
-        reversal = find_closed_ha_reversal(rows, final_idx, hook["trade_direction"])
-        if reversal:
-            hook.update({"ha_reversal_time": reversal["time"], "ha_reversal_idx": reversal["idx"],
-                         "ha_reversal_from": reversal["from_color"], "ha_reversal_to": reversal["to_color"]})
+            "node_indices": [nodes[n]["idx"] for n in ("start", "h1", "l1", "h2", "l2", "final")]}
     return hook
 
-
 def hook_nodes_in_rows(hook: Dict[str, Any], rows: List[Dict[str, Any]]) -> bool:
-    return bool(rows) and all(nearest_candle_index(rows, parse_time(hook[k]["time"]) or hook[k]["time"]) is not None
-                              for k in ("start", "h1", "l1", "h2", "l2"))
-
+    return bool(rows) and all(
+        nearest_candle_index(rows, parse_time(hook[k]["time"]) or hook[k]["time"]) is not None
+        for k in ("start", "h1", "l1", "h2", "l2", "final")
+    )
 
 def monitor_open_trades(rows_by_symbol: Dict[str, List[Dict[str, Any]]], stats: Dict[str, int], live_prices: Dict[str, float]) -> None:
     conn = db_connect()
@@ -788,7 +860,7 @@ def activate_pending_trade(pending: sqlite3.Row, current_price: float) -> bool:
     if not favorable_side or deviation_pct > PENDING_MAX_ENTRY_DEVIATION_PCT or not target_still_profitable:
         return False
     # Reload the hook in memory for save_trade-compatible shape. Entry is the observed
-    # quote, not the stale historical node price. TP remains node three; SL remains START.
+    # quote only when the original 86.4% entry remains unviolated; TP is H3/L3, SL is START.
     conn = db_connect()
     try:
         row = conn.execute("SELECT * FROM hooks WHERE hook_key=? LIMIT 1", (pending["hook_key"],)).fetchone()
@@ -828,13 +900,36 @@ def update_pending_trades(rows_by_symbol: Dict[str, List[Dict[str, Any]]], stats
         if rows:
             rows_by_symbol[symbol] = rows
         hook = load_hook_for_trade(trade["hook_key"], rows) if rows else None
-        if hook and tp_touch_info(rows, hook)["touched"]:
-            delete_pending_trade(trade["hook_key"], "EXPIRED_TP")
-            stats["pending_expired"] += 1
-            continue
+        if hook and rows:
+            historical_exit = trade_exit_touch_info(rows, hook)
+            if historical_exit.get("touched"):
+                expired_status = "EXPIRED_" + str(historical_exit.get("reason", "EXIT"))
+                delete_pending_trade(trade["hook_key"], expired_status)
+                stats["pending_expired"] += 1
+                print(f"PENDING_EXPIRED | symbol={symbol} | reason={expired_status} | time={utc_iso(historical_exit.get('time')) if historical_exit.get('time') else 'unknown'}")
+                continue
         current = live_prices.get(symbol)
         if current is None:
             print(f"PENDING_PRICE_UNAVAILABLE | symbol={symbol} | stale price not substituted")
+            continue
+        direction = str(trade["direction"]).upper()
+        tp_level = float(trade["tp"])
+        sl_level = safe_float(trade["sl"])
+        live_exit = None
+        if direction == "LONG":
+            if sl_level is not None and current <= sl_level:
+                live_exit = "SL"
+            elif current >= tp_level:
+                live_exit = "TP"
+        else:
+            if sl_level is not None and current >= sl_level:
+                live_exit = "SL"
+            elif current <= tp_level:
+                live_exit = "TP"
+        if live_exit:
+            delete_pending_trade(trade["hook_key"], "EXPIRED_CURRENT_" + live_exit)
+            stats["pending_expired"] += 1
+            print(f"PENDING_EXPIRED | symbol={symbol} | reason=current price already at {live_exit} level | price={current}")
             continue
         conn2 = db_connect()
         try:
@@ -881,17 +976,17 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], re
     if not rows:
         print(f"CHART_BUILD_ERROR | symbol={symbol} | reason=no OHLC rows")
         return None
+
     if hook["direction"] == "SHORT":
-        nodes = [hook["start"], hook["h1"], hook["l1"], hook["h2"], hook["l2"]]
-        labels = ["START", "H1", "L1", "H2 (TP)", "L2 (ENTRY)"]
+        nodes = [hook["start"], hook["h1"], hook["l1"], hook["h2"], hook["l2"], hook["final"]]
+        labels = ["START (SL)", "H1", "L1", "H2", "L2", "H3 (TP)"]
     else:
-        nodes = [hook["start"], hook["l1"], hook["h1"], hook["l2"], hook["h2"]]
-        labels = ["START", "L1", "H1", "L2 (TP)", "H2 (ENTRY)"]
+        nodes = [hook["start"], hook["l1"], hook["h1"], hook["l2"], hook["h2"], hook["final"]]
+        labels = ["START (SL)", "L1", "H1", "L2", "H2", "L3 (TP)"]
 
     mapped_indices = [nearest_candle_index(rows, parse_time(n["time"]) or n["time"]) for n in nodes]
     valid_indices = [i for i in mapped_indices if i is not None]
     if include_latest:
-        # Include historical start node through the newest candle whenever the extended data exists.
         lo = max(0, min(valid_indices) - CHART_CONTEXT_BEFORE) if valid_indices else max(0, len(rows) - M5_CANDLES)
         hi = len(rows)
     elif valid_indices:
@@ -902,6 +997,7 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], re
     base = rows[lo:hi]
     if not base:
         return None
+
     ha = heikin_ashi(base)
     fig, ax = plt.subplots(figsize=(18, 10))
     for x, candle in enumerate(ha):
@@ -910,6 +1006,7 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], re
         bottom = min(candle["open"], candle["close"])
         height = max(abs(candle["close"] - candle["open"]), 1e-12)
         ax.add_patch(Rectangle((x - .34, bottom), .68, height, facecolor=color, edgecolor=color, linewidth=.5, alpha=.95, zorder=3))
+
     tick_count = min(12, len(base))
     if tick_count > 1:
         positions = sorted(set(round(i * (len(base) - 1) / (tick_count - 1)) for i in range(tick_count)))
@@ -917,7 +1014,7 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], re
         ax.set_xticklabels([base[i]["time"].strftime("%m-%d %H:%M") for i in positions], rotation=35, ha="right", fontsize=8)
     ax.set_xlabel("Candle time (UTC)")
     ax.set_ylabel("Price")
-    xmap = {c["time"]: i for i, c in enumerate(base)}
+
     xs, ys = [], []
     for node in nodes:
         dt = parse_time(node["time"]) or node["time"]
@@ -925,42 +1022,45 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], re
         if idx is not None:
             xs.append(idx)
             ys.append(float(node["price"]))
-    if len(xs) == 5:
-        ax.plot(xs, ys, linewidth=2, marker="o", color="#2463eb", zorder=5, label="NDS START + four numbered nodes")
+    if len(xs) == 6:
+        ax.plot(xs, ys, linewidth=2, marker="o", color="#2463eb", zorder=5, label="Complete NDS six-point hook")
     for node, label in zip(nodes, labels):
         dt = parse_time(node["time"]) or node["time"]
         x = nearest_candle_index(base, dt)
         if x is not None:
             ax.annotate(f"{label}\n{dt.strftime('%m-%d %H:%M')}", (x, float(node["price"])), xytext=(0, 9), textcoords="offset points",
                         ha="center", fontsize=7.5, fontweight="bold", bbox=dict(boxstyle="round,pad=.2", facecolor="white", edgecolor="#888", alpha=.88), zorder=7)
-    entry = float(hook.get("trade_entry", hook["final"]["price"]))
+
+    entry = float(hook.get("trade_entry", hook.get("entry", hook["final"]["price"])))
     tp = float(hook["tp"])
     sl = float(hook.get("sl", hook["start"]["price"]))
     tp_pct = abs(entry - tp) / abs(entry) * 100 if entry else 0
-    ax.axhline(entry, linestyle="--", linewidth=1.2, label=f"ENTRY {fmt_price(entry)}")
-    ax.axhline(tp, linestyle=":", linewidth=1.5, label=f"TP NODE 3 ({tp_pct:.2f}%) {fmt_price(tp)}")
-    ax.axhline(sl, linestyle="--", linewidth=1.2, color="#d9363e", label=f"SL START {fmt_price(sl)}")
+    sl_pct = abs(entry - sl) / abs(entry) * 100 if entry else 0
+    ax.axhline(entry, linestyle="--", linewidth=1.2, color="#d97706", label=f"ENTRY 86.4% {fmt_price(entry)}")
+    ax.axhline(tp, linestyle=":", linewidth=1.5, color="#15803d", label=f"TP H3/L3 ({tp_pct:.2f}%) {fmt_price(tp)}")
+    ax.axhline(sl, linestyle="--", linewidth=1.2, color="#d9363e", label=f"SL START ({sl_pct:.2f}%) {fmt_price(sl)}")
     if current is not None and current > 0:
-        ax.axhline(current, color="#ff8c00", linestyle="-.", linewidth=1.3, label=f"LATEST PRICE {fmt_price(current)}")
-    reversal_time = hook.get("ha_reversal_time")
-    if reversal_time is not None:
-        x = nearest_candle_index(base, parse_time(reversal_time) or reversal_time)
-        if x is not None:
-            ax.axvline(x, color="#8a2be2", linestyle="-.", linewidth=1.2, label="Closed HA reversal")
-            ax.annotate(f"HA REVERSAL\n{utc_iso(reversal_time)}", (x, base[x]["close"]), xytext=(8, -28), textcoords="offset points", fontsize=7.5, color="#6a1b9a",
-                        bbox=dict(boxstyle="round,pad=.2", facecolor="white", alpha=.9))
-    touch = tp_touch_info(rows, hook)
-    tp_status = f"TP NODE 3: {'TOUCHED | ' + utc_iso(touch['time']) if touch['touched'] else 'NOT TOUCHED'} | {fmt_price(tp)}"
-    if len(valid_indices) < 5:
-        tp_status += " | Some historical node candles unavailable in fetched history"
+        ax.axhline(current, color="#ff8c00", linestyle="-.", linewidth=1.3, label=f"LIVE PRICE {fmt_price(current)}")
+
+    entry_touch = entry_touch_info(rows, hook)
+    exit_touch = trade_exit_touch_info(rows, hook, entry_touch) if entry_touch.get("touched") else {"touched": False}
+    if entry_touch.get("touched"):
+        completion_status = f"86.4% ENTRY: TOUCHED | {utc_iso(entry_touch['time'])}"
+    elif entry_touch.get("invalid"):
+        completion_status = f"HOOK INVALID BEFORE ENTRY: {entry_touch.get('reason', 'exit level touched')}"
+    else:
+        completion_status = "86.4% ENTRY: NOT TOUCHED"
+    if exit_touch.get("touched"):
+        completion_status += f" | EXIT {exit_touch.get('reason')} touched {utc_iso(exit_touch['time'])}"
+
     chart_mode = "OPEN TRADE UPDATE" if include_latest else "HOOK / SIGNAL"
     trade_direction = hook.get("trade_direction", "LONG" if hook["direction"] == "SHORT" else "SHORT")
-    ax.set_title(f"NDS M5 | {symbol} | TRADE {trade_direction} | {chart_mode} | TP NODE 3 / SL START | PAPER ONLY")
+    ax.set_title(f"NDS M5 | {symbol} | TRADE {trade_direction} | {chart_mode} | ENTRY 86.4% / TP H3-L3 / SL START | PAPER ONLY")
     ax.legend(loc="best")
     ax.grid(alpha=.20)
     ax.margins(x=.025)
-    fig.text(.5, .035, tp_status, ha="center", va="bottom", fontsize=10, fontweight="bold", wrap=True)
-    fig.text(.5, .012, f"DECISION / REASON: {reason or 'ACCEPTED: Candidate'}", ha="center", va="bottom", fontsize=9, fontweight="bold", wrap=True)
+    fig.text(.5, .035, completion_status, ha="center", va="bottom", fontsize=9, fontweight="bold", wrap=True)
+    fig.text(.5, .012, f"DECISION / REASON: {reason or 'WAITING / REVIEW'}", ha="center", va="bottom", fontsize=9, fontweight="bold", wrap=True)
     fig.tight_layout(rect=(0, .075, 1, 1))
     Path(CHART_DIR).mkdir(parents=True, exist_ok=True)
     out = path or str(Path(CHART_DIR) / f"{symbol}_{hook['direction']}_{ts_key(hook['final']['time'])}.png")
@@ -972,7 +1072,6 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], re
         return None
     plt.close(fig)
     return out
-
 
 def telegram_ready() -> bool:
     return bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)
@@ -1019,18 +1118,21 @@ def tg_send_photo(path: str, caption: str) -> bool:
 
 
 def send_new_signal(hook: Dict[str, Any], rows: List[Dict[str, Any]], current: Optional[float], reason: str = "NEW SIGNAL - ACCEPTED") -> bool:
-    entry, tp = float(hook["final"]["price"]), float(hook["tp"])
+    entry, tp = float(hook.get("entry", hook["final"]["price"])), float(hook["tp"])
     sl = float(hook.get("sl", hook["start"]["price"]))
     trade_direction = hook.get("trade_direction", "LONG" if hook["direction"] == "SHORT" else "SHORT")
     tp_pct = abs(entry - tp) / abs(entry) * 100 if entry else 0
-    text = (f"{'🟢 LONG' if trade_direction == 'LONG' else '🔴 SHORT'} NEW SIGNAL\n"
-            f"Symbol: {hook['symbol']}\nEntry (NODE 4): {fmt_price(entry)}\nTP (NODE 3): {fmt_price(tp)} ({tp_pct:.2f}%)\nSL (START): {fmt_price(sl)}\n"
+    sl_pct = abs(entry - sl) / abs(entry) * 100 if entry else 0
+    completed = hook.get("completion_time")
+    text = (f"{'🟢 LONG' if trade_direction == 'LONG' else '🔴 SHORT'} NEW COMPLETE NDS HOOK\n"
+            f"Symbol: {hook['symbol']}\nEntry (86.4%): {fmt_price(entry)}\nTP (H3/L3): {fmt_price(tp)} ({tp_pct:.2f}%)\n"
+            f"SL (START): {fmt_price(sl)} ({sl_pct:.2f}%)\n"
             f"{live_price_label(hook['symbol']) if current is not None else 'Live market price unavailable'}: {fmt_price(current)}\n"
-            f"Range: {hook['range_pct']:.2f}%\nHA Reversal: {utc_iso(hook['ha_reversal_time'])}\n"
-            f"Signal Confirmed: {utc_iso(hook['confirmed_time'])}\nPAPER ONLY")
+            f"Hook range: {hook['range_pct']:.2f}%\n"
+            f"86.4% touched: {utc_iso(completed) if completed else 'confirmed by closed M5 candle'}\n"
+            f"PAPER ONLY - NO REAL ORDERS")
     path = make_chart(hook["symbol"], rows, hook, reason, current=current)
     return tg_send_photo(path, text + f"\nReason: {reason}") if path else False
-
 
 def send_open_update(live_prices: Dict[str, float]) -> bool:
     conn = db_connect()
@@ -1122,7 +1224,7 @@ def send_open_trade_charts(rows_by_symbol: Dict[str, List[Dict[str, Any]]], live
                 print(f"OPEN_TRADE_CHART_ERROR | {symbol} | chart generation returned no path")
                 continue
             caption = (f"📊 OPEN TRADE CHART UPDATE\n{'🟢 LONG' if trade['direction']=='LONG' else '🔴 SHORT'} | {symbol}\n"
-                       f"Entry: {fmt_price(entry)}\nTP NODE 3: {fmt_price(tp)}\nSL START: {fmt_price(float(trade['sl'])) if trade['sl'] is not None else 'N/A'}\n{price_line}: {fmt_price(current)}\n"
+                       f"Entry (86.4%): {fmt_price(entry)}\nTP H3/L3: {fmt_price(tp)}\nSL START: {fmt_price(float(trade['sl'])) if trade['sl'] is not None else 'N/A'}\n{price_line}: {fmt_price(current)}\n"
                        f"PnL: {pnl:+.2f}%\nDuration: {duration} min\nChart updated: {utc_iso()}\nPAPER ONLY")
             if tg_send_photo(path, caption):
                 stats["open_charts_sent"] += 1
@@ -1192,25 +1294,49 @@ def main() -> None:
             is_new = save_hook(hook)
             if is_new:
                 stats["new_hooks"] += 1
-            report = {"hook": hook, "rows": rows, "new": is_new, "reason": ""}
+            report = {"hook": hook, "rows": rows, "new": is_new, "reason": "", "complete": False}
             if age_seconds(hook["confirmed_time"]) > M5_MAX_HOOK_AGE_SECONDS:
-                report["reason"] = f"REJECTED: Hook older than {M5_MAX_HOOK_AGE_SECONDS // 3600}h"
+                report["reason"] = f"REJECTED: Final node older than {M5_MAX_HOOK_AGE_SECONDS // 3600}h"
             elif hook["range_pct"] < M5_MIN_HOOK_RANGE_PCT:
-                report["reason"] = f"REJECTED: Range {hook['range_pct']:.2f}% < minimum {M5_MIN_HOOK_RANGE_PCT:.2f}%"
+                report["reason"] = f"REJECTED: Hook range {hook['range_pct']:.2f}% < minimum {M5_MIN_HOOK_RANGE_PCT:.2f}%"
             else:
-                touch = tp_touch_info(rows, hook)
-                if touch["touched"]:
-                    report["reason"] = f"REJECTED: TP node 3 already touched | TP {fmt_price(hook['tp'])} | {utc_iso(touch['time'])}"
+                entry_touch = entry_touch_info(rows, hook)
+                if entry_touch.get("invalid"):
+                    report["reason"] = f"REJECTED: {entry_touch.get('reason', 'invalid before entry')}"
+                elif not entry_touch.get("touched"):
+                    report["reason"] = "WAITING: 86.4% retracement level not touched"
                 else:
-                    report["reason"] = "ACCEPTED: Candidate"
-                    candidates.append((hook, rows, report))
+                    report["complete"] = True
+                    hook["completion_time"] = entry_touch.get("completed_time")
+                    hook["entry_touch_idx"] = entry_touch["idx"]
+                    past_exit = trade_exit_touch_info(rows, hook, entry_touch)
+                    if past_exit.get("touched"):
+                        report["reason"] = f"REJECTED: {past_exit.get('reason')} already touched after entry | {utc_iso(past_exit['time'])}"
+                    else:
+                        current_price = live.get(hook["symbol"].upper())
+                        live_exit = None
+                        if current_price is not None:
+                            td = hook["trade_direction"]
+                            if td == "LONG" and current_price <= hook["sl"]:
+                                live_exit = "SL"
+                            elif td == "LONG" and current_price >= hook["tp"]:
+                                live_exit = "TP"
+                            elif td == "SHORT" and current_price >= hook["sl"]:
+                                live_exit = "SL"
+                            elif td == "SHORT" and current_price <= hook["tp"]:
+                                live_exit = "TP"
+                        if live_exit:
+                            report["reason"] = f"REJECTED: Current price already at {live_exit} level"
+                        else:
+                            report["reason"] = "ACCEPTED: COMPLETE 86.4% HOOK"
+                            candidates.append((hook, rows, report))
             hook_reports.append(report)
         time.sleep(SCAN_SLEEP_SECONDS)
 
     # Refresh all scanned and managed symbols, not just the 200 selected scan assets.
     live = get_live_prices(ticker_symbols)
     refresh_live_trade_prices(live)
-    candidates.sort(key=lambda item: item[0]["confirmed_time"])
+    candidates.sort(key=lambda item: item[0].get("completion_time") or item[0]["confirmed_time"])
     stats["candidates"] = len(candidates)
     for hook, rows, report in candidates:
         if trade_exists(hook["hook_key"]):
@@ -1240,16 +1366,16 @@ def main() -> None:
     # Send generic hook notifications only when that same hook wasn't already sent as a new signal.
     if telegram_ready():
         for report in hook_reports:
-            if not report["new"] or report["reason"].startswith("ACCEPTED: NEW SIGNAL"):
+            if not report["new"] or not report.get("complete") or report["reason"].startswith("ACCEPTED: NEW SIGNAL"):
                 continue
             hook, rows = report["hook"], report["rows"]
             try:
                 path = make_chart(hook["symbol"], rows, hook, report["reason"], current=live.get(hook["symbol"].upper()))
                 if path:
                     trade_direction = hook.get("trade_direction", "LONG" if hook["direction"] == "SHORT" else "SHORT")
-                    caption = (f"NDS M5 SETUP | {hook['symbol']} | {trade_direction}\nEntry (NODE 4): {fmt_price(hook['final']['price'])}\n"
-                               f"TP (NODE 3): {fmt_price(hook['tp'])}\nSL (START): {fmt_price(hook.get('sl', hook['start']['price']))}\nRange: {hook['range_pct']:.2f}%\n"
-                               f"HA Reversal: {utc_iso(hook['ha_reversal_time'])}\nSignal Confirmed: {utc_iso(hook['confirmed_time'])}\n"
+                    caption = (f"NDS M5 HOOK | {hook['symbol']} | {trade_direction}\nEntry (86.4%): {fmt_price(hook.get('entry', hook['final']['price']))}\n"
+                               f"TP (H3/L3): {fmt_price(hook['tp'])}\nSL (START): {fmt_price(hook.get('sl', hook['start']['price']))}\nRange: {hook['range_pct']:.2f}%\n"
+                               f"Final node confirmed: {utc_iso(hook['confirmed_time'])}\n"
                                f"Reason: {report['reason']}\nPAPER ONLY")
                     if tg_send_photo(path, caption):
                         stats["hook_charts_sent"] += 1
@@ -1268,8 +1394,8 @@ def main() -> None:
     send_open_trade_charts(rows_by_symbol, live_final, stats)
     diagnostics = (
         f"🔎 NDS M5 DIAGNOSTIC\nVersion: {VERSION}\nTime: {utc_iso()}\n\n━━━ ASSETS ━━━\nScanned: {len(symbols)}\nPrice symbols incl. managed trades: {len(ticker_symbols)}\n\n"
-        f"━━━ M5 ━━━\nMin node spacing: {MIN_NODE_CANDLES} candles\nEntry gate: node four + CLOSED Heikin-Ashi reversal strictly AFTER node four\n"
-        f"LONG trade: RED->GREEN | SHORT trade: GREEN->RED | TP=node three | SL=START\nPrice: sane bid/ask midpoint (spread <= {MAX_BID_ASK_SPREAD_PCT:.2f}%); mark fallback; last trade only if <= {MAX_LAST_TRADE_AGE_SECONDS}s\n"
+        f"━━━ M5 ━━━\nMin node spacing: {MIN_NODE_CANDLES} candles\nEntry gate: complete six-node hook, then closed M5 candle touches 86.4% retracement\n"
+        f"Positive hook -> LONG | Negative hook -> SHORT | TP=H3/L3 | SL=START\nPrice: sane bid/ask midpoint (spread <= {MAX_BID_ASK_SPREAD_PCT:.2f}%); mark fallback; last trade only if <= {MAX_LAST_TRADE_AGE_SECONDS}s\n"
         f"Hooks: {stats['hooks']}\nNew hooks: {stats['new_hooks']}\nHook charts/signals sent: {stats['hook_charts_sent']}\n"
         f"Open-trade charts sent: {stats['open_charts_sent']}\nOpen-trade chart errors: {stats['open_chart_errors']}\nChart errors: {stats['hook_chart_errors']}\n"
         f"Candidates: {stats['candidates']}\nSignals created this scan: {stats['signals']}\nPending: {stats['pending']}\nPending checked: {stats['pending_checked']}\n"
@@ -1278,7 +1404,7 @@ def main() -> None:
         f"━━━ PERFORMANCE (SUM OF TRADE PERCENTAGES, NOT ACCOUNT RETURN) ━━━\nClosed trades: {perf['closed']} | Wins: {perf['wins']} | Win rate: {perf['win_rate']:.2f}%\n"
         f"Realized PnL: {perf['realized_pnl']:+.2f}%\nFloating PnL: {perf['floating_pnl']:+.2f}%\nCombined PnL: {perf['combined_pnl']:+.2f}%\n"
         f"Gross realized profit: {perf['gross_profit']:+.2f}%\nGross realized loss: {perf['gross_loss']:+.2f}%\n\n"
-        f"TP=node three | SL=START | PAPER ONLY")
+        f"Entry=86.4% retracement | TP=H3/L3 | SL=START | PAPER ONLY")
     print(diagnostics)
     if telegram_ready():
         tg_send_message(diagnostics)
