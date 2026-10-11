@@ -35,7 +35,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-VERSION = "5.9.7"
+VERSION = "5.9.8"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -74,6 +74,26 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT")
 SESSION = requests.Session()
 SESSION.headers.update({"User-Agent": f"NDS-M5-Scanner/{VERSION}"})
 LIVE_PRICE_SOURCES: Dict[str, str] = {}
+
+# Per-run hook detection counters, included in Telegram diagnostics.
+DETECT_DIAG: Dict[str, int] = {}
+
+def reset_detect_diag() -> None:
+    DETECT_DIAG.clear()
+    for key in (
+        "assets_fetch_ok", "assets_fetch_empty", "assets_fetch_error", "candles_total",
+        "assets_with_1500", "assets_short_data", "pivots_total", "six_node_windows",
+        "spacing_rejected", "pattern_rejected", "geometry_rejected", "hooks_structural",
+        "hooks_new", "hooks_old", "hooks_small_range", "hooks_invalid_before_entry",
+        "hooks_waiting_entry", "hooks_entry_touched", "hooks_exit_already_touched",
+        "hooks_live_exit_blocked", "hooks_trade_duplicate", "hooks_accepted",
+    ):
+        DETECT_DIAG[key] = 0
+
+def dinc(key: str, amount: int = 1) -> None:
+    DETECT_DIAG[key] = DETECT_DIAG.get(key, 0) + amount
+
+reset_detect_diag()
 
 
 def utc_now() -> datetime:
@@ -433,7 +453,10 @@ def build_hook(symbol: str, rows: List[Dict[str, Any]], nodes: List[Dict[str, An
     It becomes a trade setup only when price later retraces 86.4% of the
     START-to-final move. TP is the final point; SL is START.
     """
-    if len(nodes) != 6 or not node_spacing_ok(nodes):
+    if len(nodes) != 6:
+        return None
+    if not node_spacing_ok(nodes):
+        dinc("spacing_rejected")
         return None
 
     types = "".join(n["type"] for n in nodes)
@@ -441,8 +464,10 @@ def build_hook(symbol: str, rows: List[Dict[str, Any]], nodes: List[Dict[str, An
     if types == "LHLHLH":
         start, h1, l1, h2, l2, final = nodes
         if not all(start["price"] < n["price"] for n in nodes[1:]):
+            dinc("geometry_rejected")
             return None
         if not (h2["price"] > h1["price"] and l2["price"] < l1["price"] and final["price"] > h2["price"]):
+            dinc("geometry_rejected")
             return None
         structure_direction = "SHORT"  # positive-shaped hook; trade direction is LONG
         trade_direction = "LONG"
@@ -451,29 +476,36 @@ def build_hook(symbol: str, rows: List[Dict[str, Any]], nodes: List[Dict[str, An
     elif types == "HLHLHL":
         start, l1, h1, l2, h2, final = nodes
         if not all(start["price"] > n["price"] for n in nodes[1:]):
+            dinc("geometry_rejected")
             return None
         if not (l2["price"] < l1["price"] and h2["price"] > h1["price"] and final["price"] < l2["price"]):
+            dinc("geometry_rejected")
             return None
         structure_direction = "LONG"  # negative-shaped hook; trade direction is SHORT
         trade_direction = "SHORT"
         entry = final["price"] + NDS_RETRACE * (start["price"] - final["price"])
 
     else:
+        dinc("pattern_rejected")
         return None
 
     start_price, final_price = float(start["price"]), float(final["price"])
     entry_price = float(entry)
     if min(start_price, final_price, entry_price) <= 0 or start_price == final_price:
+        dinc("geometry_rejected")
         return None
 
     tp, sl = final_price, start_price
     if trade_direction == "LONG" and not (sl < entry_price < tp):
+        dinc("geometry_rejected")
         return None
     if trade_direction == "SHORT" and not (tp < entry_price < sl):
+        dinc("geometry_rejected")
         return None
 
     final_confirm_idx = final["idx"] + PIVOT_RIGHT
     if final_confirm_idx >= len(rows) or not candle_is_closed(rows[final_confirm_idx]):
+        dinc("geometry_rejected")
         return None
     confirmed_time = rows[final_confirm_idx]["time"] + timedelta(minutes=M5_INTERVAL_MINUTES)
 
@@ -498,16 +530,18 @@ def build_hook(symbol: str, rows: List[Dict[str, Any]], nodes: List[Dict[str, An
 
 def detect_hooks(symbol: str, rows: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
     pivots = build_ordered_pivots(rows)
+    dinc("pivots_total", len(pivots))
     hooks: List[Dict[str, Any]] = []
     seen = set()
-    for i in range(max(0, len(pivots) - 5)):
+    window_count = max(0, len(pivots) - 5)
+    dinc("six_node_windows", window_count)
+    for i in range(window_count):
         nodes = pivots[i:i + 6]
-        if len(nodes) != 6:
-            continue
         hook = build_hook(symbol, rows, nodes)
         if hook and hook["hook_key"] not in seen:
             seen.add(hook["hook_key"])
             hooks.append(hook)
+            dinc("hooks_structural")
     return hooks, len(pivots)
 
 def trade_pnl_pct(direction: str, entry: float, current: float) -> float:
@@ -1268,6 +1302,7 @@ def main() -> None:
     Path(CHART_DIR).mkdir(parents=True, exist_ok=True)
     before = trade_db_snapshot()
     print(f"DB_BEFORE_SCAN | total={before['total']} | open={before['open']} | tp={before['tp']} | statuses={before['statuses']} | bytes={before['db_bytes']} | path={before['db_path']}")
+    reset_detect_diag()
     stats = {"hooks": 0, "new_hooks": 0, "candidates": 0, "signals": 0, "pending": 0,
              "pending_checked": 0, "pending_expired": 0, "pending_activated": 0, "tp_closed": 0,
              "hook_chart_errors": 0, "hook_charts_sent": 0, "open_charts_sent": 0, "open_chart_errors": 0}
@@ -1286,7 +1321,15 @@ def main() -> None:
     for symbol in symbols:
         rows = fetch_ohlc(symbol, M5_CANDLES)
         if not rows:
+            dinc("assets_fetch_empty")
+            print(f"SCAN_DATA_EMPTY | symbol={symbol} | candles=0")
             continue
+        dinc("assets_fetch_ok")
+        dinc("candles_total", len(rows))
+        if len(rows) >= M5_CANDLES - 10:
+            dinc("assets_with_1500")
+        else:
+            dinc("assets_short_data")
         rows_by_symbol[symbol] = rows
         hooks, pivot_count = detect_hooks(symbol, rows)
         stats["hooks"] += len(hooks)
@@ -1296,21 +1339,27 @@ def main() -> None:
                 stats["new_hooks"] += 1
             report = {"hook": hook, "rows": rows, "new": is_new, "reason": "", "complete": False}
             if age_seconds(hook["confirmed_time"]) > M5_MAX_HOOK_AGE_SECONDS:
+                dinc("hooks_old")
                 report["reason"] = f"REJECTED: Final node older than {M5_MAX_HOOK_AGE_SECONDS // 3600}h"
             elif hook["range_pct"] < M5_MIN_HOOK_RANGE_PCT:
+                dinc("hooks_small_range")
                 report["reason"] = f"REJECTED: Hook range {hook['range_pct']:.2f}% < minimum {M5_MIN_HOOK_RANGE_PCT:.2f}%"
             else:
                 entry_touch = entry_touch_info(rows, hook)
                 if entry_touch.get("invalid"):
+                    dinc("hooks_invalid_before_entry")
                     report["reason"] = f"REJECTED: {entry_touch.get('reason', 'invalid before entry')}"
                 elif not entry_touch.get("touched"):
+                    dinc("hooks_waiting_entry")
                     report["reason"] = "WAITING: 86.4% retracement level not touched"
                 else:
+                    dinc("hooks_entry_touched")
                     report["complete"] = True
                     hook["completion_time"] = entry_touch.get("completed_time")
                     hook["entry_touch_idx"] = entry_touch["idx"]
                     past_exit = trade_exit_touch_info(rows, hook, entry_touch)
                     if past_exit.get("touched"):
+                        dinc("hooks_exit_already_touched")
                         report["reason"] = f"REJECTED: {past_exit.get('reason')} already touched after entry | {utc_iso(past_exit['time'])}"
                     else:
                         current_price = live.get(hook["symbol"].upper())
@@ -1326,8 +1375,10 @@ def main() -> None:
                             elif td == "SHORT" and current_price <= hook["tp"]:
                                 live_exit = "TP"
                         if live_exit:
+                            dinc("hooks_live_exit_blocked")
                             report["reason"] = f"REJECTED: Current price already at {live_exit} level"
                         else:
+                            dinc("hooks_accepted")
                             report["reason"] = "ACCEPTED: COMPLETE 86.4% HOOK"
                             candidates.append((hook, rows, report))
             hook_reports.append(report)
@@ -1340,6 +1391,7 @@ def main() -> None:
     stats["candidates"] = len(candidates)
     for hook, rows, report in candidates:
         if trade_exists(hook["hook_key"]):
+            dinc("hooks_trade_duplicate")
             report["reason"] = "REJECTED: Trade already exists for this Hook"
             continue
         current = live.get(hook["symbol"].upper())
@@ -1396,6 +1448,14 @@ def main() -> None:
         f"🔎 NDS M5 DIAGNOSTIC\nVersion: {VERSION}\nTime: {utc_iso()}\n\n━━━ ASSETS ━━━\nScanned: {len(symbols)}\nPrice symbols incl. managed trades: {len(ticker_symbols)}\n\n"
         f"━━━ M5 ━━━\nMin node spacing: {MIN_NODE_CANDLES} candles\nEntry gate: complete six-node hook, then closed M5 candle touches 86.4% retracement\n"
         f"Positive hook -> LONG | Negative hook -> SHORT | TP=H3/L3 | SL=START\nPrice: sane bid/ask midpoint (spread <= {MAX_BID_ASK_SPREAD_PCT:.2f}%); mark fallback; last trade only if <= {MAX_LAST_TRADE_AGE_SECONDS}s\n"
+        f"Assets with candle data: {DETECT_DIAG.get('assets_fetch_ok', 0)} | Empty/error data: {DETECT_DIAG.get('assets_fetch_empty', 0) + DETECT_DIAG.get('assets_fetch_error', 0)}\n"
+        f"Candles received total: {DETECT_DIAG.get('candles_total', 0)} | Full data (~1500): {DETECT_DIAG.get('assets_with_1500', 0)} | Short data: {DETECT_DIAG.get('assets_short_data', 0)}\n"
+        f"Pivots total: {DETECT_DIAG.get('pivots_total', 0)} | Six-node windows: {DETECT_DIAG.get('six_node_windows', 0)}\n"
+        f"Rejected: spacing={DETECT_DIAG.get('spacing_rejected', 0)} | pattern={DETECT_DIAG.get('pattern_rejected', 0)} | geometry={DETECT_DIAG.get('geometry_rejected', 0)}\n"
+        f"Structurally valid hooks: {DETECT_DIAG.get('hooks_structural', 0)} | New hooks: {stats['new_hooks']} | Old >6h: {DETECT_DIAG.get('hooks_old', 0)} | Range <{M5_MIN_HOOK_RANGE_PCT:.2f}%: {DETECT_DIAG.get('hooks_small_range', 0)}\n"
+        f"Waiting for 86.4%: {DETECT_DIAG.get('hooks_waiting_entry', 0)} | Invalid before entry (START/TP touched): {DETECT_DIAG.get('hooks_invalid_before_entry', 0)}\n"
+        f"Entry touched: {DETECT_DIAG.get('hooks_entry_touched', 0)} | TP/SL touched after entry: {DETECT_DIAG.get('hooks_exit_already_touched', 0)} | Current price at TP/SL: {DETECT_DIAG.get('hooks_live_exit_blocked', 0)}\n"
+        f"Accepted complete hooks: {DETECT_DIAG.get('hooks_accepted', 0)} | Existing trade duplicate: {DETECT_DIAG.get('hooks_trade_duplicate', 0)}\n"
         f"Hooks: {stats['hooks']}\nNew hooks: {stats['new_hooks']}\nHook charts/signals sent: {stats['hook_charts_sent']}\n"
         f"Open-trade charts sent: {stats['open_charts_sent']}\nOpen-trade chart errors: {stats['open_chart_errors']}\nChart errors: {stats['hook_chart_errors']}\n"
         f"Candidates: {stats['candidates']}\nSignals created this scan: {stats['signals']}\nPending: {stats['pending']}\nPending checked: {stats['pending_checked']}\n"
