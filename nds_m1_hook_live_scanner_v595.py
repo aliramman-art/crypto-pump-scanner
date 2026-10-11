@@ -1,8 +1,8 @@
 # ============================================================
-# NDS M5 LIVE SCANNER - VERSION 5.9.7
+# NDS M5 LIVE SCANNER - VERSION 5.9.9
 # PAPER TRADING ONLY - NO REAL ORDERS
 # File name intentionally unchanged; no workflow changes required.
-# Strategy in 5.9.7:
+# Strategy maintained in 5.9.9:
 #   Positive: START(L)->H1->L1->H2->L2->H3; after 86.4% retrace LONG.
 #   Negative: START(H)->L1->H1->L2->H2->L3; after 86.4% retrace SHORT.
 #   TP = H3/L3 (final node); SL = START. 86.4% is the entry trigger.
@@ -35,7 +35,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-VERSION = "5.9.8"
+VERSION = "5.9.9"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -50,7 +50,7 @@ PIVOT_RIGHT = 2
 MIN_NODE_CANDLES = 5
 NDS_RETRACE = 0.864
 M5_MIN_HOOK_RANGE_PCT = 0.20
-M5_MAX_HOOK_AGE_SECONDS = 6 * 60 * 60
+M5_MAX_HOOK_AGE_SECONDS = 12 * 60 * 60  # Allow structurally valid hooks up to 12 hours old.
 MAX_OPEN_TRADES = 3
 # Pending setups only activate on the favorable side of entry and within this
 # distance from the intended node price. This prevents replaying stale entries.
@@ -84,7 +84,8 @@ def reset_detect_diag() -> None:
         "assets_fetch_ok", "assets_fetch_empty", "assets_fetch_error", "candles_total",
         "assets_with_1500", "assets_short_data", "pivots_total", "six_node_windows",
         "spacing_rejected", "pattern_rejected", "geometry_rejected", "hooks_structural",
-        "hooks_new", "hooks_old", "hooks_small_range", "hooks_invalid_before_entry",
+        "hooks_new", "hooks_old", "hooks_age_under_6h", "hooks_age_6_to_12h",
+        "hooks_age_over_12h", "hooks_small_range", "hooks_invalid_before_entry",
         "hooks_waiting_entry", "hooks_entry_touched", "hooks_exit_already_touched",
         "hooks_live_exit_blocked", "hooks_trade_duplicate", "hooks_accepted",
     ):
@@ -1334,11 +1335,23 @@ def main() -> None:
         hooks, pivot_count = detect_hooks(symbol, rows)
         stats["hooks"] += len(hooks)
         for hook in hooks:
+            # Age buckets describe when each structurally valid hook's final node
+            # was confirmed. This is deliberately separate from DB novelty: a
+            # hook can be newly detected in this scan but already exist in SQLite.
+            hook_age = age_seconds(hook["confirmed_time"])
+            six_hours = 6 * 60 * 60
+            if hook_age <= six_hours:
+                dinc("hooks_age_under_6h")
+            elif hook_age <= M5_MAX_HOOK_AGE_SECONDS:
+                dinc("hooks_age_6_to_12h")
+            else:
+                dinc("hooks_age_over_12h")
+
             is_new = save_hook(hook)
             if is_new:
                 stats["new_hooks"] += 1
             report = {"hook": hook, "rows": rows, "new": is_new, "reason": "", "complete": False}
-            if age_seconds(hook["confirmed_time"]) > M5_MAX_HOOK_AGE_SECONDS:
+            if hook_age > M5_MAX_HOOK_AGE_SECONDS:
                 dinc("hooks_old")
                 report["reason"] = f"REJECTED: Final node older than {M5_MAX_HOOK_AGE_SECONDS // 3600}h"
             elif hook["range_pct"] < M5_MIN_HOOK_RANGE_PCT:
@@ -1452,11 +1465,12 @@ def main() -> None:
         f"Candles received total: {DETECT_DIAG.get('candles_total', 0)} | Full data (~1500): {DETECT_DIAG.get('assets_with_1500', 0)} | Short data: {DETECT_DIAG.get('assets_short_data', 0)}\n"
         f"Pivots total: {DETECT_DIAG.get('pivots_total', 0)} | Six-node windows: {DETECT_DIAG.get('six_node_windows', 0)}\n"
         f"Rejected: spacing={DETECT_DIAG.get('spacing_rejected', 0)} | pattern={DETECT_DIAG.get('pattern_rejected', 0)} | geometry={DETECT_DIAG.get('geometry_rejected', 0)}\n"
-        f"Structurally valid hooks: {DETECT_DIAG.get('hooks_structural', 0)} | New hooks: {stats['new_hooks']} | Old >6h: {DETECT_DIAG.get('hooks_old', 0)} | Range <{M5_MIN_HOOK_RANGE_PCT:.2f}%: {DETECT_DIAG.get('hooks_small_range', 0)}\n"
+        f"Structurally valid hooks: {DETECT_DIAG.get('hooks_structural', 0)} | Age <=6h: {DETECT_DIAG.get('hooks_age_under_6h', 0)} | Age >6-12h: {DETECT_DIAG.get('hooks_age_6_to_12h', 0)} | Age >12h: {DETECT_DIAG.get('hooks_age_over_12h', 0)}\n"
+        f"Range <{M5_MIN_HOOK_RANGE_PCT:.2f}%: {DETECT_DIAG.get('hooks_small_range', 0)} | New DB hook records: {stats['new_hooks']}\n"
         f"Waiting for 86.4%: {DETECT_DIAG.get('hooks_waiting_entry', 0)} | Invalid before entry (START/TP touched): {DETECT_DIAG.get('hooks_invalid_before_entry', 0)}\n"
         f"Entry touched: {DETECT_DIAG.get('hooks_entry_touched', 0)} | TP/SL touched after entry: {DETECT_DIAG.get('hooks_exit_already_touched', 0)} | Current price at TP/SL: {DETECT_DIAG.get('hooks_live_exit_blocked', 0)}\n"
         f"Accepted complete hooks: {DETECT_DIAG.get('hooks_accepted', 0)} | Existing trade duplicate: {DETECT_DIAG.get('hooks_trade_duplicate', 0)}\n"
-        f"Hooks: {stats['hooks']}\nNew hooks: {stats['new_hooks']}\nHook charts/signals sent: {stats['hook_charts_sent']}\n"
+        f"Structurally detected hooks: {stats['hooks']}\nNew hook DB records inserted this scan: {stats['new_hooks']}\nHook charts/signals sent: {stats['hook_charts_sent']}\n"
         f"Open-trade charts sent: {stats['open_charts_sent']}\nOpen-trade chart errors: {stats['open_chart_errors']}\nChart errors: {stats['hook_chart_errors']}\n"
         f"Candidates: {stats['candidates']}\nSignals created this scan: {stats['signals']}\nPending: {stats['pending']}\nPending checked: {stats['pending_checked']}\n"
         f"Pending activated: {stats['pending_activated']}\nPending expired: {stats['pending_expired']}\nTP closed this scan: {stats['tp_closed']}\n\n"
