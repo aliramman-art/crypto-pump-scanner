@@ -1,5 +1,5 @@
 # ============================================================
-# NDS M1 LIVE SCANNER - VERSION 5.9.6 FIXED
+# NDS M5 LIVE SCANNER - VERSION 5.9.6 FIXED
 # PAPER TRADING ONLY - NO REAL ORDERS
 # File name intentionally unchanged; no workflow changes required.
 # Fixes in 5.9.6:
@@ -38,17 +38,17 @@ REAL_TRADING = False
 PAPER_ONLY = True
 
 TARGET_ASSETS = 200
-M1_INTERVAL = "1m"
-M1_INTERVAL_MINUTES = 1
-M1_CANDLES = 1500
+M5_INTERVAL = "5m"
+M5_INTERVAL_MINUTES = 5
+M5_CANDLES = 1500
 # Used only for open trades whose historical nodes are outside the normal window.
 OPEN_TRADE_CHART_CANDLES = 4320  # 72 hours
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
-MIN_NODE_CANDLES = 10
+MIN_NODE_CANDLES = 5
 NDS_RETRACE = 0.864
-M1_MIN_HOOK_RANGE_PCT = 0.20
-M1_MAX_HOOK_AGE_SECONDS = 6 * 60 * 60
+M5_MIN_HOOK_RANGE_PCT = 0.20
+M5_MAX_HOOK_AGE_SECONDS = 6 * 60 * 60
 MAX_OPEN_TRADES = 3
 # Pending setups only activate on the favorable side of entry and within this
 # distance from the intended node price. This prevents replaying stale entries.
@@ -70,7 +70,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKE
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT")
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": f"NDS-M1-Scanner/{VERSION}"})
+SESSION.headers.update({"User-Agent": f"NDS-M5-Scanner/{VERSION}"})
 LIVE_PRICE_SOURCES: Dict[str, str] = {}
 
 
@@ -304,14 +304,14 @@ def normalize_candle(item: Any) -> Optional[Dict[str, Any]]:
     return {"time": dt, "open": o, "high": h, "low": low, "close": c}
 
 
-def fetch_ohlc(symbol: str, candles: int = M1_CANDLES, start_time: Optional[datetime] = None) -> List[Dict[str, Any]]:
-    """Fetch paginated M1 data; optional start_time is used for old open trades."""
+def fetch_ohlc(symbol: str, candles: int = M5_CANDLES, start_time: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Fetch paginated M5 data; optional start_time is used for old open trades."""
     candles = max(100, int(candles))
     end_dt = utc_now()
     start_dt = parse_time(start_time) if start_time is not None else end_dt - timedelta(minutes=candles + 20)
     if start_dt is None:
         start_dt = end_dt - timedelta(minutes=candles + 20)
-    url = f"{KRAKEN_CHARTS_BASE}/{symbol}/{M1_INTERVAL}"
+    url = f"{KRAKEN_CHARTS_BASE}/{symbol}/{M5_INTERVAL}"
     cursor_s, end_s = int(start_dt.timestamp()), int(end_dt.timestamp())
     rows_by_ms: Dict[int, Dict[str, Any]] = {}
     for page in range(12):
@@ -337,7 +337,7 @@ def fetch_ohlc(symbol: str, candles: int = M1_CANDLES, start_time: Optional[date
         last_s = max(page_times) // 1000
         if last_s < cursor_s:
             break
-        cursor_s = last_s + M1_INTERVAL_MINUTES * 60
+        cursor_s = last_s + M5_INTERVAL_MINUTES * 60
         if cursor_s >= end_s:
             break
         if page >= 11:
@@ -350,7 +350,7 @@ def fetch_ohlc(symbol: str, candles: int = M1_CANDLES, start_time: Optional[date
 
 def candle_is_closed(candle: Dict[str, Any]) -> bool:
     dt = parse_time(candle.get("time"))
-    return bool(dt and dt + timedelta(minutes=M1_INTERVAL_MINUTES) <= utc_now())
+    return bool(dt and dt + timedelta(minutes=M5_INTERVAL_MINUTES) <= utc_now())
 
 
 def is_pivot_high(rows: List[Dict[str, Any]], i: int) -> bool:
@@ -464,8 +464,8 @@ def build_hook(symbol: str, rows: List[Dict[str, Any]], nodes: List[Dict[str, An
     reversal = find_closed_ha_reversal(rows, entry_node["idx"], trade_direction)
     if reversal is None:
         return None
-    pivot_confirm_time = entry_node["time"] + timedelta(minutes=(PIVOT_RIGHT + 1) * M1_INTERVAL_MINUTES)
-    confirmed_time = max(pivot_confirm_time, reversal["time"] + timedelta(minutes=M1_INTERVAL_MINUTES))
+    pivot_confirm_time = entry_node["time"] + timedelta(minutes=(PIVOT_RIGHT + 1) * M5_INTERVAL_MINUTES)
+    confirmed_time = max(pivot_confirm_time, reversal["time"] + timedelta(minutes=M5_INTERVAL_MINUTES))
     # Keep the database's existing node columns and hook direction compatible:
     # final aliases node four; no database reset or workflow change is needed.
     final = dict(entry_node)
@@ -734,8 +734,9 @@ def monitor_open_trades(rows_by_symbol: Dict[str, List[Dict[str, Any]]], stats: 
         # If the open position predates the ordinary 1500-candle window, fetch from open time
         # so a historical TP touch is not silently missed.
         if not rows or rows[0]["time"] > opened + timedelta(minutes=1):
-            age_minutes = int(max(0, (now - opened).total_seconds()) // 60) + 20
-            rows = fetch_ohlc(symbol, candles=max(M1_CANDLES, min(age_minutes, 11000)), start_time=opened - timedelta(minutes=5))
+            age_candles = int(max(0, (now - opened).total_seconds()) // (M5_INTERVAL_MINUTES * 60)) + 20
+            rows = fetch_ohlc(symbol, candles=max(M5_CANDLES, min(age_candles, 11000)),
+                              start_time=opened - timedelta(minutes=5 * M5_INTERVAL_MINUTES))
         if rows:
             rows_by_symbol[symbol] = rows
         entry, tp, direction = float(trade["entry"]), float(trade["tp"]), trade["direction"]
@@ -746,7 +747,7 @@ def monitor_open_trades(rows_by_symbol: Dict[str, List[Dict[str, Any]]], stats: 
                 continue
             tp_hit = (direction == "LONG" and candle["high"] >= tp) or (direction == "SHORT" and candle["low"] <= tp)
             sl_hit = sl is not None and ((direction == "LONG" and candle["low"] <= sl) or (direction == "SHORT" and candle["high"] >= sl))
-            # Conservative tie-break if both levels appear inside the same M1 candle.
+            # Conservative tie-break if both levels appear inside the same M5 candle.
             if sl_hit:
                 hit, close_reason, close_price = candle, "SL", sl
                 break
@@ -756,7 +757,7 @@ def monitor_open_trades(rows_by_symbol: Dict[str, List[Dict[str, Any]]], stats: 
         conn2 = db_connect()
         try:
             if hit:
-                closed = hit["time"] + timedelta(minutes=M1_INTERVAL_MINUTES)
+                closed = hit["time"] + timedelta(minutes=M5_INTERVAL_MINUTES)
                 status = "TP" if close_reason == "TP" else "SL"
                 conn2.execute("UPDATE trades SET status=?,pnl_pct=?,closed_at=?,close_reason=?,duration_seconds=?,last_checked_at=?,last_price=? WHERE id=? AND status='OPEN'",
                               (status, trade_pnl_pct(direction, entry, float(close_price)), utc_iso(closed), close_reason, max(0, (closed-opened).total_seconds()), now_iso, close_price, trade["id"]))
@@ -818,12 +819,12 @@ def update_pending_trades(rows_by_symbol: Dict[str, List[Dict[str, Any]]], stats
         conn.close()
     for trade in pending_rows:
         confirmed = parse_time(trade["confirmed_at"]) or utc_now()
-        if age_seconds(confirmed) > M1_MAX_HOOK_AGE_SECONDS:
+        if age_seconds(confirmed) > M5_MAX_HOOK_AGE_SECONDS:
             delete_pending_trade(trade["hook_key"], "EXPIRED")
             stats["pending_expired"] += 1
             continue
         symbol = str(trade["symbol"]).upper()
-        rows = rows_by_symbol.get(symbol) or fetch_ohlc(symbol, M1_CANDLES)
+        rows = rows_by_symbol.get(symbol) or fetch_ohlc(symbol, M5_CANDLES)
         if rows:
             rows_by_symbol[symbol] = rows
         hook = load_hook_for_trade(trade["hook_key"], rows) if rows else None
@@ -891,7 +892,7 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], re
     valid_indices = [i for i in mapped_indices if i is not None]
     if include_latest:
         # Include historical start node through the newest candle whenever the extended data exists.
-        lo = max(0, min(valid_indices) - CHART_CONTEXT_BEFORE) if valid_indices else max(0, len(rows) - M1_CANDLES)
+        lo = max(0, min(valid_indices) - CHART_CONTEXT_BEFORE) if valid_indices else max(0, len(rows) - M5_CANDLES)
         hi = len(rows)
     elif valid_indices:
         lo = max(0, min(valid_indices) - CHART_CONTEXT_BEFORE)
@@ -954,7 +955,7 @@ def make_chart(symbol: str, rows: List[Dict[str, Any]], hook: Dict[str, Any], re
         tp_status += " | Some historical node candles unavailable in fetched history"
     chart_mode = "OPEN TRADE UPDATE" if include_latest else "HOOK / SIGNAL"
     trade_direction = hook.get("trade_direction", "LONG" if hook["direction"] == "SHORT" else "SHORT")
-    ax.set_title(f"NDS M1 | {symbol} | TRADE {trade_direction} | {chart_mode} | TP NODE 3 / SL START | PAPER ONLY")
+    ax.set_title(f"NDS M5 | {symbol} | TRADE {trade_direction} | {chart_mode} | TP NODE 3 / SL START | PAPER ONLY")
     ax.legend(loc="best")
     ax.grid(alpha=.20)
     ax.margins(x=.025)
@@ -1072,7 +1073,7 @@ def send_open_trade_charts(rows_by_symbol: Dict[str, List[Dict[str, Any]]], live
         try:
             rows = rows_by_symbol.get(symbol) or []
             if not rows:
-                rows = fetch_ohlc(symbol, M1_CANDLES)
+                rows = fetch_ohlc(symbol, M5_CANDLES)
             hook = load_hook_for_trade(trade["hook_key"], rows) if rows else None
             # Older trades are often >25h old. Fetch the full 72h chart window if the nodes
             # do not map to the ordinary last-1500-candle response.
@@ -1181,7 +1182,7 @@ def main() -> None:
 
     hook_reports, candidates = [], []
     for symbol in symbols:
-        rows = fetch_ohlc(symbol, M1_CANDLES)
+        rows = fetch_ohlc(symbol, M5_CANDLES)
         if not rows:
             continue
         rows_by_symbol[symbol] = rows
@@ -1192,10 +1193,10 @@ def main() -> None:
             if is_new:
                 stats["new_hooks"] += 1
             report = {"hook": hook, "rows": rows, "new": is_new, "reason": ""}
-            if age_seconds(hook["confirmed_time"]) > M1_MAX_HOOK_AGE_SECONDS:
-                report["reason"] = f"REJECTED: Hook older than {M1_MAX_HOOK_AGE_SECONDS // 3600}h"
-            elif hook["range_pct"] < M1_MIN_HOOK_RANGE_PCT:
-                report["reason"] = f"REJECTED: Range {hook['range_pct']:.2f}% < minimum {M1_MIN_HOOK_RANGE_PCT:.2f}%"
+            if age_seconds(hook["confirmed_time"]) > M5_MAX_HOOK_AGE_SECONDS:
+                report["reason"] = f"REJECTED: Hook older than {M5_MAX_HOOK_AGE_SECONDS // 3600}h"
+            elif hook["range_pct"] < M5_MIN_HOOK_RANGE_PCT:
+                report["reason"] = f"REJECTED: Range {hook['range_pct']:.2f}% < minimum {M5_MIN_HOOK_RANGE_PCT:.2f}%"
             else:
                 touch = tp_touch_info(rows, hook)
                 if touch["touched"]:
@@ -1246,7 +1247,7 @@ def main() -> None:
                 path = make_chart(hook["symbol"], rows, hook, report["reason"], current=live.get(hook["symbol"].upper()))
                 if path:
                     trade_direction = hook.get("trade_direction", "LONG" if hook["direction"] == "SHORT" else "SHORT")
-                    caption = (f"NDS M1 SETUP | {hook['symbol']} | {trade_direction}\nEntry (NODE 4): {fmt_price(hook['final']['price'])}\n"
+                    caption = (f"NDS M5 SETUP | {hook['symbol']} | {trade_direction}\nEntry (NODE 4): {fmt_price(hook['final']['price'])}\n"
                                f"TP (NODE 3): {fmt_price(hook['tp'])}\nSL (START): {fmt_price(hook.get('sl', hook['start']['price']))}\nRange: {hook['range_pct']:.2f}%\n"
                                f"HA Reversal: {utc_iso(hook['ha_reversal_time'])}\nSignal Confirmed: {utc_iso(hook['confirmed_time'])}\n"
                                f"Reason: {report['reason']}\nPAPER ONLY")
@@ -1266,8 +1267,8 @@ def main() -> None:
     print(f"DB_AFTER_SCAN | total={after['total']} | open={after['open']} | tp={after['tp']} | statuses={after['statuses']} | bytes={after['db_bytes']} | path={after['db_path']}")
     send_open_trade_charts(rows_by_symbol, live_final, stats)
     diagnostics = (
-        f"🔎 NDS M1 DIAGNOSTIC\nVersion: {VERSION}\nTime: {utc_iso()}\n\n━━━ ASSETS ━━━\nScanned: {len(symbols)}\nPrice symbols incl. managed trades: {len(ticker_symbols)}\n\n"
-        f"━━━ M1 ━━━\nMin node spacing: {MIN_NODE_CANDLES} candles\nEntry gate: node four + CLOSED Heikin-Ashi reversal strictly AFTER node four\n"
+        f"🔎 NDS M5 DIAGNOSTIC\nVersion: {VERSION}\nTime: {utc_iso()}\n\n━━━ ASSETS ━━━\nScanned: {len(symbols)}\nPrice symbols incl. managed trades: {len(ticker_symbols)}\n\n"
+        f"━━━ M5 ━━━\nMin node spacing: {MIN_NODE_CANDLES} candles\nEntry gate: node four + CLOSED Heikin-Ashi reversal strictly AFTER node four\n"
         f"LONG trade: RED->GREEN | SHORT trade: GREEN->RED | TP=node three | SL=START\nPrice: sane bid/ask midpoint (spread <= {MAX_BID_ASK_SPREAD_PCT:.2f}%); mark fallback; last trade only if <= {MAX_LAST_TRADE_AGE_SECONDS}s\n"
         f"Hooks: {stats['hooks']}\nNew hooks: {stats['new_hooks']}\nHook charts/signals sent: {stats['hook_charts_sent']}\n"
         f"Open-trade charts sent: {stats['open_charts_sent']}\nOpen-trade chart errors: {stats['open_chart_errors']}\nChart errors: {stats['hook_chart_errors']}\n"
