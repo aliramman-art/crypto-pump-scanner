@@ -1,13 +1,12 @@
 # ============================================================
-# NDS M5 STRUCTURE + M1 CCI + M15 TARGET SCANNER - VERSION 6.1.0
+# NDS M5 STRUCTURE + M1 CCI + F1-F2 TARGET SCANNER - VERSION 6.2.0
 # PAPER TRADING ONLY: NEVER SENDS REAL EXCHANGE ORDERS
 # Existing entry filename and DB filename are retained.
-# LONG: START -> F1 (SL) -> F2; a higher high forms after F2, price
-# breaks below F2, then forms FINAL low between F1 and F2. FINAL is the
-# entry price. M1 CCI crosses -100 upward for confirmation. TP is the
-# nearest confirmed M15 pivot high above entry. SHORT is mirrored.
-# A newer nested structure supersedes the previous structure and is
-# reported to Telegram with its own chart.
+# START (LONG) is the lowest low in the ten closed M5 candles ending at START.
+# START (SHORT) is the highest high in the equivalent ten-candle window.
+# F1 remains the stop; FINAL is the entry. TP distance is abs(F2 - F1):
+# LONG TP = entry + distance; SHORT TP = entry - distance.
+# Closed M1 CCI cross confirms entry. Newer nested structures supersede older.
 # ============================================================
 
 import os
@@ -27,7 +26,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-VERSION = "6.1.0"
+VERSION = "6.2.0"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -35,19 +34,17 @@ TARGET_ASSETS = 100
 REQUIRED_SYMBOLS = ("PF_XAUTUSD", "PF_XBTUSD")
 M5_INTERVAL = "5m"
 M1_INTERVAL = "1m"
-M15_INTERVAL = "15m"
 M5_MINUTES = 5
 M1_MINUTES = 1
-M15_MINUTES = 15
 M5_CANDLES = 1500
 M1_CANDLES = 360
-M15_CANDLES = 600
+START_LOOKBACK_CANDLES = 10
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
 MIN_NODE_CANDLES = 5
 CCI_PERIOD = 20
 CCI_LEVEL = 100.0
-CCI_CROSS_MAX_AGE_MINUTES = 15  # tolerate the existing 10-minute workflow cadence
+CCI_CROSS_MAX_AGE_MINUTES = 15  # accommodates a 5-minute workflow cadence
 MAX_OPEN_TRADES = 3
 MAX_BID_ASK_SPREAD_PCT = 1.0
 MAX_LAST_TRADE_AGE_SECONDS = 300
@@ -322,7 +319,7 @@ def normalize_candle(item: Any) -> Optional[Dict[str, Any]]:
 
 
 def fetch_ohlc(symbol: str, interval: str, candle_count: int) -> List[Dict[str, Any]]:
-    minutes = {M5_INTERVAL: M5_MINUTES, M1_INTERVAL: M1_MINUTES, M15_INTERVAL: M15_MINUTES}.get(interval)
+    minutes = {M5_INTERVAL: M5_MINUTES, M1_INTERVAL: M1_MINUTES}.get(interval)
     if minutes is None:
         raise ValueError(f"Unsupported candle interval: {interval}")
     end_dt = utc_now()
@@ -417,12 +414,14 @@ def pattern_key(pattern: Dict[str, Any]) -> str:
 
 
 def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-    """Detect complete M5 structures, keeping nested newer structures in preference.
+    """Detect complete M5 structures using a ten-candle START extreme.
 
-    LONG sequence: lower-low backdrop -> START higher low -> F1 -> F2 (each
-    low successively higher), a higher high after F2 relative to the rebound
-    high before F2, then a break below F2 and FINAL low in (F1, F2).
-    SHORT is the exact mirror. All nodes are confirmed pivots from closed M5 bars.
+    LONG START must be the lowest low of the ten closed M5 candles ending on
+    the START candle; the following pivot lows must rise START < F1 < F2.
+    Then a higher high after F2, a break below F2, and FINAL low in (F1,F2)
+    are required. SHORT mirrors this: START is the highest high of the same
+    ten-candle lookback and later pivot highs must fall START > F1 > F2.
+    All nodes are confirmed pivots from closed M5 bars.
     """
     now = now or utc_now()
     if len(rows) < 40:
@@ -435,10 +434,13 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
     highs = [p for p in pivots if p["type"] == "H"]
     candidates: List[Dict[str, Any]] = []
 
-    # LONG: after F2, require an actual higher high before the first break under F2.
-    for sidx in range(2, len(lows) - 3):
-        prior2, prior1, start = lows[sidx - 2], lows[sidx - 1], lows[sidx]
-        if not (prior1["price"] < prior2["price"] and start["price"] > prior1["price"]):
+    # LONG: START is the lowest low in the trailing ten closed candles ending there.
+    for sidx in range(0, len(lows) - 3):
+        start = lows[sidx]
+        if start["idx"] < START_LOOKBACK_CANDLES - 1:
+            continue
+        lookback_lows = [rows[k]["low"] for k in range(start["idx"] - START_LOOKBACK_CANDLES + 1, start["idx"] + 1)]
+        if start["price"] > min(lookback_lows):
             continue
         f1, f2 = lows[sidx + 1], lows[sidx + 2]
         if f1["idx"] - start["idx"] < MIN_NODE_CANDLES or f2["idx"] - f1["idx"] < MIN_NODE_CANDLES:
@@ -478,10 +480,13 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
             })
             break
 
-    # SHORT mirror: after F2, require a lower low before the first break above F2.
-    for sidx in range(2, len(highs) - 3):
-        prior2, prior1, start = highs[sidx - 2], highs[sidx - 1], highs[sidx]
-        if not (prior1["price"] > prior2["price"] and start["price"] < prior1["price"]):
+    # SHORT mirror: START is the highest high in the trailing ten closed candles.
+    for sidx in range(0, len(highs) - 3):
+        start = highs[sidx]
+        if start["idx"] < START_LOOKBACK_CANDLES - 1:
+            continue
+        lookback_highs = [rows[k]["high"] for k in range(start["idx"] - START_LOOKBACK_CANDLES + 1, start["idx"] + 1)]
+        if start["price"] < max(lookback_highs):
             continue
         f1, f2 = highs[sidx + 1], highs[sidx + 2]
         if f1["idx"] - start["idx"] < MIN_NODE_CANDLES or f2["idx"] - f1["idx"] < MIN_NODE_CANDLES:
@@ -582,32 +587,25 @@ def find_cci_cross(rows: List[Dict[str, Any]], direction: str, after_time: datet
     return max(candidates, key=lambda x: x["time"])
 
 
-def target_price_for_pattern(
-    pattern: Dict[str, Any], asof_time: datetime, m15_rows: List[Dict[str, Any]], entry: float
-) -> Optional[float]:
-    """Return the closest confirmed M15 swing high/low beyond the entry price."""
-    if len(m15_rows) < PIVOT_LEFT + PIVOT_RIGHT + 3:
+def target_price_for_pattern(pattern: Dict[str, Any], entry: float) -> Optional[float]:
+    """Set TP using the absolute price distance from F1 to F2.
+
+    LONG: TP = entry + abs(F2 - F1). SHORT: TP = entry - abs(F2 - F1).
+    This is a price-distance projection, not a percentage calculation.
+    """
+    f1 = safe_float(pattern.get("f1", {}).get("price"))
+    f2 = safe_float(pattern.get("f2", {}).get("price"))
+    if f1 is None or f2 is None or not math.isfinite(entry):
         return None
-    # Only use closed M15 candles whose pivot could already have been confirmed
-    # at the signal/structure time. Two right-side bars are required for a pivot.
-    eligible = [
-        row for row in m15_rows
-        if row["time"] + timedelta(minutes=M15_MINUTES * (PIVOT_RIGHT + 1)) <= asof_time
-    ]
-    if len(eligible) < PIVOT_LEFT + PIVOT_RIGHT + 3:
+    distance = abs(f2 - f1)
+    if not math.isfinite(distance) or distance <= 0:
         return None
-    pivots = build_ordered_pivots(eligible)
-    direction = pattern["direction"]
-    if direction == "LONG":
-        levels = [float(p["price"]) for p in pivots if p["type"] == "H" and float(p["price"]) > entry]
-        # Choose the nearest overhead resistance in price, not the farthest/highest peak.
-        return min(levels, key=lambda price: price - entry) if levels else None
-    levels = [float(p["price"]) for p in pivots if p["type"] == "L" and float(p["price"]) < entry]
-    return max(levels, key=lambda price: entry - price) if levels else None
+    target = entry + distance if pattern["direction"] == "LONG" else entry - distance
+    return target if math.isfinite(target) and target > 0 else None
 
 
 def build_entry_signal(
-    pattern: Dict[str, Any], m1_rows: List[Dict[str, Any]], m15_rows: List[Dict[str, Any]], live_price: Optional[float]
+    pattern: Dict[str, Any], m1_rows: List[Dict[str, Any]], live_price: Optional[float]
 ) -> Optional[Dict[str, Any]]:
     cross = find_cci_cross(m1_rows, pattern["direction"], pattern["final"]["time"])
     if not cross:
@@ -615,10 +613,10 @@ def build_entry_signal(
     dinc("cci_crosses")
     # FINAL is the exact structural entry level requested, not the delayed live price.
     entry = float(pattern["final"]["price"])
-    tp = target_price_for_pattern(pattern, cross["time"], m15_rows, entry)
+    tp = target_price_for_pattern(pattern, entry)
     sl = float(pattern["f1"]["price"])
     if tp is None or tp <= 0:
-        print(f"M15_TARGET_NOT_FOUND | symbol={pattern['symbol']} | dir={pattern['direction']} | entry={entry}")
+        print(f"F1_F2_TARGET_INVALID | symbol={pattern['symbol']} | dir={pattern['direction']} | entry={entry}")
         return None
     direction = pattern["direction"]
     if direction == "LONG" and not (sl < entry < tp):
@@ -642,11 +640,10 @@ def build_entry_signal(
     return signal
 
 
-def build_structure_chart_payload(pattern: Dict[str, Any], m15_rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+def build_structure_chart_payload(pattern: Dict[str, Any]) -> Dict[str, Any]:
     """Chart payload for Telegram structure alerts before an M1 CCI entry trigger."""
     entry = float(pattern["final"]["price"])
-    asof = utc_now()
-    tp = target_price_for_pattern(pattern, asof, m15_rows, entry)
+    tp = target_price_for_pattern(pattern, entry)
     payload = dict(pattern)
     payload.update({"entry": entry, "sl": float(pattern["f1"]["price"]), "tp": tp, "structure_only": True})
     return payload
@@ -952,9 +949,9 @@ def create_signal_chart(signal: Dict[str, Any], rows: List[Dict[str, Any]]) -> O
                    label=f"STOP LOSS / F1 {fmt_price(signal['sl'])}")
         if signal.get("tp") is not None:
             ax.axhline(signal["tp"], color="#2e7d32", linestyle="-.", linewidth=1.5,
-                       label=f"M15 TAKE PROFIT {fmt_price(signal['tp'])}")
+                       label=f"F1-F2 DISTANCE TAKE PROFIT {fmt_price(signal['tp'])}")
         chart_state = "STRUCTURE DETECTED" if signal.get("structure_only") else "M1 CCI ENTRY CONFIRMED"
-        ax.set_title(f"NDS v{VERSION} | {signal['symbol']} | {signal['direction']} | {chart_state} | M5 chart, M15 TP")
+        ax.set_title(f"NDS v{VERSION} | {signal['symbol']} | {signal['direction']} | {chart_state} | M5 chart, F1-F2 TP")
         ax.set_xlabel("Closed M5 candles")
         ax.set_ylabel("Price")
         ax.grid(True, alpha=0.2)
@@ -1068,7 +1065,7 @@ def scan_m5_symbol(symbol: str) -> Tuple[str, List[Dict[str, Any]], List[Dict[st
 
 def main() -> None:
     started = utc_now()
-    print(f"NDS_M5_M1_M15_START | version={VERSION} | time={utc_iso(started)}")
+    print(f"NDS_M5_M1_START | version={VERSION} | time={utc_iso(started)}")
     print("MODE | REAL_TRADING=False | PAPER_ONLY=True | no exchange order endpoints are used")
     try:
         tickers = get_market_tickers()
@@ -1116,40 +1113,33 @@ def main() -> None:
         candidate_patterns.extend(latest_by_direction.values())
     symbols_needing_m1 = sorted({p["symbol"] for p in candidate_patterns})
     m1_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
-    m15_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
     if symbols_needing_m1:
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            m1_futures = {executor.submit(fetch_ohlc, symbol, M1_INTERVAL, M1_CANDLES): (symbol, "M1") for symbol in symbols_needing_m1}
-            m15_futures = {executor.submit(fetch_ohlc, symbol, M15_INTERVAL, M15_CANDLES): (symbol, "M15") for symbol in symbols_needing_m1}
-            futures = {**m1_futures, **m15_futures}
-            for future in as_completed(futures):
-                symbol, timeframe = futures[future]
+            m1_futures = {executor.submit(fetch_ohlc, symbol, M1_INTERVAL, M1_CANDLES): symbol for symbol in symbols_needing_m1}
+            for future in as_completed(m1_futures):
+                symbol = m1_futures[future]
                 try:
-                    rows = future.result()
-                    if timeframe == "M1":
-                        m1_by_symbol[symbol] = rows
-                        dinc("m1_requested")
-                    else:
-                        m15_by_symbol[symbol] = rows
+                    m1_by_symbol[symbol] = future.result()
+                    dinc("m1_requested")
                 except Exception as exc:
-                    print(f"{timeframe}_SCAN_ERROR | symbol={symbol} | {type(exc).__name__}: {exc}")
-                    (m1_by_symbol if timeframe == "M1" else m15_by_symbol)[symbol] = []
+                    print(f"M1_SCAN_ERROR | symbol={symbol} | {type(exc).__name__}: {exc}")
+                    m1_by_symbol[symbol] = []
 
     # Send each newly recognized/superseding structure chart once, even before CCI confirms entry.
     for pattern in candidate_patterns:
         pkey = pattern["pattern_key"]
         if structure_alert_was_sent(pkey):
             continue
-        chart_payload = build_structure_chart_payload(pattern, m15_by_symbol.get(pattern["symbol"], []))
+        chart_payload = build_structure_chart_payload(pattern)
         chart_path = create_signal_chart(chart_payload, rows_by_symbol.get(pattern["symbol"], []))
         if chart_path:
-            tp_text = fmt_price(chart_payload["tp"]) if chart_payload.get("tp") is not None else "not found from confirmed M15 pivots"
+            tp_text = fmt_price(chart_payload["tp"]) if chart_payload.get("tp") is not None else "not available (invalid F1-F2 distance)"
             caption = (
                 f"🧩 NDS v{VERSION} | NEW/SUPERSEDING STRUCTURE | {pattern['symbol']} | {pattern['direction']}\n"
                 f"M5 nodes: START {fmt_price(pattern['start']['price'])} | F1/SL {fmt_price(pattern['f1']['price'])} | "
                 f"F2 {fmt_price(pattern['f2']['price'])} | {'HH' if pattern['direction'] == 'LONG' else 'LL'} after F2 "
                 f"{fmt_price((pattern.get('trigger_high') or pattern.get('trigger_low'))['price'])} | FINAL/ENTRY {fmt_price(pattern['final']['price'])}\n"
-                f"M15 TP: {tp_text} | Waiting for closed M1 CCI confirmation."
+                f"TP = FINAL entry ± |F2-F1|: {tp_text} | Waiting for closed M1 CCI confirmation."
             )
             sent_chart = telegram_send_photo(chart_path, caption)
             mark_structure_alert_sent(pattern, sent_chart)
@@ -1165,7 +1155,7 @@ def main() -> None:
         if signal_was_processed(pattern["pattern_key"]):
             dinc("signals_duplicate")
             continue
-        signal = build_entry_signal(pattern, m1_by_symbol.get(symbol, []), m15_by_symbol.get(symbol, []), live)
+        signal = build_entry_signal(pattern, m1_by_symbol.get(symbol, []), live)
         if not signal:
             continue
         # One open paper position per symbol; also enforce portfolio open-trade cap.
@@ -1192,11 +1182,11 @@ def main() -> None:
     ended = utc_now()
     elapsed = (ended - started).total_seconds()
     lines = [
-        f"🔎 NDS M5 STRUCTURE + M1 CCI + M15 TARGET | v{VERSION}",
+        f"🔎 NDS M5 STRUCTURE + M1 CCI + F1-F2 TARGET | v{VERSION}",
         f"Time (UTC): {utc_iso(ended)} | Scan runtime: {elapsed:.1f}s",
         f"Universe: top {TARGET_ASSETS} PF_ contracts by 24h volume, XAUT + BTC retained",
         f"Scanned: {len(scan_symbols)} | M5 data OK: {DIAG['m5_ok']} | errors/short: {errors} | structures: {DIAG['structures']}",
-        "Rules: M5 START/F1/F2/higher-high/F2-break/FINAL. FINAL is entry, F1 is SL, nearest confirmed M15 swing is TP; closed M1 CCI(20) cross confirms signal. Paper only.",
+        "Rules: START is the 10-closed-M5-candle extreme; F1 is SL; FINAL is entry; TP distance = abs(F2-F1), projected from entry by direction; closed M1 CCI(20) cross confirms signal. Paper only.",
         "",
         f"🆕 NEW SIGNALS: {len(new_signals)}",
     ]
@@ -1240,11 +1230,11 @@ def main() -> None:
                            f"START {fmt_price(signal['start']['price'])} | F1/SL {fmt_price(signal['f1']['price'])} | "
                            f"F2 {fmt_price(signal['f2']['price'])} | {'HH' if signal['direction'] == 'LONG' else 'LL'} after F2 "
                            f"{fmt_price((signal.get('trigger_high') or signal.get('trigger_low'))['price'])} | FINAL/ENTRY {fmt_price(signal['final']['price'])}\n"
-                           f"ENTRY {fmt_price(signal['entry'])} | STOP LOSS {fmt_price(signal['sl'])} | M15 TAKE PROFIT {fmt_price(signal['tp'])}\n"
+                           f"ENTRY {fmt_price(signal['entry'])} | STOP LOSS {fmt_price(signal['sl'])} | F1-F2 DISTANCE TAKE PROFIT {fmt_price(signal['tp'])}\n"
                            f"CCI(20) M1 cross: {float(signal['cross']['previous_cci']):+.1f} → {float(signal['cross']['cci']):+.1f}")
                 telegram_send_photo(chart_path, caption)
 
-    print("NDS_M5_M1_M15_DONE | " + json.dumps({
+    print("NDS_M5_M1_DONE | " + json.dumps({
         "version": VERSION,
         "scanned": len(scan_symbols),
         "m5_ok": DIAG["m5_ok"],
