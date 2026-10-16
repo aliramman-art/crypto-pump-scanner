@@ -1,8 +1,8 @@
-name: NDS M5 Structure M1 CCI Scanner
+name: NDS M5 Structure M1 CCI Scanner (5-minute schedule)
 
 on:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
