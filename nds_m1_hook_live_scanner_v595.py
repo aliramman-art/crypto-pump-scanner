@@ -3,7 +3,8 @@
 # PAPER TRADING ONLY: NEVER SENDS REAL EXCHANGE ORDERS
 # Existing entry filename and DB filename are retained.
 # START lowest => SHORT using rising pivot lows; START highest => LONG using falling pivot highs.
-# Require abs(START-F1) >= abs(F1-F2). Entry is projected from F2 by the F1-F2 distance.
+# Both START-F1 and F1-F2 legs must each be at least 1.00% of their reference node price.
+# Also require abs(START-F1) >= abs(F1-F2). Entry is projected from F2 by the F1-F2 distance.
 # TP is F1; SL is symmetric around entry by the entry-to-TP distance.
 # Price must touch the entry on a closed M5 candle, then a recent closed M1 CCI cross confirms.
 # The existing workflow filename, DB filename, and dependencies are intentionally retained.
@@ -26,7 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-VERSION = "6.3.0"
+VERSION = "6.3.1"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -39,6 +40,7 @@ M1_MINUTES = 1
 M5_CANDLES = 1500
 M1_CANDLES = 360
 START_LOOKBACK_CANDLES = 10
+MIN_LEG_DISTANCE_PCT = 1.0  # each START-F1 and F1-F2 leg must be >= 1%
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
 MIN_NODE_CANDLES = 5
@@ -419,8 +421,9 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
     START is the extreme of its trailing ten candles. If START is the lowest
     point, F1/F2 are rising pivot lows and the setup is SHORT. If START is the
     highest point, F1/F2 are falling pivot highs and the setup is LONG. The
-    START-to-F1 leg must be at least as large as the F1-to-F2 leg. Entry is
-    activated only after a later closed candle touches the projected entry.
+    START-to-F1 leg must be at least as large as the F1-to-F2 leg, and each
+    leg must independently span at least 1% of its reference node price. Entry
+    is activated only after a later closed candle touches the projected entry.
     """
     now = now or utc_now()
     if len(rows) < 40:
@@ -445,7 +448,11 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
             continue
         leg_start_f1 = abs(f1["price"] - start["price"])
         leg_f1_f2 = abs(f2["price"] - f1["price"])
-        if leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0:
+        start_f1_pct = (leg_start_f1 / start["price"] * 100.0) if start["price"] > 0 else 0.0
+        f1_f2_pct = (leg_f1_f2 / f1["price"] * 100.0) if f1["price"] > 0 else 0.0
+        if (leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0
+                or start_f1_pct < MIN_LEG_DISTANCE_PCT
+                or f1_f2_pct < MIN_LEG_DISTANCE_PCT):
             continue
         entry = f2["price"] + leg_f1_f2
         tp = f1["price"]
@@ -486,7 +493,11 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
             continue
         leg_start_f1 = abs(start["price"] - f1["price"])
         leg_f1_f2 = abs(f1["price"] - f2["price"])
-        if leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0:
+        start_f1_pct = (leg_start_f1 / start["price"] * 100.0) if start["price"] > 0 else 0.0
+        f1_f2_pct = (leg_f1_f2 / f1["price"] * 100.0) if f1["price"] > 0 else 0.0
+        if (leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0
+                or start_f1_pct < MIN_LEG_DISTANCE_PCT
+                or f1_f2_pct < MIN_LEG_DISTANCE_PCT):
             continue
         entry = f2["price"] - leg_f1_f2
         tp = f1["price"]
