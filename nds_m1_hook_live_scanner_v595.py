@@ -3,7 +3,7 @@
 # PAPER TRADING ONLY: NEVER SENDS REAL EXCHANGE ORDERS
 # Existing entry filename and DB filename are retained.
 # START lowest => SHORT using rising pivot lows; START highest => LONG using falling pivot highs.
-# Both START-F1 and F1-F2 legs must each be at least 1.00% of their reference node price.
+# Both START-F1 and F1-F2 legs must each be at least 0.75% of their reference node price.
 # Also require abs(START-F1) >= abs(F1-F2). Entry is projected from F2 by the F1-F2 distance.
 # TP is F1; SL is symmetric around entry by the entry-to-TP distance.
 # Price must touch the entry on a closed M5 candle, then a recent closed M1 CCI cross confirms.
@@ -27,7 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-VERSION = "6.3.2"
+VERSION = "6.3.3"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -40,7 +40,7 @@ M1_MINUTES = 1
 M5_CANDLES = 1500
 M1_CANDLES = 360
 START_LOOKBACK_CANDLES = 10
-MIN_LEG_DISTANCE_PCT = 1.0  # each START-F1 and F1-F2 leg must be >= 1%
+MIN_LEG_DISTANCE_PCT = 0.75  # each START-F1 and F1-F2 leg must be >= 0.75%
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
 MIN_NODE_CANDLES = 5
@@ -425,7 +425,7 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
     point, F1/F2 are rising pivot lows and the setup is SHORT. If START is the
     highest point, F1/F2 are falling pivot highs and the setup is LONG. The
     START-to-F1 leg must be at least as large as the F1-to-F2 leg, and each
-    leg must independently span at least 1% of its reference node price. Entry
+    leg must independently span at least 0.75% of its reference node price. A confirmed post-F2 reversal pivot must form between the F1/F2 price levels, then price must move to the projected entry. Entry
     is activated only after a later closed candle touches the projected entry.
     """
     now = now or utc_now()
@@ -453,15 +453,9 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
         if not (start["price"] < f1["price"] < f2["price"]):
             dinc("reject_geometry")
             continue
-        # Required filter: SHORT must contain a confirmed local pivot low
-        # strictly between F1 and F2 (excluding F1 and F2 themselves).
-        has_intermediate_low = any(
-            is_pivot_low(rows, i)
-            for i in range(f1["idx"] + 1, f2["idx"])
-        )
-        if not has_intermediate_low:
-            dinc("reject_intermediate_pivot")
-            continue
+        # New confirmation: after F2, a confirmed local LOW must form at a
+        # price strictly between F1 and F2. Entry is not eligible until that
+        # pivot is confirmed on closed candles and price rises to the entry.
         leg_start_f1 = abs(f1["price"] - start["price"])
         leg_f1_f2 = abs(f2["price"] - f1["price"])
         start_f1_pct = (leg_start_f1 / start["price"] * 100.0) if start["price"] > 0 else 0.0
@@ -476,19 +470,38 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
         tp = f1["price"]
         sl = entry + abs(entry - tp)
         touch = None
+        trigger_idx = None
         stop_before_entry = False
-        for k in range(f2["idx"] + 1, len(rows)):
-            candle = rows[k]
-            if candle["high"] >= sl:
-                # OHLC cannot prove entry was touched before the stop; reject conservatively.
+        # Find a post-F2 confirmed pivot low whose price lies between F1/F2.
+        # A pivot at i is confirmed only after PIVOT_RIGHT later closed candles.
+        for i in range(f2["idx"] + 1, len(rows) - PIVOT_RIGHT):
+            if not is_pivot_low(rows, i):
+                continue
+            trigger_price = rows[i]["low"]
+            if not (f1["price"] > trigger_price > f2["price"]):
+                continue
+            confirm_idx = i + PIVOT_RIGHT
+            # If the stop was reached before confirmation, discard this setup.
+            if any(rows[k]["high"] >= sl for k in range(f2["idx"] + 1, confirm_idx + 1)):
                 dinc("reject_sl_before_entry")
                 stop_before_entry = True
                 break
-            if candle["high"] >= entry:
-                touch = k
+            # Only a later closed candle may activate entry after price rises.
+            for k in range(confirm_idx + 1, len(rows)):
+                candle = rows[k]
+                if candle["high"] >= sl:
+                    dinc("reject_sl_before_entry")
+                    stop_before_entry = True
+                    break
+                if rows[k - 1]["close"] < entry <= candle["high"]:
+                    touch = k
+                    trigger_idx = i
+                    break
+            if touch is not None or stop_before_entry:
                 break
         if touch is None:
             if not stop_before_entry:
+                dinc("reject_intermediate_pivot")
                 dinc("reject_entry_not_touched")
             continue
         touch_time = rows[touch]["time"] + timedelta(minutes=M5_MINUTES)
@@ -496,10 +509,11 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
             dinc("reject_entry_touch_stale")
             continue
         final = {"type": "H", "idx": touch, "price": entry, "time": touch_time, "entry_touch": True}
+        trigger_low = {"type": "L", "idx": trigger_idx, "price": rows[trigger_idx]["low"], "time": rows[trigger_idx]["time"]}
         candidates.append({
             "symbol": symbol, "direction": "SHORT", "start": start, "f1": f1,
             "f2": f2, "final": final, "entry_price": entry, "sl_price": sl,
-            "tp_price": tp, "trigger_high": None, "trigger_low": None,
+            "tp_price": tp, "trigger_high": None, "trigger_low": trigger_low,
             "pivots": pivots, "rows": rows,
         })
 
@@ -519,15 +533,9 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
         if not (start["price"] > f1["price"] > f2["price"]):
             dinc("reject_geometry")
             continue
-        # Required filter: LONG must contain a confirmed local pivot high
-        # strictly between F1 and F2 (excluding F1 and F2 themselves).
-        has_intermediate_high = any(
-            is_pivot_high(rows, i)
-            for i in range(f1["idx"] + 1, f2["idx"])
-        )
-        if not has_intermediate_high:
-            dinc("reject_intermediate_pivot")
-            continue
+        # New confirmation: after F2, a confirmed local HIGH must form at a
+        # price strictly between F2 and F1. Entry is not eligible until that
+        # pivot is confirmed on closed candles and price falls to the entry.
         leg_start_f1 = abs(start["price"] - f1["price"])
         leg_f1_f2 = abs(f1["price"] - f2["price"])
         start_f1_pct = (leg_start_f1 / start["price"] * 100.0) if start["price"] > 0 else 0.0
@@ -545,19 +553,38 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
             dinc("reject_invalid_levels")
             continue
         touch = None
+        trigger_idx = None
         stop_before_entry = False
-        for k in range(f2["idx"] + 1, len(rows)):
-            candle = rows[k]
-            if candle["low"] <= sl:
-                # OHLC cannot prove entry was touched before the stop; reject conservatively.
+        # Find a post-F2 confirmed pivot high whose price lies between F2/F1.
+        # A pivot at i is confirmed only after PIVOT_RIGHT later closed candles.
+        for i in range(f2["idx"] + 1, len(rows) - PIVOT_RIGHT):
+            if not is_pivot_high(rows, i):
+                continue
+            trigger_price = rows[i]["high"]
+            if not (f2["price"] < trigger_price < f1["price"]):
+                continue
+            confirm_idx = i + PIVOT_RIGHT
+            # If the stop was reached before confirmation, discard this setup.
+            if any(rows[k]["low"] <= sl for k in range(f2["idx"] + 1, confirm_idx + 1)):
                 dinc("reject_sl_before_entry")
                 stop_before_entry = True
                 break
-            if candle["low"] <= entry:
-                touch = k
+            # Only a later closed candle may activate entry after price falls.
+            for k in range(confirm_idx + 1, len(rows)):
+                candle = rows[k]
+                if candle["low"] <= sl:
+                    dinc("reject_sl_before_entry")
+                    stop_before_entry = True
+                    break
+                if rows[k - 1]["close"] > entry >= candle["low"]:
+                    touch = k
+                    trigger_idx = i
+                    break
+            if touch is not None or stop_before_entry:
                 break
         if touch is None:
             if not stop_before_entry:
+                dinc("reject_intermediate_pivot")
                 dinc("reject_entry_not_touched")
             continue
         touch_time = rows[touch]["time"] + timedelta(minutes=M5_MINUTES)
@@ -565,10 +592,11 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
             dinc("reject_entry_touch_stale")
             continue
         final = {"type": "L", "idx": touch, "price": entry, "time": touch_time, "entry_touch": True}
+        trigger_high = {"type": "H", "idx": trigger_idx, "price": rows[trigger_idx]["high"], "time": rows[trigger_idx]["time"]}
         candidates.append({
             "symbol": symbol, "direction": "LONG", "start": start, "f1": f1,
             "f2": f2, "final": final, "entry_price": entry, "sl_price": sl,
-            "tp_price": tp, "trigger_high": None, "trigger_low": None,
+            "tp_price": tp, "trigger_high": trigger_high, "trigger_low": None,
             "pivots": pivots, "rows": rows,
         })
 
@@ -1247,7 +1275,7 @@ def main() -> None:
         f"Entry checks: new {len(new_signals)} | CCI crosses {DIAG['cci_crosses']} | open slots {MAX_OPEN_TRADES - len(get_open_trades())}/{MAX_OPEN_TRADES}",
         "",
         "🧪 DIAGNOSTICS (candidate windows)",
-        f"No intermediate pivot: {DIAG['reject_intermediate_pivot']} | Leg < 1%: {DIAG['reject_leg_distance']}",
+        f"Post-F2 reversal missing: {DIAG['reject_intermediate_pivot']} | Leg < 0.75%: {DIAG['reject_leg_distance']}",
         f"Geometry/spacing: {DIAG['reject_geometry']}/{DIAG['reject_spacing']} | START invalid: {DIAG['reject_start_extreme']}",
         f"Entry not touched: {DIAG['reject_entry_not_touched']} | SL reached first: {DIAG['reject_sl_before_entry']} | Touch older than 12h: {DIAG['reject_entry_touch_stale']}",
         f"M1 data insufficient: {DIAG['m1_no_data']} | No fresh CCI cross: {DIAG['cci_no_recent_cross']} | Invalid levels/price: {DIAG['reject_invalid_levels']}",
