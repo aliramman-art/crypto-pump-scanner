@@ -1,12 +1,10 @@
 # ============================================================
-# NDS M5 STRUCTURE + M1 CCI + MIRRORED F1-F2 ENTRY SCANNER - VERSION 6.3.2
+# NDS M5 10-NODE STRUCTURE SCANNER - VERSION 6.4.0
 # PAPER TRADING ONLY: NEVER SENDS REAL EXCHANGE ORDERS
-# Existing entry filename and DB filename are retained.
-# START lowest => SHORT using rising pivot lows; START highest => LONG using falling pivot highs.
-# Both START-F1 and F1-F2 legs must each be at least 0.75% of their reference node price.
-# Also require abs(START-F1) >= abs(F1-F2). Entry is projected from F2 by the F1-F2 distance.
-# TP is F1; SL is symmetric around entry by the entry-to-TP distance.
-# Price must touch the entry on a closed M5 candle, then a recent closed M1 CCI cross confirms.
+# SHORT: START-L-N1-H-S1-L-F1-H-S2-L-N2-H-S3-L-F2-H-S4-L-F3-H
+# LONG is the exact mirror. The three upward/downward legs must match within <2%.
+# Entry is F3; TP is 86.4% retracement from START to F3; SL is half the entry-to-TP distance.
+# START is confirmed as the low/high over five closed candles on each side.
 # The existing workflow filename, DB filename, and dependencies are intentionally retained.
 # ============================================================
 
@@ -27,7 +25,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-VERSION = "6.3.3"
+VERSION = "6.4.0"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -39,8 +37,12 @@ M5_MINUTES = 5
 M1_MINUTES = 1
 M5_CANDLES = 1500
 M1_CANDLES = 360
-START_LOOKBACK_CANDLES = 10
-MIN_LEG_DISTANCE_PCT = 0.75  # each START-F1 and F1-F2 leg must be >= 0.75%
+START_LOOKBACK_CANDLES = 5  # START must be the extreme among 5 candles before and 5 after
+START_CONFIRM_CANDLES = 5
+MIN_LEG_DISTANCE_PCT = 0.75  # minimum size of each of the three matched legs
+LEG_EQUALITY_TOLERANCE_PCT = 2.0  # max-min leg size must be strictly below 2% of the smallest leg
+RETRACE_TP_PCT = 86.4
+STOP_TO_TP_DISTANCE_RATIO = 0.5
 PIVOT_LEFT = 2
 PIVOT_RIGHT = 2
 MIN_NODE_CANDLES = 5
@@ -68,21 +70,20 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKE
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("TELEGRAM_CHAT")
 
 SESSION = requests.Session()
-SESSION.headers.update({"User-Agent": f"NDS-M5-CCI-Scanner/{VERSION}", "Accept": "application/json"})
+SESSION.headers.update({"User-Agent": f"NDS-M5-10-Node-Scanner/{VERSION}", "Accept": "application/json"})
 LIVE_PRICE_SOURCES: Dict[str, str] = {}
 LAST_TICKERS: Dict[str, Dict[str, Any]] = {}
 DIAG: Dict[str, int] = {}
+STRATEGY_EPOCH: Optional[datetime] = None
 
 
 def reset_diag() -> None:
     DIAG.clear()
     for key in (
         "assets", "m5_ok", "m5_errors", "m5_candles", "pivots", "structures",
-        "reject_spacing", "reject_start_extreme", "reject_geometry", "reject_intermediate_pivot",
-        "reject_leg_distance", "reject_invalid_levels", "reject_sl_before_entry",
-        "reject_entry_not_touched", "reject_entry_touch_stale", "m1_requested",
-        "m1_no_data", "cci_no_recent_cross", "cci_crosses", "signals_new", "signals_duplicate",
-        "entries_opened", "entries_blocked", "trades_tp", "trades_sl",
+        "reject_spacing", "reject_start_extreme", "reject_geometry", "reject_leg_imbalance",
+        "reject_leg_distance", "reject_invalid_levels", "reject_stale_structure", "reject_pre_strategy",
+        "signals_new", "signals_duplicate", "entries_opened", "entries_blocked", "trades_tp", "trades_sl",
     ):
         DIAG[key] = 0
 
@@ -411,199 +412,171 @@ def node_spacing_ok(nodes: List[Dict[str, Any]]) -> bool:
 
 
 def pattern_key(pattern: Dict[str, Any]) -> str:
+    """Stable identity for a fully confirmed 10-node structure."""
     pieces = [pattern["symbol"], pattern["direction"]]
-    for name in ("start", "f1", "f2", "final"):
+    for name in ("start", "n1", "s1", "f1", "s2", "n2", "s3", "f2", "s4", "f3"):
         node = pattern[name]
         pieces.append(f"{name}:{utc_iso(node['time'])}:{float(node['price']):.12g}")
     return "|".join(pieces)
 
 
-def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-    """Detect the user's mirrored START/F1/F2 structure on closed M5 candles.
+def is_start_extreme(rows: List[Dict[str, Any]], idx: int, kind: str) -> bool:
+    """START is the strict low/high across five candles before and after it."""
+    left = START_LOOKBACK_CANDLES
+    right = START_CONFIRM_CANDLES
+    if idx < left or idx + right >= len(rows):
+        return False
+    if kind == "L":
+        value = rows[idx]["low"]
+        neighbors = [rows[j]["low"] for j in range(idx - left, idx + right + 1) if j != idx]
+        return value < min(neighbors)
+    value = rows[idx]["high"]
+    neighbors = [rows[j]["high"] for j in range(idx - left, idx + right + 1) if j != idx]
+    return value > max(neighbors)
 
-    START is the extreme of its trailing ten candles. If START is the lowest
-    point, F1/F2 are rising pivot lows and the setup is SHORT. If START is the
-    highest point, F1/F2 are falling pivot highs and the setup is LONG. The
-    START-to-F1 leg must be at least as large as the F1-to-F2 leg, and each
-    leg must independently span at least 0.75% of its reference node price. A confirmed post-F2 reversal pivot must form between the F1/F2 price levels, then price must move to the projected entry. Entry
-    is activated only after a later closed candle touches the projected entry.
+
+def levels_for_structure(direction: str, start: float, f3: float) -> Optional[Tuple[float, float, float]]:
+    """Return entry=F3, TP=86.4% retracement of START→F3, and half-distance SL."""
+    if start <= 0 or f3 <= 0:
+        return None
+    distance = (f3 - start) if direction == "SHORT" else (start - f3)
+    if distance <= 0:
+        return None
+    entry = f3
+    retrace = distance * (RETRACE_TP_PCT / 100.0)
+    if direction == "SHORT":
+        tp = entry - retrace
+        sl = entry + retrace * STOP_TO_TP_DISTANCE_RATIO
+        if not (0 < tp < entry < sl):
+            return None
+    else:
+        tp = entry + retrace
+        sl = entry - retrace * STOP_TO_TP_DISTANCE_RATIO
+        if not (0 < sl < entry < tp):
+            return None
+    return entry, sl, tp
+
+
+def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+    """Detect the exact 10-node NDS sequence using closed M5 candles only.
+
+    SHORT nodes: START(L), N1(H), S1(L), F1(H), S2(L), N2(H), S3(L),
+    F2(H), S4(L), F3(H). Enforced relations: N1>START, F1>N1, S2<S1,
+    F2>F1, S4<S3, and F3>START. LONG is the mirrored sequence.
+
+    Matched legs are START→F1, S2→F2, and S4→F3. Their max/min size ratio
+    must differ by strictly less than 2%; each leg must also be >=0.75% of
+    its origin node. F3 is actionable only after its pivot is confirmed by
+    closed candles, and only patterns confirmed after this strategy's epoch
+    can be reported/traded.
     """
     now = now or utc_now()
-    if len(rows) < 40:
+    if len(rows) < max(40, START_LOOKBACK_CANDLES + START_CONFIRM_CANDLES + 10):
         return []
     pivots = build_ordered_pivots(rows)
     dinc("pivots", len(pivots))
-    lows = [p for p in pivots if p["type"] == "L"]
-    highs = [p for p in pivots if p["type"] == "H"]
     candidates: List[Dict[str, Any]] = []
+    expected_short = ["L", "H", "L", "H", "L", "H", "L", "H", "L", "H"]
+    expected_long = ["H", "L", "H", "L", "H", "L", "H", "L", "H", "L"]
 
-    # START is the lowest point => SHORT; F1 and F2 are rising pivot lows.
-    for sidx in range(len(lows) - 2):
-        start, f1, f2 = lows[sidx:sidx + 3]
-        if start["idx"] < START_LOOKBACK_CANDLES - 1:
-            dinc("reject_start_extreme")
+    for pos in range(0, len(pivots) - 9):
+        seq = pivots[pos:pos + 10]
+        types = [node["type"] for node in seq]
+        if types not in (expected_short, expected_long):
+            dinc("reject_geometry")
             continue
-        if not node_spacing_ok([start, f1, f2]):
+        if not node_spacing_ok(seq):
             dinc("reject_spacing")
             continue
-        lookback = rows[start["idx"] - START_LOOKBACK_CANDLES + 1:start["idx"] + 1]
-        if not lookback or start["price"] > min(r["low"] for r in lookback):
-            dinc("reject_start_extreme")
-            continue
-        if not (start["price"] < f1["price"] < f2["price"]):
-            dinc("reject_geometry")
-            continue
-        # New confirmation: after F2, a confirmed local LOW must form at a
-        # price strictly between F1 and F2. Entry is not eligible until that
-        # pivot is confirmed on closed candles and price rises to the entry.
-        leg_start_f1 = abs(f1["price"] - start["price"])
-        leg_f1_f2 = abs(f2["price"] - f1["price"])
-        start_f1_pct = (leg_start_f1 / start["price"] * 100.0) if start["price"] > 0 else 0.0
-        f1_f2_pct = (leg_f1_f2 / f1["price"] * 100.0) if f1["price"] > 0 else 0.0
-        if leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0:
-            dinc("reject_geometry")
-            continue
-        if start_f1_pct < MIN_LEG_DISTANCE_PCT or f1_f2_pct < MIN_LEG_DISTANCE_PCT:
-            dinc("reject_leg_distance")
-            continue
-        entry = f2["price"] + leg_f1_f2
-        tp = f1["price"]
-        sl = entry + abs(entry - tp)
-        touch = None
-        trigger_idx = None
-        stop_before_entry = False
-        # Find a post-F2 confirmed pivot low whose price lies between F1/F2.
-        # A pivot at i is confirmed only after PIVOT_RIGHT later closed candles.
-        for i in range(f2["idx"] + 1, len(rows) - PIVOT_RIGHT):
-            if not is_pivot_low(rows, i):
-                continue
-            trigger_price = rows[i]["low"]
-            if not (f1["price"] > trigger_price > f2["price"]):
-                continue
-            confirm_idx = i + PIVOT_RIGHT
-            # If the stop was reached before confirmation, discard this setup.
-            if any(rows[k]["high"] >= sl for k in range(f2["idx"] + 1, confirm_idx + 1)):
-                dinc("reject_sl_before_entry")
-                stop_before_entry = True
-                break
-            # Only a later closed candle may activate entry after price rises.
-            for k in range(confirm_idx + 1, len(rows)):
-                candle = rows[k]
-                if candle["high"] >= sl:
-                    dinc("reject_sl_before_entry")
-                    stop_before_entry = True
-                    break
-                if rows[k - 1]["close"] < entry <= candle["high"]:
-                    touch = k
-                    trigger_idx = i
-                    break
-            if touch is not None or stop_before_entry:
-                break
-        if touch is None:
-            if not stop_before_entry:
-                dinc("reject_intermediate_pivot")
-                dinc("reject_entry_not_touched")
-            continue
-        touch_time = rows[touch]["time"] + timedelta(minutes=M5_MINUTES)
-        if (now - touch_time).total_seconds() > MAX_PATTERN_AGE_HOURS * 3600:
-            dinc("reject_entry_touch_stale")
-            continue
-        final = {"type": "H", "idx": touch, "price": entry, "time": touch_time, "entry_touch": True}
-        trigger_low = {"type": "L", "idx": trigger_idx, "price": rows[trigger_idx]["low"], "time": rows[trigger_idx]["time"]}
-        candidates.append({
-            "symbol": symbol, "direction": "SHORT", "start": start, "f1": f1,
-            "f2": f2, "final": final, "entry_price": entry, "sl_price": sl,
-            "tp_price": tp, "trigger_high": None, "trigger_low": trigger_low,
-            "pivots": pivots, "rows": rows,
-        })
+        start, n1, s1, f1, s2, n2, s3, f2, s4, f3 = seq
+        is_short = types == expected_short
 
-    # START is the highest point => LONG; F1 and F2 are falling pivot highs.
-    for sidx in range(len(highs) - 2):
-        start, f1, f2 = highs[sidx:sidx + 3]
-        if start["idx"] < START_LOOKBACK_CANDLES - 1:
+        if not is_start_extreme(rows, start["idx"], "L" if is_short else "H"):
             dinc("reject_start_extreme")
             continue
-        if not node_spacing_ok([start, f1, f2]):
-            dinc("reject_spacing")
-            continue
-        lookback = rows[start["idx"] - START_LOOKBACK_CANDLES + 1:start["idx"] + 1]
-        if not lookback or start["price"] < max(r["high"] for r in lookback):
-            dinc("reject_start_extreme")
-            continue
-        if not (start["price"] > f1["price"] > f2["price"]):
+
+        if is_short:
+            # Required upward-structure shape before the short reversal.
+            geometry_ok = (
+                start["price"] < n1["price"]
+                and f1["price"] > n1["price"]
+                and s2["price"] < s1["price"]
+                and f2["price"] > f1["price"]
+                and s4["price"] < s3["price"]
+                and f3["price"] > start["price"]
+            )
+            direction = "SHORT"
+            legs = (
+                f1["price"] - start["price"],
+                f2["price"] - s2["price"],
+                f3["price"] - s4["price"],
+            )
+            leg_origins = (start["price"], s2["price"], s4["price"])
+        else:
+            # Exact mirror for the long setup in a downward structure.
+            geometry_ok = (
+                start["price"] > n1["price"]
+                and f1["price"] < n1["price"]
+                and s2["price"] > s1["price"]
+                and f2["price"] < f1["price"]
+                and s4["price"] > s3["price"]
+                and f3["price"] < start["price"]
+            )
+            direction = "LONG"
+            legs = (
+                start["price"] - f1["price"],
+                s2["price"] - f2["price"],
+                s4["price"] - f3["price"],
+            )
+            leg_origins = (start["price"], s2["price"], s4["price"])
+
+        if not geometry_ok or any(leg <= 0 for leg in legs):
             dinc("reject_geometry")
             continue
-        # New confirmation: after F2, a confirmed local HIGH must form at a
-        # price strictly between F2 and F1. Entry is not eligible until that
-        # pivot is confirmed on closed candles and price falls to the entry.
-        leg_start_f1 = abs(start["price"] - f1["price"])
-        leg_f1_f2 = abs(f1["price"] - f2["price"])
-        start_f1_pct = (leg_start_f1 / start["price"] * 100.0) if start["price"] > 0 else 0.0
-        f1_f2_pct = (leg_f1_f2 / f1["price"] * 100.0) if f1["price"] > 0 else 0.0
-        if leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0:
-            dinc("reject_geometry")
+
+        # Equal-length legs: max/min must be strictly under 2% difference.
+        smallest, largest = min(legs), max(legs)
+        if smallest <= 0 or ((largest - smallest) / smallest * 100.0) >= LEG_EQUALITY_TOLERANCE_PCT:
+            dinc("reject_leg_imbalance")
             continue
-        if start_f1_pct < MIN_LEG_DISTANCE_PCT or f1_f2_pct < MIN_LEG_DISTANCE_PCT:
+
+        leg_pcts = [leg / origin * 100.0 if origin > 0 else 0.0 for leg, origin in zip(legs, leg_origins)]
+        if any(pct < MIN_LEG_DISTANCE_PCT for pct in leg_pcts):
             dinc("reject_leg_distance")
             continue
-        entry = f2["price"] - leg_f1_f2
-        tp = f1["price"]
-        sl = entry - abs(tp - entry)
-        if sl <= 0 or not (sl < entry < tp):
+
+        # The F3 pivot is not confirmed until its right-side closed candles exist.
+        confirm_idx = f3["idx"] + PIVOT_RIGHT
+        if confirm_idx >= len(rows):
+            continue
+        confirmation_time = rows[confirm_idx]["time"] + timedelta(minutes=M5_MINUTES)
+        if (now - confirmation_time).total_seconds() > MAX_PATTERN_AGE_HOURS * 3600:
+            dinc("reject_stale_structure")
+            continue
+        if STRATEGY_EPOCH is not None and confirmation_time < STRATEGY_EPOCH:
+            dinc("reject_pre_strategy")
+            continue
+
+        levels = levels_for_structure(direction, start["price"], f3["price"])
+        if levels is None:
             dinc("reject_invalid_levels")
             continue
-        touch = None
-        trigger_idx = None
-        stop_before_entry = False
-        # Find a post-F2 confirmed pivot high whose price lies between F2/F1.
-        # A pivot at i is confirmed only after PIVOT_RIGHT later closed candles.
-        for i in range(f2["idx"] + 1, len(rows) - PIVOT_RIGHT):
-            if not is_pivot_high(rows, i):
-                continue
-            trigger_price = rows[i]["high"]
-            if not (f2["price"] < trigger_price < f1["price"]):
-                continue
-            confirm_idx = i + PIVOT_RIGHT
-            # If the stop was reached before confirmation, discard this setup.
-            if any(rows[k]["low"] <= sl for k in range(f2["idx"] + 1, confirm_idx + 1)):
-                dinc("reject_sl_before_entry")
-                stop_before_entry = True
-                break
-            # Only a later closed candle may activate entry after price falls.
-            for k in range(confirm_idx + 1, len(rows)):
-                candle = rows[k]
-                if candle["low"] <= sl:
-                    dinc("reject_sl_before_entry")
-                    stop_before_entry = True
-                    break
-                if rows[k - 1]["close"] > entry >= candle["low"]:
-                    touch = k
-                    trigger_idx = i
-                    break
-            if touch is not None or stop_before_entry:
-                break
-        if touch is None:
-            if not stop_before_entry:
-                dinc("reject_intermediate_pivot")
-                dinc("reject_entry_not_touched")
-            continue
-        touch_time = rows[touch]["time"] + timedelta(minutes=M5_MINUTES)
-        if (now - touch_time).total_seconds() > MAX_PATTERN_AGE_HOURS * 3600:
-            dinc("reject_entry_touch_stale")
-            continue
-        final = {"type": "L", "idx": touch, "price": entry, "time": touch_time, "entry_touch": True}
-        trigger_high = {"type": "H", "idx": trigger_idx, "price": rows[trigger_idx]["high"], "time": rows[trigger_idx]["time"]}
-        candidates.append({
-            "symbol": symbol, "direction": "LONG", "start": start, "f1": f1,
-            "f2": f2, "final": final, "entry_price": entry, "sl_price": sl,
-            "tp_price": tp, "trigger_high": trigger_high, "trigger_low": None,
+        entry, sl, tp = levels
+        final = dict(f3)
+        candidate = {
+            "symbol": symbol, "direction": direction,
+            "start": start, "n1": n1, "s1": s1, "f1": f1, "s2": s2,
+            "n2": n2, "s3": s3, "f2": f2, "s4": s4, "f3": f3,
+            "final": final, "entry_price": entry, "sl_price": sl, "tp_price": tp,
+            "leg_lengths": [float(x) for x in legs],
+            "leg_diff_pct": (largest - smallest) / smallest * 100.0,
+            "confirmed_at": utc_iso(confirmation_time),
             "pivots": pivots, "rows": rows,
-        })
+        }
+        candidate["pattern_key"] = pattern_key(candidate)
+        candidates.append(candidate)
 
-    unique: Dict[str, Dict[str, Any]] = {}
-    for item in candidates:
-        item["pattern_key"] = pattern_key(item)
-        unique[item["pattern_key"]] = item
+    unique = {item["pattern_key"]: item for item in candidates}
     raw = sorted(unique.values(), key=lambda x: x["final"]["time"], reverse=True)
     result: List[Dict[str, Any]] = []
     for item in raw:
@@ -660,67 +633,51 @@ def find_cci_cross(rows: List[Dict[str, Any]], direction: str, after_time: datet
 
 
 def target_price_for_pattern(pattern: Dict[str, Any], entry: float) -> Optional[float]:
-    """The take-profit is F1 for both mirrored structures."""
-    target = safe_float(pattern.get("f1", {}).get("price"))
-    if target is None or not math.isfinite(entry) or target <= 0:
+    """TP is the 86.4% retracement from START to the F3 entry."""
+    levels = levels_for_structure(pattern.get("direction", ""), float(pattern["start"]["price"]), float(pattern["final"]["price"]))
+    if levels is None:
         return None
-    direction = pattern.get("direction")
-    if direction == "LONG" and target <= entry:
-        return None
-    if direction == "SHORT" and target >= entry:
-        return None
-    return target
+    return float(levels[2])
 
 
 def build_entry_signal(
-    pattern: Dict[str, Any], m1_rows: List[Dict[str, Any]], live_price: Optional[float]
+    pattern: Dict[str, Any], m1_rows: Optional[List[Dict[str, Any]]] = None, live_price: Optional[float] = None
 ) -> Optional[Dict[str, Any]]:
-    # FINAL is a synthetic node at the entry level, placed only after a closed M5
-    # candle has touched that level. The M1 CCI cross is an additional confirmation.
-    cross = find_cci_cross(m1_rows, pattern["direction"], pattern["final"]["time"])
-    if not cross:
-        return None
-    dinc("cci_crosses")
-    entry = float(pattern.get("entry_price", pattern["final"]["price"]))
-    tp = target_price_for_pattern(pattern, entry)
-    if tp is None:
-        print(f"ENTRY_LEVELS_INVALID | symbol={pattern['symbol']} | dir={pattern['direction']} | entry={entry} | TP={tp}")
-        return None
-    distance = abs(entry - tp)
-    sl = entry - distance if pattern["direction"] == "LONG" else entry + distance
-    if sl <= 0:
+    """Build a signal immediately after the F3 pivot is confirmed on closed M5 candles."""
+    entry = safe_float(pattern.get("entry_price"))
+    sl = safe_float(pattern.get("sl_price"))
+    tp = safe_float(pattern.get("tp_price"))
+    if entry is None or sl is None or tp is None:
+        dinc("reject_invalid_levels")
         return None
     direction = pattern["direction"]
-    if direction == "LONG" and not (sl < entry < tp):
-        print(f"ENTRY_LEVELS_INVALID | symbol={pattern['symbol']} | dir=LONG | entry={entry} | SL={sl} | TP={tp}")
+    if direction == "SHORT" and not (0 < tp < entry < sl):
+        dinc("reject_invalid_levels")
         return None
-    if direction == "SHORT" and not (tp < entry < sl):
-        print(f"ENTRY_LEVELS_INVALID | symbol={pattern['symbol']} | dir=SHORT | entry={entry} | SL={sl} | TP={tp}")
-        return None
-    if cross["age_minutes"] > CCI_CROSS_MAX_AGE_MINUTES:
+    if direction == "LONG" and not (0 < sl < entry < tp):
+        dinc("reject_invalid_levels")
         return None
     signal = dict(pattern)
     signal.update({
         "signal_key": pattern["pattern_key"],
-        "entry": entry,
-        "sl": sl,
-        "tp": float(tp),
-        "cross": cross,
-        "signal_time": utc_iso(cross["time"]),
+        "entry": float(entry), "sl": float(sl), "tp": float(tp),
+        "signal_time": pattern.get("confirmed_at", utc_iso()),
         "detected_time": utc_iso(),
+        "cross": None,
     })
     return signal
 
-def build_structure_chart_payload(pattern: Dict[str, Any]) -> Dict[str, Any]:
-    """Chart payload for a confirmed entry-level touch before M1 CCI confirmation."""
-    entry = float(pattern.get("entry_price", pattern["final"]["price"]))
-    tp = target_price_for_pattern(pattern, entry)
-    distance = abs(entry - tp) if tp is not None else 0.0
-    sl = entry - distance if pattern["direction"] == "LONG" else entry + distance
-    payload = dict(pattern)
-    payload.update({"entry": entry, "sl": sl, "tp": tp, "structure_only": True})
-    return payload
 
+def build_structure_chart_payload(pattern: Dict[str, Any]) -> Dict[str, Any]:
+    """Chart payload for a fully confirmed 10-node structure and F3 entry."""
+    payload = dict(pattern)
+    payload.update({
+        "entry": float(pattern["entry_price"]),
+        "sl": float(pattern["sl_price"]),
+        "tp": float(pattern["tp_price"]),
+        "structure_only": True,
+    })
+    return payload
 
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_FILE, timeout=30)
@@ -760,16 +717,21 @@ def db_connect() -> sqlite3.Connection:
         telegram_sent INTEGER NOT NULL DEFAULT 0
     )""")
     conn.execute("CREATE TABLE IF NOT EXISTS nds6_migration_flags (flag TEXT PRIMARY KEY, created_at TEXT NOT NULL)")
-    # Clear old v6 report/trade history exactly once. The marker is stored in the
-    # same DB file, so subsequent scheduled workflow runs preserve new results.
-    reset_flag = "v6.3.0_clean_reporting_start"
+    # Start a clean report for the materially new v6.4.0 strategy exactly once.
+    # Old paper trades/signals/structure alerts came from incompatible entry logic.
+    reset_flag = "v6.4.0_clean_reporting_start"
     already_reset = conn.execute("SELECT 1 FROM nds6_migration_flags WHERE flag=?", (reset_flag,)).fetchone()
     if not already_reset:
         conn.execute("DELETE FROM nds6_trades")
         conn.execute("DELETE FROM nds6_processed_signals")
         conn.execute("DELETE FROM nds6_structure_alerts")
         conn.execute("INSERT INTO nds6_migration_flags(flag,created_at) VALUES(?,?)", (reset_flag, utc_iso()))
-        print("REPORT_HISTORY_RESET | old NDS v6 trades/signals cleared; reporting starts from this run")
+        print("REPORT_HISTORY_RESET | old strategy trades/signals/alerts cleared for v6.4.0")
+    epoch_flag = "v6.4.0_strategy_epoch"
+    has_epoch = conn.execute("SELECT 1 FROM nds6_migration_flags WHERE flag=?", (epoch_flag,)).fetchone()
+    if not has_epoch:
+        conn.execute("INSERT INTO nds6_migration_flags(flag,created_at) VALUES(?,?)", (epoch_flag, utc_iso()))
+        print("STRATEGY_EPOCH_SET | only F3 structures confirmed from this version onward can signal")
     conn.commit()
     return conn
 
@@ -838,9 +800,10 @@ def mark_signal_processed(signal: Dict[str, Any], state: str, note: str = "") ->
 
 
 def insert_trade(signal: Dict[str, Any]) -> Optional[int]:
+    node_names = ("start", "n1", "s1", "f1", "s2", "n2", "s3", "f2", "s4", "f3")
     nodes_json = json.dumps({
         name: {"price": float(signal[name]["price"]), "time": utc_iso(signal[name]["time"])}
-        for name in ("start", "f1", "f2", "final")
+        for name in node_names
     }, ensure_ascii=False)
     conn = db_connect()
     try:
@@ -849,7 +812,7 @@ def insert_trade(signal: Dict[str, Any]) -> Optional[int]:
             (signal_key,symbol,direction,entry_price,sl_price,tp_price,entry_time,status,nodes_json,cci_value,cci_cross_time)
             VALUES(?,?,?,?,?,?,?,'OPEN',?,?,?)""",
             (signal["signal_key"], signal["symbol"], signal["direction"], signal["entry"], signal["sl"], signal["tp"],
-             utc_iso(), nodes_json, signal["cross"]["cci"], signal["signal_time"]),
+             utc_iso(), nodes_json, None, None),
         )
         conn.commit()
         if cur.rowcount <= 0:
@@ -858,7 +821,6 @@ def insert_trade(signal: Dict[str, Any]) -> Optional[int]:
         return int(cur.lastrowid)
     finally:
         conn.close()
-
 
 def close_trade(trade_id: int, exit_price: float, exit_reason: str, direction: str, entry: float) -> float:
     pnl = trade_pnl_pct(direction, entry, exit_price)
@@ -1002,12 +964,11 @@ def create_signal_chart(signal: Dict[str, Any], rows: List[Dict[str, Any]]) -> O
             body_low = min(op, cl)
             body_height = max(abs(cl - op), max(abs(cl), 1.0) * 0.00001)
             ax.add_patch(Rectangle((x - 0.28, body_low), 0.56, body_height, fill=True, facecolor=candle_color, edgecolor=candle_color, linewidth=0.5, alpha=0.65))
-        annotations = [("START", signal["start"]), ("F1 / TAKE PROFIT", signal["f1"]), ("F2", signal["f2"])]
-        if signal.get("trigger_high") is not None:
-            annotations.append(("HH after F2", signal["trigger_high"]))
-        if signal.get("trigger_low") is not None:
-            annotations.append(("LL after F2", signal["trigger_low"]))
-        annotations.append(("FINAL / ENTRY", signal["final"]))
+        annotations = [(label, signal[name]) for label, name in (
+            ("START", "start"), ("N1", "n1"), ("S1", "s1"), ("F1", "f1"),
+            ("S2", "s2"), ("N2", "n2"), ("S3", "s3"), ("F2", "f2"),
+            ("S4", "s4"), ("F3 / ENTRY", "f3"),
+        )]
         for label, node in annotations:
             x = int(node["idx"]) - left
             if 0 <= x < len(view):
@@ -1029,12 +990,12 @@ def create_signal_chart(signal: Dict[str, Any], rows: List[Dict[str, Any]]) -> O
                     textcoords="offset points", ha="right", fontsize=8, color="#1565c0",
                     fontweight="bold", bbox={"boxstyle": "round,pad=0.2", "fc": "white", "alpha": 0.85, "ec": "#1565c0"})
         ax.axhline(signal["sl"], color="#c62828", linestyle=":", linewidth=1.5,
-                   label=f"SYMMETRIC STOP LOSS {fmt_price(signal['sl'])}")
+                   label=f"STOP LOSS (half TP distance) {fmt_price(signal['sl'])}")
         if signal.get("tp") is not None:
             ax.axhline(signal["tp"], color="#2e7d32", linestyle="-.", linewidth=1.5,
-                       label=f"F1 TAKE PROFIT {fmt_price(signal['tp'])}")
-        chart_state = "STRUCTURE DETECTED" if signal.get("structure_only") else "M1 CCI ENTRY CONFIRMED"
-        ax.set_title(f"NDS v{VERSION} | {signal['symbol']} | {signal['direction']} | {chart_state} | M5 chart, F1 TP / symmetric SL")
+                       label=f"TP (86.4% retracement) {fmt_price(signal['tp'])}")
+        chart_state = "F3 CONFIRMED ON CLOSED M5"
+        ax.set_title(f"NDS v{VERSION} | {signal['symbol']} | {signal['direction']} | {chart_state} | TP 86.4%, SL half-risk")
         ax.set_xlabel("Closed M5 candles")
         ax.set_ylabel("Price")
         ax.grid(True, alpha=0.2)
@@ -1065,16 +1026,18 @@ def format_signal(signal: Dict[str, Any], trade_id: Optional[int], trade_opened:
     tp_from_current = ((tp / live) - 1.0) * 100.0 if direction == "LONG" and live else ((live / tp) - 1.0) * 100.0 if direction == "SHORT" and tp else 0.0
     sl_from_current = ((sl / live) - 1.0) * 100.0 if direction == "LONG" and live else ((live / sl) - 1.0) * 100.0 if direction == "SHORT" and sl else 0.0
     state = f"PAPER TRADE #{trade_id} OPENED" if trade_opened and trade_id else "SIGNAL ONLY (no free slot / duplicate symbol)"
-    cross = signal["cross"]
+    legs = signal.get("leg_lengths", [])
+    legs_text = " / ".join(fmt_price(float(x)) for x in legs) if legs else "N/A"
+    nodes_text = " | ".join(f"{name.upper()} {fmt_price(signal[name]['price'])}" for name in ("start", "n1", "s1", "f1", "s2", "n2", "s3", "f2", "s4", "f3"))
     return "\n".join([
         f"{icon} {direction} SIGNAL | {signal['symbol']} | {state}",
-        f"Entry: {fmt_price(entry)} | Current: {fmt_price(live)} ({current_pnl:+.2f}% PnL, {live_price_label(signal['symbol'])})",
-        f"SL (symmetric): {fmt_price(sl)} ({sl_entry_pct:+.2f}% from entry; current→SL {sl_from_current:+.2f}%)",
-        f"TP: {fmt_price(tp)} ({tp_entry_pct:+.2f}% from entry; current→TP {tp_from_current:+.2f}%)",
-        f"Nodes: START {fmt_price(signal['start']['price'])} | F1/TP {fmt_price(signal['f1']['price'])} | F2 {fmt_price(signal['f2']['price'])} | ENTRY LEVEL {fmt_price(signal['entry'])}",
-        f"CCI(20) M1: {float(cross['previous_cci']):+.1f} → {float(cross['cci']):+.1f} | cross {utc_iso(cross['time'])} | age {cross['age_minutes']:.1f}m",
+        f"Entry at F3: {fmt_price(entry)} | Current: {fmt_price(live)} ({current_pnl:+.2f}% PnL, {live_price_label(signal['symbol'])})",
+        f"SL (half TP distance): {fmt_price(sl)} ({sl_entry_pct:+.2f}% from entry; current→SL {sl_from_current:+.2f}%)",
+        f"TP (86.4% retracement): {fmt_price(tp)} ({tp_entry_pct:+.2f}% from entry; current→TP {tp_from_current:+.2f}%)",
+        f"Nodes: {nodes_text}",
+        f"Matched legs START→F1 / S2→F2 / S4→F3: {legs_text} | max difference {float(signal.get('leg_diff_pct', 0.0)):.2f}%",
+        f"F3 confirmed: {signal.get('confirmed_at', signal.get('signal_time', 'N/A'))}",
     ])
-
 
 def format_open_trade(trade: Dict[str, Any], current: Optional[float]) -> str:
     symbol, direction = trade["symbol"], trade["direction"]
@@ -1105,8 +1068,8 @@ def format_open_trade(trade: Dict[str, Any], current: Optional[float]) -> str:
     return "\n".join([
         f"{icon} #{trade['id']} {direction} | {symbol} | age {age}",
         f"Entry: {fmt_price(entry)} | Current: {current_text} | PnL: {pnl_text}",
-        f"SL/F1: {sl_text}",
-        f"TP: {tp_text}",
+        f"SL (half TP distance): {sl_text}",
+        f"TP (86.4% retracement): {tp_text}",
     ])
 
 
@@ -1146,14 +1109,25 @@ def scan_m5_symbol(symbol: str) -> Tuple[str, List[Dict[str, Any]], List[Dict[st
 
 
 def main() -> None:
+    global STRATEGY_EPOCH
     started = utc_now()
-    print(f"NDS_M5_M1_START | version={VERSION} | time={utc_iso(started)}")
+    print(f"NDS_M5_10_NODE_START | version={VERSION} | time={utc_iso(started)}")
     print("MODE | REAL_TRADING=False | PAPER_ONLY=True | no exchange order endpoints are used")
+
+    # Initialize/reset report history once and load the strategy-start cutoff.
+    conn = db_connect()
+    try:
+        row = conn.execute("SELECT created_at FROM nds6_migration_flags WHERE flag=?", ("v6.4.0_strategy_epoch",)).fetchone()
+        STRATEGY_EPOCH = parse_time(row[0]) if row else started
+    finally:
+        conn.close()
+    print(f"STRATEGY_EPOCH | {utc_iso(STRATEGY_EPOCH or started)} | old structures are excluded")
+
     try:
         tickers = get_market_tickers()
         selected_symbols = get_target_assets(tickers, TARGET_ASSETS)
     except Exception as exc:
-        message = f"NDS M5/M1 CCI SCANNER ERROR\nTime: {utc_iso()}\n{type(exc).__name__}: {exc}"
+        message = f"NDS M5 10-NODE SCANNER ERROR\nTime: {utc_iso()}\n{type(exc).__name__}: {exc}"
         telegram_send(message)
         raise
 
@@ -1176,14 +1150,13 @@ def main() -> None:
             else:
                 dinc("m5_ok")
             if structures:
-                print(f"M5_STRUCTURES | symbol={symbol} | count={len(structures)} | newest={structures[0]['direction']} | final={fmt_price(structures[0]['final']['price'])}")
+                p = structures[0]
+                print(f"M5_STRUCTURES | symbol={symbol} | count={len(structures)} | newest={p['direction']} | F3={fmt_price(p['f3']['price'])} | legs={p['leg_lengths']} | diff={p['leg_diff_pct']:.2f}%")
 
     prices = get_live_prices(scan_symbols, tickers)
     closed_trades = manage_open_trades(prices, rows_by_symbol)
 
-    # Keep only the newest non-superseded candidate per symbol and direction.
-    # Opposite-direction candidates may coexist; nested same-direction structures
-    # have already superseded the enclosing older pattern in detect_structures().
+    # Keep only the newest valid fresh structure per symbol/direction.
     candidate_patterns: List[Dict[str, Any]] = []
     for symbol, patterns in structures_by_symbol.items():
         latest_by_direction: Dict[str, Dict[str, Any]] = {}
@@ -1193,24 +1166,8 @@ def main() -> None:
             if current is None or pattern["final"]["time"] > current["final"]["time"]:
                 latest_by_direction[direction] = pattern
         candidate_patterns.extend(latest_by_direction.values())
-    symbols_needing_m1 = sorted({p["symbol"] for p in candidate_patterns})
-    m1_by_symbol: Dict[str, List[Dict[str, Any]]] = {}
-    if symbols_needing_m1:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            m1_futures = {executor.submit(fetch_ohlc, symbol, M1_INTERVAL, M1_CANDLES): symbol for symbol in symbols_needing_m1}
-            for future in as_completed(m1_futures):
-                symbol = m1_futures[future]
-                try:
-                    m1_by_symbol[symbol] = future.result()
-                    dinc("m1_requested")
-                except Exception as exc:
-                    print(f"M1_SCAN_ERROR | symbol={symbol} | {type(exc).__name__}: {exc}")
-                    m1_by_symbol[symbol] = []
-            for symbol in symbols_needing_m1:
-                if len(m1_by_symbol.get(symbol, [])) < CCI_PERIOD + 2:
-                    dinc("m1_no_data")
 
-    # Send each newly recognized/superseding structure chart once, even before CCI confirms entry.
+    # Send one annotated chart for each freshly confirmed 10-node structure.
     for pattern in candidate_patterns:
         pkey = pattern["pattern_key"]
         if structure_alert_was_sent(pkey):
@@ -1218,12 +1175,12 @@ def main() -> None:
         chart_payload = build_structure_chart_payload(pattern)
         chart_path = create_signal_chart(chart_payload, rows_by_symbol.get(pattern["symbol"], []))
         if chart_path:
-            tp_text = fmt_price(chart_payload["tp"]) if chart_payload.get("tp") is not None else "not available (invalid F1 target)"
             caption = (
-                f"🧩 NDS v{VERSION} | NEW/SUPERSEDING STRUCTURE | {pattern['symbol']} | {pattern['direction']}\n"
-                f"M5 nodes: START {fmt_price(pattern['start']['price'])} | F1/TP {fmt_price(pattern['f1']['price'])} | "
-                f"F2 {fmt_price(pattern['f2']['price'])} | ENTRY LEVEL {fmt_price(pattern['entry_price'])}\n"
-                f"TP = F1: {tp_text} | SL is symmetric around entry | Waiting for closed M1 CCI confirmation."
+                f"🧩 NDS v{VERSION} | CONFIRMED 10-NODE STRUCTURE | {pattern['symbol']} | {pattern['direction']}\n"
+                f"F3/ENTRY {fmt_price(pattern['entry_price'])} | TP 86.4% {fmt_price(pattern['tp_price'])} | SL {fmt_price(pattern['sl_price'])}\n"
+                f"Legs START→F1 / S2→F2 / S4→F3: "
+                f"{' / '.join(fmt_price(float(x)) for x in pattern['leg_lengths'])} | difference {pattern['leg_diff_pct']:.2f}%\n"
+                f"Confirmed on closed M5 candles at {pattern['confirmed_at']}"
             )
             sent_chart = telegram_send_photo(chart_path, caption)
             mark_structure_alert_sent(pattern, sent_chart)
@@ -1240,13 +1197,9 @@ def main() -> None:
         if signal_was_processed(pattern["pattern_key"]):
             dinc("signals_duplicate")
             continue
-        before_crosses = DIAG["cci_crosses"]
-        signal = build_entry_signal(pattern, m1_by_symbol.get(symbol, []), live)
+        signal = build_entry_signal(pattern, None, live)
         if not signal:
-            if DIAG["cci_crosses"] == before_crosses:
-                dinc("cci_no_recent_cross")
             continue
-        # One open paper position per symbol; also enforce portfolio open-trade cap.
         current_open = get_open_trades()
         same_symbol_open = any(t["symbol"] == symbol for t in current_open)
         can_open = len(current_open) < MAX_OPEN_TRADES and not same_symbol_open
@@ -1263,22 +1216,21 @@ def main() -> None:
             mark_signal_processed(signal, "SIGNAL_ONLY", note)
             dinc("entries_blocked")
             new_signals.append({"signal": signal, "trade_id": None, "opened": False})
+        dinc("signals_new")
 
-    # Build one report containing new signals, all open trades, realized/floating PnL,
-    # and each trade's TP/SL distances. Send chunks safely under Telegram's limit.
     perf = performance_stats(prices)
     ended = utc_now()
     elapsed = (ended - started).total_seconds()
     lines = [
         f"🔎 NDS Scanner v{VERSION} | {utc_iso(ended)}",
-        f"Scan: {len(scan_symbols)} symbols | M5 OK {DIAG['m5_ok']} | errors {errors} | structures {DIAG['structures']} | {elapsed:.1f}s",
-        f"Entry checks: new {len(new_signals)} | CCI crosses {DIAG['cci_crosses']} | open slots {MAX_OPEN_TRADES - len(get_open_trades())}/{MAX_OPEN_TRADES}",
+        f"Scan: {len(scan_symbols)} symbols | M5 OK {DIAG['m5_ok']} | errors {errors} | 10-node structures {DIAG['structures']} | {elapsed:.1f}s",
+        f"New signals {len(new_signals)} | open slots {MAX_OPEN_TRADES - len(get_open_trades())}/{MAX_OPEN_TRADES}",
         "",
-        "🧪 DIAGNOSTICS (candidate windows)",
-        f"Post-F2 reversal missing: {DIAG['reject_intermediate_pivot']} | Leg < 0.75%: {DIAG['reject_leg_distance']}",
-        f"Geometry/spacing: {DIAG['reject_geometry']}/{DIAG['reject_spacing']} | START invalid: {DIAG['reject_start_extreme']}",
-        f"Entry not touched: {DIAG['reject_entry_not_touched']} | SL reached first: {DIAG['reject_sl_before_entry']} | Touch older than 12h: {DIAG['reject_entry_touch_stale']}",
-        f"M1 data insufficient: {DIAG['m1_no_data']} | No fresh CCI cross: {DIAG['cci_no_recent_cross']} | Invalid levels/price: {DIAG['reject_invalid_levels']}",
+        "🧪 DIAGNOSTICS (candidate 10-node windows)",
+        f"Rejected geometry: {DIAG['reject_geometry']} | spacing: {DIAG['reject_spacing']} | invalid START: {DIAG['reject_start_extreme']}",
+        f"Leg-size mismatch ≥2%: {DIAG['reject_leg_imbalance']} | leg <0.75%: {DIAG['reject_leg_distance']}",
+        f"Stale structures (>12h): {DIAG['reject_stale_structure']} | formed before v6.4.0 epoch: {DIAG['reject_pre_strategy']} | invalid levels: {DIAG['reject_invalid_levels']}",
+        "Rules: START has 5 candles on both sides | legs START-F1, S2-F2, S4-F3 differ by <2% | entry F3 | TP 86.4% retracement | SL half TP distance",
         "",
         f"🆕 SIGNALS: {len(new_signals)}",
     ]
@@ -1310,29 +1262,27 @@ def main() -> None:
             sent = False
             break
 
-    # Send an annotated M5 chart for every new CCI-confirmed signal, even if
-    # the trade could not open because of the open-trade cap or an existing position.
     if sent:
         for item in new_signals:
             signal = item["signal"]
             chart_path = create_signal_chart(signal, rows_by_symbol.get(signal["symbol"], []))
             if chart_path:
                 state = f"PAPER TRADE #{item['trade_id']} OPENED" if item["opened"] and item["trade_id"] else "SIGNAL ONLY"
-                caption = (f"NDS v{VERSION} | {signal['symbol']} | {signal['direction']} | {state}\n"
-                           f"START {fmt_price(signal['start']['price'])} | F1/TP {fmt_price(signal['f1']['price'])} | "
-                           f"F2 {fmt_price(signal['f2']['price'])} | ENTRY LEVEL {fmt_price(signal['entry'])}\n"
-                           f"ENTRY {fmt_price(signal['entry'])} | SYMMETRIC STOP LOSS {fmt_price(signal['sl'])} | F1 TAKE PROFIT {fmt_price(signal['tp'])}\n"
-                           f"CCI(20) M1 cross: {float(signal['cross']['previous_cci']):+.1f} → {float(signal['cross']['cci']):+.1f}")
+                caption = (
+                    f"NDS v{VERSION} | {signal['symbol']} | {signal['direction']} | {state}\n"
+                    f"Entry F3 {fmt_price(signal['entry'])} | TP 86.4% {fmt_price(signal['tp'])} | SL half distance {fmt_price(signal['sl'])}\n"
+                    f"Legs START→F1 / S2→F2 / S4→F3: {' / '.join(fmt_price(float(x)) for x in signal['leg_lengths'])}"
+                )
                 telegram_send_photo(chart_path, caption)
 
-    print("NDS_M5_M1_DONE | " + json.dumps({
+    print("NDS_M5_10_NODE_DONE | " + json.dumps({
         "version": VERSION,
         "scanned": len(scan_symbols),
         "m5_ok": DIAG["m5_ok"],
         "m5_errors": errors,
         "structures": DIAG["structures"],
         "signals_new": len(new_signals),
-        "diagnostics": {k: v for k, v in DIAG.items() if k.startswith("reject_") or k in ("m1_no_data", "cci_no_recent_cross", "cci_crosses")},
+        "diagnostics": {k: v for k, v in DIAG.items() if k.startswith("reject_")},
         "entries_opened": DIAG["entries_opened"],
         "entries_blocked": DIAG["entries_blocked"],
         "open_trades": len(open_now),
