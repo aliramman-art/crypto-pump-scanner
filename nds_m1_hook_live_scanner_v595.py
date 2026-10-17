@@ -446,6 +446,14 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
             continue
         if not (start["price"] < f1["price"] < f2["price"]):
             continue
+        # Required filter: SHORT must contain a confirmed local pivot low
+        # strictly between F1 and F2 (excluding F1 and F2 themselves).
+        has_intermediate_low = any(
+            is_pivot_low(rows, i)
+            for i in range(f1["idx"] + 1, f2["idx"])
+        )
+        if not has_intermediate_low:
+            continue
         leg_start_f1 = abs(f1["price"] - start["price"])
         leg_f1_f2 = abs(f2["price"] - f1["price"])
         start_f1_pct = (leg_start_f1 / start["price"] * 100.0) if start["price"] > 0 else 0.0
@@ -490,6 +498,14 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
         if not lookback or start["price"] < max(r["high"] for r in lookback):
             continue
         if not (start["price"] > f1["price"] > f2["price"]):
+            continue
+        # Required filter: LONG must contain a confirmed local pivot high
+        # strictly between F1 and F2 (excluding F1 and F2 themselves).
+        has_intermediate_high = any(
+            is_pivot_high(rows, i)
+            for i in range(f1["idx"] + 1, f2["idx"])
+        )
+        if not has_intermediate_high:
             continue
         leg_start_f1 = abs(start["price"] - f1["price"])
         leg_f1_f2 = abs(f1["price"] - f2["price"])
