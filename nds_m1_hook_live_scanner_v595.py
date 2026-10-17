@@ -1,5 +1,5 @@
 # ============================================================
-# NDS M5 STRUCTURE + M1 CCI + MIRRORED F1-F2 ENTRY SCANNER - VERSION 6.3.0
+# NDS M5 STRUCTURE + M1 CCI + MIRRORED F1-F2 ENTRY SCANNER - VERSION 6.3.2
 # PAPER TRADING ONLY: NEVER SENDS REAL EXCHANGE ORDERS
 # Existing entry filename and DB filename are retained.
 # START lowest => SHORT using rising pivot lows; START highest => LONG using falling pivot highs.
@@ -27,7 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
-VERSION = "6.3.1"
+VERSION = "6.3.2"
 REAL_TRADING = False
 PAPER_ONLY = True
 
@@ -78,7 +78,10 @@ def reset_diag() -> None:
     DIAG.clear()
     for key in (
         "assets", "m5_ok", "m5_errors", "m5_candles", "pivots", "structures",
-        "m1_requested", "cci_crosses", "signals_new", "signals_duplicate",
+        "reject_spacing", "reject_start_extreme", "reject_geometry", "reject_intermediate_pivot",
+        "reject_leg_distance", "reject_invalid_levels", "reject_sl_before_entry",
+        "reject_entry_not_touched", "reject_entry_touch_stale", "m1_requested",
+        "m1_no_data", "cci_no_recent_cross", "cci_crosses", "signals_new", "signals_duplicate",
         "entries_opened", "entries_blocked", "trades_tp", "trades_sl",
     ):
         DIAG[key] = 0
@@ -438,13 +441,17 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
     for sidx in range(len(lows) - 2):
         start, f1, f2 = lows[sidx:sidx + 3]
         if start["idx"] < START_LOOKBACK_CANDLES - 1:
+            dinc("reject_start_extreme")
             continue
         if not node_spacing_ok([start, f1, f2]):
+            dinc("reject_spacing")
             continue
         lookback = rows[start["idx"] - START_LOOKBACK_CANDLES + 1:start["idx"] + 1]
         if not lookback or start["price"] > min(r["low"] for r in lookback):
+            dinc("reject_start_extreme")
             continue
         if not (start["price"] < f1["price"] < f2["price"]):
+            dinc("reject_geometry")
             continue
         # Required filter: SHORT must contain a confirmed local pivot low
         # strictly between F1 and F2 (excluding F1 and F2 themselves).
@@ -453,31 +460,40 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
             for i in range(f1["idx"] + 1, f2["idx"])
         )
         if not has_intermediate_low:
+            dinc("reject_intermediate_pivot")
             continue
         leg_start_f1 = abs(f1["price"] - start["price"])
         leg_f1_f2 = abs(f2["price"] - f1["price"])
         start_f1_pct = (leg_start_f1 / start["price"] * 100.0) if start["price"] > 0 else 0.0
         f1_f2_pct = (leg_f1_f2 / f1["price"] * 100.0) if f1["price"] > 0 else 0.0
-        if (leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0
-                or start_f1_pct < MIN_LEG_DISTANCE_PCT
-                or f1_f2_pct < MIN_LEG_DISTANCE_PCT):
+        if leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0:
+            dinc("reject_geometry")
+            continue
+        if start_f1_pct < MIN_LEG_DISTANCE_PCT or f1_f2_pct < MIN_LEG_DISTANCE_PCT:
+            dinc("reject_leg_distance")
             continue
         entry = f2["price"] + leg_f1_f2
         tp = f1["price"]
         sl = entry + abs(entry - tp)
         touch = None
+        stop_before_entry = False
         for k in range(f2["idx"] + 1, len(rows)):
             candle = rows[k]
             if candle["high"] >= sl:
                 # OHLC cannot prove entry was touched before the stop; reject conservatively.
+                dinc("reject_sl_before_entry")
+                stop_before_entry = True
                 break
             if candle["high"] >= entry:
                 touch = k
                 break
         if touch is None:
+            if not stop_before_entry:
+                dinc("reject_entry_not_touched")
             continue
         touch_time = rows[touch]["time"] + timedelta(minutes=M5_MINUTES)
         if (now - touch_time).total_seconds() > MAX_PATTERN_AGE_HOURS * 3600:
+            dinc("reject_entry_touch_stale")
             continue
         final = {"type": "H", "idx": touch, "price": entry, "time": touch_time, "entry_touch": True}
         candidates.append({
@@ -491,13 +507,17 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
     for sidx in range(len(highs) - 2):
         start, f1, f2 = highs[sidx:sidx + 3]
         if start["idx"] < START_LOOKBACK_CANDLES - 1:
+            dinc("reject_start_extreme")
             continue
         if not node_spacing_ok([start, f1, f2]):
+            dinc("reject_spacing")
             continue
         lookback = rows[start["idx"] - START_LOOKBACK_CANDLES + 1:start["idx"] + 1]
         if not lookback or start["price"] < max(r["high"] for r in lookback):
+            dinc("reject_start_extreme")
             continue
         if not (start["price"] > f1["price"] > f2["price"]):
+            dinc("reject_geometry")
             continue
         # Required filter: LONG must contain a confirmed local pivot high
         # strictly between F1 and F2 (excluding F1 and F2 themselves).
@@ -506,33 +526,43 @@ def detect_structures(symbol: str, rows: List[Dict[str, Any]], now: Optional[dat
             for i in range(f1["idx"] + 1, f2["idx"])
         )
         if not has_intermediate_high:
+            dinc("reject_intermediate_pivot")
             continue
         leg_start_f1 = abs(start["price"] - f1["price"])
         leg_f1_f2 = abs(f1["price"] - f2["price"])
         start_f1_pct = (leg_start_f1 / start["price"] * 100.0) if start["price"] > 0 else 0.0
         f1_f2_pct = (leg_f1_f2 / f1["price"] * 100.0) if f1["price"] > 0 else 0.0
-        if (leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0
-                or start_f1_pct < MIN_LEG_DISTANCE_PCT
-                or f1_f2_pct < MIN_LEG_DISTANCE_PCT):
+        if leg_start_f1 < leg_f1_f2 or leg_f1_f2 <= 0:
+            dinc("reject_geometry")
+            continue
+        if start_f1_pct < MIN_LEG_DISTANCE_PCT or f1_f2_pct < MIN_LEG_DISTANCE_PCT:
+            dinc("reject_leg_distance")
             continue
         entry = f2["price"] - leg_f1_f2
         tp = f1["price"]
         sl = entry - abs(tp - entry)
         if sl <= 0 or not (sl < entry < tp):
+            dinc("reject_invalid_levels")
             continue
         touch = None
+        stop_before_entry = False
         for k in range(f2["idx"] + 1, len(rows)):
             candle = rows[k]
             if candle["low"] <= sl:
                 # OHLC cannot prove entry was touched before the stop; reject conservatively.
+                dinc("reject_sl_before_entry")
+                stop_before_entry = True
                 break
             if candle["low"] <= entry:
                 touch = k
                 break
         if touch is None:
+            if not stop_before_entry:
+                dinc("reject_entry_not_touched")
             continue
         touch_time = rows[touch]["time"] + timedelta(minutes=M5_MINUTES)
         if (now - touch_time).total_seconds() > MAX_PATTERN_AGE_HOURS * 3600:
+            dinc("reject_entry_touch_stale")
             continue
         final = {"type": "L", "idx": touch, "price": entry, "time": touch_time, "entry_touch": True}
         candidates.append({
@@ -1148,6 +1178,9 @@ def main() -> None:
                 except Exception as exc:
                     print(f"M1_SCAN_ERROR | symbol={symbol} | {type(exc).__name__}: {exc}")
                     m1_by_symbol[symbol] = []
+            for symbol in symbols_needing_m1:
+                if len(m1_by_symbol.get(symbol, [])) < CCI_PERIOD + 2:
+                    dinc("m1_no_data")
 
     # Send each newly recognized/superseding structure chart once, even before CCI confirms entry.
     for pattern in candidate_patterns:
@@ -1174,12 +1207,16 @@ def main() -> None:
         symbol = pattern["symbol"]
         live = prices.get(symbol)
         if not live:
+            dinc("reject_invalid_levels")
             continue
         if signal_was_processed(pattern["pattern_key"]):
             dinc("signals_duplicate")
             continue
+        before_crosses = DIAG["cci_crosses"]
         signal = build_entry_signal(pattern, m1_by_symbol.get(symbol, []), live)
         if not signal:
+            if DIAG["cci_crosses"] == before_crosses:
+                dinc("cci_no_recent_cross")
             continue
         # One open paper position per symbol; also enforce portfolio open-trade cap.
         current_open = get_open_trades()
@@ -1205,35 +1242,39 @@ def main() -> None:
     ended = utc_now()
     elapsed = (ended - started).total_seconds()
     lines = [
-        f"🔎 NDS M5 STRUCTURE + M1 CCI + F1 TP | v{VERSION}",
-        f"Time (UTC): {utc_iso(ended)} | Scan runtime: {elapsed:.1f}s",
-        f"Universe: top {TARGET_ASSETS} PF_ contracts by 24h volume, XAUT + BTC retained",
-        f"Scanned: {len(scan_symbols)} | M5 data OK: {DIAG['m5_ok']} | errors/short: {errors} | structures: {DIAG['structures']}",
-        "Rules: START lowest => SHORT with rising F1/F2 lows; START highest => LONG with falling F1/F2 highs; abs(START-F1) >= abs(F1-F2); entry is projected from F2 by the F1-F2 distance and must be touched by a closed M5 candle; TP=F1; SL is symmetric around entry; closed M1 CCI(20) cross confirms. Paper only.",
+        f"🔎 NDS Scanner v{VERSION} | {utc_iso(ended)}",
+        f"Scan: {len(scan_symbols)} symbols | M5 OK {DIAG['m5_ok']} | errors {errors} | structures {DIAG['structures']} | {elapsed:.1f}s",
+        f"Entry checks: new {len(new_signals)} | CCI crosses {DIAG['cci_crosses']} | open slots {MAX_OPEN_TRADES - len(get_open_trades())}/{MAX_OPEN_TRADES}",
         "",
-        f"🆕 NEW SIGNALS: {len(new_signals)}",
+        "🧪 DIAGNOSTICS (candidate windows)",
+        f"No intermediate pivot: {DIAG['reject_intermediate_pivot']} | Leg < 1%: {DIAG['reject_leg_distance']}",
+        f"Geometry/spacing: {DIAG['reject_geometry']}/{DIAG['reject_spacing']} | START invalid: {DIAG['reject_start_extreme']}",
+        f"Entry not touched: {DIAG['reject_entry_not_touched']} | SL reached first: {DIAG['reject_sl_before_entry']} | Touch older than 12h: {DIAG['reject_entry_touch_stale']}",
+        f"M1 data insufficient: {DIAG['m1_no_data']} | No fresh CCI cross: {DIAG['cci_no_recent_cross']} | Invalid levels/price: {DIAG['reject_invalid_levels']}",
+        "",
+        f"🆕 SIGNALS: {len(new_signals)}",
     ]
     if new_signals:
         for item in new_signals:
             lines.extend([format_signal(item["signal"], item["trade_id"], item["opened"], prices.get(item["signal"]["symbol"])), ""])
     else:
-        lines.append("No new CCI-confirmed entry signals this run.\n")
+        lines.append("No new confirmed entries.")
 
     open_now = get_open_trades()
-    lines.append(f"📂 OPEN TRADES: {len(open_now)}/{MAX_OPEN_TRADES}")
+    lines.append(f"📂 OPEN: {len(open_now)}/{MAX_OPEN_TRADES}")
     if open_now:
         for trade in open_now:
             lines.extend([format_open_trade(trade, prices.get(trade["symbol"])), ""])
     else:
         lines.append("No open paper trades.\n")
 
-    lines.append(f"📊 PERFORMANCE | Closed: {perf['closed']} | Wins: {perf['wins']} | Losses: {perf['losses']} | Win rate: {perf['win_rate']:.1f}%")
+    lines.append(f"📊 RESULTS: {perf['closed']} closed | {perf['wins']}W/{perf['losses']}L | win {perf['win_rate']:.1f}%")
     lines.append(f"Realized PnL: {perf['realized']:+.2f}% (sum of trade returns) | Floating PnL: {perf['floating']:+.2f}% | Combined: {perf['combined']:+.2f}%")
-    lines.append(f"Exits this run: TP {DIAG['trades_tp']} | SL {DIAG['trades_sl']} | Total paper trades ever: {perf['total']}")
+    lines.append(f"Exits this run: TP {DIAG['trades_tp']} | SL {DIAG['trades_sl']} | Paper trades total {perf['total']}")
     if closed_trades:
         lines.extend(["", "✅ CLOSED THIS RUN"])
         lines.extend(format_closed_trade(t) for t in closed_trades)
-    lines.extend(["", "Price source: Kraken bid/ask midpoint, then mark, then recent last. PnL excludes fees/funding."])
+    lines.append("Paper only | PnL excludes fees/funding")
     report = "\n".join(lines)
     sent = True
     for chunk in split_message(report):
@@ -1263,6 +1304,7 @@ def main() -> None:
         "m5_errors": errors,
         "structures": DIAG["structures"],
         "signals_new": len(new_signals),
+        "diagnostics": {k: v for k, v in DIAG.items() if k.startswith("reject_") or k in ("m1_no_data", "cci_no_recent_cross", "cci_crosses")},
         "entries_opened": DIAG["entries_opened"],
         "entries_blocked": DIAG["entries_blocked"],
         "open_trades": len(open_now),
