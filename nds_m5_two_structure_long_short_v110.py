@@ -4,12 +4,20 @@
 
 """
 NDS M5 TWO STRUCTURE LONG / SHORT SCANNER
-Version: 1.1.0
+Version 1.1.0
 
-Paper/signal detection only. No real orders are placed.
-
-Chart labels are limited to:
-START, 1 GREEN, 1 RED, 2 GREEN, 2 RED, ENTRY, TP, SL.
+- Kraken Futures public market data
+- Up to 100 PF_*USD symbols
+- XBT and XAUT prioritized when available
+- Closed M5 candles only
+- START: 5-left / 5-right confirmed pivot
+- Other structure points: 2-left / 2-right confirmed pivots
+- Chart labels: START, 1 GREEN, 1 RED, 2 GREEN, 2 RED
+- ENTRY, TP and SL are shown as horizontal levels
+- Telegram alerts and SQLite duplicate protection
+- Paper / signal only. No real orders are placed.
+- Existing database is migrated without intentionally deleting
+  historical signal records.
 """
 
 import os
@@ -20,67 +28,81 @@ from datetime import datetime, timezone
 
 import requests
 import matplotlib
+
 matplotlib.use("Agg")
+
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
 VERSION = "1.1.0"
+
+PAPER_ONLY = True
+
+TARGET_SYMBOLS = 100
+TIMEFRAME = "5m"
+CANDLE_SECONDS = 300
+CANDLE_LIMIT = 1500
+CHART_CANDLES = 160
+
+START_LEFT = 5
+START_RIGHT = 5
+PIVOT_LEFT = 2
+PIVOT_RIGHT = 2
+
+MAX_OPEN_SIGNALS = 3
+REQUEST_TIMEOUT = 20
+REQUEST_DELAY = 0.12
+
+DB_FILE = "nds_m5_two_structure_ls.db"
+CHART_DIR = "nds_m5_two_structure_ls_charts"
 
 BASE_URL = "https://futures.kraken.com"
 INSTRUMENTS_URL = BASE_URL + "/derivatives/api/v3/instruments"
 TICKERS_URL = BASE_URL + "/derivatives/api/v3/tickers"
 CHART_URL = BASE_URL + "/api/charts/v1/trade"
 
-TIMEFRAME = "5m"
-CANDLE_SECONDS = 300
-
-TARGET_SYMBOLS = 100
-CANDLE_LIMIT = 1500
-CHART_CANDLES = 160
-
-START_LEFT_RIGHT = 5
-PIVOT_LEFT_RIGHT = 2
-
-MAX_OPEN_SIGNALS = 3
-PAPER_ONLY = True
-
-DB_FILE = "nds_m5_two_structure_ls.db"
-CHART_DIR = "nds_m5_two_structure_ls_charts"
-
 TELEGRAM_TOKEN = (
     os.getenv("TELEGRAM_BOT_TOKEN")
     or os.getenv("TELEGRAM_TOKEN")
     or ""
 )
+
 TELEGRAM_CHAT_ID = (
     os.getenv("TELEGRAM_CHAT_ID")
     or os.getenv("TELEGRAM_CHAT")
     or ""
 )
 
-REQUEST_TIMEOUT = 20
-
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
+
 log = logging.getLogger("NDS-M5")
-
-
-# ============================================================
-# HTTP
-# ============================================================
 
 SESSION = requests.Session()
 SESSION.headers.update({
-    "User-Agent": "NDS-M5-Structure-Scanner/1.1.0"
+    "User-Agent": f"NDS-M5-Scanner/{VERSION}",
+    "Accept": "application/json",
 })
+
+
+# ============================================================
+# TIME AND HTTP
+# ============================================================
+
+def utc_now():
+    return datetime.now(timezone.utc)
+
+
+def utc_text():
+    return utc_now().replace(microsecond=0).isoformat()
 
 
 def get_json(url, params=None):
@@ -90,10 +112,11 @@ def get_json(url, params=None):
         timeout=REQUEST_TIMEOUT,
     )
     response.raise_for_status()
+
     data = response.json()
 
     if not isinstance(data, dict):
-        raise ValueError("Unexpected API response")
+        raise ValueError("Unexpected API response format")
 
     if data.get("result") == "error":
         raise RuntimeError(str(data))
@@ -101,79 +124,302 @@ def get_json(url, params=None):
     return data
 
 
+def normalize_timestamp(value):
+    value = float(value)
+
+    # Convert milliseconds to seconds when necessary.
+    if value > 10_000_000_000:
+        value /= 1000.0
+
+    return int(value)
+
+
 # ============================================================
-# DATABASE
+# DATABASE MIGRATION
 # ============================================================
+
+DB_COLUMNS = {
+    "id",
+    "symbol",
+    "direction",
+    "start_time",
+    "entry_time",
+    "start_price",
+    "entry_price",
+    "tp",
+    "sl",
+    "status",
+    "chart_path",
+    "created_at",
+}
+
+
+def table_exists(con, table_name):
+    row = con.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type='table' AND name=?
+        """,
+        (table_name,),
+    ).fetchone()
+
+    return row is not None
+
+
+def get_table_columns(con, table_name):
+    return {
+        row[1]
+        for row in con.execute(
+            f'PRAGMA table_info("{table_name}")'
+        ).fetchall()
+    }
+
+
+def first_value(row, names, default=None):
+    for name in names:
+        if name in row and row[name] is not None:
+            return row[name]
+
+    return default
+
+
+def create_signals_table(con, table_name="signals"):
+    con.execute(f"""
+        CREATE TABLE "{table_name}" (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            start_time INTEGER NOT NULL DEFAULT 0,
+            entry_time INTEGER NOT NULL DEFAULT 0,
+            start_price REAL NOT NULL DEFAULT 0,
+            entry_price REAL NOT NULL DEFAULT 0,
+            tp REAL NOT NULL DEFAULT 0,
+            sl REAL NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'OPEN',
+            chart_path TEXT,
+            created_at TEXT NOT NULL DEFAULT '',
+            UNIQUE(symbol, direction, entry_time)
+        )
+    """)
+
+
+def migrate_old_signals_table(con):
+    """
+    Rebuild an older signals table if its schema is incompatible.
+
+    Existing rows are copied using known legacy column names.
+    The old table is dropped only after the copy has completed.
+    """
+    old_columns = get_table_columns(con, "signals")
+
+    if DB_COLUMNS.issubset(old_columns):
+        return
+
+    log.warning(
+        "Legacy database schema detected. Migrating signals table."
+    )
+
+    old_rows = con.execute(
+        'SELECT * FROM "signals"'
+    ).fetchall()
+
+    old_names = [
+        item[0]
+        for item in con.execute(
+            'SELECT * FROM "signals" LIMIT 0'
+        ).description
+    ]
+
+    rows_as_dicts = [
+        dict(zip(old_names, values))
+        for values in old_rows
+    ]
+
+    # A unique temporary name avoids overwriting an earlier backup.
+    legacy_name = "signals_legacy_migration"
+
+    suffix = 1
+    while table_exists(con, legacy_name):
+        legacy_name = f"signals_legacy_migration_{suffix}"
+        suffix += 1
+
+    con.execute(
+        f'ALTER TABLE "signals" RENAME TO "{legacy_name}"'
+    )
+
+    create_signals_table(con, "signals")
+
+    for row in rows_as_dicts:
+        symbol = first_value(row, ["symbol", "instrument"], "")
+        direction = str(
+            first_value(row, ["direction", "side"], "LONG")
+        ).upper()
+
+        if direction not in ("LONG", "SHORT"):
+            direction = "LONG"
+
+        start_time = first_value(
+            row,
+            ["start_time", "setup_time", "signal_time"],
+            0,
+        )
+
+        entry_time = first_value(
+            row,
+            ["entry_time", "setup_time", "signal_time", "start_time"],
+            start_time,
+        )
+
+        start_price = first_value(
+            row,
+            ["start_price", "start", "start_point"],
+            0,
+        )
+
+        entry_price = first_value(
+            row,
+            ["entry_price", "entry", "entry_point"],
+            0,
+        )
+
+        tp = first_value(
+            row,
+            ["tp", "take_profit", "target"],
+            0,
+        )
+
+        sl = first_value(
+            row,
+            ["sl", "stop_loss", "stop"],
+            0,
+        )
+
+        status = str(
+            first_value(row, ["status"], "OPEN")
+        ).upper()
+
+        chart_path = first_value(
+            row,
+            ["chart_path", "chart", "image_path"],
+            None,
+        )
+
+        created_at = str(
+            first_value(row, ["created_at", "timestamp"], "")
+        )
+
+        try:
+            con.execute("""
+                INSERT OR IGNORE INTO signals (
+                    symbol, direction, start_time, entry_time,
+                    start_price, entry_price, tp, sl,
+                    status, chart_path, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                str(symbol),
+                direction,
+                int(float(start_time or 0)),
+                int(float(entry_time or 0)),
+                float(start_price or 0),
+                float(entry_price or 0),
+                float(tp or 0),
+                float(sl or 0),
+                status,
+                chart_path,
+                created_at,
+            ))
+        except (ValueError, TypeError, sqlite3.Error) as exc:
+            log.warning(
+                "Could not migrate one legacy row: %s",
+                exc,
+            )
+
+    # Keep the old table if migration encountered a database-level error.
+    # This point is reached only after row migration has completed.
+    con.execute(f'DROP TABLE "{legacy_name}"')
+
 
 def init_db():
     os.makedirs(CHART_DIR, exist_ok=True)
 
-    with sqlite3.connect(DB_FILE) as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS signals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                symbol TEXT NOT NULL,
-                direction TEXT NOT NULL,
-                start_time INTEGER NOT NULL,
-                entry_time INTEGER NOT NULL,
-                start_price REAL NOT NULL,
-                entry_price REAL NOT NULL,
-                tp REAL NOT NULL,
-                sl REAL NOT NULL,
-                status TEXT NOT NULL DEFAULT 'OPEN',
-                chart_path TEXT,
-                created_at TEXT NOT NULL,
-                UNIQUE(symbol, direction, entry_time)
-            )
-        """)
+    with sqlite3.connect(DB_FILE, timeout=30) as con:
+        con.execute("PRAGMA busy_timeout=30000")
+
+        if not table_exists(con, "signals"):
+            create_signals_table(con, "signals")
+        else:
+            migrate_old_signals_table(con)
+
+        # The index is created only AFTER schema migration.
+        columns = get_table_columns(con, "signals")
+
+        if "status" not in columns:
+            con.execute("""
+                ALTER TABLE signals
+                ADD COLUMN status TEXT NOT NULL DEFAULT 'OPEN'
+            """)
+
         con.execute("""
             CREATE INDEX IF NOT EXISTS idx_signals_status
             ON signals(status)
         """)
+
         con.commit()
+
+    log.info("Database initialized: %s", DB_FILE)
 
 
 def already_seen(symbol, direction, entry_time):
-    with sqlite3.connect(DB_FILE) as con:
+    with sqlite3.connect(DB_FILE, timeout=30) as con:
         row = con.execute("""
-            SELECT id FROM signals
-            WHERE symbol=? AND direction=? AND entry_time=?
-        """, (symbol, direction, entry_time)).fetchone()
+            SELECT 1
+            FROM signals
+            WHERE symbol=?
+              AND direction=?
+              AND entry_time=?
+            LIMIT 1
+        """, (symbol, direction, int(entry_time))).fetchone()
+
     return row is not None
 
 
 def count_open_signals():
-    with sqlite3.connect(DB_FILE) as con:
+    with sqlite3.connect(DB_FILE, timeout=30) as con:
         row = con.execute("""
-            SELECT COUNT(*) FROM signals WHERE status='OPEN'
+            SELECT COUNT(*)
+            FROM signals
+            WHERE status='OPEN'
         """).fetchone()
-    return int(row[0] if row else 0)
+
+    return int(row[0] or 0)
 
 
 def save_signal(signal, chart_path):
-    created_at = datetime.now(timezone.utc).isoformat()
-
-    with sqlite3.connect(DB_FILE) as con:
-        cur = con.execute("""
+    with sqlite3.connect(DB_FILE, timeout=30) as con:
+        cursor = con.execute("""
             INSERT OR IGNORE INTO signals (
                 symbol, direction, start_time, entry_time,
                 start_price, entry_price, tp, sl,
                 status, chart_path, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?, ?)
         """, (
             signal["symbol"],
             signal["direction"],
-            signal["start"]["time"],
-            signal["entry"]["time"],
-            signal["start"]["price"],
-            signal["entry"]["price"],
-            signal["tp"],
-            signal["sl"],
+            int(signal["start"]["time"]),
+            int(signal["entry"]["time"]),
+            float(signal["start"]["price"]),
+            float(signal["entry"]["price"]),
+            float(signal["tp"]),
+            float(signal["sl"]),
             chart_path,
-            created_at,
+            utc_text(),
         ))
+
         con.commit()
-        return cur.rowcount == 1
+        return cursor.rowcount == 1
 
 
 # ============================================================
@@ -182,13 +428,13 @@ def save_signal(signal, chart_path):
 
 def telegram_send_message(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        log.info("Telegram not configured; message skipped.")
+        log.info("Telegram not configured; text alert skipped.")
+        log.info("%s", message)
         return False
 
     url = (
-        "https://api.telegram.org/bot"
-        + TELEGRAM_TOKEN
-        + "/sendMessage"
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendMessage"
     )
 
     try:
@@ -201,10 +447,12 @@ def telegram_send_message(message):
             },
             timeout=REQUEST_TIMEOUT,
         )
+
         response.raise_for_status()
         return bool(response.json().get("ok"))
+
     except Exception as exc:
-        log.error("Telegram message error: %s", exc)
+        log.error("Telegram text error: %s", exc)
         return False
 
 
@@ -213,24 +461,25 @@ def telegram_send_photo(path, caption):
         return False
 
     url = (
-        "https://api.telegram.org/bot"
-        + TELEGRAM_TOKEN
-        + "/sendPhoto"
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendPhoto"
     )
 
     try:
-        with open(path, "rb") as photo:
+        with open(path, "rb") as image_file:
             response = SESSION.post(
                 url,
                 data={
                     "chat_id": TELEGRAM_CHAT_ID,
                     "caption": caption[:1000],
                 },
-                files={"photo": photo},
+                files={"photo": image_file},
                 timeout=REQUEST_TIMEOUT,
             )
+
         response.raise_for_status()
         return bool(response.json().get("ok"))
+
     except Exception as exc:
         log.error("Telegram photo error: %s", exc)
         return False
@@ -249,6 +498,7 @@ def get_symbol_universe():
         or instruments_data.get("data")
         or []
     )
+
     tickers = (
         tickers_data.get("tickers")
         or tickers_data.get("data")
@@ -265,73 +515,65 @@ def get_symbol_universe():
 
         if not symbol.startswith("PF_"):
             continue
+
         if not symbol.endswith("USD"):
             continue
 
-        status = str(
-            item.get("tradeable", item.get("status", True))
-        ).lower()
+        tradeable = item.get("tradeable", True)
 
-        if status in ("false", "inactive", "delisted", "0"):
+        if tradeable is False:
             continue
 
         eligible.add(symbol)
 
-    ticker_by_symbol = {}
+    ticker_map = {}
 
     for ticker in tickers:
         if not isinstance(ticker, dict):
             continue
 
         symbol = str(ticker.get("symbol", ""))
+
         if symbol in eligible:
-            ticker_by_symbol[symbol] = ticker
+            ticker_map[symbol] = ticker
 
     def volume_of(symbol):
-        item = ticker_by_symbol.get(symbol, {})
-        for key in ("vol24h", "volume24h", "volume_24h"):
+        ticker = ticker_map.get(symbol, {})
+
+        for field in ("vol24h", "volume24h", "volume"):
             try:
-                return float(item.get(key, 0) or 0)
-            except (ValueError, TypeError):
-                pass
+                return float(ticker.get(field) or 0)
+            except (TypeError, ValueError):
+                continue
+
         return 0.0
 
     ranked = sorted(
         eligible,
-        key=lambda symbol: volume_of(symbol),
+        key=volume_of,
         reverse=True,
     )
 
-    # Keep BTC and tokenized gold near the front when available.
     priority = ["PF_XBTUSD", "PF_XAUTUSD"]
-    result = []
 
-    for symbol in priority:
-        if symbol in eligible:
-            result.append(symbol)
+    selected = [
+        symbol for symbol in priority
+        if symbol in eligible
+    ]
 
     for symbol in ranked:
-        if symbol not in result:
-            result.append(symbol)
-        if len(result) >= TARGET_SYMBOLS:
+        if symbol not in selected:
+            selected.append(symbol)
+
+        if len(selected) >= TARGET_SYMBOLS:
             break
 
-    return result[:TARGET_SYMBOLS]
+    return selected[:TARGET_SYMBOLS]
 
 
 # ============================================================
-# CANDLE DATA
+# CANDLES
 # ============================================================
-
-def normalize_timestamp(value):
-    timestamp = float(value)
-
-    # API timestamps can be seconds or milliseconds.
-    if timestamp > 10_000_000_000:
-        timestamp /= 1000.0
-
-    return int(timestamp)
-
 
 def normalize_candle(raw):
     if isinstance(raw, dict):
@@ -340,14 +582,17 @@ def normalize_candle(raw):
             or raw.get("timestamp")
             or raw.get("t")
         )
+
         open_price = raw.get("open", raw.get("o"))
         high_price = raw.get("high", raw.get("h"))
         low_price = raw.get("low", raw.get("l"))
         close_price = raw.get("close", raw.get("c"))
         volume = raw.get("volume", raw.get("v", 0))
+
     elif isinstance(raw, (list, tuple)) and len(raw) >= 5:
         timestamp, open_price, high_price, low_price, close_price = raw[:5]
         volume = raw[5] if len(raw) > 5 else 0
+
     else:
         return None
 
@@ -365,6 +610,7 @@ def normalize_candle(raw):
             return None
 
         return candle
+
     except (TypeError, ValueError, OverflowError):
         return None
 
@@ -375,10 +621,10 @@ def fetch_candles(symbol):
 
     url = f"{CHART_URL}/{symbol}/{TIMEFRAME}"
 
-    data = get_json(url, params={
-        "from": start,
-        "to": now,
-    })
+    data = get_json(
+        url,
+        params={"from": start, "to": now},
+    )
 
     raw_candles = (
         data.get("candles")
@@ -387,85 +633,82 @@ def fetch_candles(symbol):
     )
 
     candles = []
+
     for raw in raw_candles:
         candle = normalize_candle(raw)
-        if candle:
+
+        if candle is not None:
             candles.append(candle)
 
     candles.sort(key=lambda candle: candle["time"])
 
-    # Remove duplicate timestamps.
-    unique = {}
-    for candle in candles:
-        unique[candle["time"]] = candle
-    candles = [unique[t] for t in sorted(unique)]
+    # Deduplicate timestamps.
+    by_time = {
+        candle["time"]: candle
+        for candle in candles
+    }
 
-    # Only fully closed M5 candles are eligible.
-    closed_before = now - CANDLE_SECONDS
+    candles = [
+        by_time[timestamp]
+        for timestamp in sorted(by_time)
+    ]
+
+    # Ignore any candle that has not fully closed.
+    now = int(time.time())
+
     candles = [
         candle for candle in candles
         if candle["time"] + CANDLE_SECONDS <= now
     ]
 
-    if len(candles) > CANDLE_LIMIT:
-        candles = candles[-CANDLE_LIMIT:]
-
-    return candles
+    return candles[-CANDLE_LIMIT:]
 
 
 # ============================================================
-# PIVOT DETECTION
+# CONFIRMED PIVOTS
 # ============================================================
 
-def find_pivots(candles, left_right):
-    """
-    Confirmed pivots only.
-    A pivot is returned only after right-side candles have closed.
-    """
+def find_pivots(candles, left, right):
     pivots = []
-    n = len(candles)
-    width = left_right
 
-    if n < width * 2 + 1:
+    if len(candles) < left + right + 1:
         return pivots
 
-    for i in range(width, n - width):
-        high = candles[i]["high"]
-        low = candles[i]["low"]
+    for index in range(left, len(candles) - right):
+        current = candles[index]
 
-        left = candles[i - width:i]
-        right = candles[i + 1:i + width + 1]
+        left_candles = candles[index - left:index]
+        right_candles = candles[index + 1:index + right + 1]
 
         is_high = (
-            all(high > c["high"] for c in left)
-            and all(high >= c["high"] for c in right)
+            all(current["high"] > c["high"] for c in left_candles)
+            and all(current["high"] >= c["high"] for c in right_candles)
         )
 
         is_low = (
-            all(low < c["low"] for c in left)
-            and all(low <= c["low"] for c in right)
+            all(current["low"] < c["low"] for c in left_candles)
+            and all(current["low"] <= c["low"] for c in right_candles)
         )
 
         if is_high:
             pivots.append({
                 "kind": "H",
-                "index": i,
-                "time": candles[i]["time"],
-                "price": high,
+                "index": index,
+                "time": current["time"],
+                "price": current["high"],
             })
 
         if is_low:
             pivots.append({
                 "kind": "L",
-                "index": i,
-                "time": candles[i]["time"],
-                "price": low,
+                "index": index,
+                "time": current["time"],
+                "price": current["low"],
             })
 
     pivots.sort(key=lambda p: (p["index"], p["kind"]))
 
-    # Do not allow two consecutive pivots of the same type.
-    # Keep the more extreme one.
+    # Collapse adjacent same-type pivots to the more extreme point.
     cleaned = []
 
     for pivot in pivots:
@@ -475,105 +718,96 @@ def find_pivots(candles, left_right):
 
         previous = cleaned[-1]
 
-        if pivot["kind"] != previous["kind"]:
+        if previous["kind"] != pivot["kind"]:
             cleaned.append(pivot)
             continue
 
-        if pivot["kind"] == "H" and pivot["price"] > previous["price"]:
-            cleaned[-1] = pivot
-        elif pivot["kind"] == "L" and pivot["price"] < previous["price"]:
-            cleaned[-1] = pivot
+        if pivot["kind"] == "H":
+            if pivot["price"] > previous["price"]:
+                cleaned[-1] = pivot
+        else:
+            if pivot["price"] < previous["price"]:
+                cleaned[-1] = pivot
 
     return cleaned
 
 
 def find_start_pivots(candles):
-    return find_pivots(candles, START_LEFT_RIGHT)
+    return find_pivots(
+        candles,
+        START_LEFT,
+        START_RIGHT,
+    )
 
 
-def find_structure_pivots(candles):
-    return find_pivots(candles, PIVOT_LEFT_RIGHT)
+def find_entry_structure_pivots(candles):
+    return find_pivots(
+        candles,
+        PIVOT_LEFT,
+        PIVOT_RIGHT,
+    )
 
 
 # ============================================================
-# STRUCTURE DETECTION
+# STRUCTURE AND SIGNAL RULES
 # ============================================================
 
 def make_signal(symbol, direction, points):
-    start = points[0]
-    p1_green = points[1]
-    p1_red = points[2]
-    p2_green = points[3]
-    p2_red = points[4]
+    start, p1g, p1r, p2g, p2r = points
 
     if direction == "LONG":
-        # Bullish structure: higher second high and a lower
-        # second retracement low, while entry stays above START.
-        if not (
-            p1_green["kind"] == "H"
-            and p1_red["kind"] == "L"
-            and p2_green["kind"] == "H"
-            and p2_red["kind"] == "L"
-        ):
+        if [p["kind"] for p in points] != ["L", "H", "L", "H", "L"]:
             return None
 
-        if p2_green["price"] <= p1_green["price"]:
+        # Second green pivot must be higher than the first.
+        if p2g["price"] <= p1g["price"]:
             return None
 
-        if p2_red["price"] >= p1_red["price"]:
+        # The second red pivot is below the first red pivot,
+        # but remains above the START low.
+        if not (start["price"] < p2r["price"] < p1r["price"]):
             return None
 
-        if p2_red["price"] <= start["price"]:
-            return None
+        entry = p2r
+        tp = p2g["price"]
 
-        tp = p2_green["price"]
-        sl = p2_green["price"] - (
-            0.864 * (p2_green["price"] - start["price"])
+        # Preserve the existing 86.4% calculation.
+        sl = p2g["price"] - (
+            0.864 * (p2g["price"] - start["price"])
         )
 
-        entry = p2_red
-
-        if not (sl < entry["price"] < tp):
+        if not sl < entry["price"] < tp:
             return None
 
     else:
+        if [p["kind"] for p in points] != ["H", "L", "H", "L", "H"]:
+            return None
+
         # Mirrored bearish structure.
-        # START is the highest pivot, followed by low/high/low/high.
-        if not (
-            p1_green["kind"] == "L"
-            and p1_red["kind"] == "H"
-            and p2_green["kind"] == "L"
-            and p2_red["kind"] == "H"
-        ):
+        if p2g["price"] >= p1g["price"]:
             return None
 
-        if p2_green["price"] >= p1_green["price"]:
+        if not (p2r["price"] < p1r["price"] < start["price"]):
             return None
 
-        if p2_red["price"] >= p1_red["price"]:
-            return None
+        entry = p2r
+        tp = p2g["price"]
 
-        if p2_red["price"] >= start["price"]:
-            return None
-
-        tp = p2_green["price"]
-        sl = p2_green["price"] + (
-            0.864 * (start["price"] - p2_green["price"])
+        sl = p2g["price"] + (
+            0.864 * (start["price"] - p2g["price"])
         )
 
-        entry = p2_red
-
-        if not (tp < entry["price"] < sl):
+        if not tp < entry["price"] < sl:
             return None
 
     return {
         "symbol": symbol,
         "direction": direction,
         "start": start,
-        "p1_green": p1_green,
-        "p1_red": p1_red,
-        "p2_green": p2_green,
-        "p2_red": p2_red,
+        "p1_green": p1g,
+        "p1_red": p1r,
+        "p2_green": p2g,
+        "p2_red": p2r,
         "entry": entry,
         "tp": float(tp),
         "sl": float(sl),
@@ -584,101 +818,100 @@ def detect_latest_signal(symbol, candles):
     if len(candles) < 40:
         return None
 
-    start_pivots = find_start_pivots(candles)
-    regular_pivots = find_structure_pivots(candles)
+    starts = find_start_pivots(candles)
+    pivots = find_entry_structure_pivots(candles)
 
-    if not start_pivots or len(regular_pivots) < 4:
+    if not starts or len(pivots) < 4:
         return None
-
-    regular_by_index = {
-        (p["index"], p["kind"]): p
-        for p in regular_pivots
-    }
 
     candidates = []
 
-    # LONG: START low, then H/L/H/L.
-    for start in start_pivots:
-        if start["kind"] != "L":
-            continue
-
-        after = [
-            p for p in regular_pivots
-            if p["index"] > start["index"]
+    for start in starts:
+        later = [
+            pivot for pivot in pivots
+            if pivot["index"] > start["index"]
         ]
 
-        for i in range(len(after) - 3):
-            seq = after[i:i + 4]
-
-            if [p["kind"] for p in seq] != ["H", "L", "H", "L"]:
-                continue
-
-            points = [start] + seq
-            signal = make_signal(symbol, "LONG", points)
-
-            if signal:
-                candidates.append(signal)
-
-    # SHORT: START high, then L/H/L/H.
-    for start in start_pivots:
-        if start["kind"] != "H":
+        if len(later) < 4:
             continue
 
-        after = [
-            p for p in regular_pivots
-            if p["index"] > start["index"]
-        ]
+        for i in range(len(later) - 3):
+            seq = later[i:i + 4]
 
-        for i in range(len(after) - 3):
-            seq = after[i:i + 4]
+            # LONG structure:
+            # START low -> H1 -> L1 -> H2 -> L2
+            if start["kind"] == "L":
+                if [p["kind"] for p in seq] != ["H", "L", "H", "L"]:
+                    continue
 
-            if [p["kind"] for p in seq] != ["L", "H", "L", "H"]:
-                continue
+                signal = make_signal(
+                    symbol,
+                    "LONG",
+                    [start] + seq,
+                )
 
-            points = [start] + seq
-            signal = make_signal(symbol, "SHORT", points)
+                if signal:
+                    candidates.append(signal)
 
-            if signal:
-                candidates.append(signal)
+            # SHORT structure:
+            # START high -> L1 -> H1 -> L2 -> H2
+            elif start["kind"] == "H":
+                if [p["kind"] for p in seq] != ["L", "H", "L", "H"]:
+                    continue
+
+                signal = make_signal(
+                    symbol,
+                    "SHORT",
+                    [start] + seq,
+                )
+
+                if signal:
+                    candidates.append(signal)
 
     if not candidates:
         return None
 
-    # Use the most recently confirmed entry point.
-    candidates.sort(key=lambda s: s["entry"]["time"])
+    # Only return the most recently confirmed entry pivot.
+    candidates.sort(key=lambda item: item["entry"]["time"])
     return candidates[-1]
 
 
 # ============================================================
-# CHART
+# CHART: ONLY FIVE STRUCTURE POINTS + ENTRY/TP/SL
 # ============================================================
-
-def candle_datetime(timestamp):
-    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
-
 
 def draw_chart(candles, signal):
     symbol = signal["symbol"]
     direction = signal["direction"]
 
     view = candles[-CHART_CANDLES:]
+
     if not view:
         raise ValueError("No candles available for chart")
 
-    dates = [
-        mdates.date2num(candle_datetime(c["time"]))
-        for c in view
-    ]
-
     fig, ax = plt.subplots(figsize=(15, 8))
-    fig.subplots_adjust(bottom=0.16, top=0.88)
+    fig.subplots_adjust(
+        left=0.08,
+        right=0.82,
+        top=0.88,
+        bottom=0.18,
+    )
 
-    candle_width = (5 / (24 * 60)) * 0.65
+    candle_width = 5 / (24 * 60) * 0.65
 
-    # Draw candlesticks without adding labels for unrelated pivots.
-    for x, candle in zip(dates, view):
-        up = candle["close"] >= candle["open"]
-        color = "#159447" if up else "#d62728"
+    for candle in view:
+        x = mdates.date2num(
+            datetime.fromtimestamp(
+                candle["time"],
+                tz=timezone.utc,
+            )
+        )
+
+        color = (
+            "#159447"
+            if candle["close"] >= candle["open"]
+            else "#d62728"
+        )
 
         ax.vlines(
             x,
@@ -693,9 +926,9 @@ def draw_chart(candles, signal):
         body_height = abs(candle["close"] - candle["open"])
 
         if body_height == 0:
-            body_height = max(candle["close"] * 0.00001, 1e-8)
+            body_height = max(abs(candle["close"]) * 0.00001, 1e-8)
 
-        rect = Rectangle(
+        ax.add_patch(Rectangle(
             (x - candle_width / 2, body_low),
             candle_width,
             body_height,
@@ -703,71 +936,71 @@ def draw_chart(candles, signal):
             edgecolor=color,
             linewidth=0.7,
             zorder=3,
-        )
-        ax.add_patch(rect)
+        ))
 
     point_specs = [
-        ("START", signal["start"], "#1565c0", "bottom"),
-        ("1 GREEN", signal["p1_green"], "#159447", "top"),
-        ("1 RED", signal["p1_red"], "#d62728", "bottom"),
-        ("2 GREEN", signal["p2_green"], "#159447", "top"),
-        ("2 RED", signal["p2_red"], "#d62728", "bottom"),
+        ("START", signal["start"], "#1565c0", -18),
+        ("1 GREEN", signal["p1_green"], "#159447", 12),
+        ("1 RED", signal["p1_red"], "#d62728", -18),
+        ("2 GREEN", signal["p2_green"], "#159447", 12),
+        ("2 RED", signal["p2_red"], "#d62728", -18),
     ]
 
-    # Exactly five structure-point labels.
-    for label, point, color, placement in point_specs:
-        x = mdates.date2num(candle_datetime(point["time"]))
+    # No other pivots are labeled on the chart.
+    for label, point, color, offset in point_specs:
+        x = mdates.date2num(
+            datetime.fromtimestamp(
+                point["time"],
+                tz=timezone.utc,
+            )
+        )
+
         y = point["price"]
 
         ax.scatter(
-            [x], [y],
-            color=color,
+            [x],
+            [y],
             s=65,
+            color=color,
             edgecolors="white",
-            linewidths=0.7,
+            linewidths=0.8,
             zorder=6,
         )
 
-        offset = 12 if placement == "top" else -18
         ax.annotate(
             f"{label}\n{y:.8g}",
             (x, y),
             xytext=(0, offset),
             textcoords="offset points",
             ha="center",
-            va="bottom" if placement == "top" else "top",
+            va="bottom" if offset > 0 else "top",
             fontsize=8,
-            color=color,
             fontweight="bold",
+            color=color,
             bbox={
                 "boxstyle": "round,pad=0.25",
                 "fc": "white",
                 "ec": color,
-                "alpha": 0.88,
+                "alpha": 0.9,
             },
             zorder=7,
         )
 
-    entry = signal["entry"]["price"]
-    tp = signal["tp"]
-    sl = signal["sl"]
-
-    levels = [
-        ("ENTRY", entry, "#1565c0", "--"),
-        ("TP", tp, "#159447", "-."),
-        ("SL", sl, "#d62728", "-."),
-    ]
-
-    for label, price, color, linestyle in levels:
+    for label, price, color, style in [
+        ("ENTRY", signal["entry"]["price"], "#1565c0", "--"),
+        ("TP", signal["tp"], "#159447", "-."),
+        ("SL", signal["sl"], "#d62728", "-."),
+    ]:
         ax.axhline(
             price,
             color=color,
-            linestyle=linestyle,
+            linestyle=style,
             linewidth=1.5,
             alpha=0.95,
         )
+
         ax.text(
-            1.005,
+            1.01,
             price,
             f"{label}: {price:.8g}",
             transform=ax.get_yaxis_transform(),
@@ -783,10 +1016,13 @@ def draw_chart(candles, signal):
         fontsize=13,
         fontweight="bold",
     )
+
     ax.set_xlabel("Time (UTC)")
     ax.set_ylabel("Price")
     ax.grid(True, alpha=0.2)
-    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    ax.xaxis.set_major_formatter(
+        mdates.DateFormatter("%m-%d %H:%M")
+    )
     fig.autofmt_xdate()
 
     path = os.path.join(
@@ -794,20 +1030,25 @@ def draw_chart(candles, signal):
         f"{symbol}_{direction}_{signal['entry']['time']}.png",
     )
 
-    fig.savefig(path, dpi=140, bbox_inches="tight")
+    fig.savefig(
+        path,
+        dpi=140,
+        bbox_inches="tight",
+    )
     plt.close(fig)
+
     return path
 
 
 # ============================================================
-# SIGNAL REPORT
+# ALERT AND PROCESSING
 # ============================================================
 
 def format_price(value):
-    return f"{value:.10g}"
+    return f"{float(value):.10g}"
 
 
-def signal_caption(signal):
+def make_caption(signal):
     emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
 
     return (
@@ -816,9 +1057,9 @@ def signal_caption(signal):
         f"Entry: {format_price(signal['entry']['price'])}\n"
         f"TP: {format_price(signal['tp'])}\n"
         f"SL: {format_price(signal['sl'])}\n"
-        f"Start: {format_price(signal['start']['price'])}\n"
+        f"START: {format_price(signal['start']['price'])}\n"
         f"Mode: PAPER / SIGNAL ONLY\n"
-        f"Structure confirmed on closed M5 candles"
+        f"Confirmation: closed M5 candles"
     )
 
 
@@ -830,37 +1071,35 @@ def process_symbol(symbol):
 
     signal = detect_latest_signal(symbol, candles)
 
-    if not signal:
+    if signal is None:
         return "no structure"
 
     entry_time = signal["entry"]["time"]
 
-    if already_seen(symbol, signal["direction"], entry_time):
+    if already_seen(
+        symbol,
+        signal["direction"],
+        entry_time,
+    ):
         return "duplicate"
 
     if count_open_signals() >= MAX_OPEN_SIGNALS:
         return "open signal limit"
 
     chart_path = draw_chart(candles, signal)
+    caption = make_caption(signal)
 
-    # Insert before Telegram send to prevent repeated alerts on reruns.
-    inserted = save_signal(signal, chart_path)
-
-    if not inserted:
+    # Save first to prevent repeat alerts on workflow reruns.
+    if not save_signal(signal, chart_path):
         return "duplicate"
 
-    caption = signal_caption(signal)
-
-    photo_sent = telegram_send_photo(chart_path, caption)
-
-    if not photo_sent:
-        # Send the text even if the photo upload failed.
+    if not telegram_send_photo(chart_path, caption):
         telegram_send_message(caption)
 
     log.info(
-        "NEW SIGNAL %s %s entry=%s TP=%s SL=%s",
-        symbol,
+        "NEW %s %s | Entry=%s TP=%s SL=%s",
         signal["direction"],
+        symbol,
         signal["entry"]["price"],
         signal["tp"],
         signal["sl"],
@@ -876,9 +1115,10 @@ def process_symbol(symbol):
 def main():
     init_db()
 
-    started = datetime.now(timezone.utc)
+    started = time.time()
+
     log.info(
-        "NDS M5 Two Structure LONG SHORT v%s | PAPER_ONLY=%s",
+        "NDS M5 scanner v%s | PAPER_ONLY=%s",
         VERSION,
         PAPER_ONLY,
     )
@@ -886,15 +1126,14 @@ def main():
     try:
         symbols = get_symbol_universe()
     except Exception as exc:
-        log.exception("Could not retrieve symbol universe: %s", exc)
+        log.exception("Could not retrieve symbols")
+
         telegram_send_message(
             f"⚠️ NDS M5 v{VERSION}\n"
             f"Could not retrieve Kraken Futures symbols.\n"
-            f"Error: {str(exc)[:300]}"
+            f"{str(exc)[:300]}"
         )
         raise
-
-    log.info("Universe: %d symbols", len(symbols))
 
     stats = {
         "scanned": 0,
@@ -904,9 +1143,12 @@ def main():
         "new_long": 0,
         "new_short": 0,
         "limited": 0,
+        "insufficient": 0,
     }
 
-    for index, symbol in enumerate(symbols, start=1):
+    log.info("Symbols selected: %d", len(symbols))
+
+    for number, symbol in enumerate(symbols, start=1):
         try:
             result = process_symbol(symbol)
             stats["scanned"] += 1
@@ -921,10 +1163,12 @@ def main():
                 stats["duplicates"] += 1
             elif result == "open signal limit":
                 stats["limited"] += 1
+            elif result == "insufficient candles":
+                stats["insufficient"] += 1
 
             log.info(
                 "[%d/%d] %s: %s",
-                index,
+                number,
                 len(symbols),
                 symbol,
                 result,
@@ -932,21 +1176,19 @@ def main():
 
         except Exception as exc:
             stats["errors"] += 1
-            log.warning("%s scan error: %s", symbol, exc)
+            log.exception("Scan failed for %s: %s", symbol, exc)
 
-        # Avoid hammering the public API.
-        time.sleep(0.12)
+        time.sleep(REQUEST_DELAY)
 
-    elapsed = (
-        datetime.now(timezone.utc) - started
-    ).total_seconds()
+    elapsed = time.time() - started
 
     report = (
         f"🔎 NDS Scanner v{VERSION}\n"
-        f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+        f"Time: {utc_text()}\n"
         f"Scanned: {stats['scanned']}/{len(symbols)}\n"
         f"Errors: {stats['errors']}\n"
         f"No structure: {stats['no_structure']}\n"
+        f"Insufficient candles: {stats['insufficient']}\n"
         f"Duplicates: {stats['duplicates']}\n"
         f"New LONG: {stats['new_long']}\n"
         f"New SHORT: {stats['new_short']}\n"
