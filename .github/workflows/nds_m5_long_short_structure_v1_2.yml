@@ -1,43 +1,63 @@
-
-name: NDS M5 Long Short Structure v1.2
+name: NDS M5 Long + Short Structure Scanner v1.3
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: '*/5 * * * *'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: nds-m5-long-short-structure-v1-2
+  group: nds-m5-long-short-structure-v1-2-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  scanner:
+  scan:
     runs-on: ubuntu-latest
     timeout-minutes: 9
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: main
 
-      - name: Set up Python
+      - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install requests pandas numpy matplotlib
+        run: python -m pip install --upgrade pip requests matplotlib
 
-      - name: Run NDS M5 Scanner
+      - name: Restore persistent SQLite database
+        uses: actions/cache@v4
+        with:
+          path: nds_m5_long_short_structure_v1.db
+          key: nds-m5-long-short-structure-v1-2-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            nds-m5-long-short-structure-v1-2-${{ github.ref_name }}-
+            nds-m5-long-short-structure-v1-${{ github.ref_name }}-
+
+      - name: Run NDS M5 scanner
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          PYTHONUNBUFFERED: "1"
-        run: |
-          python nds_m5_long_short_structure_scanner_v1_2.py
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
+          UNIVERSE_SIZE: '100'
+          MAX_OPEN_TRADES: '3'
+          MAX_SIGNAL_AGE_HOURS: '6'
+          DB_PATH: nds_m5_long_short_structure_v1.db
+          CHART_DIR: nds_m5_long_short_structure_charts
+          REPORT_TIMEZONE: Europe/Berlin
+          PYTHONUNBUFFERED: '1'
+        run: python -u nds_m5_long_short_structure_scanner_v1_2.py
+
+      - name: Upload signal charts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nds-m5-long-short-structure-charts-${{ github.run_number }}
+          path: nds_m5_long_short_structure_charts/*.png
+          if-no-files-found: ignore
+          retention-days: 7
