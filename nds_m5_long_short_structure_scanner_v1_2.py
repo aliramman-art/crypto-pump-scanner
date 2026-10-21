@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 Long + Short Structure Scanner v1.1.0
+NDS M5 Long + Short Structure Scanner v1.3.0
 
-LONG + SHORT mirrored signal/paper-trade scanner with strict absolute START validation. It never places real exchange orders.
+LONG + SHORT signal/paper-trade scanner. It never places real exchange orders.
 
-Pattern:
-  START: confirmed M5 swing low (5 candles on each side)
-  1H:    first confirmed swing high after START (green)
-  1L:    first confirmed swing low after 1H (red)
-  2H:    first confirmed swing high after 1L with high > 1H (green)
-  2L:    first confirmed swing low after 2H with low < 1L (red)
+LONG structure:
+  START: the endpoint of an 86.4% retracement of a previous bullish M5 leg
+  1: highest high between START and 1 RED
+  1 RED: lowest low between point 1 and point 2 GREEN
+  2 GREEN: highest high between 1 RED and 2 RED
+  2 RED: confirmed M5 pivot low below 1 RED
+  Entry is considered only after 2 RED has five closed candles to its right.
+  TP = 2 GREEN. SL = nearest recent, confirmed, unbroken M15 swing low below entry.
 
-Entry:
-  On confirmation of 2L (5 closed M5 candles to its right), enter at the current
-  public market price, if the setup is still valid and current price is between
-  SL and TP. TP = 2H. SL = the nearest recent, confirmed, unbroken M15 swing low
-  below entry, using a 2-left/2-right pivot definition.
+SHORT structure remains the mirrored legacy structure. All pivots use closed candles.
 
 Reporting:
   - Sends a PNG chart for each new signal to Telegram.
@@ -61,7 +59,7 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
@@ -201,7 +199,7 @@ def current_price_from_ticker(ticker: Optional[dict[str, Any]]) -> Optional[floa
     ask = as_float(ticker.get("ask")) or as_float(ticker.get("askPrice"))
     if bid is not None and ask is not None and bid > 0 and ask >= bid:
         return (bid + ask) / 2.0
-    for key in ("markPrice", "mark_price", "last", "lastPrice", "lastTradePrice", "indexPrice", "index_price"):
+    for key in ("markPrice", "mark_price", "last", "lastPrice", "lastTradePrice", "last_price", "indexPrice", "index_price"):
         value = as_float(ticker.get(key))
         if value is not None and value > 0:
             return value
@@ -298,7 +296,7 @@ def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, in
     return f"{direction}|{symbol}|" + "|".join(timestamps)
 
 
-def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction: str) -> Optional[dict[str, Any]]:
+def detect_legacy_pattern(symbol: str, candles: list[dict[str, Any]], direction: str) -> Optional[dict[str, Any]]:
     """Find the latest confirmed mirrored five-pivot pattern (START + 4 labeled pivots)."""
     if len(candles) < PIVOT_LEFT + PIVOT_RIGHT + 10:
         return None
@@ -377,12 +375,103 @@ def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction:
     return patterns[0]
 
 
-def find_nearest_valid_m15_low(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
-    """Nearest (most recent) confirmed intact M15 swing low below a LONG entry."""
-    lows, _ = find_confirmed_pivots(candles15, M15_PIVOT_LEFT, M15_PIVOT_RIGHT)
-    eligible = [(i, candles15[i]["low"]) for i in lows if candles15[i]["low"] < entry and not any(b["low"] <= candles15[i]["low"] for b in candles15[i+1:])]
-    return sorted(eligible, key=lambda x: x[0], reverse=True)[0][1] if eligible else None
 
+def detect_long_retracement_pattern(symbol: str, candles: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Detect LONG from a START that is the 86.4% retracement endpoint of a prior up-leg.
+
+    1 GREEN = highest high from START to 1 RED.
+    1 RED = lowest low between 1 GREEN and 2 GREEN.
+    2 GREEN = highest high between 1 RED and 2 RED.
+    2 RED = confirmed pivot low below 1 RED; entry activates only after its 5 right candles close.
+    """
+    if len(candles) < PIVOT_LEFT + PIVOT_RIGHT + 20:
+        return None
+    lows, highs = find_confirmed_pivots(candles, PIVOT_LEFT, PIVOT_RIGHT)
+    if not lows or not highs:
+        return None
+
+    # Build START candidates from confirmed bullish legs. The retracement level is
+    # 86.4% down from the leg high, i.e. 13.6% above the leg origin.
+    starts: list[tuple[int, float, int, int]] = []  # (start candle index, level, leg low index, leg high index)
+    for high_i in highs:
+        prior_lows = [i for i in lows if i < high_i and candles[i]["high"] < candles[high_i]["high"]]
+        if not prior_lows:
+            continue
+        low_i = prior_lows[-1]
+        leg_low = float(candles[low_i]["low"])
+        leg_high = float(candles[high_i]["high"])
+        if leg_high <= leg_low:
+            continue
+        start_level = leg_high - 0.864 * (leg_high - leg_low)
+        # The first closed candle after the leg high that reaches the 86.4% level
+        # marks the retracement endpoint. Store the exact calculated price, not a
+        # candle's overshoot low, so the chart and database represent the level.
+        touch_i = next((i for i in range(high_i + 1, len(candles))
+                        if candles[i]["low"] <= start_level <= candles[i]["high"]
+                        or candles[i]["low"] <= start_level), None)
+        if touch_i is not None:
+            starts.append((touch_i, start_level, low_i, high_i))
+
+    if not starts:
+        return None
+    # Prefer the newest complete structure. A later retracement touch does not
+    # replace an older START unless the later candidate forms all required points.
+    # Iterate confirmed 2 RED pivots and 1 RED troughs newest-first to keep scans efficient.
+    for start_i, start_level, leg_low_i, leg_high_i in starts:
+        p4_candidates = [i for i in lows if i >= start_i + 4]
+        # 1 RED is a trough, but it does not need five right-side candles of
+        # confirmation because its exact position is defined by the 1-to-2 range.
+        p2_candidates = [i for i in range(max(PIVOT_LEFT, start_i + 2), len(candles) - 1)
+                         if candles[i]["low"] <= candles[i - 1]["low"]
+                         and candles[i]["low"] <= candles[i + 1]["low"]]
+        for p4_i in reversed(p4_candidates):
+            # 2 RED must be below 1 RED. This cheap test rejects most pairs early.
+            p2s = [i for i in p2_candidates if i < p4_i - 1 and candles[i]["low"] > candles[p4_i]["low"]]
+            for p2_i in reversed(p2s):
+                # 1 GREEN is the absolute highest high between START and 1 RED.
+                p1_range = range(start_i + 1, p2_i)
+                if not p1_range:
+                    continue
+                p1_i = max(p1_range, key=lambda i: candles[i]["high"])
+                # 2 GREEN is the absolute highest high between 1 RED and 2 RED.
+                p3_range = range(p2_i + 1, p4_i)
+                if not p3_range:
+                    continue
+                p3_i = max(p3_range, key=lambda i: candles[i]["high"])
+                if candles[p3_i]["high"] <= candles[p1_i]["high"]:
+                    continue
+                # 1 RED is the lowest low between 1 GREEN and 2 GREEN.
+                if candles[p2_i]["low"] != min(candles[i]["low"] for i in range(p1_i, p3_i + 1)):
+                    continue
+                # Do not resurrect a 2 RED already broken by a later candle.
+                if any(bar["low"] < candles[p4_i]["low"] for bar in candles[p4_i + 1:]):
+                    continue
+                confirmation_i = p4_i + PIVOT_RIGHT
+                if confirmation_i >= len(candles):
+                    continue
+                points = {"start": start_i, "p1": p1_i, "p2": p2_i, "p3": p3_i, "p4": p4_i}
+                key = pattern_key(symbol, candles, points, "LONG") + f"|START864:{start_level:.12g}"
+                return {
+                    "symbol": symbol, "direction": "LONG", "points": points, "key": key,
+                    "confirmation_time": (candles[confirmation_i]["time"] + M5_MS) / 1000.0,
+                    "start_price": start_level,
+                    "p1_price": candles[p1_i]["high"],
+                    "p2_price": candles[p2_i]["low"],
+                    "p3_price": candles[p3_i]["high"],
+                    "p4_price": candles[p4_i]["low"],
+                    "terminal_time": candles[p4_i]["time"] / 1000.0,
+                    "prior_leg_low": float(candles[leg_low_i]["low"]),
+                    "prior_leg_high": float(candles[leg_high_i]["high"]),
+                    "prior_leg_low_time": candles[leg_low_i]["time"] / 1000.0,
+                    "prior_leg_high_time": candles[leg_high_i]["time"] / 1000.0,
+                }
+    return None
+
+
+def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction: str) -> Optional[dict[str, Any]]:
+    if direction == "LONG":
+        return detect_long_retracement_pattern(symbol, candles)
+    return detect_legacy_pattern(symbol, candles, direction)
 
 def find_nearest_valid_m15_high(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
     """Nearest (most recent) confirmed intact M15 swing high above a SHORT entry."""
@@ -415,7 +504,7 @@ def connect_db() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA journal_mode=DELETE")
     conn.execute("PRAGMA busy_timeout=30000")
     conn.executescript(
         """
@@ -436,6 +525,8 @@ def connect_db() -> sqlite3.Connection:
             entry_price REAL NOT NULL,
             tp_price REAL NOT NULL,
             sl_price REAL NOT NULL,
+            current_price REAL,
+            updated_at REAL,
             status TEXT NOT NULL DEFAULT 'OPEN',
             exit_time REAL,
             exit_price REAL,
@@ -450,6 +541,10 @@ def connect_db() -> sqlite3.Connection:
     cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
     if "direction" not in cols:
         conn.execute("ALTER TABLE trades ADD COLUMN direction TEXT NOT NULL DEFAULT 'LONG'")
+    if "current_price" not in cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN current_price REAL")
+    if "updated_at" not in cols:
+        conn.execute("ALTER TABLE trades ADD COLUMN updated_at REAL")
     conn.commit()
     return conn
 
@@ -483,9 +578,9 @@ def insert_trade(
     next_bar_time_ms = ((entry_ms // M5_MS) + 1) * M5_MS
     conn.execute(
         """INSERT INTO trades
-        (pattern_key,symbol,direction,entry_time,next_bar_time_ms,entry_price,tp_price,sl_price,status,created_at)
-        VALUES(?,?,?,?,?,?,?,?,'OPEN',?)""",
-        (pattern["key"], pattern["symbol"], direction, entry_time, next_bar_time_ms, entry_price, tp, sl, time.time()),
+        (pattern_key,symbol,direction,entry_time,next_bar_time_ms,entry_price,tp_price,sl_price,current_price,updated_at,status,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,'OPEN',?)""",
+        (pattern["key"], pattern["symbol"], direction, entry_time, next_bar_time_ms, entry_price, tp, sl, entry_price, time.time(), time.time()),
     )
     conn.commit()
 
@@ -525,9 +620,9 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
         body_low=min(c["open"],c["close"]); body_h=max(abs(c["close"]-c["open"]),abs(c["close"])*0.000002)
         ax.add_patch(Rectangle((x-0.31,body_low),0.62,body_h,facecolor=color,edgecolor=color,linewidth=0.6,zorder=3))
     if direction == "LONG":
-        style={"start":("START","#277da1","o",candles[pts["start"]]["low"]),"p1":("1 GREEN","#149447","^",candles[pts["p1"]]["high"]),"p2":("1 RED","#db2b39","v",candles[pts["p2"]]["low"]),"p3":("2 GREEN / TP","#149447","^",candles[pts["p3"]]["high"]),"p4":("2 RED / ENTRY","#db2b39","v",candles[pts["p4"]]["low"])}
+        style={"start":("START","#277da1","o",float(pattern.get("start_price", candles[pts["start"]]["low"]))),"p1":("1","#149447","^",candles[pts["p1"]]["high"]),"p2":("1","#db2b39","v",candles[pts["p2"]]["low"]),"p3":("2 / TP","#149447","^",candles[pts["p3"]]["high"]),"p4":("2 / ENTRY","#db2b39","v",candles[pts["p4"]]["low"])}
     else:
-        style={"start":("START","#277da1","o",candles[pts["start"]]["high"]),"p1":("1 RED","#db2b39","v",candles[pts["p1"]]["low"]),"p2":("1 GREEN","#149447","^",candles[pts["p2"]]["high"]),"p3":("2 RED / TP","#db2b39","v",candles[pts["p3"]]["low"]),"p4":("2 GREEN / ENTRY","#149447","^",candles[pts["p4"]]["high"])}
+        style={"start":("START","#277da1","o",float(pattern.get("start_price", candles[pts["start"]]["high"]))),"p1":("1","#db2b39","v",candles[pts["p1"]]["low"]),"p2":("1","#149447","^",candles[pts["p2"]]["high"]),"p3":("2 / TP","#db2b39","v",candles[pts["p3"]]["low"]),"p4":("2 / ENTRY","#149447","^",candles[pts["p4"]]["high"])}
     for name,(label,color,marker,y) in style.items():
         x=pts[name]-left_edge
         if 0 <= x < len(chart_candles):
@@ -657,6 +752,20 @@ def update_open_trades(
     return closed
 
 
+
+def persist_current_prices(conn: sqlite3.Connection, prices: dict[str, Optional[float]]) -> None:
+    """Persist the latest available market price for every open paper trade."""
+    now = time.time()
+    for row in open_trades(conn):
+        price = prices.get(str(row["symbol"]))
+        if price is not None and price > 0:
+            conn.execute(
+                "UPDATE trades SET current_price=?, updated_at=? WHERE id=? AND status='OPEN'",
+                (float(price), now, int(row["id"])),
+            )
+    conn.commit()
+
+
 def get_performance(conn: sqlite3.Connection, prices: dict[str, Optional[float]]) -> dict[str, Any]:
     closed_rows = list(conn.execute("SELECT status,pnl_pct FROM trades WHERE status IN ('CLOSED_TP','CLOSED_SL')"))
     open_rows = open_trades(conn)
@@ -727,6 +836,8 @@ def main() -> int:
         message = f"❌ NDS M5 LONG+SHORT scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
         LOG.exception("Ticker fetch failed")
         telegram_send_message(message)
+        conn.commit()
+        conn.close()
         return 1
 
     tickers_by_symbol = ticker_map(tickers)
@@ -745,12 +856,25 @@ def main() -> int:
                 errors_by_symbol[symbol] = error
                 LOG.warning("M5 data error %s: %s", symbol, error)
 
+    # Refresh ticker data after the candle scan so report/current-price fields do not
+    # depend on the snapshot taken before scanning up to 100 markets.
+    try:
+        fresh_tickers = get_tickers()
+        fresh_ticker_map = ticker_map(fresh_tickers)
+        if fresh_ticker_map:
+            tickers_by_symbol = fresh_ticker_map
+        LOG.info("Refreshed live ticker snapshot for %d contracts", len(tickers_by_symbol))
+    except Exception as exc:
+        LOG.warning("Live ticker refresh failed; using initial ticker snapshot: %s", exc)
+
     prices: dict[str, Optional[float]] = {}
-    for symbol in set(universe) | {str(row["symbol"]) for row in open_trades(conn)}:
+    tracked_symbols = set(universe) | {str(row["symbol"]) for row in open_trades(conn)}
+    for symbol in tracked_symbols:
         price = current_price_from_ticker(tickers_by_symbol.get(symbol))
         bars = candles_by_symbol.get(symbol)
         if price is None and bars:
             price = bars[-1]["close"]
+            LOG.warning("No live ticker price for %s; using last closed M5 close %s", symbol, fmt_price(price))
         prices[symbol] = price
 
     # Update previously open paper trades before assessing fresh entries.
@@ -819,6 +943,16 @@ def main() -> int:
         if prices.get(symbol) is None:
             prices[symbol] = float(row["entry_price"])
 
+    # Last refresh immediately before reporting; persist this value in SQLite as well.
+    try:
+        final_tickers = ticker_map(get_tickers())
+        for symbol in tracked_symbols | {str(row["symbol"]) for row in open_trades(conn)}:
+            live = current_price_from_ticker(final_tickers.get(symbol))
+            if live is not None and live > 0:
+                prices[symbol] = live
+    except Exception as exc:
+        LOG.warning("Final live-price refresh failed: %s", exc)
+    persist_current_prices(conn, prices)
     perf = get_performance(conn, prices)
     stats = {
         "scanned": len(universe),
@@ -844,7 +978,7 @@ def main() -> int:
                 f"Entry: {fmt_price(signal['entry'])}\n"
                 f"TP: {fmt_price(signal['tp'])} ({fmt_pct(tp_pct)})\n"
                 f"SL nearest valid M15 pivot: {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
-                "Chart labels include START, 1/2 GREEN, 1/2 RED, ENTRY, TP, SL"
+                "Chart labels include START, 1, 2, ENTRY, TP, SL"
             )
             if telegram_send_photo(chart_path, caption):
                 sent_charts += 1
@@ -853,6 +987,7 @@ def main() -> int:
         "Finished in %.1fs | new signals=%d | closed=%d | open=%d | charts sent=%d",
         time.time() - started, len(new_signals), len(closed_trades), perf["open_count"], sent_charts,
     )
+    conn.commit()
     conn.close()
     return 0
 
