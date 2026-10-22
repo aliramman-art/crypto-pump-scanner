@@ -59,7 +59,7 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.3.1"
+VERSION = "1.4.0"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
@@ -376,95 +376,134 @@ def detect_legacy_pattern(symbol: str, candles: list[dict[str, Any]], direction:
 
 
 
-def detect_long_retracement_pattern(symbol: str, candles: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Detect the newest valid LONG structure anchored to the previous bullish leg's 86.4% retracement.
+def detect_dynamic_retracement_pattern(symbol: str, candles: list[dict[str, Any]], direction: str) -> Optional[dict[str, Any]]:
+    """Dynamic START: confirmed reversal break, then confirmed 86.4% retracement.
 
-    Bullish leg = latest confirmed swing low followed by a confirmed swing high.
-    Retracement level = leg_high - 0.864 * (leg_high - leg_low). START is the
-    first confirmed pivot low after that high whose candle low reaches this level.
-    1 GREEN is the highest high from START to 1 RED; 1 RED is the lowest low
-    between 1 GREEN and 2 GREEN; 2 GREEN is the highest high between 1 RED and
-    2 RED. 2 RED must be a confirmed pivot low and cannot already be broken.
+    LONG: prior lower-high/lower-low structure, then a confirmed swing high above
+    the last confirmed swing high. Measure the leg from the latest swing low before
+    that breakout high to the breakout high. START becomes the confirmed local low
+    at/after the 86.4% retracement level. A newer qualified setup supersedes older.
+
+    SHORT is the exact mirror. All pivots are confirmed using closed candles only.
     """
-    if len(candles) < PIVOT_LEFT + PIVOT_RIGHT + 20:
+    if len(candles) < PIVOT_LEFT + PIVOT_RIGHT + 30:
         return None
+    is_long = direction == "LONG"
     lows, highs = find_confirmed_pivots(candles, PIVOT_LEFT, PIVOT_RIGHT)
-    if not lows or not highs:
+    if len(lows) < 2 or len(highs) < 2:
         return None
 
-    starts: list[tuple[int, float, int, int]] = []
-    # Search most recent highs first, so a stale historical leg cannot win.
-    for high_i in reversed(highs):
-        prior_lows = [i for i in lows if i < high_i]
-        if not prior_lows:
+    # Detect a structural break only when it is confirmed as a pivot.
+    breakouts = []
+    for pivot_i in (highs if is_long else lows):
+        earlier_opposite = [i for i in (highs if is_long else lows) if i < pivot_i]
+        earlier_same = [i for i in (lows if is_long else highs) if i < pivot_i]
+        if len(earlier_opposite) < 2 or len(earlier_same) < 2:
             continue
-        low_i = prior_lows[-1]
-        leg_low = float(candles[low_i]["low"])
-        leg_high = float(candles[high_i]["high"])
-        if leg_high <= leg_low:
-            continue
-        level = leg_high - 0.864 * (leg_high - leg_low)
-        # The bullish leg remains the reference through lower rebound highs.
-        # Reset only if a later confirmed pivot high makes a new high above it.
-        next_higher_highs = [i for i in highs if i > high_i and candles[i]["high"] > leg_high]
-        stop_i = next_higher_highs[0] if next_higher_highs else len(candles)
-        # A closed candle must actually reach/cross the calculated retracement.
-        touch_i = next((i for i in range(high_i + 1, stop_i)
-                        if candles[i]["low"] <= level), None)
-        if touch_i is None:
-            continue
-        # START is the candle where the closed-candle retracement first reaches
-        # the calculated 86.4% level. Do not substitute the preceding leg origin
-        # or wait for a later pivot that moves START away from the retracement end.
-        start_i = touch_i
-        starts.append((start_i, level, low_i, high_i))
+        last_ref = earlier_opposite[-1]
+        prev_ref = earlier_opposite[-2]
+        # The pre-break trend must be lower highs/lows for LONG, higher highs/lows for SHORT.
+        if is_long:
+            downtrend = (candles[prev_ref]['high'] > candles[last_ref]['high'] and
+                         candles[earlier_same[-2]]['low'] > candles[earlier_same[-1]]['low'])
+            broke = candles[pivot_i]['high'] > candles[last_ref]['high']
+            origin_candidates = [i for i in lows if i < pivot_i]
+        else:
+            downtrend = (candles[prev_ref]['low'] < candles[last_ref]['low'] and
+                         candles[earlier_same[-2]]['high'] < candles[earlier_same[-1]]['high'])
+            broke = candles[pivot_i]['low'] < candles[last_ref]['low']
+            origin_candidates = [i for i in highs if i < pivot_i]
+        if downtrend and broke and origin_candidates:
+            origin_i = origin_candidates[-1]
+            # The origin must belong to the last leg leading into the breakout pivot.
+            if origin_i < last_ref:
+                breakouts.append((pivot_i, origin_i))
 
-    # Newest qualifying retracement first.
-    starts.sort(key=lambda item: candles[item[0]]["time"], reverse=True)
-    for start_i, start_level, leg_low_i, leg_high_i in starts:
-        p4_candidates = [i for i in lows if i >= start_i + 4]
-        for p4_i in reversed(p4_candidates):
-            # 2 RED is below 1 RED.
-            p2_candidates = [i for i in range(start_i + 2, p4_i - 1)
-                             if candles[i]["low"] > candles[p4_i]["low"]]
-            for p2_i in reversed(p2_candidates):
-                if p2_i <= start_i + 1 or p4_i <= p2_i + 1:
-                    continue
-                # 1 GREEN: highest point between START and 1 RED.
-                p1_i = max(range(start_i + 1, p2_i + 1), key=lambda i: candles[i]["high"])
-                # 2 GREEN: highest point in the interval 1 RED to 2 RED.
-                p3_i = max(range(p2_i + 1, p4_i), key=lambda i: candles[i]["high"])
-                # 1 RED: lowest point from 1 GREEN through 2 GREEN.
-                if candles[p2_i]["low"] != min(candles[i]["low"] for i in range(p1_i, p3_i + 1)):
-                    continue
-                # START must remain the absolute lowest candle low through 2 RED.
-                if candles[start_i]["low"] != min(c["low"] for c in candles[start_i:p4_i + 1]):
-                    continue
-                if any(bar["low"] < candles[p4_i]["low"] for bar in candles[p4_i + 1:]):
-                    continue
-                confirmation_i = p4_i + PIVOT_RIGHT
-                if confirmation_i >= len(candles):
-                    continue
-                points = {"start": start_i, "p1": p1_i, "p2": p2_i, "p3": p3_i, "p4": p4_i}
-                key = pattern_key(symbol, candles, points, "LONG") + f"|START864:{start_level:.12g}|LEG:{candles[leg_low_i]['time']}:{candles[leg_high_i]['time']}"
-                return {
-                    "symbol": symbol, "direction": "LONG", "points": points, "key": key,
-                    "confirmation_time": (candles[confirmation_i]["time"] + M5_MS) / 1000.0,
-                    "start_price": start_level,
-                    "p1_price": candles[p1_i]["high"], "p2_price": candles[p2_i]["low"],
-                    "p3_price": candles[p3_i]["high"], "p4_price": candles[p4_i]["low"],
-                    "terminal_time": candles[p4_i]["time"] / 1000.0,
-                    "prior_leg_low": leg_low, "prior_leg_high": leg_high,
-                    "prior_leg_low_time": candles[leg_low_i]["time"] / 1000.0,
-                    "prior_leg_high_time": candles[leg_high_i]["time"] / 1000.0,
-                }
+    candidates = []
+    for break_i, origin_i in breakouts:
+        if is_long:
+            leg_low = float(candles[origin_i]['low'])
+            leg_high = float(candles[break_i]['high'])
+            if leg_high <= leg_low: continue
+            level = leg_high - 0.864 * (leg_high - leg_low)
+            touch = next((i for i in range(break_i + 1, len(candles) - PIVOT_RIGHT)
+                          if candles[i]['low'] <= level), None)
+            if touch is None: continue
+            # START must be a confirmed pivot low whose candle reaches the retracement level.
+            start_i = next((i for i in lows if i >= touch and candles[i]['low'] <= level
+                            and i < len(candles) - PIVOT_RIGHT), None)
+        else:
+            leg_high = float(candles[origin_i]['high'])
+            leg_low = float(candles[break_i]['low'])
+            if leg_high <= leg_low: continue
+            level = leg_low + 0.864 * (leg_high - leg_low)
+            touch = next((i for i in range(break_i + 1, len(candles) - PIVOT_RIGHT)
+                          if candles[i]['high'] >= level), None)
+            if touch is None: continue
+            start_i = next((i for i in highs if i >= touch and candles[i]['high'] >= level
+                            and i < len(candles) - PIVOT_RIGHT), None)
+        if start_i is None: continue
+        candidates.append((start_i, level, origin_i, break_i, leg_low if is_long else leg_low,
+                           leg_high if is_long else leg_high))
+
+    # Always use the newest fully-qualified START, not an old historical one.
+    candidates.sort(key=lambda x: candles[x[0]]['time'], reverse=True)
+    for start_i, start_level, origin_i, break_i, leg_low, leg_high in candidates:
+        post_lows = [i for i in lows if i > start_i]
+        post_highs = [i for i in highs if i > start_i]
+        # Find the first valid mirrored sequence after START.
+        if is_long:
+            for p4_i in reversed(post_lows):
+                p2_options = [i for i in post_lows if start_i < i < p4_i and candles[i]['low'] > candles[p4_i]['low']]
+                for p2_i in reversed(p2_options):
+                    p1_options = [i for i in post_highs if start_i < i < p2_i]
+                    p3_options = [i for i in post_highs if p2_i < i < p4_i]
+                    if not p1_options or not p3_options: continue
+                    p1_i = max(p1_options, key=lambda i: candles[i]['high'])
+                    p3_i = max(p3_options, key=lambda i: candles[i]['high'])
+                    if candles[p2_i]['low'] != min(candles[i]['low'] for i in range(p1_i, p3_i + 1)): continue
+                    if candles[start_i]['low'] != min(c['low'] for c in candles[start_i:p4_i + 1]): continue
+                    if any(b['low'] < candles[p4_i]['low'] for b in candles[p4_i + 1:]): continue
+                    confirmation_i = p4_i + PIVOT_RIGHT
+                    if confirmation_i >= len(candles): continue
+                    points = {'start':start_i,'p1':p1_i,'p2':p2_i,'p3':p3_i,'p4':p4_i}
+                    return {'symbol':symbol,'direction':direction,'points':points,
+                        'key':pattern_key(symbol,candles,points,direction)+f'|START864:{start_level:.12g}|BREAK:{candles[break_i]["time"]}',
+                        'confirmation_time':(candles[confirmation_i]['time']+M5_MS)/1000.0,
+                        'start_price':start_level,'p1_price':candles[p1_i]['high'],'p2_price':candles[p2_i]['low'],
+                        'p3_price':candles[p3_i]['high'],'p4_price':candles[p4_i]['low'],
+                        'terminal_time':candles[p4_i]['time']/1000.0,'prior_leg_low':leg_low,'prior_leg_high':leg_high}
+        else:
+            for p4_i in reversed(post_highs):
+                p2_options = [i for i in post_highs if start_i < i < p4_i and candles[i]['high'] < candles[p4_i]['high']]
+                for p2_i in reversed(p2_options):
+                    p1_options = [i for i in post_lows if start_i < i < p2_i]
+                    p3_options = [i for i in post_lows if p2_i < i < p4_i]
+                    if not p1_options or not p3_options: continue
+                    p1_i = min(p1_options, key=lambda i: candles[i]['low'])
+                    p3_i = min(p3_options, key=lambda i: candles[i]['low'])
+                    if candles[p2_i]['high'] != max(candles[i]['high'] for i in range(p1_i, p3_i + 1)): continue
+                    if candles[start_i]['high'] != max(c['high'] for c in candles[start_i:p4_i + 1]): continue
+                    if any(b['high'] > candles[p4_i]['high'] for b in candles[p4_i + 1:]): continue
+                    confirmation_i = p4_i + PIVOT_RIGHT
+                    if confirmation_i >= len(candles): continue
+                    points = {'start':start_i,'p1':p1_i,'p2':p2_i,'p3':p3_i,'p4':p4_i}
+                    return {'symbol':symbol,'direction':direction,'points':points,
+                        'key':pattern_key(symbol,candles,points,direction)+f'|START864:{start_level:.12g}|BREAK:{candles[break_i]["time"]}',
+                        'confirmation_time':(candles[confirmation_i]['time']+M5_MS)/1000.0,
+                        'start_price':start_level,'p1_price':candles[p1_i]['low'],'p2_price':candles[p2_i]['high'],
+                        'p3_price':candles[p3_i]['low'],'p4_price':candles[p4_i]['high'],
+                        'terminal_time':candles[p4_i]['time']/1000.0,'prior_leg_low':leg_low,'prior_leg_high':leg_high}
     return None
 
 
+def detect_long_retracement_pattern(symbol: str, candles: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    return detect_dynamic_retracement_pattern(symbol, candles, 'LONG')
+
+
 def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction: str) -> Optional[dict[str, Any]]:
-    if direction == "LONG":
-        return detect_long_retracement_pattern(symbol, candles)
-    return detect_legacy_pattern(symbol, candles, direction)
+    return detect_dynamic_retracement_pattern(symbol, candles, direction)
+
 
 def find_nearest_valid_m15_high(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
     """Nearest (most recent) confirmed intact M15 swing high above a SHORT entry."""
