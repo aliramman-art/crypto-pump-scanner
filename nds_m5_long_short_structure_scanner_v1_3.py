@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 Long + Short Structure Scanner v1.3.1
+NDS M5 Long + Short Structure Scanner v1.3.2
 
 LONG + SHORT signal/paper-trade scanner. It never places real exchange orders.
 
@@ -446,8 +446,15 @@ def detect_dynamic_retracement_pattern(symbol: str, candles: list[dict[str, Any]
         candidates.append((start_i, level, origin_i, break_i, leg_low if is_long else leg_low,
                            leg_high if is_long else leg_high))
 
-    # Always use the newest fully-qualified START, not an old historical one.
-    candidates.sort(key=lambda x: candles[x[0]]['time'], reverse=True)
+    # START is a live structural anchor: once a newer valid 86.4% retracement
+    # has been confirmed, it supersedes every older START immediately. Do not
+    # fall back to an older START merely because the newer one has not yet
+    # completed all four downstream structure points. In that case return None
+    # until the structure following the newest START is confirmed.
+    candidates.sort(key=lambda x: (candles[x[0]]['time'], candles[x[3]]['time']), reverse=True)
+    if not candidates:
+        return None
+    candidates = candidates[:1]
     for start_i, start_level, origin_i, break_i, leg_low, leg_high in candidates:
         post_lows = [i for i in lows if i > start_i]
         post_highs = [i for i in highs if i > start_i]
