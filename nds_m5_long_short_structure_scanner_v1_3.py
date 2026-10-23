@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 Long + Short Structure Scanner v1.3.2
+NDS M5 Long + Short Structure Scanner v1.4.1
 
 LONG + SHORT signal/paper-trade scanner. It never places real exchange orders.
 
@@ -59,7 +59,7 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
@@ -414,9 +414,12 @@ def detect_dynamic_retracement_pattern(symbol: str, candles: list[dict[str, Any]
             broke = candles[pivot_i]['low'] < candles[last_ref]['low']
             origin_candidates = [i for i in highs if i < pivot_i]
         if downtrend and broke and origin_candidates:
+            # The retracement leg must start from the latest confirmed opposite pivot
+            # AFTER the reference swing that was broken, not from an older pivot before it.
+            # The old origin_i < last_ref condition selected a stale leg and could pin
+            # START to the first historical setup instead of recalculating it for new breaks.
             origin_i = origin_candidates[-1]
-            # The origin must belong to the last leg leading into the breakout pivot.
-            if origin_i < last_ref:
+            if origin_i > last_ref:
                 breakouts.append((pivot_i, origin_i))
 
     candidates = []
@@ -468,6 +471,11 @@ def detect_dynamic_retracement_pattern(symbol: str, candles: list[dict[str, Any]
                     if not p1_options or not p3_options: continue
                     p1_i = max(p1_options, key=lambda i: candles[i]['high'])
                     p3_i = max(p3_options, key=lambda i: candles[i]['high'])
+                    # Required LONG geometry: 2 GREEN must be strictly above 1 GREEN.
+                    # 2 RED (p4) must be strictly below 1 RED (p2); p2_options
+                    # already requires this, and we keep an explicit guard here.
+                    if candles[p3_i]['high'] <= candles[p1_i]['high']: continue
+                    if candles[p4_i]['low'] >= candles[p2_i]['low']: continue
                     if candles[p2_i]['low'] != min(candles[i]['low'] for i in range(p1_i, p3_i + 1)): continue
                     if candles[start_i]['low'] != min(c['low'] for c in candles[start_i:p4_i + 1]): continue
                     if any(b['low'] < candles[p4_i]['low'] for b in candles[p4_i + 1:]): continue
@@ -489,6 +497,11 @@ def detect_dynamic_retracement_pattern(symbol: str, candles: list[dict[str, Any]
                     if not p1_options or not p3_options: continue
                     p1_i = min(p1_options, key=lambda i: candles[i]['low'])
                     p3_i = min(p3_options, key=lambda i: candles[i]['low'])
+                    # Required SHORT geometry: 2 RED must be strictly below 1 RED.
+                    # 2 GREEN (p4) must be strictly above 1 GREEN (p2); p2_options
+                    # already requires this, and we keep an explicit guard here.
+                    if candles[p3_i]['low'] >= candles[p1_i]['low']: continue
+                    if candles[p4_i]['high'] <= candles[p2_i]['high']: continue
                     if candles[p2_i]['high'] != max(candles[i]['high'] for i in range(p1_i, p3_i + 1)): continue
                     if candles[start_i]['high'] != max(c['high'] for c in candles[start_i:p4_i + 1]): continue
                     if any(b['high'] > candles[p4_i]['high'] for b in candles[p4_i + 1:]): continue
