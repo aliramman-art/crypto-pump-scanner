@@ -1,70 +1,50 @@
-name: NDS M5 Long Short Structure v1.3.1
+
+name: NDS M5 Long Short Structure Scanner
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: "*/15 * * * *"
 
 permissions:
   contents: read
 
 concurrency:
-  group: nds-m5-long-short-structure-v1-3-${{ github.ref }}
+  group: nds-m5-long-short-structure-scanner
   cancel-in-progress: false
 
 jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 9
+
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
+      UNIVERSE_SIZE: "100"
+      MAX_OPEN_TRADES: "3"
+      MAX_SIGNAL_AGE_HOURS: "6"
+      DB_PATH: nds_m5_long_short_structure_v1.db
+      CHART_DIR: nds_m5_long_short_structure_charts
+      REPORT_TIMEZONE: Europe/Berlin
+      PYTHONUNBUFFERED: "1"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: main
 
-      - name: Set up Python 3.11
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
-        run: python -m pip install --upgrade pip requests matplotlib
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install requests pandas matplotlib
 
-      # Cache keys are unique per run; restore-keys load the latest saved DB.
-      # Keep the DB filename stable so previous runs' paper trades are recovered.
-      - name: Restore persistent SQLite database
-        uses: actions/cache@v4
-        with:
-          path: |
-            nds_m5_long_short_structure_v1.db
-            nds_m5_long_short_structure_v1.db-shm
-            nds_m5_long_short_structure_v1.db-wal
-          key: nds-m5-long-short-structure-v1-3-${{ github.ref_name }}-${{ github.run_id }}
-          restore-keys: |
-            nds-m5-long-short-structure-v1-3-${{ github.ref_name }}-
-            nds-m5-long-short-structure-v1-2-${{ github.ref_name }}-
-            nds-m5-long-short-structure-v1-${{ github.ref_name }}-
-
-      - name: Run NDS M5 scanner
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
-          UNIVERSE_SIZE: '100'
-          MAX_OPEN_TRADES: '3'
-          MAX_SIGNAL_AGE_HOURS: '6'
-          DB_PATH: nds_m5_long_short_structure_v1.db
-          CHART_DIR: nds_m5_long_short_structure_charts
-          REPORT_TIMEZONE: Europe/Berlin
-          PYTHONUNBUFFERED: '1'
+      - name: Run NDS Scanner
         run: python -u nds_m5_long_short_structure_scanner_v1_3.py
-
-      - name: Upload signal charts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nds-m5-long-short-structure-charts-${{ github.run_number }}
-          path: nds_m5_long_short_structure_charts/*.png
-          if-no-files-found: ignore
-          retention-days: 7
