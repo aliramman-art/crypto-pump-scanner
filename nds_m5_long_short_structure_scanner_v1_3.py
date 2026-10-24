@@ -376,8 +376,9 @@ def detect_m15_structure_pattern(
                     continue
                 for p2 in reversed([i for i in highs if i < p3]):
                     h1 = candles[p2]["high"]
-                    if h1 <= 0 or h2 >= h1:
+                    if h1 <= 0 or h2 <= h1:
                         continue
+                    # User requirement: 2 GREEN (H2) must be above 1 GREEN (H1).
                     # L2 must be the lowest point between H1 and H2; H2 must
                     # be the highest high from L2 through H2.
                     if l2 != min(c["low"] for c in candles[p2:p4 + 1]):
@@ -415,7 +416,6 @@ def detect_m15_structure_pattern(
                                 "terminal_time": candles[p4]["time"] / 1000.0,
                             }
     return None
-
 
 def detect_long_retracement_pattern(symbol: str, candles: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     return detect_m15_structure_pattern(symbol, candles, "LONG")
