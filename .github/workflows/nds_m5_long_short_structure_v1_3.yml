@@ -1,4 +1,3 @@
-
 name: NDS M5 Long Short Structure Scanner
 
 on:
@@ -8,6 +7,7 @@ on:
 
 permissions:
   contents: read
+  actions: write
 
 concurrency:
   group: nds-m5-long-short-structure-scanner
@@ -46,5 +46,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install requests pandas matplotlib
 
+      - name: Restore previous database
+        uses: actions/cache/restore@v4
+        with:
+          path: nds_m5_long_short_structure_v1.db
+          key: nds-db-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            nds-db-
+
       - name: Run NDS Scanner
         run: python -u nds_m5_long_short_structure_scanner_v1_3.py
+
+      - name: Save database
+        if: always() && hashFiles('nds_m5_long_short_structure_v1.db') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: nds_m5_long_short_structure_v1.db
+          key: nds-db-${{ github.run_id }}-${{ github.run_attempt }}
