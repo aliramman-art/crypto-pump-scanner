@@ -20,7 +20,7 @@ Environment variables:
   TELEGRAM_BOT_TOKEN or TELEGRAM_TOKEN
   TELEGRAM_CHAT_ID or TELEGRAM_CHAT
   UNIVERSE_SIZE (default 100)
-  MAX_OPEN_TRADES (default 3)
+  MAX_OPEN_TRADES (default 10)
   MAX_SIGNAL_AGE_HOURS (default 6)
   DB_PATH (default nds_m5_long_short_structure_v1.db)
   CHART_DIR (default nds_m5_long_short_structure_charts)
@@ -59,7 +59,7 @@ CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
 
 UNIVERSE_SIZE = max(2, int(os.getenv("UNIVERSE_SIZE", "100")))
-MAX_OPEN_TRADES = max(1, int(os.getenv("MAX_OPEN_TRADES", "3")))
+MAX_OPEN_TRADES = max(1, int(os.getenv("MAX_OPEN_TRADES", "10")))
 MAX_SIGNAL_AGE_HOURS = max(1, int(os.getenv("MAX_SIGNAL_AGE_HOURS", "6")))
 M5_CANDLE_COUNT = 600  # retained for compatibility; strategy now uses M15
 M15_CANDLE_COUNT = 300
