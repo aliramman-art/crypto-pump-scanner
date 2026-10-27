@@ -1,16 +1,16 @@
-name: NDS M5 Long Short Structure Scanner
+
+name: NDS M15 Long Short Structure Scanner
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/15 * * * *"
+    - cron: "*/10 * * * *"
 
 permissions:
   contents: read
-  actions: write
 
 concurrency:
-  group: nds-m5-long-short-structure-scanner
+  group: nds-m15-long-short-structure-scanner
   cancel-in-progress: false
 
 jobs:
@@ -19,17 +19,16 @@ jobs:
     timeout-minutes: 9
 
     env:
+      PYTHONUNBUFFERED: "1"
+      UNIVERSE_SIZE: "100"
+      MAX_SIGNAL_AGE_HOURS: "6"
+      MAX_OPEN_TRADES: "3"
+      STOP_BUFFER_PCT: "0.10"
+      REPORT_TIMEZONE: "Europe/Berlin"
+      DB_PATH: "nds_m5_long_short_structure_v1.db"
+      CHART_DIR: "nds_m5_long_short_structure_charts"
       TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_CHAT: ${{ secrets.TELEGRAM_CHAT }}
-      UNIVERSE_SIZE: "100"
-      MAX_OPEN_TRADES: "3"
-      MAX_SIGNAL_AGE_HOURS: "6"
-      DB_PATH: nds_m5_long_short_structure_v1.db
-      CHART_DIR: nds_m5_long_short_structure_charts
-      REPORT_TIMEZONE: Europe/Berlin
-      PYTHONUNBUFFERED: "1"
 
     steps:
       - name: Checkout repository
@@ -39,27 +38,27 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
+          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install requests pandas matplotlib
+          python -m pip install requests matplotlib
 
-      - name: Restore previous database
+      - name: Restore previous SQLite database
         uses: actions/cache/restore@v4
         with:
           path: nds_m5_long_short_structure_v1.db
-          key: nds-db-${{ github.run_id }}-${{ github.run_attempt }}
+          key: nds-m15-db-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            nds-db-
+            nds-m15-db-${{ runner.os }}-
 
-      - name: Run NDS Scanner
-        run: python -u nds_m5_long_short_structure_scanner_v1_3.py
+      - name: Run scanner
+        run: python nds_m5_long_short_structure_scanner_v1.py
 
-      - name: Save database
+      - name: Save SQLite database
         if: always() && hashFiles('nds_m5_long_short_structure_v1.db') != ''
         uses: actions/cache/save@v4
         with:
           path: nds_m5_long_short_structure_v1.db
-          key: nds-db-${{ github.run_id }}-${{ github.run_attempt }}
+          key: nds-m15-db-${{ runner.os }}-${{ github.run_id }}-${{ github.run_attempt }}
