@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 Long + Short Structure Scanner v1.2.0
+NDS M15 Long + Short Structure Scanner v1.3.0
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
@@ -27,6 +27,7 @@ Environment variables:
   UNIVERSE_SIZE (default 100)
   MAX_OPEN_TRADES (default 3)
   MAX_SIGNAL_AGE_HOURS (default 6)
+  STOP_BUFFER_PCT (default 0.10, percent beyond swing stop)
   DB_PATH (default nds_m5_long_short_structure_v1.db)
   CHART_DIR (default nds_m5_long_short_structure_charts)
 """
@@ -58,7 +59,7 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
@@ -66,12 +67,12 @@ TELEGRAM_API = "https://api.telegram.org"
 UNIVERSE_SIZE = max(2, int(os.getenv("UNIVERSE_SIZE", "100")))
 MAX_OPEN_TRADES = max(1, int(os.getenv("MAX_OPEN_TRADES", "3")))
 MAX_SIGNAL_AGE_HOURS = max(1, int(os.getenv("MAX_SIGNAL_AGE_HOURS", "6")))
-M5_CANDLE_COUNT = 600
 M15_CANDLE_COUNT = 300
 PIVOT_LEFT = 5
 PIVOT_RIGHT = 5
-M15_PIVOT_LEFT = 2
-M15_PIVOT_RIGHT = 2
+M15_PIVOT_LEFT = 5
+M15_PIVOT_RIGHT = 5
+STOP_BUFFER_PCT = max(0.0, float(os.getenv("STOP_BUFFER_PCT", "0.10")))
 MAX_CONCURRENT_REQUESTS = 8
 MAX_CHARTS_PER_RUN = 8
 REQUIRED_SYMBOLS = ("PF_XBTUSD", "PF_XAUTUSD")
@@ -83,10 +84,9 @@ try:
 except Exception:
     REPORT_TZ = timezone.utc
 
-M5_MS = 5 * 60 * 1000
 M15_MS = 15 * 60 * 1000
 HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": f"NDS-M5-Long-Scanner/{VERSION}", "Accept": "application/json"})
+HTTP.headers.update({"User-Agent": f"NDS-M15-Structure-Scanner/{VERSION}", "Accept": "application/json"})
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -214,7 +214,7 @@ def ticker_map(tickers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 def get_candles(symbol: str, resolution: str, limit: int) -> list[dict[str, Any]]:
     """Fetch OHLC candles and remove the currently-open candle."""
     now = time.time()
-    timeframe_ms = M5_MS if resolution == "5m" else M15_MS
+    timeframe_ms = M15_MS
     timeframe_seconds = timeframe_ms / 1000
     params = {
         "from": int(now - timeframe_seconds * (limit + 5)),
@@ -292,151 +292,99 @@ def find_confirmed_pivots(
 
 def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, int], direction: str) -> str:
     timestamps = [str(candles[points[name]]["time"]) for name in ("start", "p1", "p2", "p3", "p4", "p5")]
-    return f"{direction}|{symbol}|" + "|".join(timestamps)
+    return f"{direction}|{symbol}|M15|" + "|".join(timestamps)
 
 
 def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction: str) -> Optional[dict[str, Any]]:
-    """Find the base structure and the later confirmed breakout pivot used for entry.
+    """Detect the requested six-point M15 structure with confirmed 5x5 pivots.
 
-    SHORT: START low -> 1 GREEN high -> 1 RED low -> 2 GREEN higher high
-           -> 2 RED lower low -> later confirmed high above 2 GREEN.
-    LONG:  START high -> 1 RED low -> 1 GREEN high -> 2 RED lower low
-           -> 2 GREEN higher high -> later confirmed low below 2 RED.
-
-    A signal is only produced after p5 has been confirmed by PIVOT_RIGHT closed
-    candles. The entry itself uses current market price, never the old pivot price.
+    SHORT: START low -> H1 -> L1 -> H2 -> L2 -> H3.
+    LONG:  START high -> L1 -> H1 -> L2 -> H2 -> L3 (exact mirror).
+    Adjacent pivots of the same type are compressed to the more extreme pivot,
+    so each leg uses the relevant swing extreme rather than an arbitrary pivot.
     """
-    if len(candles) < PIVOT_LEFT + PIVOT_RIGHT + 12:
+    if len(candles) < PIVOT_LEFT + PIVOT_RIGHT + 20:
         return None
     lows, highs = find_confirmed_pivots(candles, PIVOT_LEFT, PIVOT_RIGHT)
     if not lows or not highs:
         return None
-
-    is_long = direction == "LONG"
-    # SHORT uses the bullish base; LONG uses its bearish mirror.
-    starts = highs if is_long else lows
-    first_points = lows if is_long else highs
-    second_points = highs if is_long else lows
-    third_points = lows if is_long else highs
-    fourth_points = highs if is_long else lows
-    follow_points = lows if is_long else highs
+    raw = sorted([(i, "L") for i in lows] + [(i, "H") for i in highs])
+    swings: list[tuple[int, str]] = []
+    for item in raw:
+        if not swings or swings[-1][1] != item[1]:
+            swings.append(item)
+        else:
+            old_i, kind = swings[-1]
+            new_i = item[0]
+            more_extreme = (candles[new_i]["low"] < candles[old_i]["low"]) if kind == "L" else (candles[new_i]["high"] > candles[old_i]["high"])
+            if more_extreme:
+                swings[-1] = item
     patterns: list[dict[str, Any]] = []
-
-    for start_i in starts:
-        p1s = [i for i in first_points if i > start_i]
-        if not p1s:
+    wanted = ["L", "H", "L", "H", "L", "H"] if direction == "SHORT" else ["H", "L", "H", "L", "H", "L"]
+    for j in range(0, len(swings) - 5):
+        seq = swings[j:j + 6]
+        if [kind for _, kind in seq] != wanted:
             continue
-        p1_i = p1s[0]
-        p2s = [i for i in second_points if i > p1_i]
-        if not p2s:
+        idx = [i for i, _ in seq]
+        start_i, p1_i, p2_i, p3_i, p4_i, p5_i = idx
+        start_price = candles[start_i]["low"] if direction == "SHORT" else candles[start_i]["high"]
+        p1 = candles[p1_i]["high"] if direction == "SHORT" else candles[p1_i]["low"]
+        p2 = candles[p2_i]["low"] if direction == "SHORT" else candles[p2_i]["high"]
+        p3 = candles[p3_i]["high"] if direction == "SHORT" else candles[p3_i]["low"]
+        p4 = candles[p4_i]["low"] if direction == "SHORT" else candles[p4_i]["high"]
+        p5 = candles[p5_i]["high"] if direction == "SHORT" else candles[p5_i]["low"]
+        if direction == "SHORT":
+            valid = (p1 > start_price and p2 > start_price and p3 > p1 and p4 > start_price and p4 < p2 and p5 > p1 and p5 > p3)
+            # H1/H2 must be the highest prices on their respective full legs;
+            # L1/L2 must be the lowest prices on their respective full legs.
+            valid = valid and max(c["high"] for c in candles[start_i:p2_i + 1]) == p1
+            valid = valid and min(c["low"] for c in candles[p1_i:p3_i + 1]) == p2
+            valid = valid and max(c["high"] for c in candles[p2_i:p4_i + 1]) == p3
+            valid = valid and min(c["low"] for c in candles[p3_i:p5_i + 1]) == p4
+            valid = valid and min(c["low"] for c in candles[start_i:p5_i + 1]) == start_price
+        else:
+            valid = (p1 < start_price and p2 < start_price and p3 < p1 and p4 < start_price and p4 < p2 and p5 < p1 and p5 < p3)
+            valid = valid and min(c["low"] for c in candles[start_i:p2_i + 1]) == p1
+            valid = valid and max(c["high"] for c in candles[p1_i:p3_i + 1]) == p2
+            valid = valid and min(c["low"] for c in candles[p2_i:p4_i + 1]) == p3
+            valid = valid and max(c["high"] for c in candles[p3_i:p5_i + 1]) == p4
+            valid = valid and max(c["high"] for c in candles[start_i:p5_i + 1]) == start_price
+        if not valid or p5_i + PIVOT_RIGHT >= len(candles):
             continue
-        p2_i = p2s[0]
-        p3s = [i for i in third_points if i > p2_i]
-        if not p3s:
-            continue
-        p3_i = None
-        for candidate in p3s:
-            if is_long and candles[candidate]["low"] < candles[p1_i]["low"]:
-                p3_i = candidate
-                break
-            if not is_long and candles[candidate]["high"] > candles[p1_i]["high"]:
-                p3_i = candidate
-                break
-        if p3_i is None:
-            continue
-        p4s = [i for i in fourth_points if i > p3_i]
-        if not p4s:
-            continue
-        p4_i = None
-        for candidate in p4s:
-            if is_long and candles[candidate]["high"] > candles[p2_i]["high"]:
-                p4_i = candidate
-                break
-            if not is_long and candles[candidate]["low"] < candles[p2_i]["low"]:
-                p4_i = candidate
-                break
-        if p4_i is None:
-            continue
-
-        # Once the base 2 RED/2 GREEN is formed, wait for a new confirmed extreme
-        # beyond the opposite base point: lower low for LONG, higher high for SHORT.
-        p5_i = None
-        for candidate in follow_points:
-            if candidate <= p4_i:
-                continue
-            candidate_price = candles[candidate]["low"] if is_long else candles[candidate]["high"]
-            breaks_base = (candidate_price < candles[p3_i]["low"]) if is_long else (candidate_price > candles[p3_i]["high"])
-            if not breaks_base:
-                continue
-            # The pivot must remain intact after its right-side confirmation candles.
-            later_broken = (
-                any(bar["low"] < candidate_price for bar in candles[candidate + 1:])
-                if is_long else any(bar["high"] > candidate_price for bar in candles[candidate + 1:])
-            )
-            if later_broken:
-                continue
-            p5_i = candidate
-            break
-        if p5_i is None:
-            continue
-
-        terminal_price = candles[p5_i]["low"] if is_long else candles[p5_i]["high"]
-        confirmation_i = p5_i + PIVOT_RIGHT
-        if confirmation_i >= len(candles):
-            continue
-
-        points = {"start": start_i, "p1": p1_i, "p2": p2_i, "p3": p3_i, "p4": p4_i, "p5": p5_i}
+        pts = {"start": start_i, "p1": p1_i, "p2": p2_i, "p3": p3_i, "p4": p4_i, "p5": p5_i}
         patterns.append({
-            "symbol": symbol,
-            "direction": direction,
-            "points": points,
-            "key": pattern_key(symbol, candles, points, direction),
-            "confirmation_time": (candles[confirmation_i]["time"] + M5_MS) / 1000.0,
-            "start_price": candles[start_i]["high"] if is_long else candles[start_i]["low"],
-            "p1_price": candles[p1_i]["low"] if is_long else candles[p1_i]["high"],
-            "p2_price": candles[p2_i]["high"] if is_long else candles[p2_i]["low"],
-            "p3_price": candles[p3_i]["low"] if is_long else candles[p3_i]["high"],
-            "p4_price": candles[p4_i]["high"] if is_long else candles[p4_i]["low"],
-            "p5_price": candles[p5_i]["low"] if is_long else candles[p5_i]["high"],
+            "symbol": symbol, "direction": direction, "points": pts,
+            "key": pattern_key(symbol, candles, pts, direction),
+            "confirmation_time": (candles[p5_i + PIVOT_RIGHT]["time"] + M15_MS) / 1000.0,
+            "start_price": start_price, "p1_price": p1, "p2_price": p2,
+            "p3_price": p3, "p4_price": p4, "p5_price": p5,
             "terminal_time": candles[p5_i]["time"] / 1000.0,
         })
-
     if not patterns:
         return None
-    patterns.sort(key=lambda item: (item["terminal_time"], candles[item["points"]["start"]]["time"]), reverse=True)
+    patterns.sort(key=lambda item: item["terminal_time"], reverse=True)
     return patterns[0]
 
-
 def find_nearest_valid_m15_low(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
-    """Nearest (most recent) confirmed intact M15 swing low below a LONG entry."""
+    """Closest intact confirmed M15 swing low below entry, with a small buffer applied later."""
     lows, _ = find_confirmed_pivots(candles15, M15_PIVOT_LEFT, M15_PIVOT_RIGHT)
-    eligible = [(i, candles15[i]["low"]) for i in lows if candles15[i]["low"] < entry and not any(b["low"] <= candles15[i]["low"] for b in candles15[i+1:])]
-    return sorted(eligible, key=lambda x: x[0], reverse=True)[0][1] if eligible else None
+    eligible = []
+    for i in lows:
+        price = candles15[i]["low"]
+        if price < entry and not any(b["low"] <= price for b in candles15[i + 1:]):
+            eligible.append((price, i))
+    return max(eligible, key=lambda item: item[0])[0] if eligible else None
 
 
 def find_nearest_valid_m15_high(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
-    """Nearest (most recent) confirmed intact M15 swing high above a SHORT entry."""
-    _lows, highs = find_confirmed_pivots(candles15, M15_PIVOT_LEFT, M15_PIVOT_RIGHT)
-    eligible = [(i, candles15[i]["high"]) for i in highs if candles15[i]["high"] > entry and not any(b["high"] >= candles15[i]["high"] for b in candles15[i+1:])]
-    return sorted(eligible, key=lambda x: x[0], reverse=True)[0][1] if eligible else None
-
-
-def find_nearest_valid_m15_low(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
-    """Nearest (most recent) confirmed M15 swing low below entry, not later swept."""
-    lows, _highs = find_confirmed_pivots(candles15, M15_PIVOT_LEFT, M15_PIVOT_RIGHT)
-    eligible: list[tuple[int, float]] = []
-    for index in lows:
-        price = candles15[index]["low"]
-        if price >= entry:
-            continue
-        # A later equal/lower candle low invalidates that pivot as intact support.
-        if any(bar["low"] <= price for bar in candles15[index + 1:]):
-            continue
-        eligible.append((index, price))
-    if not eligible:
-        return None
-    eligible.sort(key=lambda item: item[0], reverse=True)
-    return eligible[0][1]
+    """Closest intact confirmed M15 swing high above entry, with a small buffer applied later."""
+    _, highs = find_confirmed_pivots(candles15, M15_PIVOT_LEFT, M15_PIVOT_RIGHT)
+    eligible = []
+    for i in highs:
+        price = candles15[i]["high"]
+        if price > entry and not any(b["high"] >= price for b in candles15[i + 1:]):
+            eligible.append((price, i))
+    return min(eligible, key=lambda item: item[0])[0] if eligible else None
 
 
 # ----------------------------- Database -----------------------------
@@ -510,7 +458,7 @@ def insert_trade(
 ) -> None:
     direction = str(pattern.get("direction", "LONG"))
     entry_ms = int(entry_time * 1000)
-    next_bar_time_ms = ((entry_ms // M5_MS) + 1) * M5_MS
+    next_bar_time_ms = ((entry_ms // M15_MS) + 1) * M15_MS
     conn.execute(
         """INSERT INTO trades
         (pattern_key,symbol,direction,entry_time,next_bar_time_ms,entry_price,tp_price,sl_price,status,created_at)
@@ -555,9 +503,9 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
         body_low=min(c["open"],c["close"]); body_h=max(abs(c["close"]-c["open"]),abs(c["close"])*0.000002)
         ax.add_patch(Rectangle((x-0.31,body_low),0.62,body_h,facecolor=color,edgecolor=color,linewidth=0.6,zorder=3))
     if direction == "LONG":
-        style={"start":("START","#277da1","o",candles[pts["start"]]["low"]),"p1":("1 RED","#db2b39","v",candles[pts["p1"]]["low"]),"p2":("1 GREEN","#149447","^",candles[pts["p2"]]["high"]),"p3":("2 RED","#db2b39","v",candles[pts["p3"]]["low"]),"p4":("2 GREEN / TP","#149447","^",candles[pts["p4"]]["high"]),"p5":("NEW LOW / ENTRY","#db2b39","v",candles[pts["p5"]]["low"])}
+        style={"start":("START","#277da1","o",candles[pts["start"]]["high"]),"p1":("1 RED","#db2b39","v",candles[pts["p1"]]["low"]),"p2":("1 GREEN","#149447","^",candles[pts["p2"]]["high"]),"p3":("2 RED","#db2b39","v",candles[pts["p3"]]["low"]),"p4":("2 GREEN / TP","#149447","^",candles[pts["p4"]]["high"]),"p5":("3 RED / ENTRY","#db2b39","v",candles[pts["p5"]]["low"])}
     else:
-        style={"start":("START","#277da1","o",candles[pts["start"]]["high"]),"p1":("1 GREEN","#149447","^",candles[pts["p1"]]["high"]),"p2":("1 RED","#db2b39","v",candles[pts["p2"]]["low"]),"p3":("2 GREEN","#149447","^",candles[pts["p3"]]["high"]),"p4":("2 RED / TP","#db2b39","v",candles[pts["p4"]]["low"]),"p5":("NEW HIGH / ENTRY","#149447","^",candles[pts["p5"]]["high"])}
+        style={"start":("START","#277da1","o",candles[pts["start"]]["low"]),"p1":("1 GREEN","#149447","^",candles[pts["p1"]]["high"]),"p2":("1 RED","#db2b39","v",candles[pts["p2"]]["low"]),"p3":("2 GREEN","#149447","^",candles[pts["p3"]]["high"]),"p4":("2 RED / TP","#db2b39","v",candles[pts["p4"]]["low"]),"p5":("3 GREEN / ENTRY","#149447","^",candles[pts["p5"]]["high"])}
     for name,(label,color,marker,y) in style.items():
         x=pts[name]-left_edge
         if 0 <= x < len(chart_candles):
@@ -572,7 +520,7 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
     ax.annotate("ENTRY",(last_x,entry),xytext=(-8,8),textcoords="offset points",ha="right",fontsize=8,color="#277da1",fontweight="bold")
     n=min(8,len(chart_candles)); ticks=sorted(set(round(i*(len(chart_candles)-1)/max(1,n-1)) for i in range(n)))
     ax.set_xticks(ticks); ax.set_xticklabels([datetime.fromtimestamp(chart_candles[i]["time"]/1000,timezone.utc).astimezone(REPORT_TZ).strftime("%m-%d %H:%M") for i in ticks],rotation=25,ha="right",fontsize=8)
-    ax.set_title(f"NDS M5 {direction} | {symbol}\nConfirmed mirrored structure | {dt_text(pattern['confirmation_time'])}",fontsize=12,fontweight="bold")
+    ax.set_title(f"NDS M15 {direction} | {symbol}\nConfirmed mirrored structure | {dt_text(pattern['confirmation_time'])}",fontsize=12,fontweight="bold")
     ax.set_ylabel("Price"); ax.grid(True,alpha=0.2); ax.legend(loc="best",fontsize=8,framealpha=0.9); ax.margins(x=0.03,y=0.1); fig.tight_layout()
     safe="".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in symbol)
     path=CHART_DIR/f"{safe}_{direction}_{int(time.time())}.png"; fig.savefig(path,bbox_inches="tight"); plt.close(fig); return path
@@ -651,7 +599,7 @@ def update_open_trades(
         bars = candles_by_symbol.get(symbol)
         if bars is None:
             try:
-                bars = get_candles(symbol, "5m", M5_CANDLE_COUNT)
+                bars = get_candles(symbol, "15m", M15_CANDLE_COUNT)
                 candles_by_symbol[symbol] = bars
             except Exception as exc:
                 LOG.warning("Cannot refresh open trade %s: %s", symbol, exc)
@@ -667,12 +615,12 @@ def update_open_trades(
             hit_tp = bar["high"] >= tp if direction == "LONG" else bar["low"] <= tp
             if not hit_sl and not hit_tp:
                 continue
-            # Conservative resolution if both levels are touched in one M5 candle.
+            # Conservative resolution if both levels are touched in one M15 candle.
             if hit_sl:
                 status, exit_price = "CLOSED_SL", sl
             else:
                 status, exit_price = "CLOSED_TP", tp
-            exit_time = (bar["time"] + M5_MS) / 1000.0
+            exit_time = (bar["time"] + M15_MS) / 1000.0
             close_trade(conn, int(trade["id"]), status, exit_time, exit_price)
             closed.append({
                 "symbol": symbol,
@@ -718,7 +666,7 @@ def pct_from_entry(entry: float, level: float, direction: str = "LONG") -> float
 
 
 def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], closed_trades: list[dict[str, Any]], perf: dict[str, Any], prices: dict[str, Optional[float]]) -> str:
-    lines=[f"🔎 NDS M5 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M5 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open slots: {perf['open_count']}/{MAX_OPEN_TRADES}",""]
+    lines=[f"🔎 NDS M15 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M15 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open slots: {perf['open_count']}/{MAX_OPEN_TRADES}",""]
     for direction, emoji in (("LONG","🟢"),("SHORT","🔴")):
         items=[x for x in new_signals if x["direction"]==direction]
         lines.append(f"{emoji} NEW {direction} SIGNALS: {len(items)}")
@@ -743,7 +691,7 @@ def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], c
 
 def scan_symbol(symbol: str) -> tuple[str, Optional[list[dict[str, Any]]], Optional[str]]:
     try:
-        return symbol, get_candles(symbol, "5m", M5_CANDLE_COUNT), None
+        return symbol, get_candles(symbol, "15m", M15_CANDLE_COUNT), None
     except Exception as exc:
         return symbol, None, str(exc)
 
@@ -754,7 +702,7 @@ def main() -> int:
     try:
         tickers = get_tickers()
     except Exception as exc:
-        message = f"❌ NDS M5 LONG+SHORT scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
+        message = f"❌ NDS M15 LONG+SHORT scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
         LOG.exception("Ticker fetch failed")
         telegram_send_message(message)
         return 1
@@ -773,7 +721,7 @@ def main() -> int:
                 candles_by_symbol[symbol] = candles
             elif error:
                 errors_by_symbol[symbol] = error
-                LOG.warning("M5 data error %s: %s", symbol, error)
+                LOG.warning("M15 data error %s: %s", symbol, error)
 
     prices: dict[str, Optional[float]] = {}
     for symbol in set(universe) | {str(row["symbol"]) for row in open_trades(conn)}:
@@ -807,11 +755,11 @@ def main() -> int:
             continue
         symbol = pattern["symbol"]
         bars = candles_by_symbol[symbol]
-        entry = prices.get(symbol)
+        entry = float(pattern["p5_price"])
         if entry is None or entry <= 0:
             save_pattern_decision(conn, pattern, "SKIPPED", "No current market price"); continue
         direction = str(pattern["direction"])
-        # TP is the second base pivot: 2 GREEN for LONG, 2 RED for SHORT.
+        # Entry is the third extreme; TP is the second opposite pivot.
         tp = float(pattern["p4_price"])
         if direction == "LONG" and tp <= entry:
             save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (2 GREEN) is not above current entry")
@@ -832,6 +780,9 @@ def main() -> int:
             LOG.warning("M15 data error for %s: %s", symbol, exc)
             continue
         sl = find_nearest_valid_m15_low(bars15, entry) if direction == "LONG" else find_nearest_valid_m15_high(bars15, entry)
+        if sl is not None:
+            buffer = STOP_BUFFER_PCT / 100.0
+            sl = sl * (1.0 - buffer) if direction == "LONG" else sl * (1.0 + buffer)
         if sl is None or (direction == "LONG" and sl >= entry) or (direction == "SHORT" and sl <= entry):
             save_pattern_decision(conn, pattern, "SKIPPED", f"No confirmed intact M15 pivot for {direction} stop")
             continue
@@ -881,8 +832,8 @@ def main() -> int:
                 f"{emoji} NEW {signal['direction']} | {signal['symbol']}\n"
                 f"Entry: {fmt_price(signal['entry'])}\n"
                 f"TP: {fmt_price(signal['tp'])} ({fmt_pct(tp_pct)})\n"
-                f"SL nearest valid M15 pivot: {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
-                "Chart labels include START, 1/2 GREEN, 1/2 RED, breakout pivot, ENTRY, TP, SL"
+                f"SL buffered M15 swing: {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
+                "Chart labels: blue START, green highs, red lows, ENTRY, TP and buffered SL"
             )
             if telegram_send_photo(chart_path, caption):
                 sent_charts += 1
