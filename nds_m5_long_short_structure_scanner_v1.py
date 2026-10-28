@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M15 Long + Short Structure Scanner v1.3.0
+NDS M15 Long + Short Structure Scanner v1.3.1
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
@@ -59,7 +59,7 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
@@ -595,6 +595,7 @@ def telegram_send_photo(path: Path, caption: str) -> bool:
 def update_open_trades(
     conn: sqlite3.Connection,
     candles_by_symbol: dict[str, list[dict[str, Any]]],
+    live_prices: Optional[dict[str, Optional[float]]] = None,
 ) -> list[dict[str, Any]]:
     closed: list[dict[str, Any]] = []
     for trade in open_trades(conn):
@@ -635,6 +636,33 @@ def update_open_trades(
                 "exit_time": exit_time,
             })
             break
+        else:
+            # Fallback to the latest live ticker. This catches a TP/SL touch that
+            # may be missing from the locally fetched closed-candle window, and
+            # prevents a trade remaining OPEN after the market has crossed a level.
+            live_price = (live_prices or {}).get(symbol)
+            if live_price is not None and live_price > 0:
+                direction = str(trade["direction"])
+                hit_sl_live = live_price <= sl if direction == "LONG" else live_price >= sl
+                hit_tp_live = live_price >= tp if direction == "LONG" else live_price <= tp
+                if hit_sl_live or hit_tp_live:
+                    # If the current price is beyond both levels due to a gap or
+                    # inconsistent feed, resolve conservatively in favor of SL.
+                    if hit_sl_live:
+                        status, exit_price = "CLOSED_SL", sl
+                    else:
+                        status, exit_price = "CLOSED_TP", tp
+                    exit_time = time.time()
+                    close_trade(conn, int(trade["id"]), status, exit_time, exit_price)
+                    closed.append({
+                        "symbol": symbol,
+                        "status": status,
+                        "entry": float(trade["entry_price"]),
+                        "exit": exit_price,
+                        "pnl_pct": trade_pnl_percent(float(trade["entry_price"]), exit_price, direction),
+                        "direction": direction,
+                        "exit_time": exit_time,
+                    })
     return closed
 
 
@@ -735,7 +763,7 @@ def main() -> int:
         prices[symbol] = price
 
     # Update previously open paper trades before assessing fresh entries.
-    closed_trades = update_open_trades(conn, candles_by_symbol)
+    closed_trades = update_open_trades(conn, candles_by_symbol, prices)
 
     new_signals: list[dict[str, Any]] = []
     patterns_count = 0
