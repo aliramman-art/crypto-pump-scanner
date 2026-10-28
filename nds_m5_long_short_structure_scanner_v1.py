@@ -343,7 +343,10 @@ def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction:
             valid = valid and min(c["low"] for c in candles[p3_i:p5_i + 1]) == p4
             valid = valid and min(c["low"] for c in candles[start_i:p5_i + 1]) == start_price
         else:
-            valid = (p1 < start_price and p2 < start_price and p3 < p1 and p4 < start_price and p4 < p2 and p5 < p1 and p5 < p3)
+            # LONG mirror: L1 > L2 > L3 and H2 > H1.
+            # p1=L1, p2=H1, p3=L2, p4=H2, p5=L3.
+            # Critical guard: the second green high MUST exceed the first green high.
+            valid = (p1 < start_price and p2 < start_price and p3 < p1 and p4 < start_price and p4 > p2 and p5 < p1 and p5 < p3)
             valid = valid and min(c["low"] for c in candles[start_i:p2_i + 1]) == p1
             valid = valid and max(c["high"] for c in candles[p1_i:p3_i + 1]) == p2
             valid = valid and min(c["low"] for c in candles[p2_i:p4_i + 1]) == p3
