@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M15 Long + Short Structure Scanner v1.3.1
+NDS M5 Long + Short Structure Scanner v1.3.1
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
@@ -9,11 +9,11 @@ Pattern and entry (all pivots confirmed on closed M5 candles):
   SHORT: bullish base 1 GREEN -> 1 RED -> 2 GREEN higher high -> 2 RED lower low;
          then wait for a confirmed new high above 2 GREEN. Enter SHORT at current
          market price after that new high is confirmed. TP = 2 RED; SL = nearest
-         confirmed intact M15 swing high above entry (2-left/2-right).
+         confirmed intact M5 swing high above entry (2-left/2-right).
   LONG:  mirrored bearish base 1 RED -> 1 GREEN -> 2 RED lower low -> 2 GREEN higher high;
          then wait for a confirmed new low below 2 RED. Enter LONG at current market
          price after that new low is confirmed. TP = 2 GREEN; SL = nearest confirmed
-         intact M15 swing low below entry (2-left/2-right).
+         intact M5 swing low below entry (2-left/2-right).
 
 Reporting:
   - Sends a PNG chart for each new signal to Telegram.
@@ -67,11 +67,11 @@ TELEGRAM_API = "https://api.telegram.org"
 UNIVERSE_SIZE = max(2, int(os.getenv("UNIVERSE_SIZE", "100")))
 MAX_OPEN_TRADES = max(1, int(os.getenv("MAX_OPEN_TRADES", "3")))
 MAX_SIGNAL_AGE_HOURS = max(1, int(os.getenv("MAX_SIGNAL_AGE_HOURS", "6")))
-M15_CANDLE_COUNT = 300
+M5_CANDLE_COUNT = 300
 PIVOT_LEFT = 5
 PIVOT_RIGHT = 5
-M15_PIVOT_LEFT = 5
-M15_PIVOT_RIGHT = 5
+M5_PIVOT_LEFT = 5
+M5_PIVOT_RIGHT = 5
 STOP_BUFFER_PCT = max(0.0, float(os.getenv("STOP_BUFFER_PCT", "0.10")))
 MAX_CONCURRENT_REQUESTS = 8
 MAX_CHARTS_PER_RUN = 8
@@ -84,9 +84,9 @@ try:
 except Exception:
     REPORT_TZ = timezone.utc
 
-M15_MS = 15 * 60 * 1000
+M5_MS = 5 * 60 * 1000
 HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": f"NDS-M15-Structure-Scanner/{VERSION}", "Accept": "application/json"})
+HTTP.headers.update({"User-Agent": f"NDS-M5-Structure-Scanner/{VERSION}", "Accept": "application/json"})
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -214,7 +214,7 @@ def ticker_map(tickers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 def get_candles(symbol: str, resolution: str, limit: int) -> list[dict[str, Any]]:
     """Fetch OHLC candles and remove the currently-open candle."""
     now = time.time()
-    timeframe_ms = M15_MS
+    timeframe_ms = M5_MS
     timeframe_seconds = timeframe_ms / 1000
     params = {
         "from": int(now - timeframe_seconds * (limit + 5)),
@@ -292,11 +292,11 @@ def find_confirmed_pivots(
 
 def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, int], direction: str) -> str:
     timestamps = [str(candles[points[name]]["time"]) for name in ("start", "p1", "p2", "p3", "p4", "p5")]
-    return f"{direction}|{symbol}|M15|" + "|".join(timestamps)
+    return f"{direction}|{symbol}|M5|" + "|".join(timestamps)
 
 
 def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction: str) -> Optional[dict[str, Any]]:
-    """Detect the requested six-point M15 structure with confirmed 5x5 pivots.
+    """Detect the requested six-point M5 structure with confirmed 5x5 pivots.
 
     SHORT: START low -> H1 -> L1 -> H2 -> L2 -> H3.
     LONG:  START high -> L1 -> H1 -> L2 -> H2 -> L3 (exact mirror).
@@ -358,7 +358,7 @@ def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction:
         patterns.append({
             "symbol": symbol, "direction": direction, "points": pts,
             "key": pattern_key(symbol, candles, pts, direction),
-            "confirmation_time": (candles[p5_i + PIVOT_RIGHT]["time"] + M15_MS) / 1000.0,
+            "confirmation_time": (candles[p5_i + PIVOT_RIGHT]["time"] + M5_MS) / 1000.0,
             "start_price": start_price, "p1_price": p1, "p2_price": p2,
             "p3_price": p3, "p4_price": p4, "p5_price": p5,
             "terminal_time": candles[p5_i]["time"] / 1000.0,
@@ -369,8 +369,8 @@ def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction:
     return patterns[0]
 
 def find_nearest_valid_m15_low(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
-    """Closest intact confirmed M15 swing low below entry, with a small buffer applied later."""
-    lows, _ = find_confirmed_pivots(candles15, M15_PIVOT_LEFT, M15_PIVOT_RIGHT)
+    """Closest intact confirmed M5 swing low below entry, with a small buffer applied later."""
+    lows, _ = find_confirmed_pivots(candles15, M5_PIVOT_LEFT, M5_PIVOT_RIGHT)
     eligible = []
     for i in lows:
         price = candles15[i]["low"]
@@ -380,8 +380,8 @@ def find_nearest_valid_m15_low(candles15: list[dict[str, Any]], entry: float) ->
 
 
 def find_nearest_valid_m15_high(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
-    """Closest intact confirmed M15 swing high above entry, with a small buffer applied later."""
-    _, highs = find_confirmed_pivots(candles15, M15_PIVOT_LEFT, M15_PIVOT_RIGHT)
+    """Closest intact confirmed M5 swing high above entry, with a small buffer applied later."""
+    _, highs = find_confirmed_pivots(candles15, M5_PIVOT_LEFT, M5_PIVOT_RIGHT)
     eligible = []
     for i in highs:
         price = candles15[i]["high"]
@@ -461,7 +461,7 @@ def insert_trade(
 ) -> None:
     direction = str(pattern.get("direction", "LONG"))
     entry_ms = int(entry_time * 1000)
-    next_bar_time_ms = ((entry_ms // M15_MS) + 1) * M15_MS
+    next_bar_time_ms = ((entry_ms // M5_MS) + 1) * M5_MS
     conn.execute(
         """INSERT INTO trades
         (pattern_key,symbol,direction,entry_time,next_bar_time_ms,entry_price,tp_price,sl_price,status,created_at)
@@ -523,7 +523,7 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
     ax.annotate("ENTRY",(last_x,entry),xytext=(-8,8),textcoords="offset points",ha="right",fontsize=8,color="#277da1",fontweight="bold")
     n=min(8,len(chart_candles)); ticks=sorted(set(round(i*(len(chart_candles)-1)/max(1,n-1)) for i in range(n)))
     ax.set_xticks(ticks); ax.set_xticklabels([datetime.fromtimestamp(chart_candles[i]["time"]/1000,timezone.utc).astimezone(REPORT_TZ).strftime("%m-%d %H:%M") for i in ticks],rotation=25,ha="right",fontsize=8)
-    ax.set_title(f"NDS M15 {direction} | {symbol}\nConfirmed mirrored structure | {dt_text(pattern['confirmation_time'])}",fontsize=12,fontweight="bold")
+    ax.set_title(f"NDS M5 {direction} | {symbol}\nConfirmed mirrored structure | {dt_text(pattern['confirmation_time'])}",fontsize=12,fontweight="bold")
     ax.set_ylabel("Price"); ax.grid(True,alpha=0.2); ax.legend(loc="best",fontsize=8,framealpha=0.9); ax.margins(x=0.03,y=0.1); fig.tight_layout()
     safe="".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in symbol)
     path=CHART_DIR/f"{safe}_{direction}_{int(time.time())}.png"; fig.savefig(path,bbox_inches="tight"); plt.close(fig); return path
@@ -603,7 +603,7 @@ def update_open_trades(
         bars = candles_by_symbol.get(symbol)
         if bars is None:
             try:
-                bars = get_candles(symbol, "15m", M15_CANDLE_COUNT)
+                bars = get_candles(symbol, "5m", M5_CANDLE_COUNT)
                 candles_by_symbol[symbol] = bars
             except Exception as exc:
                 LOG.warning("Cannot refresh open trade %s: %s", symbol, exc)
@@ -619,12 +619,12 @@ def update_open_trades(
             hit_tp = bar["high"] >= tp if direction == "LONG" else bar["low"] <= tp
             if not hit_sl and not hit_tp:
                 continue
-            # Conservative resolution if both levels are touched in one M15 candle.
+            # Conservative resolution if both levels are touched in one M5 candle.
             if hit_sl:
                 status, exit_price = "CLOSED_SL", sl
             else:
                 status, exit_price = "CLOSED_TP", tp
-            exit_time = (bar["time"] + M15_MS) / 1000.0
+            exit_time = (bar["time"] + M5_MS) / 1000.0
             close_trade(conn, int(trade["id"]), status, exit_time, exit_price)
             closed.append({
                 "symbol": symbol,
@@ -697,7 +697,7 @@ def pct_from_entry(entry: float, level: float, direction: str = "LONG") -> float
 
 
 def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], closed_trades: list[dict[str, Any]], perf: dict[str, Any], prices: dict[str, Optional[float]]) -> str:
-    lines=[f"🔎 NDS M15 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M15 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open slots: {perf['open_count']}/{MAX_OPEN_TRADES}",""]
+    lines=[f"🔎 NDS M5 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M5 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open slots: {perf['open_count']}/{MAX_OPEN_TRADES}",""]
     for direction, emoji in (("LONG","🟢"),("SHORT","🔴")):
         items=[x for x in new_signals if x["direction"]==direction]
         lines.append(f"{emoji} NEW {direction} SIGNALS: {len(items)}")
@@ -722,7 +722,7 @@ def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], c
 
 def scan_symbol(symbol: str) -> tuple[str, Optional[list[dict[str, Any]]], Optional[str]]:
     try:
-        return symbol, get_candles(symbol, "15m", M15_CANDLE_COUNT), None
+        return symbol, get_candles(symbol, "5m", M5_CANDLE_COUNT), None
     except Exception as exc:
         return symbol, None, str(exc)
 
@@ -733,7 +733,7 @@ def main() -> int:
     try:
         tickers = get_tickers()
     except Exception as exc:
-        message = f"❌ NDS M15 LONG+SHORT scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
+        message = f"❌ NDS M5 LONG+SHORT scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
         LOG.exception("Ticker fetch failed")
         telegram_send_message(message)
         return 1
@@ -752,7 +752,7 @@ def main() -> int:
                 candles_by_symbol[symbol] = candles
             elif error:
                 errors_by_symbol[symbol] = error
-                LOG.warning("M15 data error %s: %s", symbol, error)
+                LOG.warning("M5 data error %s: %s", symbol, error)
 
     prices: dict[str, Optional[float]] = {}
     for symbol in set(universe) | {str(row["symbol"]) for row in open_trades(conn)}:
@@ -805,19 +805,19 @@ def main() -> int:
             save_pattern_decision(conn, pattern, "SKIPPED", "Maximum number of open trades reached")
             continue
         try:
-            bars15 = get_candles(symbol, "15m", M15_CANDLE_COUNT)
+            bars15 = get_candles(symbol, "5m", M5_CANDLE_COUNT)
         except Exception as exc:
-            save_pattern_decision(conn, pattern, "SKIPPED", f"M15 candle fetch failed: {exc}")
-            LOG.warning("M15 data error for %s: %s", symbol, exc)
+            save_pattern_decision(conn, pattern, "SKIPPED", f"M5 candle fetch failed: {exc}")
+            LOG.warning("M5 data error for %s: %s", symbol, exc)
             continue
         sl = find_nearest_valid_m15_low(bars15, entry) if direction == "LONG" else find_nearest_valid_m15_high(bars15, entry)
         if sl is not None:
             buffer = STOP_BUFFER_PCT / 100.0
             sl = sl * (1.0 - buffer) if direction == "LONG" else sl * (1.0 + buffer)
         if sl is None or (direction == "LONG" and sl >= entry) or (direction == "SHORT" and sl <= entry):
-            save_pattern_decision(conn, pattern, "SKIPPED", f"No confirmed intact M15 pivot for {direction} stop")
+            save_pattern_decision(conn, pattern, "SKIPPED", f"No confirmed intact M5 pivot for {direction} stop")
             continue
-        # Ensure the M15 stop and target are on the correct sides of entry.
+        # Ensure the M5 stop and target are on the correct sides of entry.
         if direction == "LONG" and not (sl < entry < tp):
             save_pattern_decision(conn, pattern, "SKIPPED", "Invalid LONG levels: require SL < entry < TP")
             continue
@@ -863,7 +863,7 @@ def main() -> int:
                 f"{emoji} NEW {signal['direction']} | {signal['symbol']}\n"
                 f"Entry: {fmt_price(signal['entry'])}\n"
                 f"TP: {fmt_price(signal['tp'])} ({fmt_pct(tp_pct)})\n"
-                f"SL buffered M15 swing: {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
+                f"SL buffered M5 swing: {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
                 "Chart labels: blue START, green highs, red lows, ENTRY, TP and buffered SL"
             )
             if telegram_send_photo(chart_path, caption):
