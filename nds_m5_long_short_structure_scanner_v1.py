@@ -715,7 +715,12 @@ def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], c
     diagnostics = scan_stats.get("diagnostics", {})
     if diagnostics:
         lines.append("🧭 SIGNAL DIAGNOSTICS")
-        lines.append(f"Candidates: {diagnostics.get('candidates', 0)} | Already seen: {diagnostics.get('already_seen', 0)} | Expired: {diagnostics.get('expired', 0)}")
+        lines.append(
+            f"Detected: {diagnostics.get('detected_total', scan_stats.get('patterns', 0))} | "
+            f"Fresh candidates: {diagnostics.get('candidates', 0)} | "
+            f"Already traded: {diagnostics.get('already_seen', 0)} | "
+            f"Expired: {diagnostics.get('expired', 0)}"
+        )
         for key, label in (("no_price", "No current price"), ("bad_tp", "TP on wrong side of entry"), ("symbol_open", "Symbol already has open trade"), ("slots_full", "Open-trade limit reached"), ("sl_missing", "No valid SL pivot"), ("bad_levels", "Invalid SL/entry/TP order"), ("candle_refresh_error", "Failed to refresh M5 candles"), ("opened", "Paper trades opened")):
             count = diagnostics.get(key, 0)
             if count:
@@ -792,7 +797,7 @@ def main() -> int:
     patterns_count = 0
     scanned_candidates: list[dict[str, Any]] = []
     diagnostics: dict[str, int] = {
-        "candidates": 0, "already_seen": 0, "expired": 0, "no_price": 0,
+        "detected_total": 0, "candidates": 0, "already_seen": 0, "expired": 0, "no_price": 0,
         "bad_tp": 0, "symbol_open": 0, "slots_full": 0, "sl_missing": 0,
         "bad_levels": 0, "candle_refresh_error": 0, "opened": 0,
     }
@@ -803,6 +808,9 @@ def main() -> int:
             # latest-only approach could let an expired/seen pattern mask a
             # newer independent structure in the same symbol and direction.
             detected_patterns = detect_patterns(symbol, bars, direction)
+            # Count every structurally valid match, including expired ones. This
+            # keeps the top-level structure count consistent with the diagnostics.
+            diagnostics["detected_total"] += len(detected_patterns)
             for pattern in detected_patterns:
                 age_seconds = scan_time - float(pattern["confirmation_time"])
                 if age_seconds < 0 or age_seconds > MAX_SIGNAL_AGE_HOURS * 3600:
@@ -865,10 +873,12 @@ def main() -> int:
         if direction == "LONG" and tp <= entry:
             diagnostics["bad_tp"] += 1
             save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (2 GREEN) is not above refreshed market entry")
+            LOG.info("Rejected %s %s after refresh: TP %.10g <= entry %.10g", symbol, direction, tp, entry)
             continue
         if direction == "SHORT" and tp >= entry:
             diagnostics["bad_tp"] += 1
             save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below refreshed market entry")
+            LOG.info("Rejected %s %s after refresh: TP %.10g >= entry %.10g", symbol, direction, tp, entry)
             continue
         sl = find_nearest_valid_m15_low(bars5, entry) if direction == "LONG" else find_nearest_valid_m15_high(bars5, entry)
         if sl is not None:
@@ -907,7 +917,7 @@ def main() -> int:
         "scanned": len(universe),
         "m5_ok": len(candles_by_symbol),
         "errors": len(errors_by_symbol),
-        "patterns": patterns_count,
+        "patterns": diagnostics["detected_total"],
         "universe_size": len(universe),
         "diagnostics": diagnostics,
     }
