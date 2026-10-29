@@ -295,7 +295,7 @@ def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, in
     return f"{direction}|{symbol}|M5|" + "|".join(timestamps)
 
 
-def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction: str) -> Optional[dict[str, Any]]:
+def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
     """Detect the requested six-point M5 structure with confirmed 5x5 pivots.
 
     SHORT: START low -> H1 -> L1 -> H2 -> L2 -> H3.
@@ -304,10 +304,10 @@ def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction:
     so each leg uses the relevant swing extreme rather than an arbitrary pivot.
     """
     if len(candles) < PIVOT_LEFT + PIVOT_RIGHT + 20:
-        return None
+        return []
     lows, highs = find_confirmed_pivots(candles, PIVOT_LEFT, PIVOT_RIGHT)
     if not lows or not highs:
-        return None
+        return []
     raw = sorted([(i, "L") for i in lows] + [(i, "H") for i in highs])
     swings: list[tuple[int, str]] = []
     for item in raw:
@@ -363,10 +363,11 @@ def detect_latest_pattern(symbol: str, candles: list[dict[str, Any]], direction:
             "p3_price": p3, "p4_price": p4, "p5_price": p5,
             "terminal_time": candles[p5_i]["time"] / 1000.0,
         })
-    if not patterns:
-        return None
-    patterns.sort(key=lambda item: item["terminal_time"], reverse=True)
-    return patterns[0]
+    # Return every valid structure, newest first. Returning only patterns[0]
+    # can hide a newer eligible setup when the newest match is already expired
+    # or recorded in SQLite.
+    patterns.sort(key=lambda item: item["confirmation_time"], reverse=True)
+    return patterns
 
 def find_nearest_valid_m15_low(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
     """Closest intact confirmed M5 swing low below entry, with a small buffer applied later."""
@@ -436,12 +437,25 @@ def connect_db() -> sqlite3.Connection:
 
 
 def pattern_seen(conn: sqlite3.Connection, key: str) -> bool:
-    return conn.execute("SELECT 1 FROM patterns WHERE pattern_key=?", (key,)).fetchone() is not None
+    # A pattern is permanently consumed only after a paper trade was opened.
+    # Old SKIPPED decisions (for example, temporarily full trade slots) must
+    # not block a still-valid pattern from being evaluated again.
+    row = conn.execute(
+        "SELECT 1 FROM patterns p LEFT JOIN trades t ON t.pattern_key=p.pattern_key "
+        "WHERE p.pattern_key=? AND (p.decision='TRADE' OR t.pattern_key IS NOT NULL) LIMIT 1",
+        (key,),
+    ).fetchone()
+    return row is not None
 
 
 def save_pattern_decision(conn: sqlite3.Connection, pattern: dict[str, Any], decision: str, reason: str = "") -> None:
     conn.execute(
-        "INSERT OR IGNORE INTO patterns(pattern_key,symbol,detected_at,decision,reason) VALUES(?,?,?,?,?)",
+        """INSERT INTO patterns(pattern_key,symbol,detected_at,decision,reason)
+           VALUES(?,?,?,?,?)
+           ON CONFLICT(pattern_key) DO UPDATE SET
+               decision=excluded.decision,
+               reason=excluded.reason
+           WHERE patterns.decision != 'TRADE'""",
         (pattern["key"], pattern["symbol"], time.time(), decision, reason[:500]),
     )
     conn.commit()
@@ -782,17 +796,20 @@ def main() -> int:
         "bad_tp": 0, "symbol_open": 0, "slots_full": 0, "sl_missing": 0,
         "bad_levels": 0, "candle_refresh_error": 0, "opened": 0,
     }
+    scan_time = time.time()
     for symbol, bars in candles_by_symbol.items():
         for direction in ("LONG", "SHORT"):
-            pattern = detect_latest_pattern(symbol, bars, direction)
-            if not pattern:
-                continue
-            age_seconds = time.time() - float(pattern["confirmation_time"])
-            if age_seconds < 0 or age_seconds > MAX_SIGNAL_AGE_HOURS * 3600:
-                diagnostics["expired"] += 1
-                continue
-            patterns_count += 1
-            scanned_candidates.append(pattern)
+            # Evaluate all matches, not only the newest match. The previous
+            # latest-only approach could let an expired/seen pattern mask a
+            # newer independent structure in the same symbol and direction.
+            detected_patterns = detect_patterns(symbol, bars, direction)
+            for pattern in detected_patterns:
+                age_seconds = scan_time - float(pattern["confirmation_time"])
+                if age_seconds < 0 or age_seconds > MAX_SIGNAL_AGE_HOURS * 3600:
+                    diagnostics["expired"] += 1
+                    continue
+                patterns_count += 1
+                scanned_candidates.append(pattern)
 
     diagnostics["candidates"] = len(scanned_candidates)
     # Process most recently confirmed structures first to make the open-slot cap fair.
