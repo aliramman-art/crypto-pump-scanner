@@ -506,9 +506,9 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
         body_low=min(c["open"],c["close"]); body_h=max(abs(c["close"]-c["open"]),abs(c["close"])*0.000002)
         ax.add_patch(Rectangle((x-0.31,body_low),0.62,body_h,facecolor=color,edgecolor=color,linewidth=0.6,zorder=3))
     if direction == "LONG":
-        style={"start":("START","#277da1","o",candles[pts["start"]]["high"]),"p1":("1 RED","#db2b39","v",candles[pts["p1"]]["low"]),"p2":("1 GREEN","#149447","^",candles[pts["p2"]]["high"]),"p3":("2 RED","#db2b39","v",candles[pts["p3"]]["low"]),"p4":("2 GREEN / TP","#149447","^",candles[pts["p4"]]["high"]),"p5":("3 RED / ENTRY","#db2b39","v",candles[pts["p5"]]["low"])}
+        style={"start":("START","#277da1","o",candles[pts["start"]]["high"]),"p1":("1 RED","#db2b39","v",candles[pts["p1"]]["low"]),"p2":("1 GREEN","#149447","^",candles[pts["p2"]]["high"]),"p3":("2 RED","#db2b39","v",candles[pts["p3"]]["low"]),"p4":("2 GREEN / TP","#149447","^",candles[pts["p4"]]["high"]),"p5":("3 RED / TRIGGER","#db2b39","v",candles[pts["p5"]]["low"])}
     else:
-        style={"start":("START","#277da1","o",candles[pts["start"]]["low"]),"p1":("1 GREEN","#149447","^",candles[pts["p1"]]["high"]),"p2":("1 RED","#db2b39","v",candles[pts["p2"]]["low"]),"p3":("2 GREEN","#149447","^",candles[pts["p3"]]["high"]),"p4":("2 RED / TP","#db2b39","v",candles[pts["p4"]]["low"]),"p5":("3 GREEN / ENTRY","#149447","^",candles[pts["p5"]]["high"])}
+        style={"start":("START","#277da1","o",candles[pts["start"]]["low"]),"p1":("1 GREEN","#149447","^",candles[pts["p1"]]["high"]),"p2":("1 RED","#db2b39","v",candles[pts["p2"]]["low"]),"p3":("2 GREEN","#149447","^",candles[pts["p3"]]["high"]),"p4":("2 RED / TP","#db2b39","v",candles[pts["p4"]]["low"]),"p5":("3 GREEN / TRIGGER","#149447","^",candles[pts["p5"]]["high"])}
     for name,(label,color,marker,y) in style.items():
         x=pts[name]-left_edge
         if 0 <= x < len(chart_candles):
@@ -698,6 +698,15 @@ def pct_from_entry(entry: float, level: float, direction: str = "LONG") -> float
 
 def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], closed_trades: list[dict[str, Any]], perf: dict[str, Any], prices: dict[str, Optional[float]]) -> str:
     lines=[f"🔎 NDS M5 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M5 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open slots: {perf['open_count']}/{MAX_OPEN_TRADES}",""]
+    diagnostics = scan_stats.get("diagnostics", {})
+    if diagnostics:
+        lines.append("🧭 SIGNAL DIAGNOSTICS")
+        lines.append(f"Candidates: {diagnostics.get('candidates', 0)} | Already seen: {diagnostics.get('already_seen', 0)} | Expired: {diagnostics.get('expired', 0)}")
+        for key, label in (("no_price", "No current price"), ("bad_tp", "TP on wrong side of entry"), ("symbol_open", "Symbol already has open trade"), ("slots_full", "Open-trade limit reached"), ("sl_missing", "No valid SL pivot"), ("bad_levels", "Invalid SL/entry/TP order"), ("candle_refresh_error", "Failed to refresh M5 candles"), ("opened", "Paper trades opened")):
+            count = diagnostics.get(key, 0)
+            if count:
+                lines.append(f"• {label}: {count}")
+        lines.append("")
     for direction, emoji in (("LONG","🟢"),("SHORT","🔴")):
         items=[x for x in new_signals if x["direction"]==direction]
         lines.append(f"{emoji} NEW {direction} SIGNALS: {len(items)}")
@@ -768,6 +777,11 @@ def main() -> int:
     new_signals: list[dict[str, Any]] = []
     patterns_count = 0
     scanned_candidates: list[dict[str, Any]] = []
+    diagnostics: dict[str, int] = {
+        "candidates": 0, "already_seen": 0, "expired": 0, "no_price": 0,
+        "bad_tp": 0, "symbol_open": 0, "slots_full": 0, "sl_missing": 0,
+        "bad_levels": 0, "candle_refresh_error": 0, "opened": 0,
+    }
     for symbol, bars in candles_by_symbol.items():
         for direction in ("LONG", "SHORT"):
             pattern = detect_latest_pattern(symbol, bars, direction)
@@ -775,61 +789,93 @@ def main() -> int:
                 continue
             age_seconds = time.time() - float(pattern["confirmation_time"])
             if age_seconds < 0 or age_seconds > MAX_SIGNAL_AGE_HOURS * 3600:
+                diagnostics["expired"] += 1
                 continue
             patterns_count += 1
             scanned_candidates.append(pattern)
 
+    diagnostics["candidates"] = len(scanned_candidates)
     # Process most recently confirmed structures first to make the open-slot cap fair.
     scanned_candidates.sort(key=lambda item: item["confirmation_time"], reverse=True)
     for pattern in scanned_candidates:
         if pattern_seen(conn, pattern["key"]):
+            diagnostics["already_seen"] += 1
             continue
         symbol = pattern["symbol"]
         bars = candles_by_symbol[symbol]
-        entry = float(pattern["p5_price"])
-        if entry is None or entry <= 0:
-            save_pattern_decision(conn, pattern, "SKIPPED", "No current market price"); continue
         direction = str(pattern["direction"])
-        # Entry is the third extreme; TP is the second opposite pivot.
+        # Entry is the current market price after the terminal pivot is confirmed,
+        # not the historical pivot price. The pivot is a trigger, not a fill.
+        entry = prices.get(symbol)
+        if entry is None or entry <= 0:
+            diagnostics["no_price"] += 1
+            save_pattern_decision(conn, pattern, "SKIPPED", "No current market price")
+            continue
+        entry = float(entry)
         tp = float(pattern["p4_price"])
         if direction == "LONG" and tp <= entry:
-            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (2 GREEN) is not above current entry")
+            diagnostics["bad_tp"] += 1
+            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (2 GREEN) is not above current market entry")
             continue
         if direction == "SHORT" and tp >= entry:
-            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below current entry")
+            diagnostics["bad_tp"] += 1
+            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below current market entry")
             continue
         if any(row["symbol"] == symbol for row in open_trades(conn)):
+            diagnostics["symbol_open"] += 1
             save_pattern_decision(conn, pattern, "SKIPPED", "Another open trade already exists for this symbol")
             continue
         if len(open_trades(conn)) >= MAX_OPEN_TRADES:
+            diagnostics["slots_full"] += 1
             save_pattern_decision(conn, pattern, "SKIPPED", "Maximum number of open trades reached")
             continue
         try:
-            bars15 = get_candles(symbol, "5m", M5_CANDLE_COUNT)
+            bars5 = get_candles(symbol, "5m", M5_CANDLE_COUNT)
         except Exception as exc:
+            diagnostics["candle_refresh_error"] += 1
             save_pattern_decision(conn, pattern, "SKIPPED", f"M5 candle fetch failed: {exc}")
             LOG.warning("M5 data error for %s: %s", symbol, exc)
             continue
-        sl = find_nearest_valid_m15_low(bars15, entry) if direction == "LONG" else find_nearest_valid_m15_high(bars15, entry)
+        # Refresh the entry from the latest available ticker/candle before final checks.
+        refreshed_entry = current_price_from_ticker(tickers_by_symbol.get(symbol))
+        if refreshed_entry is None and bars5:
+            refreshed_entry = float(bars5[-1]["close"])
+        if refreshed_entry is None or refreshed_entry <= 0:
+            diagnostics["no_price"] += 1
+            save_pattern_decision(conn, pattern, "SKIPPED", "No current market price after refresh")
+            continue
+        entry = float(refreshed_entry)
+        if direction == "LONG" and tp <= entry:
+            diagnostics["bad_tp"] += 1
+            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (2 GREEN) is not above refreshed market entry")
+            continue
+        if direction == "SHORT" and tp >= entry:
+            diagnostics["bad_tp"] += 1
+            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below refreshed market entry")
+            continue
+        sl = find_nearest_valid_m15_low(bars5, entry) if direction == "LONG" else find_nearest_valid_m15_high(bars5, entry)
         if sl is not None:
             buffer = STOP_BUFFER_PCT / 100.0
             sl = sl * (1.0 - buffer) if direction == "LONG" else sl * (1.0 + buffer)
         if sl is None or (direction == "LONG" and sl >= entry) or (direction == "SHORT" and sl <= entry):
+            diagnostics["sl_missing"] += 1
             save_pattern_decision(conn, pattern, "SKIPPED", f"No confirmed intact M5 pivot for {direction} stop")
             continue
-        # Ensure the M5 stop and target are on the correct sides of entry.
         if direction == "LONG" and not (sl < entry < tp):
-            save_pattern_decision(conn, pattern, "SKIPPED", "Invalid LONG levels: require SL < entry < TP")
+            diagnostics["bad_levels"] += 1
+            save_pattern_decision(conn, pattern, "SKIPPED", "Invalid LONG levels: require SL < market entry < TP")
             continue
         if direction == "SHORT" and not (tp < entry < sl):
-            save_pattern_decision(conn, pattern, "SKIPPED", "Invalid SHORT levels: require TP < entry < SL")
+            diagnostics["bad_levels"] += 1
+            save_pattern_decision(conn, pattern, "SKIPPED", "Invalid SHORT levels: require TP < market entry < SL")
             continue
-        save_pattern_decision(conn, pattern, "TRADE", "Paper trade opened")
+        save_pattern_decision(conn, pattern, "TRADE", "Paper trade opened at current market price")
         insert_trade(conn, pattern, time.time(), entry, tp, sl)
+        diagnostics["opened"] += 1
         signal = {"symbol": symbol, "direction": direction, "entry": entry, "tp": tp, "sl": sl, "pattern": pattern, "chart": None}
         new_signals.append(signal)
         try:
-            signal["chart"] = create_signal_chart(symbol, bars, pattern, entry, tp, sl)
+            signal["chart"] = create_signal_chart(symbol, bars5, pattern, entry, tp, sl)
         except Exception:
             LOG.exception("Chart creation failed for %s", symbol)
 
@@ -846,6 +892,7 @@ def main() -> int:
         "errors": len(errors_by_symbol),
         "patterns": patterns_count,
         "universe_size": len(universe),
+        "diagnostics": diagnostics,
     }
     report = make_report(stats, new_signals, closed_trades, perf, prices)
     LOG.info("\n%s", report)
