@@ -506,7 +506,7 @@ def trade_pnl_percent(entry: float, price: Optional[float], direction: str = "LO
 
 # ----------------------------- Charting -----------------------------
 
-def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dict[str, Any], entry: float, tp: float, sl: float, current_price: Optional[float] = None, chart_title: str = "NEW SIGNAL") -> Path:
+def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dict[str, Any], entry: Optional[float], tp: Optional[float], sl: Optional[float], current_price: Optional[float] = None, chart_title: str = "NEW SIGNAL") -> Path:
     CHART_DIR.mkdir(parents=True, exist_ok=True)
     pts = pattern["points"]; direction = pattern["direction"]
     left_edge = max(0, min(min(pts.values()) - 12, len(candles) - 175))
@@ -530,11 +530,14 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
             off=9 if marker in ("^","o") else -14
             ax.annotate(label,(x,y),xytext=(0,off),textcoords="offset points",fontsize=8,color=color,fontweight="bold",ha="center",va="bottom" if off>0 else "top",bbox={"boxstyle":"round,pad=0.18","fc":"white","ec":color,"alpha":0.86,"lw":0.65})
     last_x=len(chart_candles)-1
-    ax.axhline(tp,color="#149447",linestyle="--",linewidth=1.25,label=f"TP {fmt_price(tp)}")
-    ax.axhline(sl,color="#db2b39",linestyle="--",linewidth=1.25,label=f"SL {fmt_price(sl)}")
-    ax.axhline(entry,color="#277da1",linestyle=":",linewidth=1.5,label=f"ENTRY {fmt_price(entry)}")
-    ax.scatter([last_x],[entry],color="#277da1",marker="D",s=68,edgecolors="white",linewidths=0.7,zorder=6)
-    ax.annotate("ENTRY",(last_x,entry),xytext=(-8,8),textcoords="offset points",ha="right",fontsize=8,color="#277da1",fontweight="bold")
+    if tp is not None:
+        ax.axhline(tp,color="#149447",linestyle="--",linewidth=1.25,label=f"TP {fmt_price(tp)}")
+    if sl is not None:
+        ax.axhline(sl,color="#db2b39",linestyle="--",linewidth=1.25,label=f"SL {fmt_price(sl)}")
+    if entry is not None:
+        ax.axhline(entry,color="#277da1",linestyle=":",linewidth=1.5,label=f"ENTRY {fmt_price(entry)}")
+        ax.scatter([last_x],[entry],color="#277da1",marker="D",s=68,edgecolors="white",linewidths=0.7,zorder=6)
+        ax.annotate("ENTRY",(last_x,entry),xytext=(-8,8),textcoords="offset points",ha="right",fontsize=8,color="#277da1",fontweight="bold")
     if current_price is not None and current_price > 0:
         ax.axhline(current_price,color="#8e44ad",linestyle="-.",linewidth=1.35,label=f"NOW {fmt_price(current_price)}")
         ax.scatter([last_x],[current_price],color="#8e44ad",marker="o",s=55,edgecolors="white",linewidths=0.7,zorder=7)
@@ -878,6 +881,7 @@ def main() -> int:
     new_signals: list[dict[str, Any]] = []
     patterns_count = 0
     scanned_candidates: list[dict[str, Any]] = []
+    expired_patterns: list[dict[str, Any]] = []
     diagnostics: dict[str, int] = {
         "detected_total": 0, "candidates": 0, "already_seen": 0, "expired": 0, "no_price": 0,
         "bad_tp": 0, "symbol_open": 0, "slots_full": 0, "sl_missing": 0,
@@ -895,8 +899,11 @@ def main() -> int:
             diagnostics["detected_total"] += len(detected_patterns)
             for pattern in detected_patterns:
                 age_seconds = scan_time - float(pattern["confirmation_time"])
-                if age_seconds < 0 or age_seconds > MAX_SIGNAL_AGE_HOURS * 3600:
+                if age_seconds < 0:
+                    continue
+                if age_seconds > MAX_SIGNAL_AGE_HOURS * 3600:
                     diagnostics["expired"] += 1
+                    expired_patterns.append(pattern)
                     continue
                 patterns_count += 1
                 scanned_candidates.append(pattern)
@@ -1025,14 +1032,56 @@ def main() -> int:
             if telegram_send_photo(chart_path, caption):
                 sent_charts += 1
 
+    # If this run produced no new signals, send charts for the newest expired
+    # structures instead. These are structure-only charts: no fake ENTRY/TP/SL
+    # trade levels are drawn because an expired setup was never entered.
+    expired_charts_sent = 0
+    if not new_signals and expired_patterns:
+        expired_patterns.sort(key=lambda item: item["confirmation_time"], reverse=True)
+        seen_expired: set[str] = set()
+        for pattern in expired_patterns:
+            if expired_charts_sent >= MAX_CHARTS_PER_RUN:
+                break
+            key = str(pattern.get("key", ""))
+            if key in seen_expired:
+                continue
+            seen_expired.add(key)
+            symbol = str(pattern["symbol"])
+            bars = candles_by_symbol.get(symbol)
+            if not bars or len(bars) < 10:
+                continue
+            current = prices.get(symbol)
+            if current is None or current <= 0:
+                current = float(bars[-1]["close"])
+                prices[symbol] = current
+            try:
+                chart_path = create_signal_chart(
+                    symbol, bars, pattern, None, None, None,
+                    current_price=current, chart_title="EXPIRED SETUP - NO TRADE",
+                )
+                direction = str(pattern["direction"])
+                emoji = "🟢" if direction == "LONG" else "🔴"
+                age_hours = max(0.0, (time.time() - float(pattern["confirmation_time"])) / 3600.0)
+                caption = (
+                    f"⌛ EXPIRED {emoji} {direction} | {symbol}\n"
+                    f"Confirmed: {dt_text(float(pattern['confirmation_time']))}\n"
+                    f"Age: {age_hours:.1f} hours | Allowed: {MAX_SIGNAL_AGE_HOURS} hours\n"
+                    f"Current market price: {fmt_price(current)}\n"
+                    "Structure points are labeled on the chart. No trade was opened; ENTRY/TP/SL are not plotted."
+                )
+                if telegram_send_photo(chart_path, caption):
+                    expired_charts_sent += 1
+            except Exception:
+                LOG.exception("Expired-pattern chart/send failed for %s %s", symbol, direction)
+
     # Send a fresh chart for EVERY trade still open after this run's TP/SL updates.
     # This is independent of MAX_CHARTS_PER_RUN, which remains only for new signals.
     open_charts_sent, open_charts_attempted = send_open_trade_charts(conn, candles_by_symbol, prices)
 
     LOG.info(
-        "Finished in %.1fs | new signals=%d | closed=%d | open=%d | new-signal charts sent=%d | open-trade charts sent=%d/%d",
+        "Finished in %.1fs | new signals=%d | closed=%d | open=%d | new-signal charts sent=%d | expired charts sent=%d | open-trade charts sent=%d/%d",
         time.time() - started, len(new_signals), len(closed_trades), len(open_trades(conn)),
-        sent_charts, open_charts_sent, open_charts_attempted,
+        sent_charts, expired_charts_sent, open_charts_sent, open_charts_attempted,
     )
     conn.close()
     return 0
