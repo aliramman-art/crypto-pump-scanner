@@ -506,7 +506,7 @@ def trade_pnl_percent(entry: float, price: Optional[float], direction: str = "LO
 
 # ----------------------------- Charting -----------------------------
 
-def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dict[str, Any], entry: float, tp: float, sl: float) -> Path:
+def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dict[str, Any], entry: float, tp: float, sl: float, current_price: Optional[float] = None, chart_title: str = "NEW SIGNAL") -> Path:
     CHART_DIR.mkdir(parents=True, exist_ok=True)
     pts = pattern["points"]; direction = pattern["direction"]
     left_edge = max(0, min(min(pts.values()) - 12, len(candles) - 175))
@@ -535,12 +535,94 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
     ax.axhline(entry,color="#277da1",linestyle=":",linewidth=1.5,label=f"ENTRY {fmt_price(entry)}")
     ax.scatter([last_x],[entry],color="#277da1",marker="D",s=68,edgecolors="white",linewidths=0.7,zorder=6)
     ax.annotate("ENTRY",(last_x,entry),xytext=(-8,8),textcoords="offset points",ha="right",fontsize=8,color="#277da1",fontweight="bold")
+    if current_price is not None and current_price > 0:
+        ax.axhline(current_price,color="#8e44ad",linestyle="-.",linewidth=1.35,label=f"NOW {fmt_price(current_price)}")
+        ax.scatter([last_x],[current_price],color="#8e44ad",marker="o",s=55,edgecolors="white",linewidths=0.7,zorder=7)
     n=min(8,len(chart_candles)); ticks=sorted(set(round(i*(len(chart_candles)-1)/max(1,n-1)) for i in range(n)))
     ax.set_xticks(ticks); ax.set_xticklabels([datetime.fromtimestamp(chart_candles[i]["time"]/1000,timezone.utc).astimezone(REPORT_TZ).strftime("%m-%d %H:%M") for i in ticks],rotation=25,ha="right",fontsize=8)
-    ax.set_title(f"NDS M5 {direction} | {symbol}\nConfirmed mirrored structure | {dt_text(pattern['confirmation_time'])}",fontsize=12,fontweight="bold")
+    ax.set_title(f"NDS M5 {direction} | {symbol} | {chart_title}\nConfirmed mirrored structure | {dt_text(pattern['confirmation_time'])}",fontsize=12,fontweight="bold")
     ax.set_ylabel("Price"); ax.grid(True,alpha=0.2); ax.legend(loc="best",fontsize=8,framealpha=0.9); ax.margins(x=0.03,y=0.1); fig.tight_layout()
     safe="".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in symbol)
     path=CHART_DIR/f"{safe}_{direction}_{int(time.time())}.png"; fig.savefig(path,bbox_inches="tight"); plt.close(fig); return path
+
+
+def restore_trade_pattern(trade: sqlite3.Row, candles: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    """Restore the six structural pivot indices saved in a trade's pattern_key."""
+    parts = str(trade["pattern_key"]).split("|")
+    if len(parts) != 9 or parts[0] not in ("LONG", "SHORT"):
+        LOG.warning("Cannot restore structure for trade %s: invalid pattern_key", trade["id"])
+        return None
+    try:
+        timestamps = [int(value) for value in parts[3:9]]
+    except (TypeError, ValueError):
+        LOG.warning("Cannot restore structure for trade %s: invalid timestamps", trade["id"])
+        return None
+    index_by_time = {int(candle["time"]): i for i, candle in enumerate(candles)}
+    if not all(ts in index_by_time for ts in timestamps):
+        LOG.warning("Cannot restore all six pivots for open trade %s (%s); chart skipped", trade["id"], trade["symbol"])
+        return None
+    points = dict(zip(("start", "p1", "p2", "p3", "p4", "p5"), [index_by_time[ts] for ts in timestamps]))
+    return {
+        "symbol": str(trade["symbol"]),
+        "direction": str(trade["direction"]),
+        "points": points,
+        "confirmation_time": (timestamps[-1] + (PIVOT_RIGHT + 1) * M5_MS) / 1000.0,
+    }
+
+
+def send_open_trade_charts(
+    conn: sqlite3.Connection,
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    prices: dict[str, Optional[float]],
+) -> tuple[int, int]:
+    """Send a fresh chart for every trade that remains OPEN in SQLite."""
+    sent = 0
+    attempted = 0
+    for trade in open_trades(conn):
+        symbol = str(trade["symbol"])
+        bars = candles_by_symbol.get(symbol)
+        if not bars:
+            try:
+                bars = get_candles(symbol, "5m", M5_CANDLE_COUNT)
+                candles_by_symbol[symbol] = bars
+            except Exception as exc:
+                LOG.warning("Cannot fetch chart candles for open trade %s: %s", symbol, exc)
+                continue
+        if len(bars) < 10:
+            LOG.warning("Not enough candles to chart open trade %s", trade["id"])
+            continue
+        pattern = restore_trade_pattern(trade, bars)
+        if pattern is None:
+            continue
+        current = prices.get(symbol)
+        if current is None or current <= 0:
+            current = float(bars[-1]["close"])
+            prices[symbol] = current
+        entry = float(trade["entry_price"])
+        tp = float(trade["tp_price"])
+        sl = float(trade["sl_price"])
+        direction = str(trade["direction"])
+        floating = trade_pnl_percent(entry, current, direction)
+        try:
+            chart_path = create_signal_chart(
+                symbol, bars, pattern, entry, tp, sl,
+                current_price=current, chart_title="OPEN TRADE UPDATE",
+            )
+            emoji = "🟢" if direction == "LONG" else "🔴"
+            caption = (
+                f"{emoji} OPEN {direction} | {symbol} | Trade #{trade['id']}\n"
+                f"Entry: {fmt_price(entry)}\n"
+                f"Current: {fmt_price(current)} | Floating PnL: {fmt_pct(floating)}\n"
+                f"TP: {fmt_price(tp)} ({fmt_pct(pct_from_entry(entry, tp, direction))})\n"
+                f"SL: {fmt_price(sl)} ({fmt_pct(pct_from_entry(entry, sl, direction))})\n"
+                "Chart: START, pivots 1/2, trigger, ENTRY, TP, SL and current price"
+            )
+            attempted += 1
+            if telegram_send_photo(chart_path, caption):
+                sent += 1
+        except Exception:
+            LOG.exception("Open-trade chart/send failed for %s trade #%s", symbol, trade["id"])
+    return sent, attempted
 
 
 # ----------------------------- Telegram -----------------------------
@@ -943,9 +1025,14 @@ def main() -> int:
             if telegram_send_photo(chart_path, caption):
                 sent_charts += 1
 
+    # Send a fresh chart for EVERY trade still open after this run's TP/SL updates.
+    # This is independent of MAX_CHARTS_PER_RUN, which remains only for new signals.
+    open_charts_sent, open_charts_attempted = send_open_trade_charts(conn, candles_by_symbol, prices)
+
     LOG.info(
-        "Finished in %.1fs | new signals=%d | closed=%d | open=%d | charts sent=%d",
-        time.time() - started, len(new_signals), len(closed_trades), perf["open_count"], sent_charts,
+        "Finished in %.1fs | new signals=%d | closed=%d | open=%d | new-signal charts sent=%d | open-trade charts sent=%d/%d",
+        time.time() - started, len(new_signals), len(closed_trades), len(open_trades(conn)),
+        sent_charts, open_charts_sent, open_charts_attempted,
     )
     conn.close()
     return 0
