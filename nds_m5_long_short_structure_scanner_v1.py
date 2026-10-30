@@ -25,7 +25,7 @@ Environment variables:
   TELEGRAM_BOT_TOKEN or TELEGRAM_TOKEN
   TELEGRAM_CHAT_ID or TELEGRAM_CHAT
   UNIVERSE_SIZE (default 100)
-  MAX_OPEN_TRADES (default 3)
+  MAX_OPEN_TRADES (legacy setting; no longer limits paper trades)
   MAX_SIGNAL_AGE_HOURS (default 6)
   STOP_BUFFER_PCT (default 0.10, percent beyond swing stop)
   DB_PATH (default nds_m5_long_short_structure_v1.db)
@@ -65,6 +65,7 @@ CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
 
 UNIVERSE_SIZE = max(2, int(os.getenv("UNIVERSE_SIZE", "100")))
+# Kept for backward-compatible environment configuration; no longer enforced.
 MAX_OPEN_TRADES = max(1, int(os.getenv("MAX_OPEN_TRADES", "3")))
 MAX_SIGNAL_AGE_HOURS = max(1, int(os.getenv("MAX_SIGNAL_AGE_HOURS", "6")))
 M5_CANDLE_COUNT = 300
@@ -796,7 +797,7 @@ def pct_from_entry(entry: float, level: float, direction: str = "LONG") -> float
 
 
 def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], closed_trades: list[dict[str, Any]], perf: dict[str, Any], prices: dict[str, Optional[float]]) -> str:
-    lines=[f"🔎 NDS M5 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M5 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open slots: {perf['open_count']}/{MAX_OPEN_TRADES}",""]
+    lines=[f"🔎 NDS M5 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M5 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open paper trades: {perf['open_count']} (unlimited)",""]
     diagnostics = scan_stats.get("diagnostics", {})
     if diagnostics:
         lines.append("🧭 SIGNAL DIAGNOSTICS")
@@ -909,7 +910,8 @@ def main() -> int:
                 scanned_candidates.append(pattern)
 
     diagnostics["candidates"] = len(scanned_candidates)
-    # Process most recently confirmed structures first to make the open-slot cap fair.
+    # Process the newest confirmed structures first. There is no global or
+    # per-symbol open-trade limit: every valid, unseen structure can open a trade.
     scanned_candidates.sort(key=lambda item: item["confirmation_time"], reverse=True)
     for pattern in scanned_candidates:
         if pattern_seen(conn, pattern["key"]):
@@ -935,14 +937,10 @@ def main() -> int:
             diagnostics["bad_tp"] += 1
             save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below current market entry")
             continue
-        if any(row["symbol"] == symbol for row in open_trades(conn)):
-            diagnostics["symbol_open"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "Another open trade already exists for this symbol")
-            continue
-        if len(open_trades(conn)) >= MAX_OPEN_TRADES:
-            diagnostics["slots_full"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "Maximum number of open trades reached")
-            continue
+        # Multiple independent structures may open separate paper trades,
+        # including multiple trades on the same symbol and opposite directions.
+        # pattern_seen() above still prevents the exact same structure from
+        # being traded more than once.
         try:
             bars5 = get_candles(symbol, "5m", M5_CANDLE_COUNT)
         except Exception as exc:
