@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M15 Long + Short Structure Scanner v1.4.0
+NDS M15 Long + Short Structure Scanner v1.4.1
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
@@ -26,7 +26,7 @@ Environment variables:
   TELEGRAM_CHAT_ID or TELEGRAM_CHAT
   UNIVERSE_SIZE (default 100)
   MAX_OPEN_TRADES (default 3)
-  MAX_SIGNAL_AGE_HOURS (default 24)
+  MAX_SIGNAL_AGE_HOURS (default 72)
   STOP_BUFFER_PCT (default 0.10, percent beyond swing stop)
   DB_PATH (default nds_m5_long_short_structure_v1.db; retained to preserve existing paper-trade history)
   CHART_DIR (default nds_m15_long_short_structure_charts)
@@ -59,19 +59,21 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
 
 UNIVERSE_SIZE = max(2, int(os.getenv("UNIVERSE_SIZE", "100")))
 MAX_OPEN_TRADES = max(1, int(os.getenv("MAX_OPEN_TRADES", "3")))
-MAX_SIGNAL_AGE_HOURS = max(1, int(os.getenv("MAX_SIGNAL_AGE_HOURS", "24")))
+MAX_SIGNAL_AGE_HOURS = max(1, int(os.getenv("MAX_SIGNAL_AGE_HOURS", "72")))
 M15_CANDLE_COUNT = 300
-PIVOT_LEFT = 5
-PIVOT_RIGHT = 5
-M15_PIVOT_LEFT = 5
-M15_PIVOT_RIGHT = 5
+# 3x3 pivots improve M15 structure sensitivity while retaining closed-candle confirmation.
+# HA color reversal is still mandatory on the pivot candle itself.
+PIVOT_LEFT = 3
+PIVOT_RIGHT = 3
+M15_PIVOT_LEFT = 3
+M15_PIVOT_RIGHT = 3
 STOP_BUFFER_PCT = max(0.0, float(os.getenv("STOP_BUFFER_PCT", "0.10")))
 MAX_CONCURRENT_REQUESTS = 8
 MAX_CHARTS_PER_RUN = 8
@@ -304,7 +306,7 @@ def heiken_ashi_colors(candles: list[dict[str, Any]]) -> list[int]:
 def find_confirmed_pivots(
     candles: list[dict[str, Any]], left: int, right: int
 ) -> tuple[list[int], list[int]]:
-    """Find confirmed OHLC pivots only when HA changes color at the pivot.
+    """Find confirmed OHLC pivots using 3x3 (or supplied) confirmation and HA reversal at the pivot.
 
     Pivot low: the pivot candle itself changes HA from RED to GREEN.
     Pivot high: the pivot candle itself changes HA from GREEN to RED.
@@ -331,7 +333,7 @@ def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, in
 
 
 def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
-    """Detect the requested six-point M15 structure with confirmed 5x5 pivots.
+    """Detect the requested six-point M15 structure with confirmed 3x3 pivots.
 
     SHORT: START low -> H1 -> L1 -> H2 -> L2 -> H3.
     LONG:  START high -> L1 -> H1 -> L2 -> H2 -> L3 (exact mirror).
