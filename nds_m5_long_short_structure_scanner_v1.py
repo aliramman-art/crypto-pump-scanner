@@ -647,13 +647,18 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
     if len(chart_candles) < 10:
         chart_candles = candles[-100:]; left_edge = len(candles) - len(chart_candles)
     fig, ax = plt.subplots(figsize=(13, 7), dpi=135)
-    ha_colors = heiken_ashi_colors(candles)
-    for x, c in enumerate(chart_candles):
-        ha_direction = ha_colors[left_edge + x]
-        color = "#18a558" if ha_direction == 1 else ("#e74c3c" if ha_direction == -1 else ("#18a558" if c["close"] >= c["open"] else "#e74c3c"))
+    # Draw actual Heikin-Ashi OHLC candles, not real OHLC candles merely colored
+    # with HA direction. This keeps the visual structure consistent with pivots.
+    ha_all = heiken_ashi_candles(candles)
+    for x, _source_candle in enumerate(chart_candles):
+        c = ha_all[left_edge + x]
+        ha_direction = 1 if c["close"] > c["open"] else (-1 if c["close"] < c["open"] else 0)
+        color = "#18a558" if ha_direction >= 0 else "#e74c3c"
         ax.vlines(x, c["low"], c["high"], color=color, linewidth=1.1, zorder=2)
-        body_low=min(c["open"],c["close"]); body_h=max(abs(c["close"]-c["open"]),abs(c["close"])*0.000002)
-        ax.add_patch(Rectangle((x-0.31,body_low),0.62,body_h,facecolor=color,edgecolor=color,linewidth=0.6,zorder=3))
+        body_low = min(c["open"], c["close"])
+        body_h = max(abs(c["close"] - c["open"]), abs(c["close"]) * 0.000002)
+        ax.add_patch(Rectangle((x-0.31, body_low), 0.62, body_h,
+                               facecolor=color, edgecolor=color, linewidth=0.6, zorder=3))
     pivot_prices = pattern.get("pivot_prices") or {}
     if direction == "LONG":
         style={"start":("START","#277da1","o",pivot_prices.get("start", candles[pts["start"]]["high"])),"p1":("1 RED","#db2b39","v",pivot_prices.get("p1", candles[pts["p1"]]["low"])),"p2":("1 GREEN","#149447","^",pivot_prices.get("p2", candles[pts["p2"]]["high"])),"p3":("2 RED","#db2b39","v",pivot_prices.get("p3", candles[pts["p3"]]["low"])),"p4":("2 GREEN / TP","#149447","^",pivot_prices.get("p4", candles[pts["p4"]]["high"])),"p5":("3 RED / TRIGGER","#db2b39","v",pivot_prices.get("p5", candles[pts["p5"]]["low"]))}
@@ -680,7 +685,7 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
     n=min(8,len(chart_candles)); ticks=sorted(set(round(i*(len(chart_candles)-1)/max(1,n-1)) for i in range(n)))
     ax.set_xticks(ticks); ax.set_xticklabels([datetime.fromtimestamp(chart_candles[i]["time"]/1000,timezone.utc).astimezone(REPORT_TZ).strftime("%m-%d %H:%M") for i in ticks],rotation=25,ha="right",fontsize=8)
     chart_timeframe = str(pattern.get("timeframe", "M15"))
-    ax.set_title(f"NDS {chart_timeframe} {direction} | {symbol} | {chart_title}\nHA reversal-run pivots | {dt_text(pattern['confirmation_time'])}",fontsize=12,fontweight="bold")
+    ax.set_title(f"NDS {chart_timeframe} {direction} | {symbol} | {chart_title}\n{chart_timeframe} Heikin-Ashi candles | HA reversal-run pivots | {dt_text(pattern['confirmation_time'])}",fontsize=12,fontweight="bold")
     ax.set_ylabel("Price"); ax.grid(True,alpha=0.2); ax.legend(loc="best",fontsize=8,framealpha=0.9); ax.margins(x=0.03,y=0.1); fig.tight_layout()
     safe="".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in symbol)
     path=CHART_DIR/f"{safe}_{direction}_{int(time.time())}.png"; fig.savefig(path,bbox_inches="tight"); plt.close(fig); return path
@@ -774,7 +779,7 @@ def send_open_trade_charts(
                 f"Current: {fmt_price(current)} | Floating PnL: {fmt_pct(floating)}\n"
                 f"TP: {fmt_price(tp)} ({fmt_pct(pct_from_entry(entry, tp, direction))})\n"
                 f"SL: {fmt_price(sl)} ({fmt_pct(pct_from_entry(entry, sl, direction))})\n"
-                "Chart: START, pivots 1/2, trigger, ENTRY, TP, SL and current price"
+                f"{timeframe_label} Heikin-Ashi chart: START, pivots 1/2, trigger, ENTRY, TP, SL and current price"
             )
             attempted += 1
             if telegram_send_photo(chart_path, caption):
@@ -1179,7 +1184,7 @@ def main() -> int:
                 f"Entry: {fmt_price(signal['entry'])}\n"
                 f"TP: {fmt_price(signal['tp'])} ({fmt_pct(tp_pct)})\n"
                 f"SL buffered HA swing: {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
-                "Chart labels: blue START, green highs, red lows, ENTRY, TP and buffered SL"
+                "M15 Heikin-Ashi chart: START, numbered pivots, structure, ENTRY, TP and SL"
             )
             if telegram_send_photo(chart_path, caption):
                 sent_charts += 1
