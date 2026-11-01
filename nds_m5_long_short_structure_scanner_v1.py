@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 Long + Short Structure Scanner v1.6.0
+NDS M15 Long + Short Structure Scanner v1.0.0
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
-Pattern and entry (closed M5 candles; pivots use Heikin-Ashi only):
+Pattern and entry (closed M15 candles; pivots use Heikin-Ashi only):
   Pivots are confirmed by HA color reversals. No fixed left/right candle count is used.
   The pivot price and all structure comparisons use HA highs/lows only.
   SHORT: START low -> 1 GREEN -> 1 RED -> 2 GREEN higher high -> 2 RED lower low
@@ -61,36 +61,37 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.6.0"
+VERSION = "1.0.0"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
 
 UNIVERSE_SIZE = max(2, int(os.getenv("UNIVERSE_SIZE", "100")))
 MAX_SIGNAL_AGE_HOURS = max(1, int(os.getenv("MAX_SIGNAL_AGE_HOURS", "72")))
-M5_CANDLE_COUNT = 1500
+M15_CANDLE_COUNT = 1500
 STOP_BUFFER_PCT = max(0.0, float(os.getenv("STOP_BUFFER_PCT", "0.10")))
 MAX_CONCURRENT_REQUESTS = 8
 MAX_CHARTS_PER_RUN = 8
 REQUIRED_SYMBOLS = ("PF_XBTUSD", "PF_XAUTUSD")
 # Keep the existing DB filename so old paper-trade records remain available.
 DB_PATH = Path(os.getenv("DB_PATH", "nds_m5_long_short_structure_v1.db"))
-CHART_DIR = Path(os.getenv("CHART_DIR", "nds_m5_long_short_structure_charts"))
+CHART_DIR = Path(os.getenv("CHART_DIR", "nds_m15_long_short_structure_charts"))
 REPORT_TZ_NAME = os.getenv("REPORT_TIMEZONE", "Europe/Berlin")
 try:
     REPORT_TZ = ZoneInfo(REPORT_TZ_NAME)
 except Exception:
     REPORT_TZ = timezone.utc
 
-M5_MS = 5 * 60 * 1000
+M15_MS = 15 * 60 * 1000
+M5_MS = 5 * 60 * 1000  # Retained only to manage paper trades opened by the previous M5 version.
 HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": f"NDS-M5-Structure-Scanner/{VERSION}", "Accept": "application/json"})
+HTTP.headers.update({"User-Agent": f"NDS-M15-Structure-Scanner/{VERSION}", "Accept": "application/json"})
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s %(levelname)s %(message)s",
 )
-LOG = logging.getLogger("nds_m5_long_short")
+LOG = logging.getLogger("nds_m15_long_short")
 
 
 # ----------------------------- Generic helpers -----------------------------
@@ -212,7 +213,9 @@ def ticker_map(tickers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 def get_candles(symbol: str, resolution: str, limit: int) -> list[dict[str, Any]]:
     """Fetch OHLC candles and remove the currently-open candle."""
     now = time.time()
-    timeframe_ms = (5 * 60 * 1000) if resolution == "5m" else M5_MS
+    timeframe_ms = {"5m": M5_MS, "15m": M15_MS}.get(resolution)
+    if timeframe_ms is None:
+        raise ValueError(f"Unsupported candle resolution: {resolution}")
     timeframe_seconds = timeframe_ms / 1000
     params = {
         "from": int(now - timeframe_seconds * (limit + 5)),
@@ -368,7 +371,7 @@ def find_confirmed_pivots(
 
 def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, int], direction: str) -> str:
     timestamps = [str(candles[points[name]]["time"]) for name in ("start", "p1", "p2", "p3", "p4", "p5")]
-    return f"{direction}|{symbol}|M5|" + "|".join(timestamps)
+    return f"{direction}|{symbol}|M15|" + "|".join(timestamps)
 
 
 def _same_price(a: float, b: float) -> bool:
@@ -466,7 +469,8 @@ def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str) 
             "points": pts,
             "pivot_prices": pivot_prices,
             "key": pattern_key(symbol, candles, pts, direction),
-            "confirmation_time": (float(candles[confirmation_index]["time"]) + M5_MS) / 1000.0,
+            "confirmation_time": (float(candles[confirmation_index]["time"]) + M15_MS) / 1000.0,
+            "timeframe": "M15",
             "start_price": start_price,
             "p1_price": p1,
             "p2_price": p2,
@@ -481,7 +485,7 @@ def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str) 
     patterns.sort(key=lambda item: item["confirmation_time"], reverse=True)
     return patterns
 
-def find_nearest_valid_m5_low(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
+def find_nearest_valid_m15_low(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
     """Closest intact confirmed HA swing low below entry."""
     ha = heiken_ashi_candles(candles15)
     records = find_confirmed_pivot_records(candles15)
@@ -496,7 +500,7 @@ def find_nearest_valid_m5_low(candles15: list[dict[str, Any]], entry: float) -> 
     return max(eligible, key=lambda item: item[0])[0] if eligible else None
 
 
-def find_nearest_valid_m5_high(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
+def find_nearest_valid_m15_high(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
     """Closest intact confirmed HA swing high above entry."""
     ha = heiken_ashi_candles(candles15)
     records = find_confirmed_pivot_records(candles15)
@@ -586,11 +590,11 @@ def open_trades(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def trade_candle_settings(trade: sqlite3.Row) -> tuple[str, int, str]:
-    """Use the original interval for pre-existing trades; all new scans are M5."""
+    """Keep legacy M5 trades working while new trades use M15."""
     parts = str(trade["pattern_key"]).split("|")
     if len(parts) == 9 and parts[2] == "M5":
-        return "5m", 5 * 60 * 1000, "M5"
-    return "5m", M5_MS, "M5"
+        return "5m", M5_MS, "M5"
+    return "15m", M15_MS, "M15"
 
 
 def insert_trade(
@@ -603,7 +607,8 @@ def insert_trade(
 ) -> None:
     direction = str(pattern.get("direction", "LONG"))
     entry_ms = int(entry_time * 1000)
-    next_bar_time_ms = ((entry_ms // M5_MS) + 1) * M5_MS
+    _resolution, trade_interval_ms, _label = trade_candle_settings({"pattern_key": pattern["key"]})
+    next_bar_time_ms = ((entry_ms // trade_interval_ms) + 1) * trade_interval_ms
     conn.execute(
         """INSERT INTO trades
         (pattern_key,symbol,direction,entry_time,next_bar_time_ms,entry_price,tp_price,sl_price,status,created_at)
@@ -674,7 +679,7 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
         ax.scatter([last_x],[current_price],color="#8e44ad",marker="o",s=55,edgecolors="white",linewidths=0.7,zorder=7)
     n=min(8,len(chart_candles)); ticks=sorted(set(round(i*(len(chart_candles)-1)/max(1,n-1)) for i in range(n)))
     ax.set_xticks(ticks); ax.set_xticklabels([datetime.fromtimestamp(chart_candles[i]["time"]/1000,timezone.utc).astimezone(REPORT_TZ).strftime("%m-%d %H:%M") for i in ticks],rotation=25,ha="right",fontsize=8)
-    chart_timeframe = str(pattern.get("timeframe", "M5"))
+    chart_timeframe = str(pattern.get("timeframe", "M15"))
     ax.set_title(f"NDS {chart_timeframe} {direction} | {symbol} | {chart_title}\nHA reversal-run pivots | {dt_text(pattern['confirmation_time'])}",fontsize=12,fontweight="bold")
     ax.set_ylabel("Price"); ax.grid(True,alpha=0.2); ax.legend(loc="best",fontsize=8,framealpha=0.9); ax.margins(x=0.03,y=0.1); fig.tight_layout()
     safe="".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in symbol)
@@ -733,11 +738,11 @@ def send_open_trade_charts(
     for trade in open_trades(conn):
         symbol = str(trade["symbol"])
         resolution, interval_ms, timeframe_label = trade_candle_settings(trade)
-        bars = candles_by_symbol.get(symbol) if timeframe_label == "M5" else None
+        bars = candles_by_symbol.get(symbol) if timeframe_label == "M15" else None
         if not bars:
             try:
-                bars = get_candles(symbol, resolution, M5_CANDLE_COUNT)
-                if timeframe_label == "M5":
+                bars = get_candles(symbol, resolution, M15_CANDLE_COUNT)
+                if timeframe_label == "M15":
                     candles_by_symbol[symbol] = bars
             except Exception as exc:
                 LOG.warning("Cannot fetch chart candles for open trade %s: %s", trade["id"], exc)
@@ -851,11 +856,11 @@ def update_open_trades(
     for trade in open_trades(conn):
         symbol = str(trade["symbol"])
         resolution, interval_ms, timeframe_label = trade_candle_settings(trade)
-        bars = candles_by_symbol.get(symbol) if timeframe_label == "M5" else None
+        bars = candles_by_symbol.get(symbol) if timeframe_label == "M15" else None
         if bars is None:
             try:
-                bars = get_candles(symbol, resolution, M5_CANDLE_COUNT)
-                if timeframe_label == "M5":
+                bars = get_candles(symbol, resolution, M15_CANDLE_COUNT)
+                if timeframe_label == "M15":
                     candles_by_symbol[symbol] = bars
             except Exception as exc:
                 LOG.warning("Cannot refresh open trade %s: %s", symbol, exc)
@@ -871,7 +876,7 @@ def update_open_trades(
             hit_tp = bar["high"] >= tp if direction == "LONG" else bar["low"] <= tp
             if not hit_sl and not hit_tp:
                 continue
-            # Conservative resolution if both levels are touched in one M5 candle.
+            # Conservative resolution if both levels are touched in one candle.
             if hit_sl:
                 status, exit_price = "CLOSED_SL", sl
             else:
@@ -949,7 +954,7 @@ def pct_from_entry(entry: float, level: float, direction: str = "LONG") -> float
 
 
 def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], closed_trades: list[dict[str, Any]], perf: dict[str, Any], prices: dict[str, Optional[float]]) -> str:
-    lines=[f"🔎 NDS M5 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M5 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open trades: {perf['open_count']} | No maximum limit",""]
+    lines=[f"🔎 NDS M15 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M15 OK {scan_stats['m15_ok']} | errors {scan_stats['errors']} | structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open trades: {perf['open_count']} | No maximum limit",""]
     diagnostics = scan_stats.get("diagnostics", {})
     if diagnostics:
         lines.append("🧭 SIGNAL DIAGNOSTICS")
@@ -959,7 +964,7 @@ def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], c
             f"Already traded: {diagnostics.get('already_seen', 0)} | "
             f"Expired: {diagnostics.get('expired', 0)}"
         )
-        for key, label in (("no_price", "No current price"), ("bad_tp", "TP on wrong side of entry"), ("sl_missing", "No valid HA SL pivot"), ("bad_levels", "Invalid SL/entry/TP order"), ("candle_refresh_error", "Failed to refresh M5 candles"), ("opened", "Paper trades opened")):
+        for key, label in (("no_price", "No current price"), ("bad_tp", "TP on wrong side of entry"), ("sl_missing", "No valid HA SL pivot"), ("bad_levels", "Invalid SL/entry/TP order"), ("candle_refresh_error", "Failed to refresh M15 candles"), ("opened", "Paper trades opened")):
             count = diagnostics.get(key, 0)
             if count:
                 lines.append(f"• {label}: {count}")
@@ -988,7 +993,7 @@ def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], c
 
 def scan_symbol(symbol: str) -> tuple[str, Optional[list[dict[str, Any]]], Optional[str]]:
     try:
-        return symbol, get_candles(symbol, "5m", M5_CANDLE_COUNT), None
+        return symbol, get_candles(symbol, "15m", M15_CANDLE_COUNT), None
     except Exception as exc:
         return symbol, None, str(exc)
 
@@ -999,7 +1004,7 @@ def main() -> int:
     try:
         tickers = get_tickers()
     except Exception as exc:
-        message = f"❌ NDS M5 LONG+SHORT scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
+        message = f"❌ NDS M15 LONG+SHORT scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
         LOG.exception("Ticker fetch failed")
         telegram_send_message(message)
         return 1
@@ -1018,7 +1023,7 @@ def main() -> int:
                 candles_by_symbol[symbol] = candles
             elif error:
                 errors_by_symbol[symbol] = error
-                LOG.warning("M5 data error %s: %s", symbol, error)
+                LOG.warning("M15 data error %s: %s", symbol, error)
 
     prices: dict[str, Optional[float]] = {}
     for symbol in set(universe) | {str(row["symbol"]) for row in open_trades(conn)}:
@@ -1091,11 +1096,11 @@ def main() -> int:
         # Every distinct structure is independent. Existing trades on the same
         # symbol or in the opposite direction do not block a new signal.
         try:
-            bars15 = get_candles(symbol, "5m", M5_CANDLE_COUNT)
+            bars15 = get_candles(symbol, "15m", M15_CANDLE_COUNT)
         except Exception as exc:
             diagnostics["candle_refresh_error"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", f"M5 candle fetch failed: {exc}")
-            LOG.warning("M5 data error for %s: %s", symbol, exc)
+            save_pattern_decision(conn, pattern, "SKIPPED", f"M15 candle fetch failed: {exc}")
+            LOG.warning("M15 data error for %s: %s", symbol, exc)
             continue
         # Refresh the entry from the latest available ticker/candle before final checks.
         refreshed_entry = current_price_from_ticker(tickers_by_symbol.get(symbol))
@@ -1116,7 +1121,7 @@ def main() -> int:
             save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below refreshed market entry")
             LOG.info("Rejected %s %s after refresh: TP %.10g >= entry %.10g", symbol, direction, tp, entry)
             continue
-        sl = find_nearest_valid_m5_low(bars15, entry) if direction == "LONG" else find_nearest_valid_m5_high(bars15, entry)
+        sl = find_nearest_valid_m15_low(bars15, entry) if direction == "LONG" else find_nearest_valid_m15_high(bars15, entry)
         if sl is not None:
             buffer = STOP_BUFFER_PCT / 100.0
             sl = sl * (1.0 - buffer) if direction == "LONG" else sl * (1.0 + buffer)
@@ -1151,7 +1156,7 @@ def main() -> int:
     perf = get_performance(conn, prices)
     stats = {
         "scanned": len(universe),
-        "m5_ok": len(candles_by_symbol),
+        "m15_ok": len(candles_by_symbol),
         "errors": len(errors_by_symbol),
         "patterns": diagnostics["detected_total"],
         "universe_size": len(universe),
