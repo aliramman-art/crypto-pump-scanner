@@ -5,14 +5,14 @@ NDS M15 Long + Short Structure Scanner v1.0.0
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
-Pattern and entry (closed M15 candles; pivots use Heikin-Ashi only):
+Two-stage setup/entry (closed M15 and M1 candles; pivots use Heikin-Ashi only):
   Pivots are confirmed by HA color reversals. No fixed left/right candle count is used.
   The pivot price and all structure comparisons use HA highs/lows only.
   SHORT: START low -> 1 GREEN -> 1 RED -> 2 GREEN higher high -> 2 RED lower low
-         -> 3 GREEN higher high. The final HA swing high confirms the trigger.
-         Enter SHORT at current market price. TP = 2 RED; SL = nearest intact
-         confirmed HA swing high above entry.
-  LONG:  mirrored structure. The final HA swing low confirms the trigger.
+         -> 3 GREEN higher high. M15 creates a 72-hour READY setup only.
+         A complete same-direction six-pivot M1 structure confirms entry.
+         TP and SL are fixed from M15 and are never recalculated at M1.
+  LONG:  mirrored structure. M15 creates READY; a complete M1 structure confirms entry.
          Enter LONG at current market price. TP = 2 GREEN; SL = nearest intact
          confirmed HA swing low below entry.
   Every distinct subsequent structure can signal, whether same or opposite direction;
@@ -61,7 +61,7 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
@@ -83,6 +83,8 @@ except Exception:
     REPORT_TZ = timezone.utc
 
 M15_MS = 15 * 60 * 1000
+M1_MS = 60 * 1000
+M1_CANDLE_COUNT = 4500
 M5_MS = 5 * 60 * 1000  # Retained only to manage paper trades opened by the previous M5 version.
 HTTP = requests.Session()
 HTTP.headers.update({"User-Agent": f"NDS-M15-Structure-Scanner/{VERSION}", "Accept": "application/json"})
@@ -213,7 +215,7 @@ def ticker_map(tickers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 def get_candles(symbol: str, resolution: str, limit: int) -> list[dict[str, Any]]:
     """Fetch OHLC candles and remove the currently-open candle."""
     now = time.time()
-    timeframe_ms = {"5m": M5_MS, "15m": M15_MS}.get(resolution)
+    timeframe_ms = {"1m": M1_MS, "5m": M5_MS, "15m": M15_MS}.get(resolution)
     if timeframe_ms is None:
         raise ValueError(f"Unsupported candle resolution: {resolution}")
     timeframe_seconds = timeframe_ms / 1000
@@ -369,16 +371,16 @@ def find_confirmed_pivots(
     return lows, highs
 
 
-def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, int], direction: str) -> str:
+def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, int], direction: str, timeframe: str = "M15") -> str:
     timestamps = [str(candles[points[name]]["time"]) for name in ("start", "p1", "p2", "p3", "p4", "p5")]
-    return f"{direction}|{symbol}|M15|" + "|".join(timestamps)
+    return f"{direction}|{symbol}|{timeframe}|" + "|".join(timestamps)
 
 
 def _same_price(a: float, b: float) -> bool:
     return math.isclose(a, b, rel_tol=1e-10, abs_tol=1e-12)
 
 
-def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
+def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str, timeframe: str = "M15") -> list[dict[str, Any]]:
     """Detect every six-pivot structure using HA pivots and HA prices only.
 
     SHORT: START low -> H1 -> L1 -> H2 -> L2 -> H3.
@@ -468,9 +470,9 @@ def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str) 
             "direction": direction,
             "points": pts,
             "pivot_prices": pivot_prices,
-            "key": pattern_key(symbol, candles, pts, direction),
-            "confirmation_time": (float(candles[confirmation_index]["time"]) + M15_MS) / 1000.0,
-            "timeframe": "M15",
+            "key": pattern_key(symbol, candles, pts, direction, timeframe),
+            "confirmation_time": (float(candles[confirmation_index]["time"]) + (M1_MS if timeframe == "M1" else M15_MS)) / 1000.0,
+            "timeframe": timeframe,
             "start_price": start_price,
             "p1_price": p1,
             "p2_price": p2,
@@ -551,6 +553,17 @@ def connect_db() -> sqlite3.Connection:
         );
         CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
         CREATE INDEX IF NOT EXISTS idx_trades_symbol_status ON trades(symbol, status);
+        CREATE TABLE IF NOT EXISTS ready_setups (
+            symbol TEXT PRIMARY KEY,
+            direction TEXT NOT NULL,
+            pattern_key TEXT NOT NULL UNIQUE,
+            pattern_json TEXT NOT NULL,
+            tp_price REAL NOT NULL,
+            sl_price REAL NOT NULL,
+            created_at REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'WAITING_M1',
+            updated_at REAL NOT NULL
+        );
         """
     )
     cols = {row[1] for row in conn.execute("PRAGMA table_info(trades)")}
@@ -558,6 +571,62 @@ def connect_db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE trades ADD COLUMN direction TEXT NOT NULL DEFAULT 'LONG'")
     conn.commit()
     return conn
+
+
+
+def serialize_ready_pattern(pattern: dict[str, Any], candles: list[dict[str, Any]]) -> str:
+    names = ("start", "p1", "p2", "p3", "p4", "p5")
+    payload = {
+        "symbol": pattern["symbol"], "direction": pattern["direction"],
+        "timeframe": "M15", "key": pattern["key"],
+        "point_times": {name: int(candles[int(pattern["points"][name])]["time"]) for name in names},
+        "pivot_prices": {name: float(pattern["pivot_prices"][name]) for name in names},
+        "confirmation_time": float(pattern["confirmation_time"]),
+        "start_price": float(pattern["start_price"]), "p1_price": float(pattern["p1_price"]),
+        "p2_price": float(pattern["p2_price"]), "p3_price": float(pattern["p3_price"]),
+        "p4_price": float(pattern["p4_price"]), "p5_price": float(pattern["p5_price"]),
+        "terminal_time": float(pattern["terminal_time"]),
+    }
+    return json.dumps(payload, separators=(",", ":"))
+
+
+def restore_ready_pattern(setup: sqlite3.Row, candles: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
+    try:
+        data = json.loads(str(setup["pattern_json"]))
+        by_time = {int(c["time"]): i for i, c in enumerate(candles)}
+        point_times = data["point_times"]
+        points = {name: by_time[int(point_times[name])] for name in ("start", "p1", "p2", "p3", "p4", "p5")}
+        result = dict(data)
+        result["points"] = points
+        result["pivot_prices"] = {k: float(v) for k, v in data["pivot_prices"].items()}
+        return result
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        LOG.warning("Cannot restore M15 ready setup for %s", setup["symbol"])
+        return None
+
+
+def active_ready_setups(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return list(conn.execute("SELECT * FROM ready_setups WHERE status='WAITING_M1' ORDER BY created_at ASC"))
+
+
+def save_ready_setup(conn: sqlite3.Connection, pattern: dict[str, Any], candles: list[dict[str, Any]], tp: float, sl: float) -> None:
+    now = time.time()
+    conn.execute(
+        """INSERT INTO ready_setups(symbol,direction,pattern_key,pattern_json,tp_price,sl_price,created_at,status,updated_at)
+           VALUES(?,?,?,?,?,?,?,'WAITING_M1',?)
+           ON CONFLICT(symbol) DO UPDATE SET direction=excluded.direction, pattern_key=excluded.pattern_key,
+           pattern_json=excluded.pattern_json, tp_price=excluded.tp_price, sl_price=excluded.sl_price,
+           created_at=excluded.created_at, status='WAITING_M1', updated_at=excluded.updated_at""",
+        (pattern["symbol"], pattern["direction"], pattern["key"], serialize_ready_pattern(pattern, candles), tp, sl,
+         float(pattern["confirmation_time"]), now),
+    )
+    conn.commit()
+
+
+def finish_ready_setup(conn: sqlite3.Connection, symbol: str, status: str) -> None:
+    conn.execute("UPDATE ready_setups SET status=?, updated_at=? WHERE symbol=? AND status='WAITING_M1'",
+                 (status, time.time(), symbol))
+    conn.commit()
 
 
 def pattern_seen(conn: sqlite3.Connection, key: str) -> bool:
@@ -1009,19 +1078,22 @@ def main() -> int:
     try:
         tickers = get_tickers()
     except Exception as exc:
-        message = f"❌ NDS M15 LONG+SHORT scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
+        message = f"❌ NDS M15/M1 scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
         LOG.exception("Ticker fetch failed")
         telegram_send_message(message)
+        conn.close()
         return 1
 
     tickers_by_symbol = ticker_map(tickers)
     universe = get_universe(tickers)
-    LOG.info("Selected %d symbols (target=%d)", len(universe), UNIVERSE_SIZE)
+    active_before = {str(r["symbol"]): r for r in active_ready_setups(conn)}
+    symbols_to_scan = sorted(set(universe) | set(active_before) | {str(row["symbol"]) for row in open_trades(conn)})
+    LOG.info("Selected %d symbols (target=%d); active M15 setups=%d", len(universe), UNIVERSE_SIZE, len(active_before))
 
     candles_by_symbol: dict[str, list[dict[str, Any]]] = {}
     errors_by_symbol: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as pool:
-        futures = {pool.submit(scan_symbol, symbol): symbol for symbol in universe}
+        futures = {pool.submit(scan_symbol, symbol): symbol for symbol in symbols_to_scan}
         for future in as_completed(futures):
             symbol, candles, error = future.result()
             if candles is not None:
@@ -1031,215 +1103,218 @@ def main() -> int:
                 LOG.warning("M15 data error %s: %s", symbol, error)
 
     prices: dict[str, Optional[float]] = {}
-    for symbol in set(universe) | {str(row["symbol"]) for row in open_trades(conn)}:
+    for symbol in symbols_to_scan:
         price = current_price_from_ticker(tickers_by_symbol.get(symbol))
         bars = candles_by_symbol.get(symbol)
         if price is None and bars:
             price = bars[-1]["close"]
         prices[symbol] = price
 
-    # Update previously open paper trades before assessing fresh entries.
     closed_trades = update_open_trades(conn, candles_by_symbol, prices)
-
-    new_signals: list[dict[str, Any]] = []
-    patterns_count = 0
-    scanned_candidates: list[dict[str, Any]] = []
-    expired_patterns: list[dict[str, Any]] = []
     diagnostics: dict[str, int] = {
-        "detected_total": 0, "candidates": 0, "already_seen": 0, "expired": 0, "no_price": 0,
-        "bad_tp": 0, "sl_missing": 0,
-        "bad_levels": 0, "candle_refresh_error": 0, "opened": 0,
+        "detected_total": 0, "ready_created": 0, "ready_replaced": 0,
+        "ready_expired": 0, "m1_checked": 0, "m1_confirmed": 0,
+        "opened": 0, "no_price": 0, "bad_levels": 0, "m1_errors": 0,
     }
+    ready_charts: list[dict[str, Any]] = []
+    new_signals: list[dict[str, Any]] = []
     scan_time = time.time()
-    for symbol, bars in candles_by_symbol.items():
-        for direction in ("LONG", "SHORT"):
-            # Evaluate all matches, not only the newest match. The previous
-            # latest-only approach could let an expired/seen pattern mask a
-            # newer independent structure in the same symbol and direction.
-            detected_patterns = detect_patterns(symbol, bars, direction)
-            # Count every structurally valid match, including expired ones. This
-            # keeps the top-level structure count consistent with the diagnostics.
-            diagnostics["detected_total"] += len(detected_patterns)
-            for pattern in detected_patterns:
-                age_seconds = scan_time - float(pattern["confirmation_time"])
-                if age_seconds < 0:
-                    continue
-                if age_seconds > MAX_SIGNAL_AGE_HOURS * 3600:
-                    diagnostics["expired"] += 1
-                    expired_patterns.append(pattern)
-                    continue
-                patterns_count += 1
-                scanned_candidates.append(pattern)
 
-    diagnostics["candidates"] = len(scanned_candidates)
-    # Process the newest distinct structures first. There is no open-trade cap.
-    scanned_candidates.sort(key=lambda item: item["confirmation_time"], reverse=True)
-    for pattern in scanned_candidates:
-        if pattern_seen(conn, pattern["key"]):
-            diagnostics["already_seen"] += 1
+    # Stage 1: detect M15 structures and create/replace persistent 72-hour setups.
+    for symbol, bars15 in candles_by_symbol.items():
+        candidates: list[dict[str, Any]] = []
+        for direction in ("LONG", "SHORT"):
+            found = detect_patterns(symbol, bars15, direction, "M15")
+            diagnostics["detected_total"] += len(found)
+            candidates.extend(p for p in found if 0 <= scan_time - float(p["confirmation_time"]) <= MAX_SIGNAL_AGE_HOURS * 3600)
+        if not candidates:
             continue
-        symbol = pattern["symbol"]
-        bars = candles_by_symbol[symbol]
-        direction = str(pattern["direction"])
-        # Entry is the current market price after the terminal pivot is confirmed,
-        # not the historical pivot price. The pivot is a trigger, not a fill.
+        candidates.sort(key=lambda p: float(p["confirmation_time"]), reverse=True)
+        pattern = candidates[0]
+        if pattern_seen(conn, pattern["key"]):
+            continue
+        existing = next((r for r in active_ready_setups(conn) if str(r["symbol"]) == symbol), None)
+        if existing and str(existing["pattern_key"]) == str(pattern["key"]):
+            continue
+        if existing and float(pattern["confirmation_time"]) <= float(existing["created_at"]):
+            continue
+
+        entry_reference = prices.get(symbol)
+        if entry_reference is None or entry_reference <= 0:
+            diagnostics["no_price"] += 1
+            continue
+        entry_reference = float(entry_reference)
+        tp = float(pattern["p4_price"])
+        if (pattern["direction"] == "LONG" and tp <= entry_reference) or (pattern["direction"] == "SHORT" and tp >= entry_reference):
+            diagnostics["bad_levels"] += 1
+            continue
+        sl = find_nearest_valid_m15_low(bars15, entry_reference) if pattern["direction"] == "LONG" else find_nearest_valid_m15_high(bars15, entry_reference)
+        if sl is not None:
+            buffer = STOP_BUFFER_PCT / 100.0
+            sl = sl * (1.0 - buffer) if pattern["direction"] == "LONG" else sl * (1.0 + buffer)
+        if sl is None or (pattern["direction"] == "LONG" and not sl < entry_reference < tp) or (pattern["direction"] == "SHORT" and not tp < entry_reference < sl):
+            diagnostics["bad_levels"] += 1
+            continue
+
+        save_ready_setup(conn, pattern, bars15, tp, float(sl))
+        diagnostics["ready_created"] += 1
+        if existing:
+            diagnostics["ready_replaced"] += 1
+        try:
+            chart = create_signal_chart(symbol, bars15, pattern, None, tp, float(sl),
+                                        current_price=prices.get(symbol), chart_title="M15 READY - WAITING FOR M1")
+            ready_charts.append({"symbol": symbol, "direction": pattern["direction"], "tp": tp, "sl": float(sl), "chart": chart})
+        except Exception:
+            LOG.exception("M15 ready chart creation failed for %s", symbol)
+
+    # Stage 2: expire setups and fetch M1 candles only for symbols still waiting.
+    now = time.time()
+    for setup in active_ready_setups(conn):
+        if now - float(setup["created_at"]) > MAX_SIGNAL_AGE_HOURS * 3600:
+            finish_ready_setup(conn, str(setup["symbol"]), "EXPIRED")
+            diagnostics["ready_expired"] += 1
+
+    waiting = active_ready_setups(conn)
+    m1_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    if waiting:
+        with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as pool:
+            futures = {pool.submit(get_candles, str(r["symbol"]), "1m", M1_CANDLE_COUNT): str(r["symbol"]) for r in waiting}
+            for future in as_completed(futures):
+                symbol = futures[future]
+                try:
+                    m1_by_symbol[symbol] = future.result()
+                except Exception as exc:
+                    diagnostics["m1_errors"] += 1
+                    LOG.warning("M1 data error %s: %s", symbol, exc)
+
+    # Refresh tickers immediately before M1-triggered entries so the recorded fill
+    # is based on the market price at confirmation time, not the start of this scan.
+    if waiting:
+        try:
+            fresh_tickers = get_tickers()
+            tickers_by_symbol.update(ticker_map(fresh_tickers))
+            for setup_row in active_ready_setups(conn):
+                sym = str(setup_row["symbol"])
+                fresh_price = current_price_from_ticker(tickers_by_symbol.get(sym))
+                if fresh_price is not None and fresh_price > 0:
+                    prices[sym] = fresh_price
+        except Exception as exc:
+            LOG.warning("Ticker refresh before M1 confirmation failed; using latest cached prices: %s", exc)
+
+    # Stage 3: wait for a complete, fresh six-pivot M1 structure in the same direction.
+    for setup in active_ready_setups(conn):
+        symbol = str(setup["symbol"])
+        direction = str(setup["direction"])
+        bars1 = m1_by_symbol.get(symbol)
+        bars15 = candles_by_symbol.get(symbol)
+        if not bars1 or not bars15:
+            continue
+        diagnostics["m1_checked"] += 1
+        ready_time = float(setup["created_at"])
+        confirmed = []
+        for m1_pattern in detect_patterns(symbol, bars1, direction, "M1"):
+            point_times = [float(bars1[int(m1_pattern["points"][name])]["time"]) / 1000.0
+                           for name in ("start", "p1", "p2", "p3", "p4", "p5")]
+            if min(point_times) >= ready_time and float(m1_pattern["confirmation_time"]) > ready_time:
+                confirmed.append(m1_pattern)
+        if not confirmed:
+            continue
+        confirmed.sort(key=lambda p: float(p["confirmation_time"]), reverse=True)
+        m1_confirmation = confirmed[0]
         entry = prices.get(symbol)
         if entry is None or entry <= 0:
             diagnostics["no_price"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "No current market price")
             continue
         entry = float(entry)
-        tp = float(pattern["p4_price"])
-        if direction == "LONG" and tp <= entry:
-            diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (2 GREEN) is not above current market entry")
-            continue
-        if direction == "SHORT" and tp >= entry:
-            diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below current market entry")
-            continue
-        # Every distinct structure is independent. Existing trades on the same
-        # symbol or in the opposite direction do not block a new signal.
-        try:
-            bars15 = get_candles(symbol, "15m", M15_CANDLE_COUNT)
-        except Exception as exc:
-            diagnostics["candle_refresh_error"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", f"M15 candle fetch failed: {exc}")
-            LOG.warning("M15 data error for %s: %s", symbol, exc)
-            continue
-        # Refresh the entry from the latest available ticker/candle before final checks.
-        refreshed_entry = current_price_from_ticker(tickers_by_symbol.get(symbol))
-        if refreshed_entry is None and bars15:
-            refreshed_entry = float(bars15[-1]["close"])
-        if refreshed_entry is None or refreshed_entry <= 0:
-            diagnostics["no_price"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "No current market price after refresh")
-            continue
-        entry = float(refreshed_entry)
-        if direction == "LONG" and tp <= entry:
-            diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (2 GREEN) is not above refreshed market entry")
-            LOG.info("Rejected %s %s after refresh: TP %.10g <= entry %.10g", symbol, direction, tp, entry)
-            continue
-        if direction == "SHORT" and tp >= entry:
-            diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below refreshed market entry")
-            LOG.info("Rejected %s %s after refresh: TP %.10g >= entry %.10g", symbol, direction, tp, entry)
-            continue
-        sl = find_nearest_valid_m15_low(bars15, entry) if direction == "LONG" else find_nearest_valid_m15_high(bars15, entry)
-        if sl is not None:
-            buffer = STOP_BUFFER_PCT / 100.0
-            sl = sl * (1.0 - buffer) if direction == "LONG" else sl * (1.0 + buffer)
-        if sl is None or (direction == "LONG" and sl >= entry) or (direction == "SHORT" and sl <= entry):
-            diagnostics["sl_missing"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", f"No confirmed intact HA pivot for {direction} stop")
-            continue
-        if direction == "LONG" and not (sl < entry < tp):
+        tp = float(setup["tp_price"])
+        sl = float(setup["sl_price"])
+        valid_levels = (sl < entry < tp) if direction == "LONG" else (tp < entry < sl)
+        if not valid_levels:
+            # M15 levels are immutable; if price has crossed either level before M1 confirmation,
+            # this setup is no longer executable and must not be recalculated at M1.
+            finish_ready_setup(conn, symbol, "INVALIDATED")
             diagnostics["bad_levels"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "Invalid LONG levels: require SL < market entry < TP")
             continue
-        if direction == "SHORT" and not (tp < entry < sl):
-            diagnostics["bad_levels"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "Invalid SHORT levels: require TP < market entry < SL")
-            continue
-        save_pattern_decision(conn, pattern, "TRADE", "Paper trade opened at current market price")
-        insert_trade(conn, pattern, time.time(), entry, tp, sl)
-        diagnostics["opened"] += 1
-        signal = {"symbol": symbol, "direction": direction, "entry": entry, "tp": tp, "sl": sl, "pattern": pattern, "chart": None}
-        new_signals.append(signal)
-        try:
-            signal["chart"] = create_signal_chart(symbol, bars15, pattern, entry, tp, sl)
-        except Exception:
-            LOG.exception("Chart creation failed for %s", symbol)
 
-    # Refresh prices for symbols involved in open trades, now including newly opened ones.
+        m15_pattern = restore_ready_pattern(setup, bars15)
+        if m15_pattern is None:
+            diagnostics["m1_errors"] += 1
+            continue
+        # M15 structure key remains the trade identity; M1 is the confirmation trigger only.
+        trade_pattern = dict(m15_pattern)
+        trade_pattern["key"] = str(setup["pattern_key"])
+        trade_pattern["symbol"] = symbol
+        trade_pattern["direction"] = direction
+        entry_time = time.time()
+        try:
+            save_pattern_decision(conn, trade_pattern, "TRADE", "M15 setup confirmed by complete same-direction M1 structure")
+            insert_trade(conn, trade_pattern, entry_time, entry, tp, sl)
+        except sqlite3.IntegrityError:
+            finish_ready_setup(conn, symbol, "TRIGGERED")
+            continue
+        finish_ready_setup(conn, symbol, "TRIGGERED")
+        diagnostics["m1_confirmed"] += 1
+        diagnostics["opened"] += 1
+        signal = {"symbol": symbol, "direction": direction, "entry": entry, "tp": tp, "sl": sl,
+                  "pattern": m15_pattern, "chart": None, "m1_confirmation": m1_confirmation}
+        try:
+            signal["chart"] = create_signal_chart(symbol, bars15, m15_pattern, entry, tp, sl,
+                                                   current_price=prices.get(symbol), chart_title="SIGNAL - M1 CONFIRMED")
+        except Exception:
+            LOG.exception("Signal chart creation failed for %s", symbol)
+        new_signals.append(signal)
+
+    # Keep the current price cache populated for all open trades.
     for row in open_trades(conn):
         symbol = str(row["symbol"])
         if prices.get(symbol) is None:
             prices[symbol] = float(row["entry_price"])
 
     perf = get_performance(conn, prices)
+    ready_now = active_ready_setups(conn)
     stats = {
-        "scanned": len(universe),
-        "m15_ok": len(candles_by_symbol),
-        "errors": len(errors_by_symbol),
-        "patterns": diagnostics["detected_total"],
-        "universe_size": len(universe),
-        "diagnostics": diagnostics,
+        "scanned": len(universe), "m15_ok": len(candles_by_symbol), "errors": len(errors_by_symbol),
+        "patterns": diagnostics["detected_total"], "universe_size": len(universe),
+        "diagnostics": diagnostics, "ready_count": len(ready_now),
     }
     report = make_report(stats, new_signals, closed_trades, perf, prices)
+    report += "\n\n⏳ M15 READY / WAITING FOR M1: " + str(len(ready_now))
+    for setup in ready_now:
+        report += (f"\n• {setup['symbol']} {setup['direction']} | TP {fmt_price(float(setup['tp_price']))}"
+                   f" | SL {fmt_price(float(setup['sl_price']))} | expires {dt_text(float(setup['created_at']) + MAX_SIGNAL_AGE_HOURS * 3600)}")
+    report += (f"\n\nM1 confirmations checked: {diagnostics['m1_checked']} | confirmed: {diagnostics['m1_confirmed']}"
+               f" | new M15 ready: {diagnostics['ready_created']} | replaced: {diagnostics['ready_replaced']}"
+               f" | expired: {diagnostics['ready_expired']}")
     LOG.info("\n%s", report)
     telegram_send_message(report)
 
-    # Every new signal gets its own chart/photo with labeled points and levels.
+    # Send the M15 chart exactly when a setup enters/re-enters READY state.
+    for item in ready_charts:
+        emoji = "🟢" if item["direction"] == "LONG" else "🔴"
+        caption = (f"⏳ M15 READY {emoji} {item['direction']} | {item['symbol']}\n"
+                   f"TP (fixed from M15): {fmt_price(item['tp'])}\nSL (fixed from M15): {fmt_price(item['sl'])}\n"
+                   "Waiting for a complete same-direction six-pivot Heikin-Ashi structure on closed M1 candles.\n"
+                   "No entry yet. ENTRY is intentionally not plotted.")
+        telegram_send_photo(item["chart"], caption)
+
     sent_charts = 0
     for signal in new_signals:
         chart_path = signal.get("chart")
-        if chart_path and sent_charts < MAX_CHARTS_PER_RUN:
-            tp_pct = pct_from_entry(signal["entry"], signal["tp"], signal["direction"])
-            sl_pct = pct_from_entry(signal["entry"], signal["sl"], signal["direction"])
-            emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
-            caption = (
-                f"{emoji} NEW {signal['direction']} | {signal['symbol']}\n"
-                f"Entry: {fmt_price(signal['entry'])}\n"
-                f"TP: {fmt_price(signal['tp'])} ({fmt_pct(tp_pct)})\n"
-                f"SL buffered HA swing: {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
-                "M15 Heikin-Ashi chart: START, numbered pivots, structure, ENTRY, TP and SL"
-            )
+        if chart_path:
+            direction = signal["direction"]
+            emoji = "🟢" if direction == "LONG" else "🔴"
+            caption = (f"{emoji} NEW {direction} SIGNAL | {signal['symbol']}\n"
+                       f"Entry (M1 confirmation): {fmt_price(signal['entry'])}\n"
+                       f"TP (fixed from M15): {fmt_price(signal['tp'])} ({fmt_pct(pct_from_entry(signal['entry'], signal['tp'], direction))})\n"
+                       f"SL (fixed from M15): {fmt_price(signal['sl'])} ({fmt_pct(pct_from_entry(signal['entry'], signal['sl'], direction))})\n"
+                       "Chart: M15 Heikin-Ashi structure with M1-confirmed ENTRY and unchanged M15 TP/SL.")
             if telegram_send_photo(chart_path, caption):
                 sent_charts += 1
 
-    # If this run produced no new signals, send charts for the newest expired
-    # structures instead. These are structure-only charts: no fake ENTRY/TP/SL
-    # trade levels are drawn because an expired setup was never entered.
-    expired_charts_sent = 0
-    if not new_signals and expired_patterns:
-        expired_patterns.sort(key=lambda item: item["confirmation_time"], reverse=True)
-        seen_expired: set[str] = set()
-        for pattern in expired_patterns:
-            if expired_charts_sent >= MAX_CHARTS_PER_RUN:
-                break
-            key = str(pattern.get("key", ""))
-            if key in seen_expired:
-                continue
-            seen_expired.add(key)
-            symbol = str(pattern["symbol"])
-            bars = candles_by_symbol.get(symbol)
-            if not bars or len(bars) < 10:
-                continue
-            current = prices.get(symbol)
-            if current is None or current <= 0:
-                current = float(bars[-1]["close"])
-                prices[symbol] = current
-            try:
-                chart_path = create_signal_chart(
-                    symbol, bars, pattern, None, None, None,
-                    current_price=current, chart_title="EXPIRED SETUP - NO TRADE",
-                )
-                direction = str(pattern["direction"])
-                emoji = "🟢" if direction == "LONG" else "🔴"
-                age_hours = max(0.0, (time.time() - float(pattern["confirmation_time"])) / 3600.0)
-                caption = (
-                    f"⌛ EXPIRED {emoji} {direction} | {symbol}\n"
-                    f"Confirmed: {dt_text(float(pattern['confirmation_time']))}\n"
-                    f"Age: {age_hours:.1f} hours | Allowed: {MAX_SIGNAL_AGE_HOURS} hours\n"
-                    f"Current market price: {fmt_price(current)}\n"
-                    "Structure points are labeled on the chart. No trade was opened; ENTRY/TP/SL are not plotted."
-                )
-                if telegram_send_photo(chart_path, caption):
-                    expired_charts_sent += 1
-            except Exception:
-                LOG.exception("Expired-pattern chart/send failed for %s %s", symbol, direction)
-
-    # Send a fresh chart for EVERY trade still open after this run's TP/SL updates.
-    # This is independent of MAX_CHARTS_PER_RUN, which remains only for new signals.
     open_charts_sent, open_charts_attempted = send_open_trade_charts(conn, candles_by_symbol, prices)
-
-    LOG.info(
-        "Finished in %.1fs | new signals=%d | closed=%d | open=%d | new-signal charts sent=%d | expired charts sent=%d | open-trade charts sent=%d/%d",
-        time.time() - started, len(new_signals), len(closed_trades), len(open_trades(conn)),
-        sent_charts, expired_charts_sent, open_charts_sent, open_charts_attempted,
-    )
+    LOG.info("Finished in %.1fs | signals=%d | closed=%d | open=%d | ready=%d | ready charts=%d | signal charts=%d | open charts=%d/%d",
+             time.time() - started, len(new_signals), len(closed_trades), len(open_trades(conn)), len(ready_now),
+             len(ready_charts), sent_charts, open_charts_sent, open_charts_attempted)
     conn.close()
     return 0
 
