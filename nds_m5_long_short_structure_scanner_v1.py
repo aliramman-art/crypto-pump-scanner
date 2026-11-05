@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 Long + Short Structure Scanner v1.6.1
+NDS M5 Long + Short Structure Scanner v1.6.2
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
@@ -58,7 +58,7 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
@@ -255,6 +255,65 @@ def get_candles(symbol: str, resolution: str, limit: int) -> list[dict[str, Any]
             "volume": as_float(row.get("volume")) or 0.0,
         }
     return [by_time[key] for key in sorted(by_time)][-limit:]
+
+
+def get_candles_history_from(
+    symbol: str, resolution: str, start_time_ms: int, page_size: int = 4500
+) -> list[dict[str, Any]]:
+    """Fetch closed candles from an exact historical timestamp through now.
+
+    Kraken's chart endpoint supports from/to/count. The request is paged into
+    windows smaller than its documented 5000-candle ceiling so older Structure 1
+    pivots remain available for open-trade chart regeneration.
+    """
+    timeframe_ms = 5 * 60 * 1000 if resolution == "5m" else M5_MS
+    timeframe_seconds = timeframe_ms // 1000
+    page_size = max(100, min(int(page_size), 4500))
+    cursor = max(0, int(start_time_ms // 1000))
+    end_time = int(time.time())
+    by_time: dict[int, dict[str, Any]] = {}
+    pages = 0
+
+    while cursor < end_time and pages < 20:
+        page_end = min(end_time, cursor + timeframe_seconds * (page_size - 1))
+        params = {"from": cursor, "to": page_end, "count": page_size}
+        payload = request_json(f"{CHARTS_REST}/trade/{symbol}/{resolution}", params=params)
+        rows = payload.get("candles", [])
+        if not isinstance(rows, list):
+            raise RuntimeError(f"Invalid historical candles shape for {symbol} {resolution}")
+
+        now_ms = int(time.time() * 1000)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ts = as_float(row.get("time"))
+            opn = as_float(row.get("open"))
+            high = as_float(row.get("high"))
+            low = as_float(row.get("low"))
+            close = as_float(row.get("close"))
+            if None in (ts, opn, high, low, close):
+                continue
+            ts_i = int(ts)
+            if ts_i < 1_000_000_000_000:
+                ts_i *= 1000
+            if ts_i + timeframe_ms > now_ms:
+                continue
+            if low > high or min(opn, high, low, close) <= 0:
+                continue
+            by_time[ts_i] = {
+                "time": ts_i, "open": float(opn), "high": float(high),
+                "low": float(low), "close": float(close),
+                "volume": as_float(row.get("volume")) or 0.0,
+            }
+
+        pages += 1
+        if page_end >= end_time:
+            break
+        # Move to the next candle boundary; one second avoids inclusive-boundary
+        # repeats while retaining the next full candle.
+        cursor = page_end + 1
+
+    return [by_time[key] for key in sorted(by_time)]
 
 
 def heiken_ashi_candles(candles: list[dict[str, Any]]) -> list[dict[str, float]]:
@@ -795,6 +854,30 @@ def send_open_trade_charts(
         if len(bars) < 10:
             LOG.warning("Not enough candles to chart open trade %s", trade["id"])
             continue
+
+        # The regular scan window is only 1500 M5 candles (~5.2 days).
+        # Structure 1 may be older than that even though Structure 2 is recent.
+        # Fetch a wider, paged history from S1's exact timestamp before restore.
+        key_parts = str(trade["pattern_key"]).split("|")
+        if len(key_parts) == 15 and key_parts[2] == "M5":
+            try:
+                first_start_ms = int(key_parts[3])
+                if first_start_ms < int(bars[0]["time"]):
+                    extended_start_ms = max(0, first_start_ms - 12 * M5_MS)
+                    extended_bars = get_candles_history_from(symbol, resolution, extended_start_ms)
+                    if extended_bars:
+                        bars = extended_bars
+                        candles_by_symbol[symbol] = bars
+                        LOG.info(
+                            "Expanded chart history for trade %s: %d candles from %s",
+                            trade["id"], len(bars), dt_text(bars[0]["time"] / 1000.0)
+                        )
+            except Exception as exc:
+                LOG.warning(
+                    "Could not expand history for Structure 1 on trade %s: %s",
+                    trade["id"], exc
+                )
+
         pattern = restore_trade_pattern(trade, bars)
         if pattern is None:
             continue
@@ -1193,7 +1276,10 @@ def main() -> int:
         signal = {"symbol": symbol, "direction": direction, "entry": entry, "tp": tp, "sl": sl, "pattern": pattern, "chart": None}
         new_signals.append(signal)
         try:
-            signal["chart"] = create_signal_chart(symbol, bars15, pattern, entry, tp, sl)
+            # Pattern pivot indices belong to the original scan candles (bars).
+            # The refreshed bars15 list may have shifted after a new M5 candle,
+            # so using it here can misplace or hide S1/S2 markers.
+            signal["chart"] = create_signal_chart(symbol, bars, pattern, entry, tp, sl)
         except Exception:
             LOG.exception("Chart creation failed for %s", symbol)
 
