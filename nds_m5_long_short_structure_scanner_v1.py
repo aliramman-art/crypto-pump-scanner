@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 Long + Short Structure Scanner v1.6.0
+NDS M5 Long + Short Structure Scanner v1.6.1
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
@@ -58,7 +58,7 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
@@ -618,9 +618,14 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
     pts = pattern["points"]
     direction = pattern["direction"]
     first = pattern.get("first_structure")
+    # Accept either saved representation so Structure 1 cannot silently disappear.
+    if not isinstance(first, dict):
+        second = pattern.get("second_structure")
+        first = second.get("first_structure") if isinstance(second, dict) else None
     first_pts = first.get("points") if isinstance(first, dict) else None
     all_indices = list(pts.values()) + (list(first_pts.values()) if first_pts else [])
-    left_edge = max(0, min(min(all_indices) - 12, len(candles) - 220))
+    # Keep the complete S1-to-S2 span visible; do not crop old S1 pivots.
+    left_edge = max(0, min(all_indices) - 18)
     chart_candles = candles[left_edge:]
     if len(chart_candles) < 10:
         chart_candles = candles[-120:]
@@ -667,11 +672,14 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
             xs.append(x)
             ys.append(y)
             if is_first:
-                ax.scatter([x], [y], s=82, marker=marker, facecolors="white", edgecolors=color, linewidths=1.8, zorder=6)
-                text_color = color
-                box_fc = "#f4f6f8"
-                offset = 12 if marker in ("^", "o") else -17
-                full_label = f"S1 {label}"
+                # Bright filled markers make the confirmation structure obvious.
+                s1_color = "#ff9f1c" if color != "#277da1" else "#00b4d8"
+                ax.scatter([x], [y], s=150, marker=marker, color=s1_color,
+                           edgecolors="#17202a", linewidths=1.15, zorder=10)
+                text_color = "#7a3e00" if s1_color == "#ff9f1c" else "#00566b"
+                box_fc = "#fff0d6"
+                offset = 25 if marker in ("^", "o") else -30
+                full_label = f"S1-{name.upper()} | {label}"
             else:
                 ax.scatter([x], [y], s=92, marker=marker, color=color, edgecolors="black", linewidths=0.55, zorder=7)
                 text_color = color
@@ -682,8 +690,9 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
                         color=text_color, fontweight="bold", ha="center", va="bottom" if offset > 0 else "top",
                         bbox={"boxstyle": "round,pad=0.2", "fc": box_fc, "ec": color, "alpha": 0.9, "lw": 0.75})
         if len(xs) >= 2:
-            ax.plot(xs, ys, color="#73808c" if is_first else "#202a35", linestyle="--" if is_first else "-",
-                    linewidth=1.2 if is_first else 1.8, alpha=0.85, zorder=4)
+            ax.plot(xs, ys, color="#ff9f1c" if is_first else "#202a35", linestyle="--" if is_first else "-",
+                    linewidth=2.2 if is_first else 1.8, alpha=0.95, zorder=5 if is_first else 4,
+                    label="STRUCTURE 1 (confirmation only)" if is_first else "STRUCTURE 2 (trade structure)")
 
     if first_pts:
         draw_structure(first_pts, "S1", True)
