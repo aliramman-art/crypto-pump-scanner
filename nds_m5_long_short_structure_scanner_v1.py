@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 Long + Short Structure Scanner v1.6.2
+NDS M5 Long + Short Structure Scanner v1.7.0
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
 Pattern and entry (all pivots confirmed on closed M5 candles and HA color reversal at each pivot):
-  A signal requires TWO complete, consecutive, non-overlapping six-pivot structures
-  in the SAME direction. Structure 1 is confirmation only; it never opens a trade.
-  Structure 2 triggers the signal. Entry is the current market price after Structure
-  2 is confirmed. TP is Structure 2's p4 pivot; SL is the nearest confirmed intact
-  M5 swing beyond entry. Both structures' pivots are labeled separately on charts.
+  One seven-point structure: START is a 5x5 HA pivot; H/F or L/F points are HA
+  color-run extremes. Entry follows the closed confirmation candle after F3.
+  TP=H3/L3 and SL=F1, both from HA prices, without a stop buffer.
   SHORT: START low -> H1 -> L1 -> H2 -> L2 -> H3.
   LONG:  START high -> L1 -> H1 -> L2 -> H2 -> L3 (exact mirror).
 
@@ -26,7 +24,7 @@ Environment variables:
   UNIVERSE_SIZE (default 100)
   MAX_OPEN_TRADES (default 3)
   MAX_SIGNAL_AGE_HOURS (default 72)
-  STOP_BUFFER_PCT (default 0.10, percent beyond swing stop)
+  STOP_BUFFER_PCT (legacy setting; retained but not applied)
   DB_PATH (default nds_m5_long_short_structure_v1.db; retained to preserve existing paper-trade history)
   CHART_DIR (default nds_m5_long_short_structure_charts)
 """
@@ -58,7 +56,7 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.6.2"
+VERSION = "1.7.0"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
@@ -401,93 +399,119 @@ def find_confirmed_pivots(
 # ----------------------------- Strategy detection -----------------------------
 
 def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, int], direction: str) -> str:
-    timestamps = [str(candles[points[name]]["time"]) for name in ("start", "p1", "p2", "p3", "p4", "p5")]
+    names = ("start", "h1", "f1", "h2", "f2", "h3", "f3")
+    timestamps = [str(candles[points[name]]["time"]) for name in names]
     return f"{direction}|{symbol}|M5|" + "|".join(timestamps)
 
 
 def _detect_raw_structures(symbol: str, candles: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
-    """Detect the requested six-point M5 structure with confirmed 5x5 pivots.
-
-    SHORT: START low -> H1 -> L1 -> H2 -> L2 -> H3.
-    LONG:  START high -> L1 -> H1 -> L2 -> H2 -> L3 (exact mirror).
-    Adjacent pivots of the same type are compressed to the more extreme pivot,
-    so each leg uses the relevant swing extreme rather than an arbitrary pivot.
-    """
+    """Detect one seven-point HA structure; START is 5x5, later points are HA color-run extremes."""
     if len(candles) < PIVOT_LEFT + PIVOT_RIGHT + 20:
         return []
-    lows, highs = find_confirmed_pivots(candles, PIVOT_LEFT, PIVOT_RIGHT)
-    if not lows or not highs:
-        return []
-    raw = sorted([(i, "L") for i in lows] + [(i, "H") for i in highs])
-    swings: list[tuple[int, str]] = []
-    for item in raw:
-        if not swings or swings[-1][1] != item[1]:
-            swings.append(item)
+    ha = heiken_ashi_candles(candles)
+    colors = heiken_ashi_colors(candles)
+    start_indices: list[int] = []
+    for i in range(PIVOT_LEFT, len(candles) - PIVOT_RIGHT):
+        if direction == "LONG":
+            if is_pivot_low(candles, i, PIVOT_LEFT, PIVOT_RIGHT, ha):
+                start_indices.append(i)
         else:
-            old_i, kind = swings[-1]
-            new_i = item[0]
-            more_extreme = (candles[new_i]["low"] < candles[old_i]["low"]) if kind == "L" else (candles[new_i]["high"] > candles[old_i]["high"])
-            if more_extreme:
-                swings[-1] = item
+            if is_pivot_high(candles, i, PIVOT_LEFT, PIVOT_RIGHT, ha):
+                start_indices.append(i)
+
     patterns: list[dict[str, Any]] = []
-    wanted = ["L", "H", "L", "H", "L", "H"] if direction == "SHORT" else ["H", "L", "H", "L", "H", "L"]
-    for j in range(0, len(swings) - 5):
-        seq = swings[j:j + 6]
-        if [kind for _, kind in seq] != wanted:
+    for start_i in start_indices:
+        # Ignore neutral HA candles while detecting color runs. A run is complete
+        # only when the opposite non-neutral color appears on a closed candle.
+        expected = 1 if direction == "LONG" else -1
+        runs: list[dict[str, int]] = []
+        run_color = expected
+        run_start: Optional[int] = None
+        run_end: Optional[int] = None
+        for i in range(start_i + 1, len(candles)):
+            color = colors[i]
+            if color == 0:
+                continue
+            if run_start is None:
+                if color != expected:
+                    continue
+                run_start = i
+                run_end = i
+                continue
+            if color == run_color:
+                run_end = i
+                continue
+            # The previous color run is now confirmed by this closed reversal candle.
+            assert run_start is not None and run_end is not None
+            runs.append({"start": run_start, "end": run_end, "reverse": i})
+            if len(runs) == 6:
+                break
+            run_color = color
+            run_start = i
+            run_end = i
+        if len(runs) != 6:
             continue
-        idx = [i for i, _ in seq]
-        start_i, p1_i, p2_i, p3_i, p4_i, p5_i = idx
-        start_price = candles[start_i]["low"] if direction == "SHORT" else candles[start_i]["high"]
-        p1 = candles[p1_i]["high"] if direction == "SHORT" else candles[p1_i]["low"]
-        p2 = candles[p2_i]["low"] if direction == "SHORT" else candles[p2_i]["high"]
-        p3 = candles[p3_i]["high"] if direction == "SHORT" else candles[p3_i]["low"]
-        p4 = candles[p4_i]["low"] if direction == "SHORT" else candles[p4_i]["high"]
-        p5 = candles[p5_i]["high"] if direction == "SHORT" else candles[p5_i]["low"]
-        if direction == "SHORT":
-            valid = (p1 > start_price and p2 > start_price and p3 > p1 and p4 > start_price and p4 < p2 and p5 > p1 and p5 > p3)
-            # H1/H2 must be the highest prices on their respective full legs;
-            # L1/L2 must be the lowest prices on their respective full legs.
-            valid = valid and max(c["high"] for c in candles[start_i:p2_i + 1]) == p1
-            valid = valid and min(c["low"] for c in candles[p1_i:p3_i + 1]) == p2
-            valid = valid and max(c["high"] for c in candles[p2_i:p4_i + 1]) == p3
-            valid = valid and min(c["low"] for c in candles[p3_i:p5_i + 1]) == p4
-            valid = valid and min(c["low"] for c in candles[start_i:p5_i + 1]) == start_price
+        # First six alternating completed runs must have the exact expected colors.
+        required = ([1, -1, 1, -1, 1, -1] if direction == "LONG"
+                    else [-1, 1, -1, 1, -1, 1])
+        if [expected if n % 2 == 0 else -expected for n in range(6)] != required:
+            continue
+        names = ("h1", "f1", "h2", "f2", "h3", "f3")
+        points: dict[str, int] = {"start": start_i}
+        prices: dict[str, float] = {}
+        for n, (name, run) in enumerate(zip(names, runs)):
+            a, b = run["start"], run["end"]
+            if direction == "LONG":
+                use_high = (n % 2 == 0)
+                vals = [ha[j]["high"] if use_high else ha[j]["low"] for j in range(a, b + 1)]
+                extreme = max(vals) if use_high else min(vals)
+            else:
+                use_high = (n % 2 == 1)
+                vals = [ha[j]["high"] if use_high else ha[j]["low"] for j in range(a, b + 1)]
+                extreme = max(vals) if use_high else min(vals)
+            # First occurrence of the run's extreme is the structural point.
+            extreme_i = next(j for j in range(a, b + 1)
+                             if (ha[j]["high"] if use_high else ha[j]["low"]) == extreme)
+            points[name] = extreme_i
+            prices[name] = float(extreme)
+        start_price = float(ha[start_i]["low"] if direction == "LONG" else ha[start_i]["high"])
+        h1, f1, h2, f2, h3, f3 = (prices[k] for k in names)
+        if direction == "LONG":
+            valid = h2 > h1 and h3 > h2 and f2 > f1 and f3 < f2 and f3 > f1
+            tp, sl = h3, f1
         else:
-            # LONG mirror: L1 > L2 > L3 and H2 > H1.
-            # p1=L1, p2=H1, p3=L2, p4=H2, p5=L3.
-            # Critical guard: the second green high MUST exceed the first green high.
-            valid = (p1 < start_price and p2 < start_price and p3 < p1 and p4 < start_price and p4 > p2 and p5 < p1 and p5 < p3)
-            valid = valid and min(c["low"] for c in candles[start_i:p2_i + 1]) == p1
-            valid = valid and max(c["high"] for c in candles[p1_i:p3_i + 1]) == p2
-            valid = valid and min(c["low"] for c in candles[p2_i:p4_i + 1]) == p3
-            valid = valid and max(c["high"] for c in candles[p3_i:p5_i + 1]) == p4
-            valid = valid and max(c["high"] for c in candles[start_i:p5_i + 1]) == start_price
-        if not valid or p5_i + PIVOT_RIGHT >= len(candles):
+            # For SHORT, H-named legs are lows (L1/L2/L3); F-named legs are highs.
+            l1, sf1, l2, sf2, l3, sf3 = (prices[k] for k in names)
+            valid = l2 < l1 and l3 < l2 and sf2 < sf1 and sf3 > sf2 and sf3 < sf1
+            tp, sl = l3, sf1
+        if not valid:
             continue
-        pts = {"start": start_i, "p1": p1_i, "p2": p2_i, "p3": p3_i, "p4": p4_i, "p5": p5_i}
+        # The reversal candle after F3 is the first confirmation-color candle.
+        confirmation_i = int(runs[-1]["reverse"])
+        confirmation_time = (int(candles[confirmation_i]["time"]) + M5_MS) / 1000.0
+        point_prices = {"start": start_price, **prices}
         patterns.append({
-            "symbol": symbol, "direction": direction, "points": pts,
-            "key": pattern_key(symbol, candles, pts, direction),
-            "confirmation_time": (candles[p5_i + PIVOT_RIGHT]["time"] + M5_MS) / 1000.0,
-            "start_price": start_price, "p1_price": p1, "p2_price": p2,
-            "p3_price": p3, "p4_price": p4, "p5_price": p5,
-            "terminal_time": candles[p5_i]["time"] / 1000.0,
+            "symbol": symbol, "direction": direction, "points": points,
+            "key": pattern_key(symbol, candles, points, direction),
+            "confirmation_time": confirmation_time,
+            "terminal_time": candles[points["f3"]]["time"] / 1000.0,
+            "point_prices": point_prices,
+            "tp_price": float(tp), "sl_price": float(sl),
+            "start_price": start_price,
+            "p1_price": prices["h1"], "p2_price": prices["f1"],
+            "p3_price": prices["h2"], "p4_price": prices["h3"],
+            "p5_price": prices["f3"],
         })
-    # Return every valid structure, newest first. Returning only patterns[0]
-    # can hide a newer eligible setup when the newest match is already expired
-    # or recorded in SQLite.
-    patterns.sort(key=lambda item: item["confirmation_time"], reverse=True)
-    return patterns
+    # Multiple START pivots may parse the same sequence. Deduplicate exact keys.
+    unique = {item["key"]: item for item in patterns}
+    result = list(unique.values())
+    result.sort(key=lambda item: item["confirmation_time"], reverse=True)
+    return result
 
 
-def paired_pattern_key(
-    symbol: str,
-    candles: list[dict[str, Any]],
-    first_points: dict[str, int],
-    second_points: dict[str, int],
-    direction: str,
-) -> str:
-    """Stable key containing all six pivot times from both structures."""
+def paired_pattern_key(*args: Any, **kwargs: Any) -> str:
+    """Legacy helper retained for compatibility with older saved records."""
+    symbol, candles, first_points, second_points, direction = args
     names = ("start", "p1", "p2", "p3", "p4", "p5")
     first_times = [str(candles[first_points[name]]["time"]) for name in names]
     second_times = [str(candles[second_points[name]]["time"]) for name in names]
@@ -495,37 +519,8 @@ def paired_pattern_key(
 
 
 def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
-    """Return trade-eligible pairs of consecutive complete same-direction structures.
+    return _detect_raw_structures(symbol, candles, direction)
 
-    Structure 1 must finish before Structure 2 starts. The newest possible prior
-    complete structure is used as confirmation. All trade fields remain those of
-    Structure 2, while Structure 1 is retained for chart annotation.
-    """
-    raw = _detect_raw_structures(symbol, candles, direction)
-    if len(raw) < 2:
-        return []
-    chronological = sorted(raw, key=lambda item: item["points"]["start"])
-    paired: list[dict[str, Any]] = []
-    for second in chronological:
-        second_start = int(second["points"]["start"])
-        previous = [
-            item for item in chronological
-            if int(item["points"]["p5"]) < second_start
-        ]
-        if not previous:
-            continue
-        first = max(previous, key=lambda item: int(item["points"]["p5"]))
-        result = dict(second)
-        result["points"] = dict(second["points"])
-        result["first_structure"] = first
-        result["second_structure"] = second
-        result["key"] = paired_pattern_key(
-            symbol, candles, first["points"], second["points"], direction
-        )
-        result["structure_count"] = 2
-        paired.append(result)
-    paired.sort(key=lambda item: item["confirmation_time"], reverse=True)
-    return paired
 
 def find_nearest_valid_m5_low(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
     """Closest intact confirmed M5 swing low below entry, with a small buffer applied later."""
@@ -626,7 +621,7 @@ def open_trades(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 def trade_candle_settings(trade: sqlite3.Row) -> tuple[str, int, str]:
     """Use the original interval for pre-existing trades; all new scans are M5."""
     parts = str(trade["pattern_key"]).split("|")
-    if len(parts) in (9, 15) and parts[2] == "M5":
+    if len(parts) in (9, 10, 15) and parts[2] == "M5":
         return "5m", 5 * 60 * 1000, "M5"
     return "5m", M5_MS, "M5"
 
@@ -675,160 +670,99 @@ def trade_pnl_percent(entry: float, price: Optional[float], direction: str = "LO
 def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dict[str, Any], entry: Optional[float], tp: Optional[float], sl: Optional[float], current_price: Optional[float] = None, chart_title: str = "NEW SIGNAL") -> Path:
     CHART_DIR.mkdir(parents=True, exist_ok=True)
     pts = pattern["points"]
-    direction = pattern["direction"]
-    first = pattern.get("first_structure")
-    # Accept either saved representation so Structure 1 cannot silently disappear.
-    if not isinstance(first, dict):
-        second = pattern.get("second_structure")
-        first = second.get("first_structure") if isinstance(second, dict) else None
-    first_pts = first.get("points") if isinstance(first, dict) else None
-    all_indices = list(pts.values()) + (list(first_pts.values()) if first_pts else [])
-    # Keep the complete S1-to-S2 span visible; do not crop old S1 pivots.
-    left_edge = max(0, min(all_indices) - 18)
-    chart_candles = candles[left_edge:]
-    if len(chart_candles) < 10:
-        chart_candles = candles[-120:]
-        left_edge = len(candles) - len(chart_candles)
-
+    direction = str(pattern["direction"])
+    ha = heiken_ashi_candles(candles)
+    new_names = ("start", "h1", "f1", "h2", "f2", "h3", "f3")
+    legacy = not all(name in pts for name in new_names)
+    names = ("start", "p1", "p2", "p3", "p4", "p5") if legacy else new_names
+    all_indices = [int(pts[n]) for n in names if n in pts]
+    left_edge = max(0, min(all_indices, default=0) - 18)
+    right_edge = min(len(candles), max(all_indices, default=len(candles)-1) + 35)
+    if right_edge - left_edge < 20:
+        left_edge = max(0, right_edge - 120)
+    chart_candles = candles[left_edge:right_edge]
     fig, ax = plt.subplots(figsize=(14, 7.5), dpi=140)
-    ha_colors = heiken_ashi_colors(candles)
+    colors = heiken_ashi_colors(candles)
     for x, c in enumerate(chart_candles):
-        ha_direction = ha_colors[left_edge + x]
-        color = "#18a558" if ha_direction == 1 else ("#e74c3c" if ha_direction == -1 else ("#18a558" if c["close"] >= c["open"] else "#e74c3c"))
-        ax.vlines(x, c["low"], c["high"], color=color, linewidth=1.0, zorder=2)
-        body_low = min(c["open"], c["close"])
-        body_h = max(abs(c["close"] - c["open"]), abs(c["close"]) * 0.000002)
-        ax.add_patch(Rectangle((x - 0.31, body_low), 0.62, body_h, facecolor=color, edgecolor=color, linewidth=0.6, zorder=3))
+        i = left_edge + x
+        color = "#18a558" if colors[i] == 1 else ("#e74c3c" if colors[i] == -1 else "#7f8c8d")
+        o, h, l, cl = ha[i]["open"], ha[i]["high"], ha[i]["low"], ha[i]["close"]
+        ax.vlines(x, l, h, color=color, linewidth=1.0, zorder=2)
+        body_low = min(o, cl)
+        body_h = max(abs(cl-o), abs(cl)*0.000002)
+        ax.add_patch(Rectangle((x-0.31, body_low), 0.62, body_h, facecolor=color, edgecolor=color, linewidth=0.6, zorder=3))
 
-    def draw_structure(points: dict[str, int], prefix: str, is_first: bool) -> None:
+    if legacy:
         if direction == "LONG":
-            specs = {
-                "start": ("START", "#277da1", "o", "high"),
-                "p1": ("1 RED", "#db2b39", "v", "low"),
-                "p2": ("1 GREEN", "#149447", "^", "high"),
-                "p3": ("2 RED", "#db2b39", "v", "low"),
-                "p4": ("2 GREEN / TP", "#149447", "^", "high"),
-                "p5": ("3 RED / END", "#db2b39", "v", "low"),
-            }
+            specs = {"start":("START","#277da1","o","high"),"p1":("1 RED","#db2b39","v","low"),"p2":("1 GREEN","#149447","^","high"),"p3":("2 RED","#db2b39","v","low"),"p4":("2 GREEN / TP","#149447","^","high"),"p5":("3 RED / END","#db2b39","v","low")}
         else:
-            specs = {
-                "start": ("START", "#277da1", "o", "low"),
-                "p1": ("1 GREEN", "#149447", "^", "high"),
-                "p2": ("1 RED", "#db2b39", "v", "low"),
-                "p3": ("2 GREEN", "#149447", "^", "high"),
-                "p4": ("2 RED / TP", "#db2b39", "v", "low"),
-                "p5": ("3 GREEN / END", "#149447", "^", "high"),
-            }
-        xs: list[int] = []
-        ys: list[float] = []
-        for name in ("start", "p1", "p2", "p3", "p4", "p5"):
-            idx = int(points[name])
-            x = idx - left_edge
-            if not (0 <= x < len(chart_candles)):
-                continue
-            label, color, marker, side = specs[name]
-            y = float(candles[idx][side])
-            xs.append(x)
-            ys.append(y)
-            if is_first:
-                # Bright filled markers make the confirmation structure obvious.
-                s1_color = "#ff9f1c" if color != "#277da1" else "#00b4d8"
-                ax.scatter([x], [y], s=150, marker=marker, color=s1_color,
-                           edgecolors="#17202a", linewidths=1.15, zorder=10)
-                text_color = "#7a3e00" if s1_color == "#ff9f1c" else "#00566b"
-                box_fc = "#fff0d6"
-                offset = 25 if marker in ("^", "o") else -30
-                full_label = f"S1-{name.upper()} | {label}"
-            else:
-                ax.scatter([x], [y], s=92, marker=marker, color=color, edgecolors="black", linewidths=0.55, zorder=7)
-                text_color = color
-                box_fc = "white"
-                offset = 17 if marker in ("^", "o") else -22
-                full_label = f"S2 {label}"
-            ax.annotate(full_label, (x, y), xytext=(0, offset), textcoords="offset points", fontsize=7.5 if is_first else 8,
-                        color=text_color, fontweight="bold", ha="center", va="bottom" if offset > 0 else "top",
-                        bbox={"boxstyle": "round,pad=0.2", "fc": box_fc, "ec": color, "alpha": 0.9, "lw": 0.75})
-        if len(xs) >= 2:
-            ax.plot(xs, ys, color="#ff9f1c" if is_first else "#202a35", linestyle="--" if is_first else "-",
-                    linewidth=2.2 if is_first else 1.8, alpha=0.95, zorder=5 if is_first else 4,
-                    label="STRUCTURE 1 (confirmation only)" if is_first else "STRUCTURE 2 (trade structure)")
-
-    if first_pts:
-        draw_structure(first_pts, "S1", True)
-    draw_structure(pts, "S2", False)
-
-    last_x = len(chart_candles) - 1
-    if tp is not None:
-        ax.axhline(tp, color="#149447", linestyle="--", linewidth=1.3, label=f"S2 TP {fmt_price(tp)}")
-    if sl is not None:
-        ax.axhline(sl, color="#db2b39", linestyle="--", linewidth=1.3, label=f"SL {fmt_price(sl)}")
+            specs = {"start":("START","#277da1","o","low"),"p1":("1 GREEN","#149447","^","high"),"p2":("1 RED","#db2b39","v","low"),"p3":("2 GREEN","#149447","^","high"),"p4":("2 RED / TP","#db2b39","v","low"),"p5":("3 GREEN / END","#149447","^","high")}
+    else:
+        if direction == "LONG":
+            specs = {"start":("START","#277da1","o","low"),"h1":("H1","#149447","^","high"),"f1":("F1 / SL","#db2b39","v","low"),"h2":("H2","#149447","^","high"),"f2":("F2","#db2b39","v","low"),"h3":("H3 / TP","#149447","^","high"),"f3":("F3","#db2b39","v","low")}
+        else:
+            specs = {"start":("START","#277da1","o","high"),"h1":("L1","#db2b39","v","low"),"f1":("F1 / SL","#149447","^","high"),"h2":("L2","#db2b39","v","low"),"f2":("F2","#149447","^","high"),"h3":("L3 / TP","#db2b39","v","low"),"f3":("F3","#149447","^","high")}
+    xs, ys = [], []
+    for name in names:
+        if name not in pts:
+            continue
+        idx = int(pts[name]); x = idx-left_edge
+        if not (0 <= x < len(chart_candles)):
+            continue
+        label, color, marker, side = specs[name]
+        price = pattern.get("point_prices", {}).get(name)
+        if price is None:
+            price = ha[idx][side]
+        y = float(price)
+        xs.append(x); ys.append(y)
+        ax.scatter([x],[y],s=100,marker=marker,color=color,edgecolors="black",linewidths=0.6,zorder=8)
+        offset = 18 if marker in ("^","o") else -24
+        ax.annotate(label,(x,y),xytext=(0,offset),textcoords="offset points",fontsize=8,color=color,fontweight="bold",ha="center",va="bottom" if offset>0 else "top",bbox={"boxstyle":"round,pad=0.2","fc":"white","ec":color,"alpha":0.9,"lw":0.7})
+    if len(xs) >= 2:
+        ax.plot(xs,ys,color="#202a35",linewidth=1.8,alpha=0.9,zorder=4,label="Seven-point HA structure" if not legacy else "Legacy structure")
+    if tp is not None: ax.axhline(tp,color="#149447",linestyle="--",linewidth=1.3,label=f"TP {fmt_price(tp)}")
+    if sl is not None: ax.axhline(sl,color="#db2b39",linestyle="--",linewidth=1.3,label=f"SL {fmt_price(sl)}")
+    last_x=len(chart_candles)-1
     if entry is not None:
-        ax.axhline(entry, color="#277da1", linestyle=":", linewidth=1.5, label=f"ENTRY {fmt_price(entry)}")
-        ax.scatter([last_x], [entry], color="#277da1", marker="D", s=68, edgecolors="white", linewidths=0.7, zorder=8)
-        ax.annotate("ENTRY", (last_x, entry), xytext=(-8, 8), textcoords="offset points", ha="right", fontsize=8, color="#277da1", fontweight="bold")
-    if current_price is not None and current_price > 0:
-        ax.axhline(current_price, color="#8e44ad", linestyle="-.", linewidth=1.35, label=f"NOW {fmt_price(current_price)}")
-        ax.scatter([last_x], [current_price], color="#8e44ad", marker="o", s=55, edgecolors="white", linewidths=0.7, zorder=9)
-
-    n = min(9, len(chart_candles))
-    ticks = sorted(set(round(i * (len(chart_candles) - 1) / max(1, n - 1)) for i in range(n)))
+        ax.axhline(entry,color="#277da1",linestyle=":",linewidth=1.5,label=f"ENTRY {fmt_price(entry)}")
+        ax.scatter([last_x],[entry],color="#277da1",marker="D",s=68,edgecolors="white",linewidths=0.7,zorder=9)
+    if current_price is not None and current_price>0:
+        ax.axhline(current_price,color="#8e44ad",linestyle="-.",linewidth=1.35,label=f"NOW {fmt_price(current_price)}")
+    n=min(9,len(chart_candles)); ticks=sorted(set(round(i*(len(chart_candles)-1)/max(1,n-1)) for i in range(n)))
     ax.set_xticks(ticks)
-    ax.set_xticklabels([datetime.fromtimestamp(chart_candles[i]["time"] / 1000, timezone.utc).astimezone(REPORT_TZ).strftime("%m-%d %H:%M") for i in ticks], rotation=25, ha="right", fontsize=8)
-    chart_timeframe = str(pattern.get("timeframe", "M5"))
-    ax.set_title(f"NDS {chart_timeframe} {direction} | {symbol} | {chart_title}\nTwo consecutive structures; trade levels from Structure 2 | {dt_text(pattern['confirmation_time'])}", fontsize=11, fontweight="bold")
-    ax.set_ylabel("Price")
-    ax.grid(True, alpha=0.2)
-    ax.legend(loc="best", fontsize=8, framealpha=0.9)
-    ax.margins(x=0.03, y=0.12)
-    fig.tight_layout()
-    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in symbol)
-    path = CHART_DIR / f"{safe}_{direction}_{int(time.time())}.png"
-    fig.savefig(path, bbox_inches="tight")
-    plt.close(fig)
+    ax.set_xticklabels([datetime.fromtimestamp(chart_candles[i]["time"]/1000,timezone.utc).astimezone(REPORT_TZ).strftime("%m-%d %H:%M") for i in ticks],rotation=25,ha="right",fontsize=8)
+    ax.set_title(f"NDS M5 {direction} | {symbol} | {chart_title}\nHA seven-point structure | {dt_text(pattern['confirmation_time'])}",fontsize=11,fontweight="bold")
+    ax.set_ylabel("Heikin-Ashi price"); ax.grid(True,alpha=0.2); ax.legend(loc="best",fontsize=8,framealpha=0.9); ax.margins(x=0.03,y=0.12)
+    fig.tight_layout(); safe="".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in symbol)
+    path=CHART_DIR/f"{safe}_{direction}_{int(time.time())}.png"; fig.savefig(path,bbox_inches="tight"); plt.close(fig)
     return path
 
 
 def restore_trade_pattern(trade: sqlite3.Row, candles: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Restore old six-pivot keys and new twelve-pivot paired keys for charting."""
+    """Restore seven-point new keys and legacy six/twelve-pivot keys for charting."""
     parts = str(trade["pattern_key"]).split("|")
-    if len(parts) not in (9, 15) or parts[0] not in ("LONG", "SHORT"):
+    if len(parts) not in (9, 15, 10) or parts[0] not in ("LONG", "SHORT"):
         LOG.warning("Cannot restore structure for trade %s: invalid pattern_key", trade["id"])
         return None
     try:
-        if len(parts) == 15:
-            first_timestamps = [int(value) for value in parts[3:9]]
-            second_timestamps = [int(value) for value in parts[9:15]]
+        if len(parts) == 10:
+            timestamps=[int(v) for v in parts[3:10]]
+            names=("start","h1","f1","h2","f2","h3","f3")
+        elif len(parts) == 15:
+            timestamps=[int(v) for v in parts[9:15]]
+            names=("start","p1","p2","p3","p4","p5")
         else:
-            first_timestamps = []
-            second_timestamps = [int(value) for value in parts[3:9]]
-    except (TypeError, ValueError):
-        LOG.warning("Cannot restore structure for trade %s: invalid timestamps", trade["id"])
+            timestamps=[int(v) for v in parts[3:9]]
+            names=("start","p1","p2","p3","p4","p5")
+    except (TypeError,ValueError):
         return None
-
-    index_by_time = {int(candle["time"]): i for i, candle in enumerate(candles)}
-    if not all(ts in index_by_time for ts in second_timestamps):
-        LOG.warning("Cannot restore Structure 2 pivots for open trade %s (%s); chart skipped", trade["id"], trade["symbol"])
+    index_by_time={int(c["time"]):i for i,c in enumerate(candles)}
+    if not all(ts in index_by_time for ts in timestamps):
+        LOG.warning("Cannot restore structure for open trade %s (%s); chart skipped",trade["id"],trade["symbol"])
         return None
-    names = ("start", "p1", "p2", "p3", "p4", "p5")
-    second_points = dict(zip(names, [index_by_time[ts] for ts in second_timestamps]))
-    first_structure = None
-    if first_timestamps and all(ts in index_by_time for ts in first_timestamps):
-        first_points = dict(zip(names, [index_by_time[ts] for ts in first_timestamps]))
-        first_structure = {"points": first_points}
-    elif first_timestamps:
-        LOG.warning("Structure 1 pivots are outside candle history for open trade %s; chart will show Structure 2 only", trade["id"])
-
-    _resolution, interval_ms, timeframe_label = trade_candle_settings(trade)
-    restored = {
-        "symbol": str(trade["symbol"]),
-        "direction": str(trade["direction"]),
-        "points": second_points,
-        "timeframe": timeframe_label,
-        "confirmation_time": (second_timestamps[-1] + (PIVOT_RIGHT + 1) * interval_ms) / 1000.0,
-    }
-    if first_structure is not None:
-        restored["first_structure"] = first_structure
-    return restored
+    points=dict(zip(names,[index_by_time[ts] for ts in timestamps]))
+    _resolution, interval_ms, timeframe_label=trade_candle_settings(trade)
+    return {"symbol":str(trade["symbol"]),"direction":str(trade["direction"]),"points":points,"timeframe":timeframe_label,"confirmation_time":(timestamps[-1]+interval_ms)/1000.0}
 
 
 def send_open_trade_charts(
@@ -902,7 +836,7 @@ def send_open_trade_charts(
                 f"Current: {fmt_price(current)} | Floating PnL: {fmt_pct(floating)}\n"
                 f"TP: {fmt_price(tp)} ({fmt_pct(pct_from_entry(entry, tp, direction))})\n"
                 f"SL: {fmt_price(sl)} ({fmt_pct(pct_from_entry(entry, sl, direction))})\n"
-                "Chart: S1 and S2 pivots shown separately; entry/TP/SL are based on S2"
+                "Chart: seven-point HA structure; TP=H3/L3 and SL=F1"
             )
             attempted += 1
             if telegram_send_photo(chart_path, caption):
@@ -1082,7 +1016,7 @@ def pct_from_entry(entry: float, level: float, direction: str = "LONG") -> float
 
 
 def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], closed_trades: list[dict[str, Any]], perf: dict[str, Any], prices: dict[str, Optional[float]]) -> str:
-    lines=[f"🔎 NDS M5 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M5 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | paired structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open slots: {perf['open_count']}/{MAX_OPEN_TRADES}",""]
+    lines=[f"🔎 NDS M5 LONG + SHORT v{VERSION} | {dt_text(time.time())}",f"Scan: {scan_stats['scanned']} symbols | M5 OK {scan_stats['m5_ok']} | errors {scan_stats['errors']} | seven-point structures {scan_stats['patterns']}",f"Universe: {scan_stats['universe_size']} | Open slots: {perf['open_count']}/{MAX_OPEN_TRADES}",""]
     diagnostics = scan_stats.get("diagnostics", {})
     if diagnostics:
         lines.append("🧭 SIGNAL DIAGNOSTICS")
@@ -1092,7 +1026,7 @@ def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], c
             f"Already traded: {diagnostics.get('already_seen', 0)} | "
             f"Expired: {diagnostics.get('expired', 0)}"
         )
-        for key, label in (("no_price", "No current price"), ("bad_tp", "TP on wrong side of entry"), ("symbol_open", "Symbol already has open trade"), ("slots_full", "Open-trade limit reached"), ("sl_missing", "No valid SL pivot"), ("bad_levels", "Invalid SL/entry/TP order"), ("candle_refresh_error", "Failed to refresh M5 candles"), ("opened", "Paper trades opened")):
+        for key, label in (("no_price", "No current price"), ("bad_tp", "TP on wrong side of entry"), ("symbol_open", "Symbol already has open trade"), ("slots_full", "Open-trade limit reached"), ("sl_missing", "F1 HA stop invalid"), ("bad_levels", "Invalid SL/entry/TP order"), ("candle_refresh_error", "Failed to refresh M5 candles"), ("opened", "Paper trades opened")):
             count = diagnostics.get(key, 0)
             if count:
                 lines.append(f"• {label}: {count}")
@@ -1212,14 +1146,14 @@ def main() -> int:
             save_pattern_decision(conn, pattern, "SKIPPED", "No current market price")
             continue
         entry = float(entry)
-        tp = float(pattern["p4_price"])
+        tp = float(pattern["tp_price"])
         if direction == "LONG" and tp <= entry:
             diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (2 GREEN) is not above current market entry")
+            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (H3) is not above current market entry")
             continue
         if direction == "SHORT" and tp >= entry:
             diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below current market entry")
+            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (L3) is not below current market entry")
             continue
         # Multiple independent paper trades are allowed on the same symbol,
         # including trades in the same or opposite direction. Each pattern has
@@ -1228,17 +1162,10 @@ def main() -> int:
             diagnostics["slots_full"] += 1
             save_pattern_decision(conn, pattern, "SKIPPED", "Maximum number of open trades reached")
             continue
-        try:
-            bars15 = get_candles(symbol, "5m", M5_CANDLE_COUNT)
-        except Exception as exc:
-            diagnostics["candle_refresh_error"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", f"M5 candle fetch failed: {exc}")
-            LOG.warning("M5 data error for %s: %s", symbol, exc)
-            continue
         # Refresh the entry from the latest available ticker/candle before final checks.
         refreshed_entry = current_price_from_ticker(tickers_by_symbol.get(symbol))
-        if refreshed_entry is None and bars15:
-            refreshed_entry = float(bars15[-1]["close"])
+        if refreshed_entry is None and bars:
+            refreshed_entry = float(bars[-1]["close"])
         if refreshed_entry is None or refreshed_entry <= 0:
             diagnostics["no_price"] += 1
             save_pattern_decision(conn, pattern, "SKIPPED", "No current market price after refresh")
@@ -1246,21 +1173,19 @@ def main() -> int:
         entry = float(refreshed_entry)
         if direction == "LONG" and tp <= entry:
             diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (2 GREEN) is not above refreshed market entry")
+            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (H3) is not above refreshed market entry")
             LOG.info("Rejected %s %s after refresh: TP %.10g <= entry %.10g", symbol, direction, tp, entry)
             continue
         if direction == "SHORT" and tp >= entry:
             diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (2 RED) is not below refreshed market entry")
+            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (L3) is not below refreshed market entry")
             LOG.info("Rejected %s %s after refresh: TP %.10g >= entry %.10g", symbol, direction, tp, entry)
             continue
-        sl = find_nearest_valid_m5_low(bars15, entry) if direction == "LONG" else find_nearest_valid_m5_high(bars15, entry)
-        if sl is not None:
-            buffer = STOP_BUFFER_PCT / 100.0
-            sl = sl * (1.0 - buffer) if direction == "LONG" else sl * (1.0 + buffer)
-        if sl is None or (direction == "LONG" and sl >= entry) or (direction == "SHORT" and sl <= entry):
+        # SL is the F1 HA extreme from this seven-point structure. No buffer.
+        sl = float(pattern["sl_price"])
+        if (direction == "LONG" and sl >= entry) or (direction == "SHORT" and sl <= entry):
             diagnostics["sl_missing"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", f"No confirmed intact M5 pivot for {direction} stop")
+            save_pattern_decision(conn, pattern, "SKIPPED", f"F1 HA stop is not beyond entry for {direction}")
             continue
         if direction == "LONG" and not (sl < entry < tp):
             diagnostics["bad_levels"] += 1
@@ -1276,9 +1201,7 @@ def main() -> int:
         signal = {"symbol": symbol, "direction": direction, "entry": entry, "tp": tp, "sl": sl, "pattern": pattern, "chart": None}
         new_signals.append(signal)
         try:
-            # Pattern pivot indices belong to the original scan candles (bars).
-            # The refreshed bars15 list may have shifted after a new M5 candle,
-            # so using it here can misplace or hide S1/S2 markers.
+            # Pattern indices and HA structure prices belong to this scan's candles.
             signal["chart"] = create_signal_chart(symbol, bars, pattern, entry, tp, sl)
         except Exception:
             LOG.exception("Chart creation failed for %s", symbol)
@@ -1314,8 +1237,8 @@ def main() -> int:
                 f"{emoji} NEW {signal['direction']} | {signal['symbol']}\n"
                 f"Entry: {fmt_price(signal['entry'])}\n"
                 f"TP: {fmt_price(signal['tp'])} ({fmt_pct(tp_pct)})\n"
-                f"SL buffered M5 swing: {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
-                "Chart labels: Structure 1 and Structure 2 pivots shown separately; trade levels use Structure 2"
+                f"SL (F1 HA): {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
+                "Chart labels: START, H1/L1, F1, H2/L2, F2, H3/L3, F3; TP=H3/L3 and SL=F1"
             )
             if telegram_send_photo(chart_path, caption):
                 sent_charts += 1
