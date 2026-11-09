@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 Long + Short Structure Scanner v1.7.0
+NDS M30 + M1 XAUUSD Structure Scanner v2.0.0
 
 LONG + SHORT mirrored signal/paper-trade scanner. It never places real exchange orders.
 
-Pattern and entry (all pivots confirmed on closed M5 candles and HA color reversal at each pivot):
-  One seven-point structure: START is a 5x5 HA pivot; H/F or L/F points are HA
-  color-run extremes. Entry follows the closed confirmation candle after F3.
-  TP=H3/L3 and SL=F1, both from HA prices, without a stop buffer.
-  SHORT: START low -> H1 -> L1 -> H2 -> L2 -> H3.
-  LONG:  START high -> L1 -> H1 -> L2 -> H2 -> L3 (exact mirror).
+Strategy:
+  - Scan PF_XAUTUSD only.
+  - Detect the seven-point structure independently on M30 and M1.
+  - A paper signal requires a confirmed M30 structure and a later, same-direction
+    confirmed M1 structure.
+  - LONG START must be the lowest of all seven structural points.
+  - Entry, TP, SL and trade monitoring use M1 candles only.
+  - TP=H3/L3 and SL=F1 from the M1 structure.
 
 Reporting:
   - Sends a PNG chart for each new signal to Telegram.
@@ -56,15 +58,16 @@ except Exception as exc:  # Let startup explain the missing chart dependency cle
 
 # ----------------------------- Configuration -----------------------------
 
-VERSION = "1.7.0"
+VERSION = "2.0.0"
 FUTURES_REST = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS_REST = "https://futures.kraken.com/api/charts/v1"
 TELEGRAM_API = "https://api.telegram.org"
 
-UNIVERSE_SIZE = max(2, int(os.getenv("UNIVERSE_SIZE", "100")))
+UNIVERSE_SIZE = 1
 MAX_OPEN_TRADES = max(1, int(os.getenv("MAX_OPEN_TRADES", "3")))
 MAX_SIGNAL_AGE_HOURS = max(1, int(os.getenv("MAX_SIGNAL_AGE_HOURS", "72")))
-M5_CANDLE_COUNT = 1500
+M30_CANDLE_COUNT = 1200
+M1_CANDLE_COUNT = 5000
 # Pivot detection uses Heikin Ashi color reversal plus 5 candles on each side.
 # The pivot is confirmed only after all 5 right-side candles have closed.
 PIVOT_LEFT = 5
@@ -72,19 +75,23 @@ PIVOT_RIGHT = 5
 STOP_BUFFER_PCT = max(0.0, float(os.getenv("STOP_BUFFER_PCT", "0.10")))
 MAX_CONCURRENT_REQUESTS = 8
 MAX_CHARTS_PER_RUN = 8
-REQUIRED_SYMBOLS = ("PF_XBTUSD", "PF_XAUTUSD")
+REQUIRED_SYMBOLS = ("PF_XAUTUSD",)
 # Keep the existing DB filename so old paper-trade records remain available.
-DB_PATH = Path(os.getenv("DB_PATH", "nds_m5_long_short_structure_v1.db"))
-CHART_DIR = Path(os.getenv("CHART_DIR", "nds_m5_long_short_structure_charts"))
+DB_PATH = Path(os.getenv("DB_PATH", "nds_xauusd_m30_m1_structure_v2.db"))
+CHART_DIR = Path(os.getenv("CHART_DIR", "nds_xauusd_m30_m1_structure_charts"))
 REPORT_TZ_NAME = os.getenv("REPORT_TIMEZONE", "Europe/Berlin")
 try:
     REPORT_TZ = ZoneInfo(REPORT_TZ_NAME)
 except Exception:
     REPORT_TZ = timezone.utc
 
-M5_MS = 5 * 60 * 1000
+M1_MS = 60 * 1000
+M5_MS = 5 * 60 * 1000  # Legacy compatibility only.
+M30_MS = 30 * 60 * 1000
+TIMEFRAME_MS = {"1m": M1_MS, "30m": M30_MS}
+TIMEFRAME_LABEL = {"1m": "M1", "30m": "M30"}
 HTTP = requests.Session()
-HTTP.headers.update({"User-Agent": f"NDS-M5-Structure-Scanner/{VERSION}", "Accept": "application/json"})
+HTTP.headers.update({"User-Agent": f"NDS-XAUUSD-M30-M1-Scanner/{VERSION}", "Accept": "application/json"})
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
@@ -170,23 +177,10 @@ def extract_volume(ticker: dict[str, Any]) -> float:
 
 
 def get_universe(tickers: list[dict[str, Any]]) -> list[str]:
-    rows: list[tuple[str, float]] = []
-    for ticker in tickers:
-        symbol = str(ticker.get("symbol", "")).upper()
-        # Keep USD-settled perpetual symbols for consistent cross-market behavior.
-        if symbol.startswith("PF_") and symbol.endswith("USD"):
-            rows.append((symbol, extract_volume(ticker)))
-    rows.sort(key=lambda row: (row[1], row[0]), reverse=True)
-
-    selected: list[str] = []
-    for required in REQUIRED_SYMBOLS:
-        selected.append(required)
-    for symbol, _volume in rows:
-        if symbol not in selected:
-            selected.append(symbol)
-        if len(selected) >= UNIVERSE_SIZE:
-            break
-    return selected[:UNIVERSE_SIZE] if len(selected) >= UNIVERSE_SIZE else selected
+    available = {str(t.get("symbol", "")).upper() for t in tickers}
+    if "PF_XAUTUSD" not in available:
+        raise RuntimeError("Kraken Futures ticker list does not contain PF_XAUTUSD")
+    return ["PF_XAUTUSD"]
 
 
 def current_price_from_ticker(ticker: Optional[dict[str, Any]]) -> Optional[float]:
@@ -212,7 +206,7 @@ def ticker_map(tickers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 def get_candles(symbol: str, resolution: str, limit: int) -> list[dict[str, Any]]:
     """Fetch OHLC candles and remove the currently-open candle."""
     now = time.time()
-    timeframe_ms = (5 * 60 * 1000) if resolution == "5m" else M5_MS
+    timeframe_ms = TIMEFRAME_MS.get(resolution, M1_MS)
     timeframe_seconds = timeframe_ms / 1000
     params = {
         "from": int(now - timeframe_seconds * (limit + 5)),
@@ -264,7 +258,7 @@ def get_candles_history_from(
     windows smaller than its documented 5000-candle ceiling so older Structure 1
     pivots remain available for open-trade chart regeneration.
     """
-    timeframe_ms = 5 * 60 * 1000 if resolution == "5m" else M5_MS
+    timeframe_ms = TIMEFRAME_MS.get(resolution, M1_MS)
     timeframe_seconds = timeframe_ms // 1000
     page_size = max(100, min(int(page_size), 4500))
     cursor = max(0, int(start_time_ms // 1000))
@@ -398,13 +392,13 @@ def find_confirmed_pivots(
 
 # ----------------------------- Strategy detection -----------------------------
 
-def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, int], direction: str) -> str:
+def pattern_key(symbol: str, candles: list[dict[str, Any]], points: dict[str, int], direction: str, timeframe: str = "1m") -> str:
     names = ("start", "h1", "f1", "h2", "f2", "h3", "f3")
     timestamps = [str(candles[points[name]]["time"]) for name in names]
-    return f"{direction}|{symbol}|M5|" + "|".join(timestamps)
+    return f"{direction}|{symbol}|{TIMEFRAME_LABEL[timeframe]}|" + "|".join(timestamps)
 
 
-def _detect_raw_structures(symbol: str, candles: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
+def _detect_raw_structures(symbol: str, candles: list[dict[str, Any]], direction: str, timeframe: str = "1m") -> list[dict[str, Any]]:
     """Detect one seven-point HA structure; START is 5x5, later points are HA color-run extremes."""
     if len(candles) < PIVOT_LEFT + PIVOT_RIGHT + 20:
         return []
@@ -477,7 +471,10 @@ def _detect_raw_structures(symbol: str, candles: list[dict[str, Any]], direction
         start_price = float(ha[start_i]["low"] if direction == "LONG" else ha[start_i]["high"])
         h1, f1, h2, f2, h3, f3 = (prices[k] for k in names)
         if direction == "LONG":
-            valid = h2 > h1 and h3 > h2 and f2 > f1 and f3 < f2 and f3 > f1
+            # START must be the absolute lowest of all seven structural points.
+            start_is_lowest = start_price <= min(h1, f1, h2, f2, h3, f3)
+            valid = (start_is_lowest and h2 > h1 and h3 > h2
+                     and f2 > f1 and f3 < f2 and f3 > f1)
             tp, sl = h3, f1
         else:
             # For SHORT, H-named legs are lows (L1/L2/L3); F-named legs are highs.
@@ -488,11 +485,14 @@ def _detect_raw_structures(symbol: str, candles: list[dict[str, Any]], direction
             continue
         # The reversal candle after F3 is the first confirmation-color candle.
         confirmation_i = int(runs[-1]["reverse"])
-        confirmation_time = (int(candles[confirmation_i]["time"]) + M5_MS) / 1000.0
+        interval_ms = TIMEFRAME_MS[timeframe]
+        confirmation_time = (int(candles[confirmation_i]["time"]) + interval_ms) / 1000.0
         point_prices = {"start": start_price, **prices}
         patterns.append({
             "symbol": symbol, "direction": direction, "points": points,
-            "key": pattern_key(symbol, candles, points, direction),
+            "key": pattern_key(symbol, candles, points, direction, timeframe),
+            "timeframe": TIMEFRAME_LABEL[timeframe],
+            "resolution": timeframe,
             "confirmation_time": confirmation_time,
             "terminal_time": candles[points["f3"]]["time"] / 1000.0,
             "point_prices": point_prices,
@@ -518,8 +518,8 @@ def paired_pattern_key(*args: Any, **kwargs: Any) -> str:
     return f"{direction}|{symbol}|M5|" + "|".join(first_times + second_times)
 
 
-def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str) -> list[dict[str, Any]]:
-    return _detect_raw_structures(symbol, candles, direction)
+def detect_patterns(symbol: str, candles: list[dict[str, Any]], direction: str, timeframe: str = "1m") -> list[dict[str, Any]]:
+    return _detect_raw_structures(symbol, candles, direction, timeframe)
 
 
 def find_nearest_valid_m5_low(candles15: list[dict[str, Any]], entry: float) -> Optional[float]:
@@ -619,11 +619,8 @@ def open_trades(conn: sqlite3.Connection) -> list[sqlite3.Row]:
 
 
 def trade_candle_settings(trade: sqlite3.Row) -> tuple[str, int, str]:
-    """Use the original interval for pre-existing trades; all new scans are M5."""
-    parts = str(trade["pattern_key"]).split("|")
-    if len(parts) in (9, 10, 15) and parts[2] == "M5":
-        return "5m", 5 * 60 * 1000, "M5"
-    return "5m", M5_MS, "M5"
+    """All trades in this strategy are managed from closed M1 candles."""
+    return "1m", M1_MS, "M1"
 
 
 def insert_trade(
@@ -636,7 +633,7 @@ def insert_trade(
 ) -> None:
     direction = str(pattern.get("direction", "LONG"))
     entry_ms = int(entry_time * 1000)
-    next_bar_time_ms = ((entry_ms // M5_MS) + 1) * M5_MS
+    next_bar_time_ms = ((entry_ms // M1_MS) + 1) * M1_MS
     conn.execute(
         """INSERT INTO trades
         (pattern_key,symbol,direction,entry_time,next_bar_time_ms,entry_price,tp_price,sl_price,status,created_at)
@@ -731,10 +728,10 @@ def create_signal_chart(symbol: str, candles: list[dict[str, Any]], pattern: dic
     n=min(9,len(chart_candles)); ticks=sorted(set(round(i*(len(chart_candles)-1)/max(1,n-1)) for i in range(n)))
     ax.set_xticks(ticks)
     ax.set_xticklabels([datetime.fromtimestamp(chart_candles[i]["time"]/1000,timezone.utc).astimezone(REPORT_TZ).strftime("%m-%d %H:%M") for i in ticks],rotation=25,ha="right",fontsize=8)
-    ax.set_title(f"NDS M5 {direction} | {symbol} | {chart_title}\nHA seven-point structure | {dt_text(pattern['confirmation_time'])}",fontsize=11,fontweight="bold")
+    ax.set_title(f"NDS {pattern.get('timeframe', 'M1')} {direction} | {symbol} | {chart_title}\nHA seven-point structure | {dt_text(pattern['confirmation_time'])}",fontsize=11,fontweight="bold")
     ax.set_ylabel("Heikin-Ashi price"); ax.grid(True,alpha=0.2); ax.legend(loc="best",fontsize=8,framealpha=0.9); ax.margins(x=0.03,y=0.12)
     fig.tight_layout(); safe="".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in symbol)
-    path=CHART_DIR/f"{safe}_{direction}_{int(time.time())}.png"; fig.savefig(path,bbox_inches="tight"); plt.close(fig)
+    path=CHART_DIR/f"{safe}_{pattern.get('timeframe', 'M1')}_{direction}_{time.time_ns()}.png"; fig.savefig(path,bbox_inches="tight"); plt.close(fig)
     return path
 
 
@@ -776,11 +773,11 @@ def send_open_trade_charts(
     for trade in open_trades(conn):
         symbol = str(trade["symbol"])
         resolution, interval_ms, timeframe_label = trade_candle_settings(trade)
-        bars = candles_by_symbol.get(symbol) if timeframe_label == "M5" else None
+        bars = candles_by_symbol.get(symbol) if timeframe_label == "M1" else None
         if not bars:
             try:
-                bars = get_candles(symbol, resolution, M5_CANDLE_COUNT)
-                if timeframe_label == "M5":
+                bars = get_candles(symbol, resolution, M1_CANDLE_COUNT)
+                if timeframe_label == "M1":
                     candles_by_symbol[symbol] = bars
             except Exception as exc:
                 LOG.warning("Cannot fetch chart candles for open trade %s: %s", trade["id"], exc)
@@ -789,9 +786,7 @@ def send_open_trade_charts(
             LOG.warning("Not enough candles to chart open trade %s", trade["id"])
             continue
 
-        # The regular scan window is only 1500 M5 candles (~5.2 days).
-        # Structure 1 may be older than that even though Structure 2 is recent.
-        # Fetch a wider, paged history from S1's exact timestamp before restore.
+        # Legacy M5 multi-structure keys are not used by this M1-only strategy.
         key_parts = str(trade["pattern_key"]).split("|")
         if len(key_parts) == 15 and key_parts[2] == "M5":
             try:
@@ -918,11 +913,11 @@ def update_open_trades(
     for trade in open_trades(conn):
         symbol = str(trade["symbol"])
         resolution, interval_ms, timeframe_label = trade_candle_settings(trade)
-        bars = candles_by_symbol.get(symbol) if timeframe_label == "M5" else None
+        bars = candles_by_symbol.get(symbol) if timeframe_label == "M1" else None
         if bars is None:
             try:
-                bars = get_candles(symbol, resolution, M5_CANDLE_COUNT)
-                if timeframe_label == "M5":
+                bars = get_candles(symbol, resolution, M1_CANDLE_COUNT)
+                if timeframe_label == "M1":
                     candles_by_symbol[symbol] = bars
             except Exception as exc:
                 LOG.warning("Cannot refresh open trade %s: %s", symbol, exc)
@@ -938,7 +933,7 @@ def update_open_trades(
             hit_tp = bar["high"] >= tp if direction == "LONG" else bar["low"] <= tp
             if not hit_sl and not hit_tp:
                 continue
-            # Conservative resolution if both levels are touched in one M5 candle.
+            # Conservative resolution if both levels are touched in one M1 candle.
             if hit_sl:
                 status, exit_price = "CLOSED_SL", sl
             else:
@@ -955,33 +950,6 @@ def update_open_trades(
                 "exit_time": exit_time,
             })
             break
-        else:
-            # Fallback to the latest live ticker. This catches a TP/SL touch that
-            # may be missing from the locally fetched closed-candle window, and
-            # prevents a trade remaining OPEN after the market has crossed a level.
-            live_price = (live_prices or {}).get(symbol)
-            if live_price is not None and live_price > 0:
-                direction = str(trade["direction"])
-                hit_sl_live = live_price <= sl if direction == "LONG" else live_price >= sl
-                hit_tp_live = live_price >= tp if direction == "LONG" else live_price <= tp
-                if hit_sl_live or hit_tp_live:
-                    # If the current price is beyond both levels due to a gap or
-                    # inconsistent feed, resolve conservatively in favor of SL.
-                    if hit_sl_live:
-                        status, exit_price = "CLOSED_SL", sl
-                    else:
-                        status, exit_price = "CLOSED_TP", tp
-                    exit_time = time.time()
-                    close_trade(conn, int(trade["id"]), status, exit_time, exit_price)
-                    closed.append({
-                        "symbol": symbol,
-                        "status": status,
-                        "entry": float(trade["entry_price"]),
-                        "exit": exit_price,
-                        "pnl_pct": trade_pnl_percent(float(trade["entry_price"]), exit_price, direction),
-                        "direction": direction,
-                        "exit_time": exit_time,
-                    })
     return closed
 
 
@@ -1053,11 +1021,26 @@ def make_report(scan_stats: dict[str, Any], new_signals: list[dict[str, Any]], c
 
 # ----------------------------- Main run -----------------------------
 
-def scan_symbol(symbol: str) -> tuple[str, Optional[list[dict[str, Any]]], Optional[str]]:
+def scan_timeframe(symbol: str, resolution: str, limit: int) -> tuple[str, str, Optional[list[dict[str, Any]]], Optional[str]]:
     try:
-        return symbol, get_candles(symbol, "5m", M5_CANDLE_COUNT), None
+        return symbol, resolution, get_candles(symbol, resolution, limit), None
     except Exception as exc:
-        return symbol, None, str(exc)
+        return symbol, resolution, None, str(exc)
+
+
+def _fresh_structure(conn: sqlite3.Connection, pattern: dict[str, Any]) -> bool:
+    row = conn.execute("SELECT 1 FROM patterns WHERE pattern_key=?", (pattern["key"],)).fetchone()
+    return row is None
+
+
+def _chart_caption(pattern: dict[str, Any], label: str) -> str:
+    direction = str(pattern["direction"])
+    emoji = "🟢" if direction == "LONG" else "🔴"
+    return (
+        f"{emoji} STRUCTURE DETECTED | {pattern['symbol']} | {pattern['timeframe']} | {direction}\n"
+        f"Confirmed: {dt_text(float(pattern['confirmation_time']))}\n"
+        f"{label}: structure only; no trade until matching M30 + M1 direction is confirmed."
+    )
 
 
 def main() -> int:
@@ -1065,235 +1048,181 @@ def main() -> int:
     conn = connect_db()
     try:
         tickers = get_tickers()
+        universe = get_universe(tickers)
     except Exception as exc:
-        message = f"❌ NDS M5 LONG+SHORT scanner startup error: unable to load Kraken Futures tickers.\n{exc}"
-        LOG.exception("Ticker fetch failed")
+        message = f"❌ NDS XAUUSD M30+M1 scanner startup error.\n{exc}"
+        LOG.exception("Startup/ticker fetch failed")
         telegram_send_message(message)
+        conn.close()
         return 1
 
+    symbol = "PF_XAUTUSD"
     tickers_by_symbol = ticker_map(tickers)
-    universe = get_universe(tickers)
-    LOG.info("Selected %d symbols (target=%d)", len(universe), UNIVERSE_SIZE)
-
-    candles_by_symbol: dict[str, list[dict[str, Any]]] = {}
-    errors_by_symbol: dict[str, str] = {}
-    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as pool:
-        futures = {pool.submit(scan_symbol, symbol): symbol for symbol in universe}
+    prices: dict[str, Optional[float]] = {symbol: current_price_from_ticker(tickers_by_symbol.get(symbol))}
+    candle_sets: dict[str, list[dict[str, Any]]] = {}
+    errors: dict[str, str] = {}
+    jobs = [("30m", M30_CANDLE_COUNT), ("1m", M1_CANDLE_COUNT)]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(scan_timeframe, symbol, resolution, limit) for resolution, limit in jobs]
         for future in as_completed(futures):
-            symbol, candles, error = future.result()
-            if candles is not None:
-                candles_by_symbol[symbol] = candles
+            sym, resolution, bars, error = future.result()
+            if bars is not None:
+                candle_sets[resolution] = bars
             elif error:
-                errors_by_symbol[symbol] = error
-                LOG.warning("M5 data error %s: %s", symbol, error)
+                errors[resolution] = error
+                LOG.error("Candle fetch failed %s %s: %s", sym, resolution, error)
 
-    prices: dict[str, Optional[float]] = {}
-    for symbol in set(universe) | {str(row["symbol"]) for row in open_trades(conn)}:
-        price = current_price_from_ticker(tickers_by_symbol.get(symbol))
-        bars = candles_by_symbol.get(symbol)
-        if price is None and bars:
-            price = bars[-1]["close"]
-        prices[symbol] = price
+    if "1m" not in candle_sets or "30m" not in candle_sets:
+        telegram_send_message(
+            "❌ XAUUSD scan incomplete. " + "; ".join(f"{tf}: {err}" for tf, err in errors.items())
+        )
+        conn.close()
+        return 1
 
-    # Update previously open paper trades before assessing fresh entries.
-    closed_trades = update_open_trades(conn, candles_by_symbol, prices)
+    m1_bars = candle_sets["1m"]
+    m30_bars = candle_sets["30m"]
+    if prices[symbol] is None and m1_bars:
+        prices[symbol] = float(m1_bars[-1]["close"])
+    current = prices[symbol]
+
+    # Detect structures independently on both timeframes. Every newly confirmed
+    # structure gets its own chart, even when the other timeframe has not matched.
+    patterns_by_tf: dict[str, list[dict[str, Any]]] = {"30m": [], "1m": []}
+    chart_events: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    for resolution, bars in (("30m", m30_bars), ("1m", m1_bars)):
+        for direction in ("LONG", "SHORT"):
+            found = detect_patterns(symbol, bars, direction, resolution)
+            patterns_by_tf[resolution].extend(found)
+            # The detector returns newest first. Chart the latest newly confirmed
+            # structure for each direction/timeframe, avoiding a historical chart
+            # flood on the first run while still reporting fresh structures.
+            if found:
+                pattern = found[0]
+                if _fresh_structure(conn, pattern):
+                    try:
+                        chart = create_signal_chart(
+                            symbol, bars, pattern, None, None, None,
+                            current_price=current, chart_title=f"{pattern['timeframe']} STRUCTURE DETECTED",
+                        )
+                        chart_events.append((pattern, [chart]))
+                    except Exception:
+                        LOG.exception("Structure chart failed: %s %s", resolution, direction)
+
+    # Find the newest M30 setup and require a same-direction M1 setup confirmed
+    # after the M30 setup. The actual trade geometry is taken exclusively from M1.
+    now = time.time()
+    max_age = MAX_SIGNAL_AGE_HOURS * 3600
+    m30_candidates = [p for p in patterns_by_tf["30m"] if 0 <= now - p["confirmation_time"] <= max_age]
+    m1_candidates = [p for p in patterns_by_tf["1m"] if 0 <= now - p["confirmation_time"] <= max_age]
+    m30_candidates.sort(key=lambda p: p["confirmation_time"], reverse=True)
+    m1_candidates.sort(key=lambda p: p["confirmation_time"], reverse=True)
 
     new_signals: list[dict[str, Any]] = []
-    patterns_count = 0
-    scanned_candidates: list[dict[str, Any]] = []
-    expired_patterns: list[dict[str, Any]] = []
-    diagnostics: dict[str, int] = {
-        "detected_total": 0, "candidates": 0, "already_seen": 0, "expired": 0, "no_price": 0,
-        "bad_tp": 0, "symbol_open": 0, "slots_full": 0, "sl_missing": 0,
-        "bad_levels": 0, "candle_refresh_error": 0, "opened": 0,
-    }
-    scan_time = time.time()
-    for symbol, bars in candles_by_symbol.items():
-        for direction in ("LONG", "SHORT"):
-            # Evaluate all matches, not only the newest match. The previous
-            # latest-only approach could let an expired/seen pattern mask a
-            # newer independent structure in the same symbol and direction.
-            detected_patterns = detect_patterns(symbol, bars, direction)
-            # Count every structurally valid match, including expired ones. This
-            # keeps the top-level structure count consistent with the diagnostics.
-            diagnostics["detected_total"] += len(detected_patterns)
-            for pattern in detected_patterns:
-                age_seconds = scan_time - float(pattern["confirmation_time"])
-                if age_seconds < 0:
-                    continue
-                if age_seconds > MAX_SIGNAL_AGE_HOURS * 3600:
-                    diagnostics["expired"] += 1
-                    expired_patterns.append(pattern)
-                    continue
-                patterns_count += 1
-                scanned_candidates.append(pattern)
-
-    diagnostics["candidates"] = len(scanned_candidates)
-    # Process most recently confirmed structures first to make the open-slot cap fair.
-    scanned_candidates.sort(key=lambda item: item["confirmation_time"], reverse=True)
-    for pattern in scanned_candidates:
-        if pattern_seen(conn, pattern["key"]):
+    diagnostics = {"m30_structures": len(patterns_by_tf["30m"]), "m1_structures": len(patterns_by_tf["1m"]),
+                   "matched": 0, "opened": 0, "already_seen": 0, "bad_levels": 0, "slots_full": 0}
+    # A M1 structure is eligible only if it is newer than the matching M30
+    # confirmation. Its own key is the unique trade key, preventing duplicate entries.
+    for m30 in m30_candidates:
+        matches = [p for p in m1_candidates
+                   if p["direction"] == m30["direction"]
+                   and p["confirmation_time"] >= m30["confirmation_time"]]
+        if not matches:
+            continue
+        m1 = matches[0]
+        diagnostics["matched"] += 1
+        if pattern_seen(conn, m1["key"]):
             diagnostics["already_seen"] += 1
             continue
-        symbol = pattern["symbol"]
-        bars = candles_by_symbol[symbol]
-        direction = str(pattern["direction"])
-        # Entry is the current market price after the terminal pivot is confirmed,
-        # not the historical pivot price. The pivot is a trigger, not a fill.
-        entry = prices.get(symbol)
-        if entry is None or entry <= 0:
-            diagnostics["no_price"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "No current market price")
-            continue
-        entry = float(entry)
-        tp = float(pattern["tp_price"])
-        if direction == "LONG" and tp <= entry:
-            diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (H3) is not above current market entry")
-            continue
-        if direction == "SHORT" and tp >= entry:
-            diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (L3) is not below current market entry")
-            continue
-        # Multiple independent paper trades are allowed on the same symbol,
-        # including trades in the same or opposite direction. Each pattern has
-        # its own unique key and its own entry/TP/SL lifecycle in SQLite.
         if len(open_trades(conn)) >= MAX_OPEN_TRADES:
             diagnostics["slots_full"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "Maximum number of open trades reached")
+            save_pattern_decision(conn, m1, "SKIPPED", "Maximum number of open paper trades reached")
             continue
-        # Refresh the entry from the latest available ticker/candle before final checks.
-        refreshed_entry = current_price_from_ticker(tickers_by_symbol.get(symbol))
-        if refreshed_entry is None and bars:
-            refreshed_entry = float(bars[-1]["close"])
-        if refreshed_entry is None or refreshed_entry <= 0:
-            diagnostics["no_price"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "No current market price after refresh")
-            continue
-        entry = float(refreshed_entry)
-        if direction == "LONG" and tp <= entry:
-            diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "LONG TP (H3) is not above refreshed market entry")
-            LOG.info("Rejected %s %s after refresh: TP %.10g <= entry %.10g", symbol, direction, tp, entry)
-            continue
-        if direction == "SHORT" and tp >= entry:
-            diagnostics["bad_tp"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "SHORT TP (L3) is not below refreshed market entry")
-            LOG.info("Rejected %s %s after refresh: TP %.10g >= entry %.10g", symbol, direction, tp, entry)
-            continue
-        # SL is the F1 HA extreme from this seven-point structure. No buffer.
-        sl = float(pattern["sl_price"])
-        if (direction == "LONG" and sl >= entry) or (direction == "SHORT" and sl <= entry):
-            diagnostics["sl_missing"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", f"F1 HA stop is not beyond entry for {direction}")
-            continue
-        if direction == "LONG" and not (sl < entry < tp):
+        # Fill reference is the latest fully closed M1 candle, not a live
+        # ticker value or any M30 price.
+        entry = float(m1_bars[-1]["close"])
+        tp = float(m1["tp_price"])
+        sl = float(m1["sl_price"])
+        direction = str(m1["direction"])
+        valid = (sl < entry < tp) if direction == "LONG" else (tp < entry < sl)
+        if not valid:
             diagnostics["bad_levels"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "Invalid LONG levels: require SL < market entry < TP")
+            save_pattern_decision(conn, m1, "SKIPPED", "M1 levels are not correctly ordered around current entry")
             continue
-        if direction == "SHORT" and not (tp < entry < sl):
-            diagnostics["bad_levels"] += 1
-            save_pattern_decision(conn, pattern, "SKIPPED", "Invalid SHORT levels: require TP < market entry < SL")
-            continue
-        save_pattern_decision(conn, pattern, "TRADE", "Paper trade opened at current market price")
-        insert_trade(conn, pattern, time.time(), entry, tp, sl)
+        save_pattern_decision(conn, m1, "TRADE", "M30 + same-direction M1 structures confirmed; M1 trade levels")
+        insert_trade(conn, m1, time.time(), entry, tp, sl)
         diagnostics["opened"] += 1
-        signal = {"symbol": symbol, "direction": direction, "entry": entry, "tp": tp, "sl": sl, "pattern": pattern, "chart": None}
-        new_signals.append(signal)
+        new_signals.append({"symbol": symbol, "direction": direction, "entry": entry,
+                            "tp": tp, "sl": sl, "pattern": m1, "chart": None,
+                            "m30_pattern": m30})
         try:
-            # Pattern indices and HA structure prices belong to this scan's candles.
-            signal["chart"] = create_signal_chart(symbol, bars, pattern, entry, tp, sl)
+            new_signals[-1]["chart"] = create_signal_chart(
+                symbol, m1_bars, m1, entry, tp, sl,
+                current_price=current, chart_title="CONFIRMED M30 + M1 SIGNAL (M1 LEVELS)",
+            )
         except Exception:
-            LOG.exception("Chart creation failed for %s", symbol)
+            LOG.exception("Signal chart creation failed")
+        # One trade per M30 setup per run; later structures can be evaluated next run.
+        break
 
-    # Refresh prices for symbols involved in open trades, now including newly opened ones.
-    for row in open_trades(conn):
-        symbol = str(row["symbol"])
-        if prices.get(symbol) is None:
-            prices[symbol] = float(row["entry_price"])
-
+    # Manage all open positions exclusively with M1 candles and M1 timestamps.
+    closed_trades = update_open_trades(conn, {symbol: m1_bars}, prices)
     perf = get_performance(conn, prices)
-    stats = {
-        "scanned": len(universe),
-        "m5_ok": len(candles_by_symbol),
-        "errors": len(errors_by_symbol),
-        "patterns": diagnostics["detected_total"],
-        "universe_size": len(universe),
-        "diagnostics": diagnostics,
-    }
-    report = make_report(stats, new_signals, closed_trades, perf, prices)
+    report_lines = [
+        f"🔎 NDS XAUUSD M30 + M1 v{VERSION} | {dt_text(time.time())}",
+        f"Symbol: {symbol} only | M30 candles: {len(m30_bars)} | M1 candles: {len(m1_bars)}",
+        f"Structures: M30={diagnostics['m30_structures']} | M1={diagnostics['m1_structures']} | same-direction matches={diagnostics['matched']}",
+        f"New paper signals: {diagnostics['opened']} | Open trades: {perf['open_count']}/{MAX_OPEN_TRADES}",
+        "",
+    ]
+    for signal in new_signals:
+        d = signal["direction"]
+        report_lines.append(
+            f"{'🟢' if d == 'LONG' else '🔴'} NEW {d} | {symbol} | Entry(M1) {fmt_price(signal['entry'])} "
+            f"| TP(M1) {fmt_price(signal['tp'])} ({fmt_pct(pct_from_entry(signal['entry'], signal['tp'], d))}) "
+            f"| SL(M1) {fmt_price(signal['sl'])} ({fmt_pct(pct_from_entry(signal['entry'], signal['sl'], d))})"
+        )
+    if not new_signals:
+        report_lines.append("No new signal. Both timeframes must have a confirmed same-direction structure.")
+    if closed_trades:
+        report_lines.append("")
+        for trade in closed_trades:
+            report_lines.append(
+                f"CLOSED {trade['direction']} {trade['status']} | Entry {fmt_price(trade['entry'])} "
+                f"| Exit(M1) {fmt_price(trade['exit'])} | PnL {fmt_pct(trade['pnl_pct'])}"
+            )
+    report_lines.extend([
+        "", f"OPEN TRADES: {perf['open_count']}",
+        f"Closed: {perf['closed_count']} | W/L: {perf['wins']}/{perf['losses']} | Win rate: {perf['win_rate']:.2f}%",
+        f"Realized PnL: {fmt_pct(perf['realized_pct'])} | Floating PnL: {fmt_pct(perf['floating_pct'])} | Total: {fmt_pct(perf['total_pct'])}",
+        "Entry, TP, SL and trade monitoring use M1 candles. Paper mode only; no real orders.",
+    ])
+    report = "\n".join(report_lines)
     LOG.info("\n%s", report)
     telegram_send_message(report)
 
-    # Every new signal gets its own chart/photo with labeled points and levels.
-    sent_charts = 0
+    # Send each newly detected timeframe structure chart, regardless of pairing.
+    charts_sent = 0
+    for pattern, chart_list in chart_events:
+        if chart_list and telegram_send_photo(chart_list[0], _chart_caption(pattern, "Independent timeframe scan")):
+            charts_sent += 1
+            save_pattern_decision(conn, pattern, "CHART", f"Structure chart sent for {pattern['timeframe']}")
+
+    # Send signal chart with the actual M1 entry/TP/SL overlays.
     for signal in new_signals:
-        chart_path = signal.get("chart")
-        if chart_path and sent_charts < MAX_CHARTS_PER_RUN:
-            tp_pct = pct_from_entry(signal["entry"], signal["tp"], signal["direction"])
-            sl_pct = pct_from_entry(signal["entry"], signal["sl"], signal["direction"])
-            emoji = "🟢" if signal["direction"] == "LONG" else "🔴"
+        chart = signal.get("chart")
+        if chart:
+            d = signal["direction"]
             caption = (
-                f"{emoji} NEW {signal['direction']} | {signal['symbol']}\n"
-                f"Entry: {fmt_price(signal['entry'])}\n"
-                f"TP: {fmt_price(signal['tp'])} ({fmt_pct(tp_pct)})\n"
-                f"SL (F1 HA): {fmt_price(signal['sl'])} ({fmt_pct(sl_pct)})\n"
-                "Chart labels: START, H1/L1, F1, H2/L2, F2, H3/L3, F3; TP=H3/L3 and SL=F1"
+                f"{'🟢' if d == 'LONG' else '🔴'} NEW {d} SIGNAL | {symbol}\n"
+                f"M30 + M1 structures confirmed\nEntry (M1): {fmt_price(signal['entry'])}\n"
+                f"TP (M1): {fmt_price(signal['tp'])}\nSL (M1): {fmt_price(signal['sl'])}\n"
+                "All trade levels and TP/SL monitoring are based on M1."
             )
-            if telegram_send_photo(chart_path, caption):
-                sent_charts += 1
+            telegram_send_photo(chart, caption)
 
-    # If this run produced no new signals, send charts for the newest expired
-    # structures instead. These are structure-only charts: no fake ENTRY/TP/SL
-    # trade levels are drawn because an expired setup was never entered.
-    expired_charts_sent = 0
-    if not new_signals and expired_patterns:
-        expired_patterns.sort(key=lambda item: item["confirmation_time"], reverse=True)
-        seen_expired: set[str] = set()
-        for pattern in expired_patterns:
-            if expired_charts_sent >= MAX_CHARTS_PER_RUN:
-                break
-            key = str(pattern.get("key", ""))
-            if key in seen_expired:
-                continue
-            seen_expired.add(key)
-            symbol = str(pattern["symbol"])
-            bars = candles_by_symbol.get(symbol)
-            if not bars or len(bars) < 10:
-                continue
-            current = prices.get(symbol)
-            if current is None or current <= 0:
-                current = float(bars[-1]["close"])
-                prices[symbol] = current
-            try:
-                chart_path = create_signal_chart(
-                    symbol, bars, pattern, None, None, None,
-                    current_price=current, chart_title="EXPIRED SETUP - NO TRADE",
-                )
-                direction = str(pattern["direction"])
-                emoji = "🟢" if direction == "LONG" else "🔴"
-                age_hours = max(0.0, (time.time() - float(pattern["confirmation_time"])) / 3600.0)
-                caption = (
-                    f"⌛ EXPIRED {emoji} {direction} | {symbol}\n"
-                    f"Confirmed: {dt_text(float(pattern['confirmation_time']))}\n"
-                    f"Age: {age_hours:.1f} hours | Allowed: {MAX_SIGNAL_AGE_HOURS} hours\n"
-                    f"Current market price: {fmt_price(current)}\n"
-                    "Structure points are labeled on the chart. No trade was opened; ENTRY/TP/SL are not plotted."
-                )
-                if telegram_send_photo(chart_path, caption):
-                    expired_charts_sent += 1
-            except Exception:
-                LOG.exception("Expired-pattern chart/send failed for %s %s", symbol, direction)
-
-    # Send a fresh chart for EVERY trade still open after this run's TP/SL updates.
-    # This is independent of MAX_CHARTS_PER_RUN, which remains only for new signals.
-    open_charts_sent, open_charts_attempted = send_open_trade_charts(conn, candles_by_symbol, prices)
-
-    LOG.info(
-        "Finished in %.1fs | new signals=%d | closed=%d | open=%d | new-signal charts sent=%d | expired charts sent=%d | open-trade charts sent=%d/%d",
-        time.time() - started, len(new_signals), len(closed_trades), len(open_trades(conn)),
-        sent_charts, expired_charts_sent, open_charts_sent, open_charts_attempted,
-    )
+    open_charts_sent, open_charts_attempted = send_open_trade_charts(conn, {symbol: m1_bars}, prices)
+    LOG.info("Finished in %.1fs | structures charts=%d | signals=%d | open charts=%d/%d",
+             time.time() - started, charts_sent, len(new_signals), open_charts_sent, open_charts_attempted)
     conn.close()
     return 0
 
