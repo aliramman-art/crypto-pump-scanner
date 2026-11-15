@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NDS M5 FOUR PIVOT LONG + SHORT SCANNER v2.0.0
+NDS M5 FOUR PIVOT LONG + SHORT SCANNER v2.0.1
 
 Kraken Futures | M5 only | OHLC pivots | Paper trading only
 
@@ -10,7 +10,7 @@ LONG:
     H1 -> L1 -> H2 -> L2
     H2 > H1
     L2 > L1
-    Entry = close of the candle confirming pivot L2
+    Entry = close of candle confirming pivot L2
     TP = H2
     SL = L2
 
@@ -18,13 +18,13 @@ SHORT:
     L1 -> H1 -> L2 -> H2
     L2 < L1
     H2 < H1
-    Entry = close of the candle confirming pivot H2
+    Entry = close of candle confirming pivot H2
     TP = L2
     SL = H2
 
 Pivot confirmation:
-    PIVOT_LEFT = 5
-    PIVOT_RIGHT = 5
+    First 3 pivots: 5 left + 5 right
+    Fourth pivot:   5 left + 2 right
 
 No M1 data.
 No Heikin Ashi.
@@ -48,7 +48,7 @@ import requests
 # CONFIGURATION
 # ============================================================
 
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 
 BASE = "https://futures.kraken.com/derivatives/api/v3"
 CHARTS = "https://futures.kraken.com/api/charts/v1"
@@ -59,7 +59,6 @@ CANDLE_MS = 300000
 
 UNIVERSE_SIZE = 100
 
-# Required symbols are added in addition to the top 100.
 REQUIRED_SYMBOLS = (
     "PF_XBTUSD",
     "PF_XAUTUSD",
@@ -70,12 +69,14 @@ M5_LIMIT = int(os.getenv("M5_CANDLE_COUNT", "3000"))
 PIVOT_LEFT = int(os.getenv("PIVOT_LEFT", "5"))
 PIVOT_RIGHT = int(os.getenv("PIVOT_RIGHT", "5"))
 
+# Only the fourth pivot uses 2 right candles.
+PIVOT4_RIGHT = int(os.getenv("PIVOT4_RIGHT", "2"))
+
 MAX_OPEN_TRADES = max(
     1,
     int(os.getenv("MAX_OPEN_TRADES", "3"))
 )
 
-# Only recently confirmed structures can generate new signals.
 MAX_SIGNAL_AGE_MINUTES = int(
     os.getenv("MAX_SIGNAL_AGE_MINUTES", "20")
 )
@@ -314,7 +315,6 @@ def get_universe(ticker_map):
 
     for symbol, ticker in ticker_map.items():
 
-        # USD perpetual contracts only.
         if not symbol.startswith("PF_"):
             continue
 
@@ -340,7 +340,6 @@ def get_universe(ticker_map):
         for symbol, _ in candidates[:UNIVERSE_SIZE]
     ]
 
-    # Required BTC and XAU symbols are always included.
     for symbol in REQUIRED_SYMBOLS:
 
         if symbol in ticker_map and symbol not in selected:
@@ -425,19 +424,22 @@ def candles(symbol, limit):
 # PIVOTS
 # ============================================================
 
-def pivots(bars):
+def pivots(bars, right=None):
 
     """
     Strict confirmed OHLC pivots.
 
-    A pivot is valid only after PIVOT_RIGHT
-    candles have completely closed.
+    Default:
+        5 left + 5 right candles.
+
+    The fourth pivot is separately checked with:
+        5 left + 2 right candles.
     """
 
     result = []
 
     left = PIVOT_LEFT
-    right = PIVOT_RIGHT
+    right = PIVOT_RIGHT if right is None else right
 
     for i in range(left, len(bars) - right):
 
@@ -447,7 +449,6 @@ def pivots(bars):
         hi = current["high"]
 
         left_bars = bars[i-left:i]
-
         right_bars = bars[i+1:i+right+1]
 
         surrounding = left_bars + right_bars
@@ -492,13 +493,29 @@ def find_signal(symbol, bars, direction):
     SHORT:
         L1 -> H1 -> L2 -> H2
 
-    Entry is the close of the candle confirming
-    the fourth pivot.
+    First three pivots:
+        5 left + 5 right candles.
+
+    Fourth pivot:
+        5 left + 2 right candles.
+
+    Entry:
+        Close of the second candle after the fourth pivot.
     """
 
-    ps = pivots(bars)
+    # First three pivots must have 5 right candles.
+    ps = pivots(
+        bars,
+        right=PIVOT_RIGHT
+    )
 
-    if len(ps) < 4:
+    # Fourth pivot candidates need only 2 right candles.
+    fourth_pivots = pivots(
+        bars,
+        right=PIVOT4_RIGHT
+    )
+
+    if len(ps) < 3 or not fourth_pivots:
         return None
 
     expected = (
@@ -509,23 +526,44 @@ def find_signal(symbol, bars, direction):
 
     now_ms = int(time.time() * 1000)
 
-    # Search newest structures first.
-    for j in range(len(ps) - 4, -1, -1):
+    # Search newest three-pivot structures first.
+    for j in range(len(ps) - 3, -1, -1):
 
-        seq = ps[j:j+4]
+        first_three = ps[j:j+3]
 
-        if len(seq) != 4:
+        if len(first_three) != 3:
             continue
 
-        if [x[1] for x in seq] != expected:
+        if [x[1] for x in first_three] != expected[:3]:
             continue
 
-        p1, p2, p3, p4 = seq
+        p1, p2, p3 = first_three
 
         i1, _, v1 = p1
         i2, _, v2 = p2
         i3, _, v3 = p3
-        i4, _, v4 = p4
+
+        # The fourth pivot must be the first confirmed pivot
+        # after the third pivot, using the 2-right rule.
+        candidates = [
+            p for p in fourth_pivots
+            if p[0] > i3
+        ]
+
+        if not candidates:
+            continue
+
+        p4 = candidates[0]
+
+        i4, type4, v4 = p4
+
+        if type4 != expected[3]:
+            continue
+
+        # The first three pivots must be consecutive
+        # in the standard 5-right pivot sequence.
+        # The fourth pivot must also be the next pivot
+        # after pivot 3 in the 2-right sequence.
 
         if direction == "LONG":
 
@@ -551,8 +589,8 @@ def find_signal(symbol, bars, direction):
             tp = v3
             sl = v4
 
-        # Confirmation candle of the fourth pivot.
-        confirmation_index = i4 + PIVOT_RIGHT
+        # Fourth pivot confirmation uses 2 right candles.
+        confirmation_index = i4 + PIVOT4_RIGHT
 
         if confirmation_index >= len(bars):
             continue
@@ -1106,7 +1144,8 @@ def main():
 
             (
                 "Timeframe: M5 | "
-                f"Pivot L/R: {PIVOT_LEFT}/{PIVOT_RIGHT} | "
+                f"First 3 pivots: L/R {PIVOT_LEFT}/{PIVOT_RIGHT} | "
+                f"Fourth pivot: L/R {PIVOT_LEFT}/{PIVOT4_RIGHT} | "
                 "M1: OFF | HA: OFF | Paper only"
             ),
 
@@ -1223,7 +1262,7 @@ def main():
 
             (
                 "Entry: close of the M5 candle "
-                "confirming the fourth pivot."
+                "confirming the fourth pivot after 2 right candles."
             ),
 
             "No M1 confirmation. No real orders."
